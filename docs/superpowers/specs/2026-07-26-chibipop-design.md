@@ -1,7 +1,7 @@
 # chibipop — Design
 
 **Date:** 2026-07-26
-**Status:** Approved (design); not yet implemented
+**Status:** M0 and M1 built and merged. M2–M5 not started.
 **Revision:** 3 — spec corrected against the completed M0+M1 build: the §5 POS-vocabulary claim was
 false and is replaced with the real `term.pos`/`deconjugator.json` mapping; schema, ranking, the
 `Dictionary` trait, the golden corpus, and one non-goal now match the shipped code; threading,
@@ -505,12 +505,19 @@ of excluding it — and does not reach the engine.
 
 ## 11. Open questions
 
-None blocking. Three unknowns remain, each scheduled at the milestone that can settle it cheaply:
+None blocking.
+
+**Settled.** *Is `ja` OCR available on this machine?* — **Yes.** `Windows.Media.Ocr`'s
+`AvailableRecognizerLanguages` returns `en-US` and `ja`, with `MaxImageDimension` 10000. The OCR tier
+is viable exactly as designed: no model needs bundling, and the §2 memory budget stands. Findings note:
+`docs/superpowers/findings/2026-07-26-m0-ocr-availability.md`.
+
+**Still open**, each scheduled at the milestone that can settle it cheaply:
 
 | Unknown | Settled at | If it fails |
 |---|---|---|
-| Is `ja` OCR available on this machine? | **M0** (~30 min, gates everything) | Different OCR engine; §2 memory budget re-decided before any production code. |
 | Does `WDA_EXCLUDEFROMCAPTURE` hold against `BitBlt`? | **M3** | Hide the popup during capture instead. Local to `ui/window.rs`. |
 | Does UIA `RangeFromPoint` return usable text and offsets in real applications? | **M4** | Delete the tier. Costs one module, no rework, because OCR shipped at M2. |
 
-None of the three can invalidate M1, which is where most of the correctness risk lives.
+Neither can invalidate M1, which is where most of the correctness risk lived — and which is now built
+and green.
