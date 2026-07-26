@@ -276,7 +276,8 @@ Build time is not runtime memory, so the builder stays in Python if that is quic
 `.sqlite` is a `chibipop` artifact.
 
 **Measured, once the builder existed (2026-07-26):** 768,636 entries and 1,261,454 term rows, built in
-72 seconds, producing a **238MB** database — Jitendex 433,885 entries, 大辞林 334,751. An earlier draft
+~70 seconds, producing a **230.3 MiB** database (241,496,064 bytes) — Jitendex 433,885 entries,
+大辞林 334,751. An earlier draft
 of this section said 大辞林 held "3,028 entries"; that was the count of *files inside the archive*
 (term banks plus `gaiji` glyphs), not dictionary entries, and it is also why this section previously
 estimated ~100MB. The database is never committed (`.gitignore`), so its size costs nothing but build
