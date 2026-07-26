@@ -21,7 +21,7 @@ pub fn clean_input(text: &str) -> String {
 }
 
 fn is_kana(c: char) -> bool {
-    matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}' | '\u{30FC}')
+    matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
 
 /// Ported from weikipop's `_calculate_priority`.
