@@ -1414,7 +1414,7 @@ git add -A && git commit -m "feat(lookup): deconjugation rule types and loader"
 
 This is a **faithful port** of weikipop's `src/dictionary/deconjugator.py`. Two inherited behaviours are preserved deliberately and pinned by tests — do not "fix" either:
 
-1. **`max_len` is driven by `dec_end` alone.** In the reference, `dec_end` is always a list after normalisation, so it always determines the iteration count. Exactly one rule has a `dec_tag` list one element longer than its `dec_end` list, so its final tag (`vs-i`) is unreachable and `する`→`し` mizenkei is tagged `vk`. The upstream intent is unknown; changing it would alter deconjugation for many verbs at once.
+1. **`max_len` is driven by `dec_end` alone.** In the reference, `dec_end` is always a list after normalisation, so it always determines the iteration count. Exactly one rule (the mizenkei stem rule, `con_tag: "stem-mizenkei"`) has a `dec_tag` list one element longer than its `dec_end` list, so its sixth tag (`vs-i`) is unreachable and the mizenkei path tags `する` as `vk`. That rule requires a form already tagged `stem-mizenkei` (reached via e.g. しない), so bare `し`/`する` never touches it; a parallel rule reaches `vs-i` down its own path regardless, which is why the quirk has no practical effect. The upstream intent is unknown; changing it would alter deconjugation for many verbs at once.
 2. **`contextrule` predicates are ignored.** Both `contextrule` rules carry a `contextrule` key (`saspecial`, `v1inftrap`) that the reference never reads, so they over-match. Spurious forms simply fail to match the dictionary, so the cost is extra queries, not wrong answers.
 
 - [ ] **Step 1: Write the failing test**
@@ -1481,19 +1481,43 @@ mod tests {
         assert_eq!(Some(&"v1".to_string()), f.tags.last());
     }
 
-    /// Pins inherited quirk #1. If this test ever needs changing, that is a
-    /// deliberate semantic change to deconjugation - not a refactor.
+    /// Pins inherited quirk #1: `max_len` is driven by `dec_end` alone, so the
+    /// mizenkei rule's sixth `dec_tag` (`vs-i`) is unreachable and する arrives
+    /// tagged `vk` down that path.
+    ///
+    /// Verified against the unmodified Python reference: deconjugating しない
+    /// yields する twice — once via ('negative', '(mizenkei)') tagged `vk`, and
+    /// once via ('negative',) tagged `vs-i`. That parallel correct tagging is
+    /// why the quirk has no practical effect. Bare し never reaches this rule,
+    /// which needs a form already tagged `stem-mizenkei`.
+    ///
+    /// If this test ever needs changing, that is a deliberate semantic change
+    /// to deconjugation - not a refactor.
     #[test]
-    fn known_quirk_suru_mizenkei_tagged_vk_not_vs_i() {
+    fn known_quirk_mizenkei_path_tags_suru_as_vk() {
         let d = deconjugator();
-        let has_vs_i_from_shi = d
-            .deconjugate("し")
+        let forms = d.deconjugate("しない");
+
+        let via_mizenkei: Vec<&Form> = forms
             .iter()
-            .any(|f| f.text == "する" && f.tags.last().map(String::as_str) == Some("vs-i"));
+            .filter(|f| f.text == "する" && f.process.iter().any(|p| p == "(mizenkei)"))
+            .collect();
         assert!(
-            !has_vs_i_from_shi,
+            !via_mizenkei.is_empty(),
+            "the mizenkei path to する disappeared - deconjugation changed"
+        );
+        assert!(
+            via_mizenkei
+                .iter()
+                .all(|f| f.tags.last().map(String::as_str) == Some("vk")),
             "quirk resolved upstream - update this test and the note in the module docs"
         );
+
+        // The correct vs-i tagging is reachable in parallel; this is why the
+        // quirk is harmless in practice.
+        assert!(forms
+            .iter()
+            .any(|f| f.text == "する" && f.tags.last().map(String::as_str) == Some("vs-i")));
     }
 }
 ```
@@ -1516,8 +1540,9 @@ Replace the contents of `src/lookup/deconj.rs` (keeping the test module at the b
 //! Faithful port of weikipop's `src/dictionary/deconjugator.py`. Two inherited
 //! behaviours are preserved deliberately:
 //!
-//! 1. `max_len` is driven by `dec_end` alone, so one rule's trailing `vs-i`
-//!    tag is unreachable and `する` mizenkei is tagged `vk`.
+//! 1. `max_len` is driven by `dec_end` alone, so the mizenkei rule's sixth
+//!    `dec_tag` (`vs-i`) is unreachable and that path tags `する` as `vk`.
+//!    A parallel rule still reaches `vs-i`, so the quirk is harmless.
 //! 2. `contextrule` predicates are ignored, so those two rules over-match.
 //!
 //! Both are pinned by tests. Changing either is a semantic change, not a

@@ -1,9 +1,11 @@
 # chibipop — Design
 
 **Date:** 2026-07-26
-**Status:** Approved (design); not yet implemented
-**Revision:** 2 — build order inverted to lookup-and-OCR-first; dictionary sources inspected and
-documented (§5); structured-content flattening promoted from non-goal to v1 requirement.
+**Status:** M0 and M1 built and merged. M2–M5 not started.
+**Revision:** 3 — spec corrected against the completed M0+M1 build: the §5 POS-vocabulary claim was
+false and is replaced with the real `term.pos`/`deconjugator.json` mapping; schema, ranking, the
+`Dictionary` trait, the golden corpus, and one non-goal now match the shipped code; threading,
+structured-content-residual, and dependency notes recorded.
 **Supersedes:** nothing. Sits alongside `weikipop`, which stays installed until this beats it.
 
 ---
@@ -56,6 +58,13 @@ A walking skeleton, fattened only where it is missed in practice. `weikipop` rem
 | D5 | **Event-driven core + one worker thread** | weikipop's five stages are strictly sequential and only the newest request ever matters, so stage-per-thread buys nothing and costs four queues. One worker deletes the entire stale-intermediate bug class. |
 | D6 | **Low-level input hooks, not polling** | weikipop polls at ~100Hz forever (`Architecture.md:41`). `WH_MOUSE_LL` / `WH_KEYBOARD_LL` are event-driven: idle CPU ≈ 0%. |
 
+**Dependency check, recorded so it isn't re-litigated.** `Cargo.lock` does contain `windows-sys` and
+`windows-link` — transitively, via `clap`'s colour-output dependencies (`anstyle-query`, `anstream`)
+— plus `sqlite-wasm-rs`, a wasm-gated dependency of `rusqlite`. Both were traced and confirmed
+legitimate, and neither sits anywhere near `src/lookup/`, so the hard rule in §4 (no `windows` crate
+in the pure core) holds. A future `grep windows Cargo.lock` will find exactly these two and should
+not treat them as a violation.
+
 ### Rejected alternatives
 
 - **Async (`tokio`), task-per-request.** Cancellation via dropped futures is genuinely elegant, but
@@ -101,10 +110,12 @@ src/
     ocr.rs         tier 2 — Windows.Media.Ocr over a cursor-local capture
     capture.rs     screen grab of a ~600×200px region around the cursor
   lookup/
-    mod.rs         trait Dictionary; LookupEngine (prefix scan, POS filter, rank)
-    deconj.rs      BFS deconjugator; rules loaded from deconjugator.json
+    mod.rs         re-exports the submodules below
+    deconj.rs      BFS deconjugator over a loaded rule set
+    engine.rs      LookupEngine (prefix scan, POS filter, rank)
+    model.rs       trait Dictionary; Entry, Sense, TermRow, Hit
+    rules.rs       deconjugator.json rule types and loader
     sqlite.rs      SQLite-backed Dictionary
-    model.rs       Entry, Sense, TermRow, Hit
   ui/
     window.rs      layered popup, D2D device, WDA_EXCLUDEFROMCAPTURE
     layout.rs      DirectWrite layout + measure → window size
@@ -138,11 +149,18 @@ pub struct TextSpan {
 
 pub trait Dictionary {
     fn terms_for(&self, surface: &str) -> Result<Vec<TermRow>>;
+    fn entries(&self, ids: &[i64]) -> Result<Vec<Entry>>;
 }
 ```
 
 Both sides of the worker are swappable and fakeable. A fake `TextSource` plus a fixture database
 exercises the entire resolve chain headlessly.
+
+`SqliteDictionary` carries one implementation constraint worth stating here: it opens with
+`SQLITE_OPEN_NO_MUTEX`, and rusqlite's `Connection` is `Send` but never `Sync`, so a single instance
+must stay on the one thread that opened it. True by construction today — D5 puts every lookup on one
+worker thread — and it only becomes a real constraint if concurrent lookups are ever added, at which
+point it means one connection per thread (or a pool), not a shared connection.
 
 ### 4.2 Data flow, one hover
 
@@ -151,7 +169,8 @@ exercises the entire resolve chain headlessly.
 2. Worker: `TextSource::at(cursor)` walks the tiers and returns a `TextSpan`.
 3. Worker: `LookupEngine::run(&span.text[span.cursor_byte_offset..])` — scan every prefix
    longest-first; deconjugate each prefix; query SQLite for each candidate form; filter by requiring
-   the deconjugation's terminal POS tag to appear in the entry's sense POS set; rank; take the top 10.
+   the deconjugation's terminal tag, mapped to the dictionary's coarse vocabulary (§5), to appear in
+   the term row's `pos` column; rank; take the top 10.
 4. Worker: `PostMessage(WM_APP_RESULT, id)`.
 5. Main thread: drop the result if `id < latest_id`; otherwise lay out with DirectWrite, size the
    window to the measured content, position at `span.anchor`, show.
@@ -188,11 +207,13 @@ database stays inspectable with off-the-shelf tools — half the reason SQLite w
 
 ```sql
 CREATE TABLE term (              -- the hot index; ~25 point queries per hover
-  surface  TEXT NOT NULL,        -- scan key (kana or kanji surface form)
-  written  TEXT,                 -- kanji headword; NULL if the headword is kana-only
-  reading  TEXT,
-  freq     INTEGER,              -- lower = more common; NULL = unranked
-  entry_id INTEGER NOT NULL REFERENCES entry(entry_id)
+    surface  TEXT NOT NULL,      -- scan key (kana or kanji surface form)
+    written  TEXT,               -- kanji headword; NULL if the headword is kana-only
+    reading  TEXT,
+    pos      TEXT NOT NULL DEFAULT '',
+    freq     INTEGER,            -- rank; lower = more common; NULL = unranked
+    entry_id INTEGER NOT NULL REFERENCES entry(entry_id),
+    dict_id  INTEGER NOT NULL REFERENCES dict(dict_id)  -- denormalised from entry (same reason as pos): grouping and dict-priority ranking cost no join on the hot path. Appended last so existing positional indices are unaffected.
 );
 CREATE INDEX idx_term_surface ON term(surface);
 
@@ -206,15 +227,37 @@ CREATE TABLE dict (dict_id INTEGER PRIMARY KEY, name TEXT, priority INTEGER);
 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);  -- schema_version, built_at, source_hashes
 ```
 
-`deconjugator.json` (~1,200 rules) ships as a **sibling file** loaded at startup, not baked into the
-database. Rule tuning should not require a dictionary rebuild, and parsing it costs nothing.
+`term.pos` holds the Yomitan `rules` field verbatim (space-separated keys such as `v5 vs`, 35 rows).
+It is denormalised onto the term row so the part-of-speech filter in §4.2 costs no extra query on the
+hot path; `term.dict_id` is denormalised for the same reason, so grouping and dictionary-priority
+ranking (see Ranking, below) also cost no join. `SCHEMA_VERSION` (`tools/build-dict/schema.py`) is
+**2**; `SqliteDictionary::open` reads `meta.schema_version` back and hard-fails with an actionable
+message — naming the version found, the version expected, and telling the reader to rebuild — on any
+mismatch, so a dictionary built under a different column layout is never silently misread.
+
+`deconjugator.json` (104 rules across 1,223 lines) ships as a **sibling file** loaded at startup, not
+baked into the database. Rule tuning should not require a dictionary rebuild, and parsing it costs
+nothing.
 
 ### Ranking
 
-Ported from weikipop, which is a known-good baseline
-(`Dictionary-Lookup.md:32`): score on match length, then frequency, then dictionary priority; penalise
-by deconjugation step count; bonus for an unconjugated all-kana match. Entries are grouped by
-`(written, reading, dict)` and sorted by `(-match_len, -priority, dict_priority)`.
+Scoring is ported from weikipop, a known-good baseline (`Dictionary-Lookup.md:32`): match length,
+plus a frequency term, plus a bonus for an unconjugated all-kana match, minus the deconjugation step
+count.
+
+Candidates are grouped by `(written, reading, dict_id)` — distinct entries that share a headword,
+reading, and source dictionary are shown once, not once per entry. Within a group, the surviving
+candidate is chosen by a deterministic total order over `(match_len, steps, process, entry_id)`:
+larger `match_len` wins; then fewer deconjugation steps; then the `process` trace (the steps shown in
+the `via:` line) lexicographically; then `entry_id` as a final tiebreak. The order has to be total
+because forms are collected out of a `HashSet`, whose iteration order is not stable across runs —
+without one, the candidate retained for a group (and hence its score and its `via:` trace) could
+differ from run to run against the same input.
+
+Grouped results are sorted by `match_len` descending, then score descending, then `dict_id` ascending,
+then `entry_id` ascending. The `dict_id` tiebreak *is* a dictionary-priority tiebreak: `build.py`
+assigns `dict_id` in the same enumeration order it assigns `priority` (first archive → `dict_id` 1,
+`priority` 0), so ascending `dict_id` is ascending priority without a second column to read.
 
 ### Dictionary sourcing
 
@@ -224,7 +267,7 @@ directly on 2026-07-26; the facts below are read from the files, not recalled.
 | Archive | Format | Role | Notes |
 |---|---|---|---|
 | `01 [JA-EN] jitendex-yomitan (2026-07-09).zip` | Yomitan `format: 3`, `sequenced: true` | Primary JA→EN | rev `2026.07.09.0`, CC BY-SA 4.0. `term_bank_*.json`, `tag_bank_*.json`, `styles.css`, `graphics/*.avif`, `HanaMinA/*.svg`. **No `term_meta_bank`** — carries no frequency data. |
-| `[JA-JA] 大辞林　第四版.zip` | Yomitan `format: 3`, `sequenced: true` | JA→JA monolingual | 3,028 entries, rev `daijirin2;2023-07-10`, © Sanseido. `term_bank_*.json` + `gaiji/*.svg`. |
+| `[JA-JA] 大辞林　第四版.zip` | Yomitan `format: 3`, `sequenced: true` | JA→JA monolingual | **334,751 entries** across 3,028 files in the archive, rev `daijirin2;2023-07-10`, © Sanseido. `term_bank_*.json` + `gaiji/*.svg`. |
 | `[JA Freq] jiten_freq_global (2026-06-14).zip` | Yomitan `format: 3`, `sequenced: false` | Frequency | `frequencyMode: "rank-based"`, one `term_meta_bank_1.json`. |
 
 **There is no JMdict XML step.** Jitendex is already JMdict-derived and shipped in Yomitan format, so
@@ -238,10 +281,32 @@ reference for the *transformations*, not a component to port wholesale.
     0      1           2           3      4        5           6         7
 ```
 
-Field 3, `rules`, carries the Yomitan deconjugation part-of-speech key (`v1`, `v5k`, `adj-i`, …).
-**This is the field that feeds the POS filter** in §4.2 — it is the same vocabulary
-`deconjugator.json` emits as its terminal tag, so the two line up without a mapping table. Field 4,
-`score`, is a per-dictionary sort hint, not a frequency.
+Field 3, `rules`, carries a Yomitan deconjugation part-of-speech key — but not the same one
+`deconjugator.json` uses internally. **This is the field that feeds the POS filter** in §4.2, and the
+two vocabularies do not line up:
+
+| Vocabulary | Tokens |
+|---|---|
+| `term.pos` (built by `build.py`, verbatim from `rules`) | `''` (1,159,932 rows), `v5` (59,731), `v1` (24,856), `adj-i` (13,193), `vs` (2,896), `vz` (497), `vk` (312), plus rare combinations (`v5 vs`, `v1 v5`) |
+| `deconjugator.json` terminal tags (20 — every `dec_tag` not starting with `stem-`) | `adj-i`, `exp`, `topic-condition`, `uninflectable`, `v1`, `v5aru`, `v5b`, `v5g`, `v5k`, `v5k-s`, `v5m`, `v5n`, `v5r`, `v5r-i`, `v5s`, `v5t`, `v5u`, `v5u-s`, `vk`, `vs-i` |
+
+`v5k` — the obvious example — never appears in `term.pos`; it exists only in `deconjugator.json`.
+`engine.rs`'s `dict_pos_for` is the bridge: the 13 fine-grained godan tags (`v5aru` … `v5u-s`) map to
+the coarse `v5`; `vs-i` maps to `vs`; `adj-i`, `v1`, and `vk` are identity mappings; `exp`,
+`topic-condition`, and `uninflectable` impose no constraint; and a tag the table doesn't recognise
+also imposes no constraint — fail open, not closed, so a future vocabulary change cannot silently
+make words unlookupable. A test reads the real rule file and asserts every terminal tag has an
+explicit arm, so the table is self-maintaining rather than quietly drifting out of sync. `vz` (497
+`term.pos` rows) is never emitted as a terminal tag, so nothing maps to it — those entries are
+reachable only as unconjugated literals.
+
+> weikipop's own wiki names this exact hazard (`Dictionary-Lookup.md:57`): "POS filter can over-prune
+> if a dict's `pos` vocabulary doesn't match `deconjugator.json` tags." weikipop does not hit it
+> because it builds from JMdict XML, which is already fine-grained; sourcing from Yomitan archives
+> instead means the coarse/fine split above is real, not hypothetical, and the mapping in
+> `dict_pos_for` is required.
+
+Field 4, `score`, is a per-dictionary sort hint, not a frequency.
 
 **Frequency bank rows have two shapes in the same file.** Both were observed in
 `term_meta_bank_1.json`:
@@ -272,6 +337,14 @@ semantics the schema above already specifies.
 Build time is not runtime memory, so the builder stays in Python if that is quickest. Only the emitted
 `.sqlite` is a `chibipop` artifact.
 
+**Measured, once the builder existed (2026-07-26):** 768,636 entries and 1,261,454 term rows, built in
+~70 seconds, producing a **232.1 MiB** database (243,388,416 bytes) — Jitendex 433,885 entries,
+大辞林 334,751. An earlier draft
+of this section said 大辞林 held "3,028 entries"; that was the count of *files inside the archive*
+(term banks plus `gaiji` glyphs), not dictionary entries, and it is also why this section previously
+estimated ~100MB. The database is never committed (`.gitignore`), so its size costs nothing but build
+time and disk.
+
 ### Structured content
 
 Both dictionaries store glossaries as Yomitan `structured-content` trees, not plain strings — Jitendex
@@ -288,6 +361,13 @@ v1 flattening rules: keep gloss text and POS labels; keep `ruby` base text and *
 drop `img` and `gaiji` references; drop styling; render cross-references as their plain label. Rich
 rendering at runtime remains a non-goal (§7) — but *flattened* structured content is a v1 requirement,
 not an extra.
+
+**Residual, measured against the built database:** roughly 11% of Jitendex glosses still show some
+mangling after flattening. Almost all of it is one shape — a `reference-label` sitting flush against
+its cross-reference term, e.g. `See also一の字点` — readable, and accepted for v1. **That 11% is a
+floor, not a measurement**: the detection heuristic only recognises case and script transitions, so a
+fusion between two runs of the same case/script is invisible to it and goes uncounted. 大辞林 is
+unaffected — it never populates the `data.content` field the mangling comes from.
 
 ## 6. Error handling
 
@@ -311,7 +391,10 @@ Explicitly out of scope, so their absence later reads as a decision rather than 
 
 - Anki / `chibi-anki` mining
 - Settings GUI (configuration is a hand-edited TOML file)
-- Multi-dictionary merging (one dictionary)
+- Per-dictionary runtime toggles. The merge itself is not deferred — v1 already merges every term
+  archive the builder finds (the shipped build merges Jitendex and 大辞林 in one database) — but
+  which archives those are is fixed at build time by what's in the source directory; changing the set
+  means a rebuild, not a setting.
 - Kanji information panel
 - Yomitan live-API integration
 - **Rich** structured content at runtime: images, `gaiji` glyphs, furigana, styling, live
@@ -327,10 +410,13 @@ Explicitly out of scope, so their absence later reads as a decision rather than 
 **What is tested automatically** (all of it in the pure core, no Windows APIs):
 
 - Deconjugation: rule application, tag threading, BFS fixpoint termination, iteration cap.
-- Lookup engine: prefix scan order, POS filtering, kana/kanji suppression rules, ranking, truncation.
+- Lookup engine: prefix scan order, POS filtering, ranking, truncation, and grouping (distinct rows
+  sharing a headword, reading, and dictionary collapse into one result).
 - Coordinate math in `geom.rs`.
-- **Golden corpus** — `(sentence, cursor_byte_offset) → expected headword`. This is the highest-value test in
-  the project: it is pure, fast, and catches every regression that changes what the user actually sees.
+- **Golden corpus** — `(text, expected headword)` pairs run whole through the lookup engine; there is
+  no cursor-offset slicing here (that's the caller's job — see `TextSpan.cursor_byte_offset` in §4.1
+  — and belongs to M2). This is the highest-value test in the project: it is pure, fast, and catches
+  every regression that changes what the user actually sees.
 - Integration: a fixture `.sqlite` plus a fake `TextSource` drives the whole resolve chain headlessly.
 
 **What cannot be tested here, and will be reported as unverified:**
@@ -419,12 +505,19 @@ of excluding it — and does not reach the engine.
 
 ## 11. Open questions
 
-None blocking. Three unknowns remain, each scheduled at the milestone that can settle it cheaply:
+None blocking.
+
+**Settled.** *Is `ja` OCR available on this machine?* — **Yes.** `Windows.Media.Ocr`'s
+`AvailableRecognizerLanguages` returns `en-US` and `ja`, with `MaxImageDimension` 10000. The OCR tier
+is viable exactly as designed: no model needs bundling, and the §2 memory budget stands. Findings note:
+`docs/superpowers/findings/2026-07-26-m0-ocr-availability.md`.
+
+**Still open**, each scheduled at the milestone that can settle it cheaply:
 
 | Unknown | Settled at | If it fails |
 |---|---|---|
-| Is `ja` OCR available on this machine? | **M0** (~30 min, gates everything) | Different OCR engine; §2 memory budget re-decided before any production code. |
 | Does `WDA_EXCLUDEFROMCAPTURE` hold against `BitBlt`? | **M3** | Hide the popup during capture instead. Local to `ui/window.rs`. |
 | Does UIA `RangeFromPoint` return usable text and offsets in real applications? | **M4** | Delete the tier. Costs one module, no rework, because OCR shipped at M2. |
 
-None of the three can invalidate M1, which is where most of the correctness risk lives.
+Neither can invalidate M1, which is where most of the correctness risk lived — and which is now built
+and green.
