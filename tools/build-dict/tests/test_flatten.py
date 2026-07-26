@@ -60,6 +60,41 @@ class TestFlatten(unittest.TestCase):
             "tag": "div", "content": ["  ", {"tag": "img"}, "  "]}}]
         self.assertEqual([], flatten_glossary(g))
 
+    def test_attribution_subtree_dropped(self):
+        g = [{"type": "structured-content", "content": [
+            {"tag": "span", "content": "to eat"},
+            {"tag": "div", "data": {"content": "attribution"}, "content": [
+                {"tag": "a", "content": "JMdict"},
+                " | Tatoeba ",
+                {"tag": "a", "content": "[1]"},
+            ]},
+        ]}]
+        self.assertEqual(["to eat"], flatten_glossary(g))
+
+    def test_example_sentence_subtree_dropped(self):
+        g = [{"type": "structured-content", "content": [
+            {"tag": "span", "content": "to eat"},
+            {"tag": "div", "data": {"content": "example-sentence"}, "content": [
+                {"tag": "div", "data": {"content": "example-sentence-a"},
+                 "content": "もっと果物を食べるべきです。"},
+                {"tag": "div", "data": {"content": "example-sentence-b"}, "content": [
+                    {"tag": "span", "content": "You should eat more fruit."},
+                    {"tag": "span", "data": {"content": "attribution-footnote"},
+                     "content": "[1]"},
+                ]},
+            ]},
+        ]}]
+        self.assertEqual(["to eat"], flatten_glossary(g))
+
+    def test_adjacent_block_siblings_get_separator(self):
+        g = [{"type": "structured-content", "content": [
+            {"tag": "span", "data": {"content": "part-of-speech-info"},
+             "content": "1-dan"},
+            {"tag": "span", "data": {"content": "part-of-speech-info"},
+             "content": "transitive"},
+        ]}]
+        self.assertEqual(["1-dan; transitive"], flatten_glossary(g))
+
 
 if __name__ == "__main__":
     unittest.main()

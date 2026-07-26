@@ -2,12 +2,38 @@
 
 v1 keeps gloss text and ruby base text; it drops furigana (rt), images,
 gaiji glyph references, and all styling. See spec section 5.
+
+Jitendex additionally marks semantic block boundaries (part-of-speech
+labels, senses, glossary items, cross-references, alternate forms, ...)
+on each node's data.content field, and wraps every sense in an inlined
+Tatoeba example sentence plus a trailing dictionary/source attribution
+stamp. The example sentences and attribution do not belong in a
+definition and are dropped outright; every other data.content-marked
+node is treated as a block boundary, same as a list item, so adjacent
+blocks are joined with a separator instead of fusing into one run-on
+word (e.g. "1-dan" + "transitive" -> "1-dantransitive").
 """
 
 import re
 
 # Tags whose entire subtree is discarded.
 _DROP_TAGS = {"rt", "rp", "img"}
+
+# Jitendex data.content markers whose entire subtree is discarded: inlined
+# Tatoeba example sentences (source sentence, translation, and the
+# footnote number tagging them) and the trailing "JMdict | Tatoeba [1][2]"
+# attribution stamp. Neither belongs in a definition.
+_DROP_CONTENT = {
+    "attribution", "attribution-footnote",
+    "example-keyword", "example-sentence",
+    "example-sentence-a", "example-sentence-b",
+}
+
+# Sentinel marking a block boundary: list items, and any Jitendex node
+# carrying a data.content marker (part-of-speech-info, sense, glossary,
+# xref, forms, ...). _tidy() turns runs of these into "; "-separated
+# text, the same separator already used to join list items.
+_BLOCK_MARK = "\u0000LI\u0000"
 
 _WS = re.compile(r"[ \t\u3000]+")
 
@@ -23,20 +49,24 @@ def _render(node):
     if not isinstance(node, dict):
         return ""
 
+    content_marker = (node.get("data") or {}).get("content")
+    if content_marker in _DROP_CONTENT:
+        return ""
+
     tag = node.get("tag")
     if tag in _DROP_TAGS:
         return ""
     if tag == "br":
         return "\n"
-    if tag == "li":
-        return "\u0000LI\u0000" + _render(node.get("content"))
+    if tag == "li" or content_marker is not None:
+        return _BLOCK_MARK + _render(node.get("content"))
 
     return _render(node.get("content"))
 
 
 def _tidy(text):
-    """Collapse whitespace and turn list-item markers into separators."""
-    parts = [p.strip() for p in text.split("\u0000LI\u0000")]
+    """Collapse whitespace and turn block markers into separators."""
+    parts = [p.strip() for p in text.split(_BLOCK_MARK)]
     parts = [p for p in parts if p]
     text = "; ".join(parts)
     text = _WS.sub(" ", text)

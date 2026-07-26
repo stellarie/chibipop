@@ -112,6 +112,13 @@ def _flush(conn, entries, terms):
 
 
 def main(argv=None):
+    # Archive filenames can contain characters a stock Windows console's
+    # cp1252 stdout can't encode (e.g. "大辞林"); force UTF-8 so printing
+    # them doesn't crash before build() is ever called.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
     ap = argparse.ArgumentParser(description="Build chibipop.sqlite")
     ap.add_argument("--dicts-dir", type=Path, required=True,
                     help="directory containing Yomitan .zip archives")
