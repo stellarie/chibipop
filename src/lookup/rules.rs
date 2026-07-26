@@ -42,6 +42,12 @@ pub struct Rule {
 #[serde(untagged)]
 enum Element {
     Rule(Box<Rule>),
+    // The `String` payload is never read, but it is load-bearing: it is what
+    // makes serde's untagged matching accept comment strings (and only
+    // strings) instead of failing to parse, or silently accepting malformed
+    // rule objects. Do not change it to `()` (a JSON string can't
+    // deserialise into `()`) or to `IgnoredAny` (matches any JSON value).
+    #[allow(dead_code)]
     Comment(String),
 }
 
