@@ -44,6 +44,14 @@ impl PhysRect {
 
     /// Integer division of every field — used to map coordinates back out of
     /// upscaled-image space.
+    ///
+    /// Calling convention: this divides image-local (non-negative)
+    /// coordinates and is applied *before* `translated` moves the rect into
+    /// (possibly negative) virtual-desktop space, so in the intended
+    /// composition it never sees a negative input. Division truncates toward
+    /// zero (Rust's `/`), not floor — e.g. `-11 / 2 == -5`. That only matters
+    /// if this convention is violated and a negative value is passed in
+    /// directly; see the tests below for the pinned behaviour.
     pub fn scaled_down(&self, factor: i32) -> PhysRect {
         PhysRect {
             x: self.x / factor,
@@ -98,6 +106,32 @@ mod tests {
     }
 
     #[test]
+    fn edge_distance_is_orthogonal_to_the_right() {
+        // Occupied span is x,y in [10, 29]. 6px to the right, vertically within it.
+        assert_eq!(6.0, r(10, 10, 20, 20).edge_distance_to(p(35, 15)));
+    }
+
+    #[test]
+    fn edge_distance_is_orthogonal_below() {
+        // 6px below the rect, horizontally within it.
+        assert_eq!(6.0, r(10, 10, 20, 20).edge_distance_to(p(15, 35)));
+    }
+
+    #[test]
+    fn edge_distance_is_diagonal_off_the_bottom_right_corner() {
+        // 3 right of the far edge (32 - 29), 4 below the far edge (33 - 29) -> 5 by Pythagoras.
+        assert_eq!(5.0, r(10, 10, 20, 20).edge_distance_to(p(32, 33)));
+    }
+
+    #[test]
+    fn edge_distance_degrades_correctly_when_near_and_far_edges_coincide() {
+        // A 1x1 rect's near and far edge are the same pixel (10). 3 right, 4 below -> 5.
+        // Proves the far-edge term (`self.x + self.w - 1`) still works when it
+        // collapses onto the near edge instead of silently reducing to it.
+        assert_eq!(5.0, r(10, 10, 1, 1).edge_distance_to(p(13, 14)));
+    }
+
+    #[test]
     fn center_rounds_down() {
         assert_eq!(p(20, 20), r(10, 10, 21, 21).center());
     }
@@ -110,5 +144,20 @@ mod tests {
     #[test]
     fn scaled_down_divides_every_field() {
         assert_eq!(r(5, 10, 15, 20), r(10, 20, 30, 40).scaled_down(2));
+    }
+
+    #[test]
+    fn scaled_down_truncates_toward_zero_for_odd_values() {
+        // 11/2 = 5.5, 21/2 = 10.5, 31/2 = 15.5, 41/2 = 20.5 -- truncation
+        // drops the fraction, distinguishing it from round-to-nearest (which
+        // would take w:31 to 16, not 15).
+        assert_eq!(r(5, 10, 15, 20), r(11, 21, 31, 41).scaled_down(2));
+    }
+
+    #[test]
+    fn scaled_down_truncates_toward_zero_for_negative_origin() {
+        // -11/2 = -5.5, -21/2 = -10.5 -- Rust's `/` truncates toward zero, so
+        // these land on -5 and -10, not floor's -6 and -11.
+        assert_eq!(r(-5, -10, 15, 20), r(-11, -21, 30, 40).scaled_down(2));
     }
 }
