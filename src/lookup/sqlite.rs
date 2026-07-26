@@ -71,29 +71,59 @@ impl Dictionary for SqliteDictionary {
 mod tests {
     use super::*;
     use crate::lookup::model::Dictionary;
+    use std::path::{Path, PathBuf};
+
+    /// Removes the wrapped fixture file when dropped — including when a test
+    /// panics mid-assertion (Rust unwinds through `Drop` on panic), so a
+    /// failing test doesn't leave a `.sqlite` file behind either.
+    struct TempDbGuard(PathBuf);
+
+    impl Drop for TempDbGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// Unique fixture path for `test_name`: the process id plus the test
+    /// name means two concurrent `cargo test` runs, or two fixture-backed
+    /// tests in this module, never contend for the same file. That matters
+    /// on Windows, where a handle left open by one process/test can block
+    /// another's create or delete on the same path.
+    fn fixture_path(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("chibipop_sqlite_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("t_{}_{test_name}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// Creates the production `dict`/`entry`/`term`/`meta` schema at `path`,
+    /// then runs `seed_sql` (plain `INSERT`s) to populate it.
+    fn seed_fixture_db(path: &Path, seed_sql: &str) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE dict(dict_id INTEGER PRIMARY KEY, name TEXT, priority INTEGER);
+             CREATE TABLE entry(entry_id INTEGER PRIMARY KEY, dict_id INTEGER, senses TEXT);
+             CREATE TABLE term(surface TEXT, written TEXT, reading TEXT, pos TEXT,
+                               freq INTEGER, entry_id INTEGER);
+             CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
+             CREATE INDEX idx_term_surface ON term(surface);",
+        )
+        .unwrap();
+        conn.execute_batch(seed_sql).unwrap();
+    }
 
     #[test]
     fn reads_terms_and_entries() {
-        let dir = std::env::temp_dir().join("chibipop_sqlite_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("t.sqlite");
-        let _ = std::fs::remove_file(&path);
+        let path = fixture_path("reads_terms_and_entries");
+        let _guard = TempDbGuard(path.clone());
 
-        {
-            let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE dict(dict_id INTEGER PRIMARY KEY, name TEXT, priority INTEGER);
-                 CREATE TABLE entry(entry_id INTEGER PRIMARY KEY, dict_id INTEGER, senses TEXT);
-                 CREATE TABLE term(surface TEXT, written TEXT, reading TEXT, pos TEXT,
-                                   freq INTEGER, entry_id INTEGER);
-                 CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
-                 CREATE INDEX idx_term_surface ON term(surface);
-                 INSERT INTO dict VALUES (1,'d',0);
-                 INSERT INTO entry VALUES (1,1,'[{\"glosses\":[\"to eat\"],\"pos\":[\"v1\"],\"misc\":[]}]');
-                 INSERT INTO term VALUES ('食べる','食べる','たべる','v1',500,1);",
-            )
-            .unwrap();
-        }
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'d',0);
+             INSERT INTO entry VALUES (1,1,'[{\"glosses\":[\"to eat\"],\"pos\":[\"v1\"],\"misc\":[]}]');
+             INSERT INTO term VALUES ('食べる','食べる','たべる','v1',500,1);",
+        );
 
         let d = SqliteDictionary::open(&path).unwrap();
         let rows = d.terms_for("食べる").unwrap();
@@ -107,5 +137,37 @@ mod tests {
 
         assert!(d.terms_for("いぬ").unwrap().is_empty());
         assert!(d.entries(&[]).unwrap().is_empty());
+    }
+
+    /// Real-world shape check: `written IS NULL` on 275,818/1,261,454 term
+    /// rows (kana-only headwords) and `freq IS NULL` on 589,498/1,261,454
+    /// (unranked entries) — 21.9% and 46.7% of the real dictionary
+    /// respectively. Neither was exercised by `reads_terms_and_entries`,
+    /// whose one row is fully populated. This also covers `pos = ''`
+    /// (`pos` is `String`, not `Option<String>`; empty means "part of
+    /// speech unknown" and is extremely common in the real data), and
+    /// confirms `reading`, `surface`, and `entry_id` still round-trip
+    /// correctly alongside the two NULLs.
+    #[test]
+    fn nullable_columns_come_back_as_none() {
+        let path = fixture_path("nullable_columns_come_back_as_none");
+        let _guard = TempDbGuard(path.clone());
+
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (2,'d',0);
+             INSERT INTO entry VALUES (2,2,'[{\"glosses\":[\"very\"],\"pos\":[],\"misc\":[]}]');
+             INSERT INTO term VALUES ('とても',NULL,'とても','',NULL,2);",
+        );
+
+        let d = SqliteDictionary::open(&path).unwrap();
+        let rows = d.terms_for("とても").unwrap();
+        assert_eq!(1, rows.len());
+        assert_eq!("とても", rows[0].surface);
+        assert_eq!(None, rows[0].written);
+        assert_eq!(Some("とても".to_string()), rows[0].reading);
+        assert_eq!("", rows[0].pos);
+        assert_eq!(None, rows[0].freq);
+        assert_eq!(2, rows[0].entry_id);
     }
 }
