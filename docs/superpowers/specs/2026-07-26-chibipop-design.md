@@ -227,7 +227,7 @@ directly on 2026-07-26; the facts below are read from the files, not recalled.
 | Archive | Format | Role | Notes |
 |---|---|---|---|
 | `01 [JA-EN] jitendex-yomitan (2026-07-09).zip` | Yomitan `format: 3`, `sequenced: true` | Primary JA→EN | rev `2026.07.09.0`, CC BY-SA 4.0. `term_bank_*.json`, `tag_bank_*.json`, `styles.css`, `graphics/*.avif`, `HanaMinA/*.svg`. **No `term_meta_bank`** — carries no frequency data. |
-| `[JA-JA] 大辞林　第四版.zip` | Yomitan `format: 3`, `sequenced: true` | JA→JA monolingual | 3,028 entries, rev `daijirin2;2023-07-10`, © Sanseido. `term_bank_*.json` + `gaiji/*.svg`. |
+| `[JA-JA] 大辞林　第四版.zip` | Yomitan `format: 3`, `sequenced: true` | JA→JA monolingual | **334,751 entries** across 3,028 files in the archive, rev `daijirin2;2023-07-10`, © Sanseido. `term_bank_*.json` + `gaiji/*.svg`. |
 | `[JA Freq] jiten_freq_global (2026-06-14).zip` | Yomitan `format: 3`, `sequenced: false` | Frequency | `frequencyMode: "rank-based"`, one `term_meta_bank_1.json`. |
 
 **There is no JMdict XML step.** Jitendex is already JMdict-derived and shipped in Yomitan format, so
@@ -274,6 +274,13 @@ semantics the schema above already specifies.
 
 Build time is not runtime memory, so the builder stays in Python if that is quickest. Only the emitted
 `.sqlite` is a `chibipop` artifact.
+
+**Measured, once the builder existed (2026-07-26):** 768,636 entries and 1,261,454 term rows, built in
+72 seconds, producing a **238MB** database — Jitendex 433,885 entries, 大辞林 334,751. An earlier draft
+of this section said 大辞林 held "3,028 entries"; that was the count of *files inside the archive*
+(term banks plus `gaiji` glyphs), not dictionary entries, and it is also why this section previously
+estimated ~100MB. The database is never committed (`.gitignore`), so its size costs nothing but build
+time and disk.
 
 ### Structured content
 
