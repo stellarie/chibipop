@@ -187,12 +187,12 @@ the window invisible to capture APIs outright. The lock disappears.
 database stays inspectable with off-the-shelf tools — half the reason SQLite was chosen (D3).
 
 ```sql
-CREATE TABLE term (
-    surface  TEXT NOT NULL,
-    written  TEXT,
+CREATE TABLE term (              -- the hot index; ~25 point queries per hover
+    surface  TEXT NOT NULL,      -- scan key (kana or kanji surface form)
+    written  TEXT,               -- kanji headword; NULL if the headword is kana-only
     reading  TEXT,
     pos      TEXT NOT NULL DEFAULT '',
-    freq     INTEGER,
+    freq     INTEGER,            -- rank; lower = more common; NULL = unranked
     entry_id INTEGER NOT NULL REFERENCES entry(entry_id)
 );
 CREATE INDEX idx_term_surface ON term(surface);

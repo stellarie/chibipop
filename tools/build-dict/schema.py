@@ -15,12 +15,12 @@ CREATE TABLE entry (
     senses   TEXT NOT NULL
 );
 
-CREATE TABLE term (
-    surface  TEXT NOT NULL,
-    written  TEXT,
+CREATE TABLE term (              -- the hot index; ~25 point queries per hover
+    surface  TEXT NOT NULL,      -- scan key (kana or kanji surface form)
+    written  TEXT,               -- kanji headword; NULL if the headword is kana-only
     reading  TEXT,
     pos      TEXT NOT NULL DEFAULT '',
-    freq     INTEGER,
+    freq     INTEGER,            -- rank; lower = more common; NULL = unranked
     entry_id INTEGER NOT NULL REFERENCES entry(entry_id)
 );
 
