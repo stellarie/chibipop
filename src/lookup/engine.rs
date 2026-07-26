@@ -3,6 +3,7 @@
 use crate::lookup::deconj::{Deconjugator, Form};
 use crate::lookup::model::{Dictionary, Entry, Hit, TermRow};
 use anyhow::Result;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 pub const MAX_LOOKUP_CHARS: usize = 25;
@@ -94,6 +95,38 @@ struct Candidate {
     process: Vec<String>,
 }
 
+/// A result slot, per the design spec: distinct entries that share a
+/// headword, reading, and source dictionary are shown once, not once per
+/// entry.
+type GroupKey = (Option<String>, Option<String>, i64);
+
+/// True if `new` should replace `existing` as the retained candidate for a
+/// `GroupKey`. A total order over (match_len, steps, process, entry_id):
+///
+/// 1. Larger `match_len` wins - longest prefix wins (already implied by the
+///    prefix-descending scan order; made explicit here rather than relied
+///    on).
+/// 2. Then fewer `steps` wins - a shorter deconjugation is a better
+///    explanation.
+/// 3. Then the `process` trace, lexicographically - so the `via:` trace
+///    shown to the user is stable too, not just the score.
+/// 4. Then `entry_id` - a final deterministic tiebreak so a residual tie on
+///    1-3 (e.g. two dictionary rows sharing a surface, match_len, and
+///    deconjugation path) still can't leak `HashSet<Form>` iteration order
+///    into the result.
+///
+/// This replaces `best.entry(...).or_insert_with(...)`, which was
+/// first-writer-wins: with forms collected out of a `HashSet` in
+/// hash-random order, whichever form reached a given group first "won",
+/// silently deciding that group's `steps` (and hence its score) differently
+/// from one run to the next.
+fn is_better(new: &Candidate, existing: &Candidate) -> bool {
+    fn rank(c: &Candidate) -> (usize, Reverse<usize>, Reverse<&Vec<String>>, Reverse<i64>) {
+        (c.match_len, Reverse(c.steps), Reverse(&c.process), Reverse(c.row.entry_id))
+    }
+    rank(new) > rank(existing)
+}
+
 pub struct LookupEngine {
     deconjugator: Deconjugator,
 }
@@ -110,8 +143,9 @@ impl LookupEngine {
         }
 
         let chars: Vec<char> = cleaned.chars().collect();
-        // First (longest-prefix) hit per entry wins.
-        let mut best: HashMap<i64, Candidate> = HashMap::new();
+        // Best candidate seen so far for each (written, reading, dict_id)
+        // group - see `is_better` for the tiebreak order.
+        let mut best: HashMap<GroupKey, Candidate> = HashMap::new();
 
         // No early exit: shorter prefixes can deconjugate to different words.
         for prefix_len in (1..=chars.len()).rev() {
@@ -133,12 +167,20 @@ impl LookupEngine {
                             continue;
                         }
                     }
-                    best.entry(row.entry_id).or_insert_with(|| Candidate {
-                        row: row.clone(),
+                    let key: GroupKey = (row.written.clone(), row.reading.clone(), row.dict_id);
+                    let candidate = Candidate {
+                        row,
                         match_len: prefix_len,
                         steps: form.process.len(),
                         process: form.process.clone(),
-                    });
+                    };
+                    let should_replace = match best.get(&key) {
+                        Some(existing) => is_better(&candidate, existing),
+                        None => true,
+                    };
+                    if should_replace {
+                        best.insert(key, candidate);
+                    }
                 }
             }
         }
@@ -162,6 +204,10 @@ impl LookupEngine {
             b.match_len
                 .cmp(&a.match_len)
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
+                // build.py assigns dict_id in the same order as `priority`
+                // (first archive -> dict_id 1, priority 0), so ascending
+                // dict_id *is* ascending dictionary priority.
+                .then(a.row.dict_id.cmp(&b.row.dict_id))
                 .then(a.row.entry_id.cmp(&b.row.entry_id))
         });
         ranked.truncate(MAX_RESULTS);
@@ -217,7 +263,7 @@ mod tests {
 
     fn taberu_dict() -> FakeDictionary {
         let mut d = FakeDictionary::new();
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(500), 1);
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(500), 1, 1);
         d.add_entry(1, 1, vec![sense("to eat", "v1")]);
         d
     }
@@ -263,7 +309,7 @@ mod tests {
     fn pos_filter_rejects_mismatched_part_of_speech() {
         // A godan verb row cannot satisfy an ichidan deconjugation.
         let mut d = FakeDictionary::new();
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v5r", Some(500), 1);
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v5r", Some(500), 1, 1);
         d.add_entry(1, 1, vec![sense("wrong pos", "v5r")]);
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
@@ -314,7 +360,7 @@ mod tests {
         // 行かなかった deconjugates to 行く tagged v5k / v5k-s; the real
         // dictionary stores godan verbs under the coarse "v5" bucket.
         let mut d = FakeDictionary::new();
-        d.add_term("行く", Some("行く"), Some("いく"), "v5", Some(50), 1);
+        d.add_term("行く", Some("行く"), Some("いく"), "v5", Some(50), 1, 1);
         d.add_entry(1, 1, vec![sense("to go", "v5")]);
         let hits = engine().run(&d, "行かなかった").unwrap();
         assert!(
@@ -329,7 +375,7 @@ mod tests {
         // してしまった deconjugates to する tagged vs-i; the dictionary
         // stores suru-compounds under "vs".
         let mut d = FakeDictionary::new();
-        d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1);
+        d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1, 1);
         d.add_entry(1, 1, vec![sense("to do", "vs")]);
         let hits = engine().run(&d, "してしまった").unwrap();
         assert!(
@@ -347,7 +393,7 @@ mod tests {
         // via dict_pos_for. If this fails, the mapping has become a
         // no-op instead of an honest translation between vocabularies.
         let mut d = FakeDictionary::new();
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1);
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1, 1);
         d.add_entry(1, 1, vec![sense("wrong pos", "v5")]);
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
@@ -397,18 +443,22 @@ mod tests {
     #[test]
     fn empty_pos_column_is_never_filtered_out() {
         let mut d = FakeDictionary::new();
-        d.add_term("ねこ", None, Some("ねこ"), "", None, 1);
+        d.add_term("ねこ", None, Some("ねこ"), "", None, 1, 1);
         d.add_entry(1, 1, vec![sense("cat", "")]);
         assert_eq!(1, engine().run(&d, "ねこ").unwrap().len());
     }
 
     #[test]
     fn more_common_word_ranks_first() {
+        // Two different dict_ids: same (written=None, reading="はし") pair
+        // from two different source dictionaries, so they don't collapse
+        // into one grouped result (Fix 2c groups by written/reading/dict)
+        // and this stays a test of freq-based ranking, not grouping.
         let mut d = FakeDictionary::new();
-        d.add_term("はし", None, Some("はし"), "", Some(50), 1);
+        d.add_term("はし", None, Some("はし"), "", Some(50), 1, 1);
         d.add_entry(1, 1, vec![sense("chopsticks", "")]);
-        d.add_term("はし", None, Some("はし"), "", Some(9000), 2);
-        d.add_entry(2, 1, vec![sense("bridge", "")]);
+        d.add_term("はし", None, Some("はし"), "", Some(9000), 2, 2);
+        d.add_entry(2, 2, vec![sense("bridge", "")]);
         let hits = engine().run(&d, "はし").unwrap();
         assert_eq!(vec!["chopsticks".to_string()], hits[0].entry.senses[0].glosses);
     }
@@ -416,9 +466,9 @@ mod tests {
     #[test]
     fn longer_match_outranks_shorter() {
         let mut d = FakeDictionary::new();
-        d.add_term("日本", Some("日本"), Some("にほん"), "", Some(100), 1);
+        d.add_term("日本", Some("日本"), Some("にほん"), "", Some(100), 1, 1);
         d.add_entry(1, 1, vec![sense("Japan", "")]);
-        d.add_term("日本語", Some("日本語"), Some("にほんご"), "", Some(900), 2);
+        d.add_term("日本語", Some("日本語"), Some("にほんご"), "", Some(900), 2, 1);
         d.add_entry(2, 1, vec![sense("Japanese language", "")]);
         let hits = engine().run(&d, "日本語").unwrap();
         assert_eq!(Some("日本語".to_string()), hits[0].written);
@@ -428,8 +478,12 @@ mod tests {
     fn results_truncated_to_max() {
         let mut d = FakeDictionary::new();
         for i in 1..=25 {
-            d.add_term("あ", None, Some("あ"), "", Some(i), i);
-            d.add_entry(i, 1, vec![sense("x", "")]);
+            // Distinct dict_id per entry: otherwise all 25 rows share the
+            // group key (written=None, reading="あ", dict_id) and Fix 2c's
+            // grouping collapses them into a single result, defeating the
+            // truncation behaviour this test exists to check.
+            d.add_term("あ", None, Some("あ"), "", Some(i), i, i);
+            d.add_entry(i, i, vec![sense("x", "")]);
         }
         assert_eq!(MAX_RESULTS, engine().run(&d, "あ").unwrap().len());
     }

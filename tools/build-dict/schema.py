@@ -1,6 +1,6 @@
 """SQLite schema for the chibipop dictionary."""
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE dict (
@@ -21,7 +21,8 @@ CREATE TABLE term (              -- the hot index; ~25 point queries per hover
     reading  TEXT,
     pos      TEXT NOT NULL DEFAULT '',
     freq     INTEGER,            -- rank; lower = more common; NULL = unranked
-    entry_id INTEGER NOT NULL REFERENCES entry(entry_id)
+    entry_id INTEGER NOT NULL REFERENCES entry(entry_id),
+    dict_id  INTEGER NOT NULL REFERENCES dict(dict_id)  -- denormalised from entry (same reason as pos): grouping and dict-priority ranking cost no join on the hot path. Appended last so existing positional indices are unaffected.
 );
 
 CREATE TABLE meta (

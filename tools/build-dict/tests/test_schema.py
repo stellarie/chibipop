@@ -23,7 +23,8 @@ class TestSchema(unittest.TestCase):
     def test_term_has_pos_column(self):
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(term)")]
         self.assertEqual(
-            ["surface", "written", "reading", "pos", "freq", "entry_id"], cols)
+            ["surface", "written", "reading", "pos", "freq", "entry_id",
+             "dict_id"], cols)
 
     def test_surface_index_exists(self):
         idx = {r[1] for r in self.conn.execute("PRAGMA index_list(term)")}

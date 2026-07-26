@@ -9,11 +9,19 @@ pub struct TermRow {
     pub surface: String,
     pub written: Option<String>,
     pub reading: Option<String>,
-    /// Yomitan `rules` field, space-separated (e.g. "v1", "v5k").
+    /// Yomitan `rules` field, space-separated. The real vocabulary is
+    /// exactly `v1`, `v5`, `vs`, `vz`, `vk`, `adj-i`, and the empty string
+    /// (unknown part of speech) - never the deconjugator's fine-grained
+    /// JMdict-style subtypes (e.g. `v5k`). `engine.rs`'s `dict_pos_for` maps
+    /// those fine-grained deconjugator tags onto this coarse vocabulary
+    /// before filtering.
     pub pos: String,
     /// Rank; lower is more common. `None` means unranked.
     pub freq: Option<i64>,
     pub entry_id: i64,
+    /// Denormalised from `entry.dict_id` (same reason as `pos`): grouping
+    /// and dictionary-priority ranking cost no join on the hot path.
+    pub dict_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +78,7 @@ impl FakeDictionary {
         pos: &str,
         freq: Option<i64>,
         entry_id: i64,
+        dict_id: i64,
     ) {
         self.terms.entry(surface.to_string()).or_default().push(TermRow {
             surface: surface.to_string(),
@@ -78,6 +87,7 @@ impl FakeDictionary {
             pos: pos.to_string(),
             freq,
             entry_id,
+            dict_id,
         });
     }
 
@@ -119,7 +129,7 @@ mod tests {
     #[test]
     fn fake_dictionary_returns_seeded_rows() {
         let mut d = FakeDictionary::new();
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(7), 1);
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(7), 1, 1);
         assert_eq!(1, d.terms_for("食べる").unwrap().len());
         assert!(d.terms_for("猫").unwrap().is_empty());
     }

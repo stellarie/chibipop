@@ -2,12 +2,20 @@
 
 use crate::lookup::model::{Dictionary, Entry, Sense, TermRow};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
 pub struct SqliteDictionary {
     conn: Connection,
 }
+
+/// The `meta.schema_version` this build of chibipop requires. Bumped
+/// alongside `tools/build-dict/schema.py::SCHEMA_VERSION`. The builder
+/// (Python) and reader (Rust) share an on-disk contract but no shared type
+/// to enforce it, so `open` checks this explicitly instead of trusting a
+/// dictionary file blindly - a mismatch fails loudly instead of the reader
+/// silently misinterpreting columns that moved.
+const EXPECTED_SCHEMA_VERSION: i64 = 2;
 
 impl SqliteDictionary {
     pub fn open(path: &Path) -> Result<Self> {
@@ -19,6 +27,27 @@ impl SqliteDictionary {
         // 256MB mmap window: the OS pages what is touched, so resident
         // memory stays near zero.
         conn.pragma_update(None, "mmap_size", 268_435_456i64)?;
+
+        let found_version: Option<String> = conn
+            .query_row("SELECT v FROM meta WHERE k = 'schema_version'", [], |r| {
+                r.get(0)
+            })
+            .optional()
+            .with_context(|| {
+                format!("reading meta.schema_version from {}", path.display())
+            })?;
+        let is_current = found_version.as_deref().and_then(|v| v.parse::<i64>().ok())
+            == Some(EXPECTED_SCHEMA_VERSION);
+        if !is_current {
+            let found_display = found_version.as_deref().unwrap_or("<missing>");
+            anyhow::bail!(
+                "{}: schema_version is {found_display}, but this build of \
+                 chibipop expects {EXPECTED_SCHEMA_VERSION} - rebuild the \
+                 dictionary with tools/build-dict/build.py",
+                path.display()
+            );
+        }
+
         Ok(SqliteDictionary { conn })
     }
 }
@@ -26,7 +55,7 @@ impl SqliteDictionary {
 impl Dictionary for SqliteDictionary {
     fn terms_for(&self, surface: &str) -> Result<Vec<TermRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT surface, written, reading, pos, freq, entry_id \
+            "SELECT surface, written, reading, pos, freq, entry_id, dict_id \
              FROM term WHERE surface = ?1",
         )?;
         let rows = stmt.query_map([surface], |r| {
@@ -37,6 +66,7 @@ impl Dictionary for SqliteDictionary {
                 pos: r.get(3)?,
                 freq: r.get(4)?,
                 entry_id: r.get(5)?,
+                dict_id: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -105,7 +135,7 @@ mod tests {
             "CREATE TABLE dict(dict_id INTEGER PRIMARY KEY, name TEXT, priority INTEGER);
              CREATE TABLE entry(entry_id INTEGER PRIMARY KEY, dict_id INTEGER, senses TEXT);
              CREATE TABLE term(surface TEXT, written TEXT, reading TEXT, pos TEXT,
-                               freq INTEGER, entry_id INTEGER);
+                               freq INTEGER, entry_id INTEGER, dict_id INTEGER);
              CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
              CREATE INDEX idx_term_surface ON term(surface);",
         )
@@ -122,7 +152,8 @@ mod tests {
             &path,
             "INSERT INTO dict VALUES (1,'d',0);
              INSERT INTO entry VALUES (1,1,'[{\"glosses\":[\"to eat\"],\"pos\":[\"v1\"],\"misc\":[]}]');
-             INSERT INTO term VALUES ('食べる','食べる','たべる','v1',500,1);",
+             INSERT INTO term VALUES ('食べる','食べる','たべる','v1',500,1,1);
+             INSERT INTO meta VALUES ('schema_version','2');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -130,6 +161,7 @@ mod tests {
         assert_eq!(1, rows.len());
         assert_eq!("v1", rows[0].pos);
         assert_eq!(Some(500), rows[0].freq);
+        assert_eq!(1, rows[0].dict_id);
 
         let entries = d.entries(&[1]).unwrap();
         assert_eq!(1, entries.len());
@@ -157,7 +189,8 @@ mod tests {
             &path,
             "INSERT INTO dict VALUES (2,'d',0);
              INSERT INTO entry VALUES (2,2,'[{\"glosses\":[\"very\"],\"pos\":[],\"misc\":[]}]');
-             INSERT INTO term VALUES ('とても',NULL,'とても','',NULL,2);",
+             INSERT INTO term VALUES ('とても',NULL,'とても','',NULL,2,2);
+             INSERT INTO meta VALUES ('schema_version','2');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -169,5 +202,42 @@ mod tests {
         assert_eq!("", rows[0].pos);
         assert_eq!(None, rows[0].freq);
         assert_eq!(2, rows[0].entry_id);
+        assert_eq!(2, rows[0].dict_id);
+    }
+
+    /// Fix 3: `meta.schema_version` is the one drift detector already
+    /// present in the on-disk data, shared across a language boundary
+    /// (Python builder, Rust reader) with no shared type to enforce it.
+    /// `open` must hard-fail with a clear, actionable message - naming both
+    /// the version found and the version expected, and telling the reader
+    /// to rebuild - rather than silently reading a dictionary built under a
+    /// different column layout.
+    #[test]
+    fn open_fails_when_schema_version_does_not_match() {
+        let path = fixture_path("open_fails_when_schema_version_does_not_match");
+        let _guard = TempDbGuard(path.clone());
+
+        seed_fixture_db(&path, "INSERT INTO meta VALUES ('schema_version','1');");
+
+        // `.err()` + `.expect()`, not `.unwrap_err()`: the latter requires
+        // the `Ok` type (`SqliteDictionary`, which wraps a raw `Connection`
+        // and has no `Debug` impl) to be `Debug` too, for a panic message
+        // this branch never prints.
+        let err = SqliteDictionary::open(&path)
+            .err()
+            .expect("opening a dictionary with the wrong schema_version should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema_version is 1"),
+            "error should name the version found in the file: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("expects {EXPECTED_SCHEMA_VERSION}")),
+            "error should name the version this build expects: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("rebuild"),
+            "error should tell the reader to rebuild the dictionary: {msg}"
+        );
     }
 }

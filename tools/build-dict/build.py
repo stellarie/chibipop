@@ -53,11 +53,12 @@ def build(term_archives, freq_archives, out_path):
 
             # Reading row. `written` is NULL when the headword is kana-only.
             terms.append((reading, None if written == reading else written,
-                          reading, t.rules, rank, entry_id))
+                          reading, t.rules, rank, entry_id, dict_id))
             # Written row, only when it differs.
             if written != reading:
                 terms.append(
-                    (written, written, reading, t.rules, rank, entry_id))
+                    (written, written, reading, t.rules, rank, entry_id,
+                     dict_id))
 
             if len(entries) >= 5000:
                 _flush(conn, entries, terms)
@@ -107,8 +108,8 @@ def _flush(conn, entries, terms):
             entries)
     if terms:
         conn.executemany(
-            "INSERT INTO term (surface, written, reading, pos, freq, entry_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)", terms)
+            "INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)", terms)
 
 
 def main(argv=None):

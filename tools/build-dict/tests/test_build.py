@@ -69,6 +69,13 @@ class TestBuild(unittest.TestCase):
         conn.close()
         self.assertEqual("v1", pos)
 
+    def test_dict_id_denormalised(self):
+        _, conn = self._build()
+        dict_id = conn.execute(
+            "SELECT dict_id FROM term WHERE surface='食べる'").fetchone()[0]
+        conn.close()
+        self.assertEqual(1, dict_id)
+
     def test_glossary_flattened_into_senses(self):
         _, conn = self._build()
         row = conn.execute(
