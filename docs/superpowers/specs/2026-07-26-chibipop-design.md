@@ -2,6 +2,8 @@
 
 **Date:** 2026-07-26
 **Status:** Approved (design); not yet implemented
+**Revision:** 2 — build order inverted to lookup-and-OCR-first; dictionary sources inspected and
+documented (§5); structured-content flattening promoted from non-goal to v1 requirement.
 **Supersedes:** nothing. Sits alongside `weikipop`, which stays installed until this beats it.
 
 ---
@@ -35,8 +37,8 @@ screen** — not only in a browser.
 > correct headword, reading, and definition beside the cursor; the popup never steals focus; and
 > resident memory stays under **50MB (hard) / 20MB (target)**.
 
-The 50MB figure is the bar. The 20MB figure is the ambition. Both are **measured at M0**, before
-any dictionary work — see §9.
+The 50MB figure is the bar. The 20MB figure is the ambition. Both are **first measured at M3**, once
+a window exists to measure — see §9.
 
 ### Scope: lookup-only core
 
@@ -175,9 +177,9 @@ pass. Instead, `chibipop` calls `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMC
 the window invisible to capture APIs outright. The lock disappears.
 
 > ⚠️ **Unverified.** `WDA_EXCLUDEFROMCAPTURE` requires Windows 10 2004+. Its interaction with `BitBlt`
-> specifically has not been confirmed. This is probe #1 of the M-1 spike (§9). If it does not hold, the
+> specifically has not been confirmed, and stays unverified until **M3** (§9). If it does not hold, the
 > fallback is to hide the popup for the duration of the capture — one extra state transition, not a
-> redesign.
+> redesign. The failure is local to `ui/window.rs` and cannot reach the engine.
 
 ## 5. Data model
 
@@ -216,10 +218,76 @@ by deconjugation step count; bonus for an unconjugated all-kana match. Entries a
 
 ### Dictionary sourcing
 
-The offline builder is a **port of, or a direct reuse of, weikipop's `scripts/build_dictionary.py`**
-(JMdict + Yomitan import + JPDB/jiten.moe frequency data), retargeted to emit the schema above. Build
-time is not runtime memory, so this stays in Python if that is faster to get working. Only the emitted
+Source material lives in `C:\Users\Stella\Documents\dicts`. All three archives were inspected
+directly on 2026-07-26; the facts below are read from the files, not recalled.
+
+| Archive | Format | Role | Notes |
+|---|---|---|---|
+| `01 [JA-EN] jitendex-yomitan (2026-07-09).zip` | Yomitan `format: 3`, `sequenced: true` | Primary JA→EN | rev `2026.07.09.0`, CC BY-SA 4.0. `term_bank_*.json`, `tag_bank_*.json`, `styles.css`, `graphics/*.avif`, `HanaMinA/*.svg`. **No `term_meta_bank`** — carries no frequency data. |
+| `[JA-JA] 大辞林　第四版.zip` | Yomitan `format: 3`, `sequenced: true` | JA→JA monolingual | 3,028 entries, rev `daijirin2;2023-07-10`, © Sanseido. `term_bank_*.json` + `gaiji/*.svg`. |
+| `[JA Freq] jiten_freq_global (2026-06-14).zip` | Yomitan `format: 3`, `sequenced: false` | Frequency | `frequencyMode: "rank-based"`, one `term_meta_bank_1.json`. |
+
+**There is no JMdict XML step.** Jitendex is already JMdict-derived and shipped in Yomitan format, so
+the builder is a Yomitan archive reader and nothing more. weikipop's `build_dictionary.py` is a
+reference for the *transformations*, not a component to port wholesale.
+
+**Term bank row schema** (verified against both archives):
+
+```
+[ term, reading, definitionTags, rules, score, glossary[], sequence, termTags ]
+    0      1           2           3      4        5           6         7
+```
+
+Field 3, `rules`, carries the Yomitan deconjugation part-of-speech key (`v1`, `v5k`, `adj-i`, …).
+**This is the field that feeds the POS filter** in §4.2 — it is the same vocabulary
+`deconjugator.json` emits as its terminal tag, so the two line up without a mapping table. Field 4,
+`score`, is a per-dictionary sort hint, not a frequency.
+
+**Frequency bank rows have two shapes in the same file.** Both were observed in
+`term_meta_bank_1.json`:
+
+```json
+["の","freq",{"value":1,"displayValue":"1㋕"}]
+["乃","freq",{"reading":"の","frequency":{"value":1,"displayValue":"1㋕"}}]
+```
+
+The second form is **reading-scoped** and nests `value` one level deeper under `frequency`. The
+builder must handle both, and must write the reading into `term.reading` for the scoped form —
+otherwise a rare kanji spelling inherits the rank of its common homophone. Because the mode is
+`rank-based`, `value` maps directly onto `term.freq` with lower meaning more common, which is the
+semantics the schema above already specifies.
+
+**Builder gotchas, learned the hard way:**
+
+- **Do not use .NET Framework's `ZipArchive`.** Windows PowerShell 5.1 opens the Daijirin archive
+  without error and reports **0 entries**, despite a hand-verified central directory declaring 3,028.
+  Python's `zipfile` reads the identical file correctly. The archive is structurally sound
+  (`PK\x03\x04` header; CD offset 86,825,921 + size 342,950 lands exactly 22 bytes — one EOCD record —
+  before EOF).
+- Archive **filenames contain `[`, `]`, and a full-width space (U+3000)**. Square brackets are
+  PowerShell wildcard metacharacters, so every path must be passed as `-LiteralPath`, and native
+  executables invoked with these paths lose the Japanese characters to the console codepage. The
+  builder should glob the directory rather than accept hand-typed filenames.
+
+Build time is not runtime memory, so the builder stays in Python if that is quickest. Only the emitted
 `.sqlite` is a `chibipop` artifact.
+
+### Structured content
+
+Both dictionaries store glossaries as Yomitan `structured-content` trees, not plain strings — Jitendex
+wraps every sense in `div`/`span` nodes carrying POS tags, cross-references, and `ruby`/`rt` furigana;
+Daijirin uses Japanese semantic node names (`見出部`, `語義G`, `語釈`) and references `gaiji/*.svg`
+glyphs. **Rendering nothing is not an option: it would leave every entry blank.**
+
+Resolution: **the offline builder flattens structured content to plain text**, mirroring weikipop,
+which bakes its rendering at import time rather than query time (`Dictionary-Lookup.md:51`). The
+runtime stays a dumb consumer of strings, and the tree-walking complexity lives where it costs no
+memory and is trivially unit-testable.
+
+v1 flattening rules: keep gloss text and POS labels; keep `ruby` base text and **drop `rt` furigana**;
+drop `img` and `gaiji` references; drop styling; render cross-references as their plain label. Rich
+rendering at runtime remains a non-goal (§7) — but *flattened* structured content is a v1 requirement,
+not an extra.
 
 ## 6. Error handling
 
@@ -246,7 +314,9 @@ Explicitly out of scope, so their absence later reads as a decision rather than 
 - Multi-dictionary merging (one dictionary)
 - Kanji information panel
 - Yomitan live-API integration
-- Structured content: images, furigana, styled glosses
+- **Rich** structured content at runtime: images, `gaiji` glyphs, furigana, styling, live
+  cross-reference links. Note the distinction — structured content is *flattened to text by the
+  builder* and that part is required, not deferred (§5).
 - Cross-platform support
 - **Magpie support.** Deliberately deferred (see §10). `geom.rs` keeps one clean coordinate
   discipline for v1; Magpie's transform arrives later as its own bounded module, not as a
@@ -270,46 +340,73 @@ behavior, DPI scaling, and multi-monitor placement. This is the same wall weikip
 written manual acceptance checklist, executed by the user on the target machine, and results are
 recorded rather than assumed.
 
-## 9. Build order — riskiest first
+The `chibipop probe --at <x>,<y>` command built at M2 (§9) is the **manual verification harness** for
+the untestable half: it prints what was captured, what OCR recognised, which token the hit-scan chose,
+and what the engine looked up — turning "the popup showed the wrong word" into four separately
+inspectable stages. Building it is not optional polish; it is how the OCR tier gets debugged at all.
 
-### M-1 · Spike (throwaway code, before anything real)
+## 9. Build order — lookup and OCR first
 
-Three probes that can each invalidate part of the design:
+> **Note the inversion.** D1 specifies UIA → OCR as the *runtime* tier order, and that is unchanged.
+> The *build* order is the reverse: OCR is built first because it is the tier that must work
+> everywhere, while UIA is an optimization layered onto an already-working product. Building OCR
+> first also means a failure to get UIA coverage costs nothing already built.
 
-1. **Window behavior.** A layered `NOACTIVATE | TOPMOST | TOOLWINDOW` window with
-   `WDA_EXCLUDEFROMCAPTURE`: does it never take focus, and is it genuinely absent from a `BitBlt`
-   capture?
-2. **UIA coverage.** `ElementFromPoint` → `TextPattern` → `RangeFromPoint` in five applications the
-   user actually reads in: does it return usable text *and* a correct character offset?
-3. **OCR availability.** Is `ja` present in `Windows.Media.Ocr`'s `AvailableRecognizerLanguages` on
-   this machine?
+### M0 · OCR availability probe *(throwaway, ~30 minutes, gates everything)*
 
-**Deliverable:** a one-page findings note.
-**Branch conditions:** if #2 fails across the board, the UIA tier is deleted and the design simplifies
-to OCR-only. If #3 fails, an alternative OCR engine is needed and the memory budget is re-decided
-before proceeding.
+Is `ja` present in `Windows.Media.Ocr`'s `AvailableRecognizerLanguages` on this machine?
 
-### M0 · Skeleton
-Hotkey + hooks + a popup rendering a hardcoded string at the cursor. **Measure resident memory** and
-compare against §2.
+**Branch condition:** if it is absent and the language pack cannot be installed, the OCR tier needs a
+different engine, and the memory budget in §2 is re-decided **before** any production code is written.
+Every other milestone assumes this probe passes.
 
-### M1 · Pure core
-Offline builder, SQLite store, deconjugator, lookup engine, and a CLI entry point
-(`chibipop lookup 食べさせられた`) so the engine is usable and provable with no GUI at all. Golden
-corpus green.
+### M1 · Pure lookup core *(no Windows APIs, no GUI)*
 
-### M2 · UIA tier
-Wire tier 1. Real lookups in a browser and a text editor.
+Builder (Yomitan archives → `chibipop.sqlite`, including structured-content flattening and both
+frequency row shapes), SQLite store, deconjugator, lookup engine, and a CLI entry point:
 
-### M3 · OCR tier
-Wire tier 2. Real lookups in a game or video.
+```
+chibipop lookup 食べさせられた
+```
 
-### M4 · Polish
+Golden corpus green. This milestone is fully verifiable on any machine and carries the majority of the
+product's correctness risk.
+
+### M2 · OCR tier — the walking skeleton *(still headless)*
+
+`capture.rs` + `ocr.rs` + hit-scan wired to M1, exposed as `chibipop probe --at <x>,<y>`, which
+captures around a screen point and prints what it recognised and what it looked up.
+
+**This is the real walking skeleton:** the complete acquire → recognise → lookup path, end to end,
+verifiable from a terminal, with zero Win32 window code written. If OCR accuracy or hit-scan
+positioning is bad, it surfaces here — before any effort goes into rendering.
+
+### M3 · Popup
+
+Layered `NOACTIVATE | TOPMOST | TOOLWINDOW` window, Direct2D/DirectWrite rendering, low-level input
+hooks, and the `WDA_EXCLUDEFROMCAPTURE` probe from §4.4. **Measure resident memory** against §2.
+
+### M4 · UIA tier
+
+Add tier 1 to a product that already works. Probe `ElementFromPoint` → `TextPattern` →
+`RangeFromPoint` coverage across real applications, now informed by actual usage rather than
+speculation.
+
+**Branch condition:** if coverage is poor across the board, delete the tier. Because OCR shipped in
+M2, this costs one module and no rework.
+
+### M5 · Polish
+
 DPI and multi-monitor placement, TOML configuration, tray menu.
 
-Ordering rationale: M-1 and M0 attack the unknowns that could invalidate the architecture; M1 is
-pure logic and fully verifiable; M2 and M3 add the two text tiers independently, so a failure in one
-does not block the other.
+**Ordering rationale.** M0 is the one unknown that can invalidate the whole approach, so it goes
+first and costs half an hour. M1 and M2 deliver the entire product value while remaining fully
+verifiable headlessly — all Win32 window and focus complexity is deferred behind them. M3 introduces
+GUI risk only once the engine is proven. M4 is an enhancement with a clean delete path.
+
+The one risk this ordering accepts knowingly: the layered-window behaviour in §4.4 stays unverified
+until M3. That is tolerable because its failure mode is local — hide the popup during capture instead
+of excluding it — and does not reach the engine.
 
 ## 10. Deferred, with rationale
 
@@ -322,5 +419,12 @@ does not block the other.
 
 ## 11. Open questions
 
-None blocking. The three M-1 probes are the outstanding unknowns, and they are scheduled as the first
-unit of work precisely because they are unknown.
+None blocking. Three unknowns remain, each scheduled at the milestone that can settle it cheaply:
+
+| Unknown | Settled at | If it fails |
+|---|---|---|
+| Is `ja` OCR available on this machine? | **M0** (~30 min, gates everything) | Different OCR engine; §2 memory budget re-decided before any production code. |
+| Does `WDA_EXCLUDEFROMCAPTURE` hold against `BitBlt`? | **M3** | Hide the popup during capture instead. Local to `ui/window.rs`. |
+| Does UIA `RangeFromPoint` return usable text and offsets in real applications? | **M4** | Delete the tier. Costs one module, no rework, because OCR shipped at M2. |
+
+None of the three can invalidate M1, which is where most of the correctness risk lives.
