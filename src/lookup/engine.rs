@@ -36,6 +36,57 @@ fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool, steps: usize) ->
     s
 }
 
+/// Maps a deconjugator terminal `dec_tag` to the dictionary `term.pos` token
+/// a row must carry to satisfy it.
+///
+/// The two vocabularies differ in granularity: `data/deconjugator.json`
+/// tags godan and suru forms with fine-grained JMdict-style subtypes (20
+/// terminal tags, i.e. every `dec_tag` not starting with `stem-`), while
+/// `term.pos` (built by `tools/build-dict/build.py`) stores 6 coarse tokens
+/// (`adj-i`, `v1`, `v5`, `vk`, `vs`, `vz`). An exact string-equality filter
+/// therefore rejects every correctly-deconjugated godan/suru candidate.
+///
+/// Return value:
+/// - `Some(Some(token))` — the tag is recognised and constrains matches to
+///   rows whose `pos` contains `token` (an empty `pos` still always
+///   survives — see the filter call site).
+/// - `Some(None)` — the tag is recognised but carries no POS signal in this
+///   dictionary's vocabulary (`exp`, `topic-condition`, `uninflectable`);
+///   no constraint is imposed.
+/// - `None` — the tag is not in this table at all. Filtering treats this
+///   identically to `Some(None)` (fail open, not closed: a future
+///   vocabulary change must not silently make words unlookupable), but the
+///   distinction is kept here so `all_terminal_dec_tags_are_handled_by_the_mapping`
+///   can assert real completeness instead of silently tolerating drift.
+///
+/// Identity mappings (`adj-i`, `v1`, `vk`) are listed explicitly rather than
+/// falling through a catch-all, so this table reads as a complete statement
+/// of the vocabulary relationship, not a partial one.
+///
+/// `vz` (497 rows in the real dictionary) is deliberately absent: it is
+/// never emitted as a terminal tag, so nothing should map to it — those
+/// entries are reachable only as unconjugated literals, where no filter
+/// applies.
+fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
+    match dec_tag {
+        // Godan verbs: every fine-grained conjugation class collapses to
+        // the dictionary's single coarse "v5" bucket.
+        "v5aru" | "v5b" | "v5g" | "v5k" | "v5k-s" | "v5m" | "v5n" | "v5r"
+        | "v5r-i" | "v5s" | "v5t" | "v5u" | "v5u-s" => Some(Some("v5")),
+        // Suru-compound: fine-grained "vs-i" collapses to coarse "vs".
+        "vs-i" => Some(Some("vs")),
+        // Identical strings in both vocabularies - explicit identity
+        // mappings, not a fallthrough default.
+        "adj-i" => Some(Some("adj-i")),
+        "v1" => Some(Some("v1")),
+        "vk" => Some(Some("vk")),
+        // Carry no part-of-speech signal in the dictionary vocabulary.
+        "exp" | "topic-condition" | "uninflectable" => Some(None),
+        // Unrecognised: fail open. See doc comment above.
+        _ => None,
+    }
+}
+
 struct Candidate {
     row: TermRow,
     match_len: usize,
@@ -72,7 +123,8 @@ impl LookupEngine {
             forms.push(Form::seed(&prefix));
 
             for form in &forms {
-                let required_pos = form.tags.last().map(String::as_str);
+                let required_pos =
+                    form.tags.last().map(String::as_str).and_then(dict_pos_for).flatten();
                 for row in dict.terms_for(&form.text)? {
                     if let Some(need) = required_pos {
                         if !row.pos.is_empty()
@@ -146,6 +198,7 @@ mod tests {
     use super::*;
     use crate::lookup::model::{FakeDictionary, Sense};
     use crate::lookup::rules::load_rules;
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     fn engine() -> LookupEngine {
@@ -214,6 +267,131 @@ mod tests {
         d.add_entry(1, 1, vec![sense("wrong pos", "v5r")]);
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
+    }
+
+    // --- dict_pos_for: direct unit tests for the mapping table ---
+
+    #[test]
+    fn dict_pos_for_maps_fine_grained_godan_tags_to_v5() {
+        for tag in [
+            "v5aru", "v5b", "v5g", "v5k", "v5k-s", "v5m", "v5n", "v5r",
+            "v5r-i", "v5s", "v5t", "v5u", "v5u-s",
+        ] {
+            assert_eq!(Some(Some("v5")), dict_pos_for(tag), "tag {tag}");
+        }
+    }
+
+    #[test]
+    fn dict_pos_for_maps_vs_i_to_vs() {
+        assert_eq!(Some(Some("vs")), dict_pos_for("vs-i"));
+    }
+
+    #[test]
+    fn dict_pos_for_identity_mappings_are_explicit() {
+        assert_eq!(Some(Some("adj-i")), dict_pos_for("adj-i"));
+        assert_eq!(Some(Some("v1")), dict_pos_for("v1"));
+        assert_eq!(Some(Some("vk")), dict_pos_for("vk"));
+    }
+
+    #[test]
+    fn dict_pos_for_context_tags_impose_no_constraint() {
+        assert_eq!(Some(None), dict_pos_for("exp"));
+        assert_eq!(Some(None), dict_pos_for("topic-condition"));
+        assert_eq!(Some(None), dict_pos_for("uninflectable"));
+    }
+
+    #[test]
+    fn dict_pos_for_unrecognised_tag_imposes_no_constraint() {
+        // Not in the table at all - must fail open (None), not be treated
+        // as a class that rejects everything.
+        assert_eq!(None, dict_pos_for("some-future-tag-not-yet-mapped"));
+    }
+
+    // --- engine-level: the mapping actually changes filtering behaviour ---
+
+    #[test]
+    fn v5k_tagged_form_matches_v5_row() {
+        // 行かなかった deconjugates to 行く tagged v5k / v5k-s; the real
+        // dictionary stores godan verbs under the coarse "v5" bucket.
+        let mut d = FakeDictionary::new();
+        d.add_term("行く", Some("行く"), Some("いく"), "v5", Some(50), 1);
+        d.add_entry(1, 1, vec![sense("to go", "v5")]);
+        let hits = engine().run(&d, "行かなかった").unwrap();
+        assert!(
+            hits.iter().any(|h| h.written.as_deref() == Some("行く")),
+            "expected 行く among hits, got {:?}",
+            hits.iter().map(|h| h.written.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn vs_i_tagged_form_matches_vs_row() {
+        // してしまった deconjugates to する tagged vs-i; the dictionary
+        // stores suru-compounds under "vs".
+        let mut d = FakeDictionary::new();
+        d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1);
+        d.add_entry(1, 1, vec![sense("to do", "vs")]);
+        let hits = engine().run(&d, "してしまった").unwrap();
+        assert!(
+            hits.iter().any(|h| h.written.as_deref() == Some("する")),
+            "expected する among hits, got {:?}",
+            hits.iter().map(|h| h.written.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn v1_tagged_form_does_not_match_v5_only_row() {
+        // The filter must keep its protective value: an ichidan
+        // deconjugation (v1) must not be satisfied by a row that only
+        // carries the godan bucket "v5", even though both are now mapped
+        // via dict_pos_for. If this fails, the mapping has become a
+        // no-op instead of an honest translation between vocabularies.
+        let mut d = FakeDictionary::new();
+        d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1);
+        d.add_entry(1, 1, vec![sense("wrong pos", "v5")]);
+        let hits = engine().run(&d, "食べさせられた").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    /// Completeness guard: every terminal `dec_tag` the real rule file can
+    /// produce must be an explicit arm in `dict_pos_for`, not fall into the
+    /// unrecognised-tag default. This is what makes the table
+    /// self-maintaining - if the deconjugator's tag vocabulary ever grows,
+    /// this fails loudly instead of the new tag silently matching nothing.
+    #[test]
+    fn all_terminal_dec_tags_are_handled_by_the_mapping() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("data/deconjugator.json");
+        let rules = load_rules(&p).unwrap();
+
+        let mut terminal_tags: HashSet<String> = HashSet::new();
+        for rule in &rules {
+            if let Some(tags) = &rule.dec_tag {
+                for t in tags.as_slice() {
+                    if !t.starts_with("stem-") {
+                        terminal_tags.insert(t.clone());
+                    }
+                }
+            }
+        }
+
+        // Sanity check on the guard itself: if this is empty, the loop
+        // above found nothing and the assertion below would pass vacuously.
+        assert!(
+            !terminal_tags.is_empty(),
+            "expected at least one terminal dec_tag from the real rule file"
+        );
+
+        let mut unhandled: Vec<&String> = terminal_tags
+            .iter()
+            .filter(|t| dict_pos_for(t).is_none())
+            .collect();
+        unhandled.sort();
+        assert!(
+            unhandled.is_empty(),
+            "dict_pos_for has no explicit arm for real terminal dec_tag(s) {unhandled:?} - \
+             the rule vocabulary moved and the mapping table in engine.rs must be updated"
+        );
     }
 
     #[test]
