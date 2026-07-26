@@ -187,12 +187,13 @@ the window invisible to capture APIs outright. The lock disappears.
 database stays inspectable with off-the-shelf tools — half the reason SQLite was chosen (D3).
 
 ```sql
-CREATE TABLE term (              -- the hot index; ~25 point queries per hover
-  surface  TEXT NOT NULL,        -- scan key (kana or kanji surface form)
-  written  TEXT,                 -- kanji headword; NULL if the headword is kana-only
-  reading  TEXT,
-  freq     INTEGER,              -- lower = more common; NULL = unranked
-  entry_id INTEGER NOT NULL REFERENCES entry(entry_id)
+CREATE TABLE term (
+    surface  TEXT NOT NULL,
+    written  TEXT,
+    reading  TEXT,
+    pos      TEXT NOT NULL DEFAULT '',
+    freq     INTEGER,
+    entry_id INTEGER NOT NULL REFERENCES entry(entry_id)
 );
 CREATE INDEX idx_term_surface ON term(surface);
 
@@ -205,6 +206,8 @@ CREATE TABLE entry (
 CREATE TABLE dict (dict_id INTEGER PRIMARY KEY, name TEXT, priority INTEGER);
 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);  -- schema_version, built_at, source_hashes
 ```
+
+`term.pos` holds the Yomitan `rules` field verbatim (space-separated keys such as `v1 v5k`). It is denormalised onto the term row so the part-of-speech filter in §4.2 costs no extra query on the hot path.
 
 `deconjugator.json` (~1,200 rules) ships as a **sibling file** loaded at startup, not baked into the
 database. Rule tuning should not require a dictionary rebuild, and parsing it costs nothing.
