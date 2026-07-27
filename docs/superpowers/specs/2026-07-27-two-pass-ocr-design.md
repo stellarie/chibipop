@@ -124,10 +124,22 @@ effectively disables itself.
 
 ### D5 — The next start must strictly advance, or the loop stops
 
-`next_start` is derived from OCR output, so a pathological tile could return the same value forever.
-Strict advance is the **primary** termination guarantee; `max_ocr_passes` is a backstop, not the guard.
+`next_start` is derived from OCR output, so a pathological tile can return the same value repeatedly.
 
-This gets a dedicated test built from a hand-made word list that would loop without it.
+**Corrected 2026-07-28, after review.** An earlier draft called strict advance the *primary*
+termination guarantee and `max_ocr_passes` a mere backstop. That is backwards: the loop is written as
+`for _ in 0..max_tiles`, which bounds it absolutely — non-termination is impossible with or without
+the check. The advance guard's real job is to stop *early* rather than spend up to `max_tiles` real
+screen captures re-reading a position that cannot move. That is a cost guarantee, not a termination
+one, and the distinction matters because each wasted iteration is a full capture-and-recognise.
+
+Two properties need dedicated tests, and both must be proven by deleting the line they cover and
+watching the test fail:
+
+- the advance guard itself — a tile whose words cannot advance the start must stop the loop;
+- **the advance itself** (`start = next`) — a reader keyed to the tile's absolute position must
+  observe successive tiles landing on successive screen regions. Without this, a regression that
+  reads the same region forever still passes every other test in the suite.
 
 ### D6 — `[ocr] max_ocr_passes` is a kill switch first, a latency cap second
 
