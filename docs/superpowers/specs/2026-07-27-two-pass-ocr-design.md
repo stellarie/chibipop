@@ -104,9 +104,12 @@ Two edge cases that would otherwise be read either way:
 
 - **No word is clipped** — every word sits clear of the boundary. `next_start` is then the tile's own
   trailing edge, so the next tile continues from where this one ended.
-- **The first word is already clipped** — nothing is kept and `next_start` equals the current start.
-  That violates D5's strict-advance rule and stops the loop, which is the intended outcome: a tile too
-  narrow to hold one whole word cannot be made to progress by trying again.
+- **The first word is already clipped** — nothing is kept and `next_start` is **that word's own
+  leading edge**. When the word begins at the tile's start (it fills the whole tile), that equals the
+  current start, which violates D5's strict-advance rule and stops the loop — the intended outcome,
+  since a tile too narrow to hold one whole word cannot be made to progress by retrying. When the word
+  begins later in the tile, `next_start` advances to it and the next tile re-reads it whole, which is
+  the case that actually recovers a glyph straddling a seam.
 
 This is the entire defence against re-introducing edge mangling at tile seams.
 
