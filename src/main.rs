@@ -75,10 +75,34 @@ fn main() -> Result<()> {
             println!("cursor:  ({}, {})", cursor.x, cursor.y);
             println!("region:  x={} y={} w={} h={}", region.x, region.y, region.w, region.h);
 
-            match source.resolve_at(cursor)? {
-                None => println!("\nno text resolved at that point"),
+            let (lines, resolved) = source.resolve_at_verbose(cursor)?;
+
+            println!();
+            if lines.is_empty() {
+                println!("ocr:     no lines recognised in the region");
+            } else {
+                for (i, line) in lines.iter().enumerate() {
+                    let assembled: String = line.words.iter().map(|w| w.text.as_str()).collect();
+                    println!("ocr line {i}: {assembled:?}");
+                    for word in &line.words {
+                        println!("  word {:?}  x={} y={} w={} h={}",
+                                 word.text, word.rect.x, word.rect.y, word.rect.w, word.rect.h);
+                    }
+                }
+            }
+
+            match resolved {
+                // Distinguish "OCR itself found nothing" from "OCR found
+                // text, but none of it was close enough to the cursor" -
+                // probe exists to tell these two failure stages apart.
+                None if lines.is_empty() => {
+                    println!("\nno text resolved at that point: OCR recognised no lines in the region");
+                }
+                None => {
+                    println!("\nno text resolved at that point: OCR recognised text, but hit-scan found none of it close enough to the cursor");
+                }
                 Some(r) => {
-                    println!("orient:  {:?}", r.orientation);
+                    println!("\norient:  {:?}", r.orientation);
                     println!("line:    {}", r.span.text);
                     println!("at:      byte {} -> {:?}",
                              r.span.cursor_byte_offset,
@@ -104,7 +128,7 @@ fn main() -> Result<()> {
             println!("watching - hover over Japanese text. Ctrl-C to stop.\n");
 
             let mut last_pos: Option<chibipop::geom::PhysPoint> = None;
-            let mut last_key: Option<(String, usize)> = None;
+            let mut last_key: Option<(i32, i32, Option<char>)> = None;
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(125));
@@ -129,13 +153,20 @@ fn main() -> Result<()> {
                 };
                 let Some(r) = resolved else { continue };
 
-                let key = (r.span.text.clone(), r.span.cursor_byte_offset);
+                // Key on the hovered character's own anchor - absolute
+                // virtual-desktop space, independent of how the sliding
+                // capture region clipped the surrounding line - plus the
+                // character itself. Keying on the assembled line text
+                // instead (as before) reprints on every re-clip, because the
+                // line gains or loses characters at either end as the region
+                // slides even when the cursor is still over the same glyph.
+                let ch = r.span.text[r.span.cursor_byte_offset..].chars().next();
+                let key = (r.span.anchor.x, r.span.anchor.y, ch);
                 if last_key.as_ref() == Some(&key) {
                     continue;
                 }
                 last_key = Some(key);
 
-                let ch = r.span.text[r.span.cursor_byte_offset..].chars().next();
                 println!("── ({}, {})  {:?}  {:?}", cursor.x, cursor.y, r.orientation, ch);
                 match engine.run(&dictionary, &r.span.text[r.span.cursor_byte_offset..]) {
                     Ok(hits) => print_hits(&hits),

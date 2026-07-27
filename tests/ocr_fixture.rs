@@ -22,12 +22,15 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         eprintln!("SKIP: tests/fixtures/japanese_bgra.bin not present");
         return;
     };
-    if chibipop::text::ocr::OcrTextSource::new().is_err() {
-        eprintln!("SKIP: no Japanese OCR engine available");
-        return;
-    }
+    let source = match chibipop::text::ocr::OcrTextSource::new() {
+        Ok(source) => source,
+        Err(_) => {
+            eprintln!("SKIP: no Japanese OCR engine available");
+            return;
+        }
+    };
 
-    let lines = chibipop::text::ocr::recognise(&buf, FIX_W, FIX_H)
+    let lines = chibipop::text::ocr::recognise(source.engine(), &buf, FIX_W, FIX_H)
         .expect("the engine must accept a Bgra8 buffer in capture.rs's format");
 
     let assembled: String = lines

@@ -35,11 +35,17 @@ where
     }
 }
 
-/// Recognise Japanese in a tightly packed BGRA buffer.
+/// Recognise Japanese in a tightly packed BGRA buffer, using an
+/// already-created `engine`.
+///
+/// The engine is expensive to create (`Language::CreateLanguage` +
+/// `OcrEngine::TryCreateFromLanguage`), so callers create it once — see
+/// `OcrTextSource::new` — and pass it in on every frame rather than this
+/// function creating one itself.
 ///
 /// Returned coordinates are in **upscaled-image** space — the caller maps them
 /// back to the virtual desktop.
-pub fn recognise(buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+pub fn recognise(engine: &OcrEngine, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
     let ibuffer = CryptographicBuffer::CreateFromByteArray(buf)
         .context("wrapping the pixel buffer")?;
     // Bgra8 is what a 32bpp GDI capture already is. Alpha is Ignore because
@@ -53,9 +59,6 @@ pub fn recognise(buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
     )
     .context("building a SoftwareBitmap from the capture")?;
 
-    let lang = Language::CreateLanguage(&HSTRING::from("ja"))?;
-    let engine = OcrEngine::TryCreateFromLanguage(&lang)
-        .context("creating the Japanese OCR engine")?;
     let result = wait_blocking(engine.RecognizeAsync(&bitmap)?)
         .context("running OCR")?;
 
@@ -82,29 +85,44 @@ pub fn recognise(buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
     Ok(lines)
 }
 
-pub struct OcrTextSource;
+pub struct OcrTextSource {
+    engine: OcrEngine,
+}
 
 impl OcrTextSource {
-    /// Initialises the process for capture and WinRT, and proves the Japanese
-    /// recogniser exists. Fails loudly here rather than on the first hover.
+    /// Initialises the process for capture and WinRT, and creates the
+    /// Japanese recogniser once so every later frame can reuse it. Fails
+    /// loudly here rather than on the first hover.
     pub fn new() -> Result<Self> {
         init_dpi_awareness()?;
         // WinRT activation fails with CO_E_NOTINITIALIZED without this.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
         let lang = Language::CreateLanguage(&HSTRING::from("ja"))?;
-        OcrEngine::TryCreateFromLanguage(&lang).context(
+        let engine = OcrEngine::TryCreateFromLanguage(&lang).context(
             "no Japanese OCR recogniser available - see \
              docs/superpowers/findings/2026-07-26-m0-ocr-availability.md",
         )?;
-        Ok(OcrTextSource)
+        Ok(OcrTextSource { engine })
     }
 
-    /// Full resolution, exposing the orientation as well as the span. `probe`
-    /// and `watch` want the extra detail; `TextSource::at` does not.
-    pub fn resolve_at(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
+    /// The engine created in `new`, for callers that need to drive
+    /// `recognise` directly (the OCR fixture test) instead of going through
+    /// `resolve_at`.
+    pub fn engine(&self) -> &OcrEngine {
+        &self.engine
+    }
+
+    /// Full resolution, exposing both the recognised OCR lines (mapped to
+    /// virtual-desktop coordinates) and the resolution outcome. `probe` wants
+    /// the lines too, so it can show what OCR actually saw; `resolve_at`
+    /// below is this with the lines discarded.
+    pub fn resolve_at_verbose(
+        &self,
+        cursor: PhysPoint,
+    ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
         let region = region_around(cursor);
         let (buf, w, h) = capture_upscaled(region)?;
-        let raw = recognise(&buf, w, h)?;
+        let raw = recognise(&self.engine, &buf, w, h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
         let lines: Vec<OcrLine> = raw
             .into_iter()
@@ -119,7 +137,15 @@ impl OcrTextSource {
                     .collect(),
             })
             .collect();
-        Ok(resolve(&lines, cursor))
+        let resolved = resolve(&lines, cursor);
+        Ok((lines, resolved))
+    }
+
+    /// Full resolution, exposing the orientation as well as the span. `watch`
+    /// wants that much detail but not the per-word OCR spam; `TextSource::at`
+    /// does not even want the orientation.
+    pub fn resolve_at(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
+        Ok(self.resolve_at_verbose(cursor)?.1)
     }
 
     /// Where the pointer is now.
