@@ -180,6 +180,7 @@ mode = "live"            # "live" | "hold-shift"
 
 [popup]
 theme = "dark"           # "dark" | "light"
+exclude_from_capture = true   # false makes the popup recordable - see section 5
 max_height_percent = 45
 summary_chars = 40
 font = "Yu Gothic UI"
@@ -222,6 +223,28 @@ cannot be excluded.
 **Implementation requirement:** `SetWindowDisplayAffinity`'s result must be **checked and reported at
 startup**, never discarded. A silent no-op here is the failure mode that turns the whole OCR tier into
 a feedback loop.
+
+### 5.1 The cost of exclusion, and the opt-out
+
+Exclusion is not selective: it hides the popup from **every** capture API, not just chibipop's own.
+Screen recording, screenshots, screen sharing in Discord/Zoom/Teams, and remote desktop all show the
+popup missing while it is plainly visible on the physical display. This was discovered in use, not
+predicted — and it is the same wall that prevented the popup's rendered text from being verified by
+anything except the user's own eyes during M3.
+
+`[popup] exclude_from_capture` (default `true`) opts out. When it is `false`, the popup **must be
+hidden for the duration of each capture and reshown afterwards**, rather than simply leaving the
+affinity call out.
+
+Leaving it out unguarded is not acceptable: the popup would then sit inside the 900×300 region
+captured on every hover. It never covers the cursor — there is a 12-pixel gap and the never-covers-the-anchor
+guarantee — so the correct character is usually still chosen, but the popup's own text can be caught by
+the hit-scan's near-miss tolerance or contaminate the assembled line. That produces occasional silent
+wrong answers, which is a worse failure than a visible flicker.
+
+The hide-and-reshow costs a brief flicker on every re-resolution while recording. That is precisely
+what weikipop does full-time via a `screen_lock`; here it is opt-in and off by default, so ordinary
+reading is unaffected.
 
 ## 6. Error handling
 
