@@ -141,6 +141,44 @@ pub fn map_from_upscaled(rect: PhysRect, origin: PhysPoint, factor: i32) -> Phys
 pub const REGION_W: i32 = 500;
 pub const REGION_H: i32 = 100;
 
+/// How far a tile reads along the line, in physical pixels.
+///
+/// The same measured limit as `REGION_W`: Windows' OCR degrades as more text
+/// enters one captured image, and 400-500px is the band where a visual novel
+/// at ~40px text recognises correctly. See the two-pass spec section 1.1.
+pub const TILE_LEN: i32 = 500;
+
+/// A tile's perpendicular extent, as a multiple of the hovered word's own
+/// perpendicular size. Margin for ascenders and slight line drift.
+pub const BAND_FACTOR: f32 = 2.0;
+
+/// The line's perpendicular extent, derived from the hovered word.
+///
+/// The parallel axis is left at the word's own position and size; it carries
+/// no meaning here, and `tile_after` replaces it.
+pub fn band_of(word: PhysRect, orientation: Orientation) -> PhysRect {
+    let c = word.center();
+    match orientation {
+        Orientation::Horizontal => {
+            let h = ((word.h as f32) * BAND_FACTOR).round() as i32;
+            PhysRect { x: word.x, y: c.y - h / 2, w: word.w, h }
+        }
+        Orientation::Vertical => {
+            let w = ((word.w as f32) * BAND_FACTOR).round() as i32;
+            PhysRect { x: c.x - w / 2, y: word.y, w, h: word.h }
+        }
+    }
+}
+
+/// A capture box `len` long down the reading direction from `start`, carrying
+/// `band`'s perpendicular extent.
+pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32) -> PhysRect {
+    match orientation {
+        Orientation::Horizontal => PhysRect { x: start, y: band.y, w: len, h: band.h },
+        Orientation::Vertical => PhysRect { x: band.x, y: start, w: band.w, h: len },
+    }
+}
+
 pub fn region_around(cursor: PhysPoint) -> PhysRect {
     PhysRect {
         x: cursor.x - REGION_W / 2,
@@ -468,5 +506,33 @@ mod tests {
             "REGION_H/2 = {} must cover {needed}px of hit-scan slack plus half a glyph",
             REGION_H / 2
         );
+    }
+
+    #[test]
+    fn band_expands_perpendicular_and_keeps_the_word_centred() {
+        let word = PhysRect { x: 1499, y: 870, w: 35, h: 34 };
+        let b = band_of(word, Orientation::Horizontal);
+        assert_eq!(68, b.h, "2.0x the word height");
+        assert_eq!(word.center().y, b.center().y, "same centre line");
+        assert_eq!(word.x, b.x, "parallel axis untouched");
+    }
+
+    #[test]
+    fn band_swaps_axes_for_vertical_text() {
+        let word = PhysRect { x: 1438, y: 344, w: 64, h: 70 };
+        let b = band_of(word, Orientation::Vertical);
+        assert_eq!(128, b.w, "2.0x the word width");
+        assert_eq!(word.center().x, b.center().x);
+        assert_eq!(word.y, b.y, "parallel axis untouched");
+    }
+
+    #[test]
+    fn tile_runs_along_the_reading_direction() {
+        let band = PhysRect { x: 100, y: 200, w: 40, h: 80 };
+        let h = tile_after(band, 500, Orientation::Horizontal, TILE_LEN);
+        assert_eq!(PhysRect { x: 500, y: 200, w: TILE_LEN, h: 80 }, h);
+
+        let v = tile_after(band, 500, Orientation::Vertical, TILE_LEN);
+        assert_eq!(PhysRect { x: 100, y: 500, w: 40, h: TILE_LEN }, v);
     }
 }
