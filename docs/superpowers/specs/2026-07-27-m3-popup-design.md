@@ -138,6 +138,20 @@ per lookup — the `dict` table has two rows.
 merging never reorders results relative to each other. The first group becomes `top`; the rest become
 `CollapsedRow`s.
 
+**Frequency and POS are metadata, not content (revised 2026-07-27).** Both were originally drawn as
+one `body_text` line under the reading (`noun, suru · freq 7671`), which put entry bookkeeping at the
+same weight and colour as the definition. They are now:
+
+- **`freq`** — a right-aligned corner element on the headword's own line, `dimmed_text` at
+  `collapsed_size`. It is emitted *before* the headword and consumes no vertical space, so the popup's
+  measured height is unchanged; the width it occupies is reserved off the headword's line so a wide
+  headword wraps rather than running underneath it.
+- **`pos`** — its own line, `dimmed_text` at `collapsed_size`, joined with ` · `. Empty for 大辞林,
+  which carries no POS markup, and an empty `pos` draws no line at all.
+
+This is only readable because the builder now extracts POS out of the gloss text rather than fusing it
+in — see the parent spec's *Structured content* section.
+
 **Dictionary order inside a card.** `PresentConfig` carries `dict_order: Vec<String>` — a list of
 **case-insensitive substrings** matched against the dictionary's `name`. Default
 `["大辞林", "Jitendex"]`. Blocks whose name matches nothing listed sort last, by `dict_id`.
@@ -180,7 +194,7 @@ mode = "live"            # "live" | "hold-shift"
 
 [popup]
 theme = "dark"           # "dark" | "light"
-exclude_from_capture = true   # false makes the popup recordable - see section 5
+exclude_from_capture = false  # true hides the popup from all capture - see section 5.1
 max_height_percent = 45
 summary_chars = 40
 font = "Yu Gothic UI"
@@ -232,9 +246,9 @@ popup missing while it is plainly visible on the physical display. This was disc
 predicted — and it is the same wall that prevented the popup's rendered text from being verified by
 anything except the user's own eyes during M3.
 
-`[popup] exclude_from_capture` (default `true`) opts out. When it is `false`, the popup **must be
-hidden for the duration of each capture and reshown afterwards**, rather than simply leaving the
-affinity call out.
+`[popup] exclude_from_capture` (**default `false` — see the revision below**) controls this. When it
+is `false`, the popup **must be hidden for the duration of each capture and reshown afterwards**,
+rather than simply leaving the affinity call out.
 
 Leaving it out unguarded is not acceptable: the popup would then sit inside the 900×300 region
 captured on every hover. It never covers the cursor — there is a 12-pixel gap and the never-covers-the-anchor
@@ -243,8 +257,16 @@ the hit-scan's near-miss tolerance or contaminate the assembled line. That produ
 wrong answers, which is a worse failure than a visible flicker.
 
 The hide-and-reshow costs a brief flicker on every re-resolution while recording. That is precisely
-what weikipop does full-time via a `screen_lock`; here it is opt-in and off by default, so ordinary
-reading is unaffected.
+what weikipop does full-time via a `screen_lock`.
+
+**Revision (2026-07-27, after first real use): the default is now `false`.** The original default was
+`true`, on the reasoning that the flicker was a cost only a recording user should pay. Exercised
+against the real app, the hide/reshow guard produced **no noticeable lookup latency** — the flicker is
+not perceptible in ordinary reading — while the exclusion it replaced had a large hidden cost: the
+popup is invisible to every capture API, so a user who screen-records, screenshots or screen-shares
+sees nothing and has no way to distinguish a deliberately hidden window from a broken one. That is a
+worse default than an imperceptible flicker. Exclusion is now the opt-in (`true`); the guard runs
+either way, so the popup never reads its own rendered text back regardless of the setting.
 
 ## 6. Error handling
 

@@ -55,20 +55,22 @@ pub struct PopupConfig {
     /// otherwise independent of `config.rs`.
     pub theme: String,
     /// Whether the popup asks the OS to exclude it from screen captures
-    /// (`WDA_EXCLUDEFROMCAPTURE` - spec §5). Defaults `true` so ordinary
-    /// reading is unaffected: M2 captures a region around the cursor on
-    /// every hover, and an unexcluded popup photographs its own rendered
-    /// text back into the next lookup unless something else guards it (see
-    /// `app.rs`'s capture guard).
+    /// (`WDA_EXCLUDEFROMCAPTURE` - spec §5).
     ///
-    /// Set `false` to opt out (spec §5.1) when the user wants to
-    /// screen-record, screenshot, or screen-share the popup - exclusion
-    /// hides it from *every* capture API, not just chibipop's own, so this
-    /// is the only way to make the popup's rendered text visible to
-    /// anything other than the user's own eyes. Costs a brief hide/reshow
-    /// flicker on every re-resolution while it is `false` - never a silent
-    /// skip of the guard, which is why `Popup::create` takes this as a
-    /// plain `bool` rather than the caller deciding whether to call
+    /// **Defaults `false`**, which makes the popup recordable. Exclusion
+    /// hides it from *every* capture API, not just chibipop's own, so
+    /// with it on the popup cannot be screen-recorded, screenshotted or
+    /// screen-shared - it is visible to the user's own eyes and nothing
+    /// else. That was the shipped default until the hide/reshow guard was
+    /// measured in real use (spec §5.1) and found to cost no noticeable
+    /// lookup latency, at which point the more useful behaviour became
+    /// the default and exclusion became the opt-in.
+    ///
+    /// Set `true` to restore exclusion. Either way `app.rs`'s capture
+    /// guard keeps the popup out of chibipop's *own* OCR captures, so it
+    /// never photographs its own rendered text back into the next lookup.
+    /// That guard is why `Popup::create` takes this as a plain `bool`
+    /// rather than letting the caller decide whether to call
     /// `SetWindowDisplayAffinity` at all.
     pub exclude_from_capture: bool,
     /// Popup height cap, as a percentage of the current monitor's height
@@ -97,7 +99,7 @@ impl Default for Config {
             trigger: TriggerConfig { mode: TriggerMode::Live },
             popup: PopupConfig {
                 theme: "dark".to_string(),
-                exclude_from_capture: true,
+                exclude_from_capture: false,
                 max_height_percent: 45,
                 summary_chars: 40,
                 font: "Yu Gothic UI".to_string(),
@@ -171,19 +173,21 @@ mod tests {
                    c.dictionaries.display_order);
     }
 
-    /// Spec §5.1: exclusion opts *out*, so ordinary reading must be
-    /// unaffected by default - a future change that flips this default
-    /// would silently turn every fresh install into "the popup is
-    /// recordable, at the cost of a flicker on every hover", which is
-    /// exactly backwards from the opt-in this was designed to be. Kept as
-    /// its own test (not folded into `defaults_match_the_spec`) so that
-    /// exact regression fails with its own name, not a generic multi-field
+    /// Spec §5.1: exclusion is the *opt-in*. A fresh install must be
+    /// recordable, because an excluded popup is invisible to every capture
+    /// API - screen recorders, screenshots, screen sharing - and a user
+    /// who hits that has no way to tell a hidden window from a broken one.
+    /// The hide/reshow guard that replaces exclusion was measured in real
+    /// use and costs no noticeable lookup latency, so there is no
+    /// performance argument for defaulting the other way. Kept as its own
+    /// test (not folded into `defaults_match_the_spec`) so that exact
+    /// regression fails with its own name, not a generic multi-field
     /// assertion.
     #[test]
-    fn capture_exclusion_defaults_to_true() {
+    fn capture_exclusion_defaults_to_false() {
         assert!(
-            Config::default().popup.exclude_from_capture,
-            "capture exclusion must default on - it is an opt-out (spec section 5.1), not an opt-in"
+            !Config::default().popup.exclude_from_capture,
+            "the popup must be recordable out of the box - exclusion is the opt-in (spec section 5.1)"
         );
     }
 
