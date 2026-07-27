@@ -1,9 +1,15 @@
 //! The popup window shell.
 //!
 //! This establishes the window itself - flags, transparency, shape, and
-//! capture exclusion - with nothing yet drawn beyond a placeholder fill.
-//! Real content rendering belongs to later M3 tasks (Presentation, Theme);
-//! they paint into the same `HWND` this module hands out via `Popup::hwnd()`.
+//! capture exclusion. Real content is painted by `ui::render::Renderer`,
+//! called directly by application code against the same `HWND` this module
+//! hands out via `Popup::hwnd()` - see `render.rs`'s module docs for why
+//! that call happens from application code rather than from `wndproc`
+//! below. `wndproc`'s `WM_PAINT` handler here only validates the update
+//! region; it used to fill a placeholder magenta rectangle (Task 1), which
+//! had to go once real content existed - a stray `WM_PAINT` between hovers
+//! would otherwise paint magenta over whatever `Renderer::paint` had
+//! already drawn.
 //!
 //! The flags below are exactly what
 //! `docs/superpowers/findings/2026-07-27-m3-win32-d2d-spike.md` measured, not
@@ -27,14 +33,6 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Distinctive placeholder fill painted by this shell's `WM_PAINT` handler.
-/// Chosen to be unlikely to occur on a real desktop, so it can double as an
-/// unambiguous marker colour for the capture-exclusion measurement (see
-/// `examples/exclusion_check.rs`, run once for Task 1's verification and then
-/// deleted - not part of the committed tree). Tasks 2/3 (Presentation,
-/// Theme) replace this fill with real D2D-rendered content.
-pub const PLACEHOLDER_FILL_RGB: (u8, u8, u8) = (255, 0, 255); // magenta
-
 /// Corner radius (both x and y) used by `SetWindowRgn`'s rounded silhouette,
 /// in pixels. Matches the value the spike measured to still pass
 /// `WDA_EXCLUDEFROMCAPTURE`.
@@ -48,23 +46,12 @@ fn class_name() -> PCWSTR {
     w!("ChibipopPopupClass")
 }
 
-fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
-    COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
-}
-
-/// Paints the placeholder fill. Everything else falls through to
-/// `DefWindowProcW` - there is no message loop or window lifecycle beyond
-/// paint in this task.
+/// Validates the update region on `WM_PAINT` and draws nothing itself -
+/// see the module docs for why real content isn't painted here.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_PAINT {
         let mut ps = PAINTSTRUCT::default();
-        let hdc = BeginPaint(hwnd, &mut ps);
-        let mut rc = RECT::default();
-        let _ = GetClientRect(hwnd, &mut rc);
-        let (r, g, b) = PLACEHOLDER_FILL_RGB;
-        let brush = CreateSolidBrush(rgb(r, g, b));
-        FillRect(hdc, &rc, brush);
-        let _ = DeleteObject(brush.into());
+        let _ = BeginPaint(hwnd, &mut ps);
         let _ = EndPaint(hwnd, &ps);
         return LRESULT(0);
     }

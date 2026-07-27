@@ -1,4 +1,5 @@
-//! UI: the popup window and (later) its rendered content.
+//! UI: the popup window and its rendered content.
 
+pub mod render;
 pub mod theme;
 pub mod window;

@@ -98,6 +98,7 @@ dependencies = [
  "toml",
  "windows",
  "windows-future",
+ "windows-numerics",
 ]
 
 [[package]]
