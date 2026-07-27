@@ -219,6 +219,51 @@ pub fn split_at_clipped<'a>(
     (kept, end)
 }
 
+/// Read forward along a line in tiles, returning the concatenated text.
+///
+/// `read` performs one capture-and-recognise for a tile and returns its words
+/// in virtual-desktop coordinates; injecting it keeps this loop testable with
+/// no screen. Stops on any of: `max_chars` reached, a tile recognising
+/// nothing, a start that does not advance (spec D5), or `max_tiles`.
+///
+/// The result is normalised once at the end rather than per tile, so a
+/// sequence split across a seam still normalises as one string.
+pub fn tile_forward<F>(
+    band: PhysRect,
+    start: i32,
+    orientation: Orientation,
+    max_tiles: usize,
+    max_chars: usize,
+    mut read: F,
+) -> String
+where
+    F: FnMut(PhysRect) -> Vec<OcrWord>,
+{
+    let mut out = String::new();
+    let mut start = start;
+
+    for _ in 0..max_tiles {
+        if out.chars().count() >= max_chars {
+            break;
+        }
+        let tile = tile_after(band, start, orientation, TILE_LEN);
+        let words = read(tile);
+        if words.is_empty() {
+            break;
+        }
+        let (kept, next) = split_at_clipped(&words, tile, orientation);
+        for word in kept {
+            out.push_str(&word.text);
+        }
+        if next <= start {
+            break;
+        }
+        start = next;
+    }
+
+    normalise(&out)
+}
+
 pub fn region_around(cursor: PhysPoint) -> PhysRect {
     PhysRect {
         x: cursor.x - REGION_W / 2,
@@ -667,5 +712,71 @@ mod tests {
         let words = vec![hword("い", 60, 40), hword("あ", 10, 40)];
         let (kept, _) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn tiling_concatenates_successive_tiles() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, |tile| {
+            calls += 1;
+            vec![hword("あ", tile.x + 10, 40), hword("い", tile.x + 60, 40)]
+        });
+        assert_eq!(3, calls, "runs up to max_tiles");
+        assert_eq!("あいあいあい", text);
+    }
+
+    #[test]
+    fn tiling_stops_once_max_chars_is_reached() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        tile_forward(band, 0, Orientation::Horizontal, 5, 2, |tile| {
+            calls += 1;
+            vec![hword("あ", tile.x + 10, 40), hword("い", tile.x + 60, 40)]
+        });
+        assert_eq!(1, calls, "two characters already meet the budget");
+    }
+
+    #[test]
+    fn tiling_stops_when_a_tile_recognises_nothing() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, |_| {
+            calls += 1;
+            Vec::new()
+        });
+        assert_eq!(1, calls);
+        assert_eq!("", text);
+    }
+
+    /// Spec D5. Without the strict-advance guard this loops until max_tiles,
+    /// and with a larger cap it would not terminate at all. The reader here
+    /// always returns one word that fills its whole tile, so every split
+    /// reports the tile's own start back.
+    #[test]
+    fn tiling_stops_when_the_next_start_does_not_advance() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        tile_forward(band, 0, Orientation::Horizontal, 100, 25, |tile| {
+            calls += 1;
+            vec![hword("あ", tile.x, tile.w)]
+        });
+        assert_eq!(1, calls, "a start that cannot advance must stop the loop");
+    }
+
+    #[test]
+    fn tiling_normalises_across_a_seam() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut first = true;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 2, 25, |tile| {
+            let out = if first {
+                vec![hword("ツ", tile.x + 10, 40)]
+            } else {
+                vec![hword("-ル", tile.x + 10, 40)]
+            };
+            first = false;
+            out
+        });
+        assert_eq!("ツール", text, "the hyphen after kana normalises across the join");
     }
 }
