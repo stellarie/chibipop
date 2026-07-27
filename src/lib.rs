@@ -1,3 +1,4 @@
+pub mod app;
 pub mod config;
 pub mod geom;
 pub mod input;

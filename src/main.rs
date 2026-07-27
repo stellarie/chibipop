@@ -40,6 +40,19 @@ enum Command {
         #[arg(long, default_value = "data/deconjugator.json")]
         rules: PathBuf,
     },
+    /// Run the popup application: hover Japanese text anywhere on screen to
+    /// see its definition beside it. Type 'q' + Enter in this console to quit.
+    Run {
+        #[arg(long, default_value = "data/chibipop.sqlite")]
+        dict: PathBuf,
+        #[arg(long, default_value = "data/deconjugator.json")]
+        rules: PathBuf,
+        /// Defaults to chibipop.toml beside the running executable (spec
+        /// section 4.3), not this crate's data/-relative CWD convention -
+        /// so a shortcut-launched chibipop.exe still finds its settings.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -175,7 +188,23 @@ fn main() -> Result<()> {
                 println!();
             }
         }
+        Command::Run { dict, rules, config } => {
+            let config_path = config.unwrap_or_else(default_config_path);
+            let cfg = chibipop::config::load_or_create(&config_path)
+                .with_context(|| format!("loading config from {}", config_path.display()))?;
+            chibipop::app::run(cfg, &dict, &rules)
+        }
     }
+}
+
+/// `chibipop.toml` beside the running executable (spec section 4.3). Falls
+/// back to the current directory if the executable's own path can't be
+/// determined, which should not happen in practice.
+fn default_config_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|dir| dir.join("chibipop.toml")))
+        .unwrap_or_else(|| PathBuf::from("chibipop.toml"))
 }
 
 fn print_hits(hits: &[chibipop::lookup::model::Hit]) {
