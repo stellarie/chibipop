@@ -350,6 +350,25 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // hidden already (e.g. the cursor is over non-text and nothing is
     // showing).
     let mut capture_guard_prev_visible = false;
+
+    // I4: kept in one place.
+    let mut drain_capture_guard = || {
+        while let Ok(req) = capture_guard_rx.try_recv() {
+            match req {
+                CaptureGuardMsg::Hide { ack } => {
+                    capture_guard_prev_visible = popup.is_visible();
+                    let _ = popup.hide();
+                    let _ = ack.send(());
+                }
+                CaptureGuardMsg::Restore => {
+                    if capture_guard_prev_visible {
+                        let _ = popup.show_without_activating();
+                    }
+                }
+            }
+        }
+    };
+
     let mut msg = MSG::default();
 
     loop {
@@ -399,21 +418,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             // see `worker_main`), and it means a burst can never pile up
             // behind a slow main thread the way it could if this only ever
             // handled a single message per wakeup.
-            while let Ok(req) = capture_guard_rx.try_recv() {
-                match req {
-                    CaptureGuardMsg::Hide { ack } => {
-                        capture_guard_prev_visible = popup.is_visible();
-                        let _ = popup.hide();
-                        let _ = ack.send(());
-                    }
-                    CaptureGuardMsg::Restore => {
-                        if capture_guard_prev_visible {
-                            let _ = popup.show_without_activating();
-                        }
-                    }
-                }
-            }
-        } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam) {
+            drain_capture_guard();
+        } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam, &mut drain_capture_guard) {
             match cmd {
                 TrayCommand::SetMode(mode) => {
                     // AppState, hooks, and disk all updated together here -

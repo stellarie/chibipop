@@ -192,12 +192,20 @@ impl Tray {
     /// anything that is not this tray's own callback message, or that is,
     /// but produced no selection (dismissed, or a left-click) - the caller
     /// dispatches those normally either way.
-    pub fn handle_message(&self, msg: u32, lparam: LPARAM) -> Option<TrayCommand> {
+    ///
+    /// `before_blocking` runs immediately before `TrackPopupMenuEx`'s own
+    /// message pump takes over this thread - see `show_menu` for why.
+    pub fn handle_message(
+        &self,
+        msg: u32,
+        lparam: LPARAM,
+        before_blocking: impl FnOnce(),
+    ) -> Option<TrayCommand> {
         if msg != WM_TRAYICON {
             return None;
         }
         match lparam.0 as u32 {
-            WM_RBUTTONUP => self.show_menu(),
+            WM_RBUTTONUP => self.show_menu(before_blocking),
             _ => None,
         }
     }
@@ -205,7 +213,15 @@ impl Tray {
     /// Builds a fresh menu (so the radio state always matches the current
     /// mode), shows it, and translates the user's pick into a `TrayCommand`.
     /// Blocks until the menu closes - `TrackPopupMenuEx`'s own message pump.
-    fn show_menu(&self) -> Option<TrayCommand> {
+    ///
+    /// That pump is `GetMessage`/`DispatchMessage` too, but it only ever
+    /// routes messages to a real `HWND` - a thread message (`hwnd` NULL,
+    /// same shape as `app.rs`'s `WM_APP_CAPTURE_GUARD` wake-up) is picked up
+    /// and discarded with nowhere to go, not left on the queue for `run`'s
+    /// own loop to find once this call returns. `before_blocking` is the
+    /// caller's chance to service anything that wake-up would otherwise
+    /// have triggered, *before* this call can swallow it - see I4.
+    fn show_menu(&self, before_blocking: impl FnOnce()) -> Option<TrayCommand> {
         unsafe {
             let hmenu = match build_menu(self.mode.get()) {
                 Ok(h) => h,
@@ -225,6 +241,8 @@ impl Tray {
             // optional. See the module docs for why `menu_owner` is a
             // dedicated window rather than the render popup's `HWND`.
             let _ = SetForegroundWindow(self.menu_owner);
+
+            before_blocking();
 
             let flags = (TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY).0;
             let cmd = TrackPopupMenuEx(hmenu, flags, pt.x, pt.y, self.menu_owner, None);
