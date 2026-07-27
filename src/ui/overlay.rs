@@ -158,6 +158,10 @@ unsafe fn paint_overlay(hwnd: HWND) {
 /// `ui::window::wndproc`'s own discipline.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_PAINT {
+        // SAFETY: `hwnd` is the live handle the OS just supplied to
+        // this `wndproc` for its own `WM_PAINT`, exactly the
+        // precondition `paint_overlay`'s own `BeginPaint` SAFETY note
+        // relies on.
         let _ = catch_unwind(|| unsafe { paint_overlay(hwnd) });
         return LRESULT(0);
     }
@@ -268,10 +272,28 @@ pub struct Overlay {
     hwnd: HWND,
 }
 
+/// Guards against a second live `Overlay` - see `create`'s docs for why
+/// only one may exist. Released by `Drop`, so create -> drop -> create
+/// succeeds. Only ever stored `true` after `create` has fully
+/// succeeded, mirroring `register_class`'s own latch-after-success
+/// ordering: setting it any earlier would leave it stuck `true` after
+/// a failed `create`, permanently refusing every later attempt.
+static OVERLAY_LIVE: AtomicBool = AtomicBool::new(false);
+
 impl Overlay {
     /// Registers the window class if needed and creates the overlay
     /// window, hidden, with the same flags `ui::window::Popup::create`
     /// uses (see the module docs).
+    ///
+    /// Only one `Overlay` may be alive at a time: `PAINT_STATE` is a
+    /// single process-global slot keyed by `hwnd` (see its doc
+    /// comment), so a second live instance would let each
+    /// `show_rects` clobber the other's entry - the loser would find
+    /// `state.hwnd != hwnd` on its next repaint and paint nothing.
+    /// Calling this while an `Overlay` already exists returns `Err`
+    /// instead of that silently-broken window; dropping the existing
+    /// `Overlay` first (its `Drop` releases the guard) lets a later
+    /// call succeed.
     ///
     /// When `exclude_from_capture` is true, `SetWindowDisplayAffinity` is
     /// attempted the same way `Popup::create` attempts it for the popup -
@@ -283,6 +305,10 @@ impl Overlay {
     /// under this crate's `-D warnings` clippy gate. Flagged here rather
     /// than silently matched to `Popup`'s fuller tracking.
     pub fn create(exclude_from_capture: bool) -> Result<Overlay> {
+        if OVERLAY_LIVE.load(Ordering::SeqCst) {
+            anyhow::bail!("an Overlay already exists; only one may be alive at a time");
+        }
+
         // SAFETY: mirrors `ui::window::Popup::create` exactly - `hinstance`
         // comes from `GetModuleHandleW(None)`, always valid for this
         // process; `register_class` only ever registers one well-formed
@@ -318,6 +344,7 @@ impl Overlay {
                 let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
             }
 
+            OVERLAY_LIVE.store(true, Ordering::SeqCst);
             Ok(Overlay { hwnd })
         }
     }
@@ -326,6 +353,12 @@ impl Overlay {
     /// window to their bounds, stores `rects`/`theme` where `WM_PAINT` can
     /// reach them, and shows the window without activating it. Empty
     /// `rects` hides the overlay instead of showing an empty window.
+    ///
+    /// Finishes with an explicit `UpdateWindow`: `WM_PAINT` is only a
+    /// posted message, and nothing here runs a message loop to
+    /// dispatch it, so without this call the freshly-applied region
+    /// would show stale or empty content until something else happens
+    /// to pump the queue - the same reason `Popup::show_at` does it.
     pub fn show_rects(&self, rects: &[ScanRect], theme: &Theme) -> Result<()> {
         let Some((bounds, local)) = overlay_layout(rects) else {
             self.hide();
@@ -360,9 +393,6 @@ impl Overlay {
             )
             .context("SetWindowPos to show the overlay")?;
 
-            // WM_PAINT is a posted message and nothing here runs a message
-            // loop - force it to run synchronously now, same reason
-            // `Popup::show_at` does this.
             let _ = UpdateWindow(self.hwnd);
         }
         Ok(())
@@ -396,11 +426,34 @@ impl Drop for Overlay {
                 *state = None;
             }
         });
+        OVERLAY_LIVE.store(false, Ordering::SeqCst);
         // SAFETY: `self.hwnd` was created by `create` and `drop` runs at
         // most once (ordinary `Drop` semantics), so this always targets a
         // window this process owns and has not already destroyed.
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs a real desktop session - `CreateWindowExW` fails headless
+    /// (no interactive window station), so this only runs explicitly
+    /// via `cargo test -- --ignored`, never as part of the normal suite.
+    #[test]
+    #[ignore]
+    fn create_after_drop_succeeds_while_a_second_live_one_is_rejected() {
+        let first = Overlay::create(false).expect("first create must succeed");
+
+        let blocked = Overlay::create(false);
+        assert!(blocked.is_err(), "a second live Overlay must be rejected");
+
+        drop(first);
+
+        let second = Overlay::create(false).expect("create after drop must succeed");
+        drop(second);
     }
 }
