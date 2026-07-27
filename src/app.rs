@@ -316,7 +316,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
-    let theme = theme_from_config(&cfg.popup.theme);
+    let theme = theme_from_config(&cfg.popup);
     let max_height_percent = i32::from(cfg.popup.max_height_percent);
 
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
@@ -733,9 +733,44 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     }
 }
 
-fn theme_from_config(theme_name: &str) -> Theme {
-    match theme_name {
+/// Builds the runtime `Theme` from `[popup]`: the palette from `popup.theme`,
+/// then `popup.font` overlaid - the one place config crosses into theme.rs's
+/// deliberately config-free struct.
+fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
+    let mut theme = match popup.theme.as_str() {
         "light" => Theme::light(),
         _ => Theme::dark(),
+    };
+    theme.font_name = popup.font.clone();
+    theme
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PopupConfig;
+
+    fn popup_config(theme: &str, font: &str) -> PopupConfig {
+        PopupConfig {
+            theme: theme.to_string(),
+            exclude_from_capture: false,
+            max_height_percent: 45,
+            summary_chars: 40,
+            font: font.to_string(),
+        }
+    }
+
+    /// I1: `[popup] font` must reach the built `Theme`, not just round-trip
+    /// through `config.rs` unused.
+    #[test]
+    fn a_non_default_font_reaches_the_theme() {
+        let theme = theme_from_config(&popup_config("dark", "Noto Sans JP"));
+        assert_eq!("Noto Sans JP", theme.font_name);
+    }
+
+    #[test]
+    fn theme_selection_by_name_is_unaffected_by_the_font_field() {
+        assert_eq!(Theme::light().background, theme_from_config(&popup_config("light", "X")).background);
+        assert_eq!(Theme::dark().background, theme_from_config(&popup_config("anything-else", "X")).background);
     }
 }
