@@ -59,6 +59,9 @@ const LINE_GAP: f32 = 4.0;
 /// Gap above a line that starts a new block within the card (a new
 /// `GlossBlock`'s dictionary label).
 const SECTION_GAP: f32 = 10.0;
+/// Horizontal gap kept clear between an `Elem::Corner` and the line it
+/// shares, so the frequency never touches a wide headword.
+const CORNER_GAP: f32 = 8.0;
 /// Gap above and below the rule between the top card and the collapsed
 /// rows.
 const SEPARATOR_MARGIN: f32 = 10.0;
@@ -82,6 +85,12 @@ struct Line {
 
 enum Elem {
     Text(Line),
+    /// Drawn right-aligned at whatever `y` the walk has reached, without
+    /// advancing it, so it shares a line with the `Elem::Text` that follows
+    /// (the frequency, sitting in the card's top-right corner beside the
+    /// headword). The width it occupies is reserved off that next line, so
+    /// a long headword wraps instead of running underneath it.
+    Corner(Line),
     Separator { top_gap: f32 },
 }
 
@@ -161,8 +170,9 @@ impl Renderer {
 
     /// Paints `p`/`theme` into the window's current client rect (already
     /// sized by `Popup::show_at` to what `measure` returned). Draws, in
-    /// order: the panel background, the top card (headword, reading, POS,
-    /// frequency, then each `GlossBlock`), a separator, each collapsed row,
+    /// order: the panel background, the top card (frequency in the
+    /// top-right corner, headword, reading, POS, then each `GlossBlock`),
+    /// a separator, each collapsed row,
     /// and - only when content did not fit - a dimmed truncation marker.
     ///
     /// Device-lost (`D2DERR_RECREATE_TARGET`, e.g. a display mode change, a
@@ -300,15 +310,28 @@ fn color_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
 }
 
 /// Turns `p`'s content into an ordered list of drawable elements, exactly
-/// as `present.rs` ordered them: headword, reading, POS/frequency, then
-/// each `GlossBlock` (dictionary label + its glosses joined into one
-/// paragraph), a separator, then each `CollapsedRow`. Pure with respect to
+/// as `present.rs` ordered them: the frequency corner, headword, reading,
+/// POS, then each `GlossBlock` (dictionary label + its glosses joined into
+/// one paragraph), a separator, then each `CollapsedRow`. Frequency and POS
+/// are both drawn in `theme.dimmed_text` at `collapsed_size` - they are
+/// metadata about the entry, not part of reading it, and at body weight
+/// they competed with the definition itself. Pure with respect to
 /// D2D/DirectWrite - no factory or render target touched here, only plain
 /// data - so `measure` and `paint` build identical input to `layout_pass`.
 fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
     let mut out = Vec::new();
 
     if let Some(card) = &p.top {
+        // Emitted before the headword so the walk draws it at the same y.
+        if let Some(freq) = card.freq {
+            out.push(Elem::Corner(Line {
+                text: format!("freq {freq}"),
+                color: theme.dimmed_text,
+                size: theme.collapsed_size,
+                top_gap: 0.0,
+            }));
+        }
+
         let headword = card.written.clone().or_else(|| card.reading.clone()).unwrap_or_default();
         if !headword.is_empty() {
             out.push(Elem::Text(Line {
@@ -333,11 +356,11 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
             }
         }
 
-        if let Some(text) = pos_freq_line(&card.pos, card.freq) {
+        if !card.pos.is_empty() {
             out.push(Elem::Text(Line {
-                text,
-                color: theme.body_text,
-                size: theme.body_size,
+                text: card.pos.join(" · "),
+                color: theme.dimmed_text,
+                size: theme.collapsed_size,
                 top_gap: LINE_GAP,
             }));
         }
@@ -378,17 +401,6 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
     out
 }
 
-fn pos_freq_line(pos: &[String], freq: Option<i64>) -> Option<String> {
-    let pos_part = if pos.is_empty() { None } else { Some(pos.join(", ")) };
-    let freq_part = freq.map(|f| format!("freq {f}"));
-    match (pos_part, freq_part) {
-        (Some(p), Some(f)) => Some(format!("{p} · {f}")),
-        (Some(p), None) => Some(p),
-        (None, Some(f)) => Some(f),
-        (None, None) => None,
-    }
-}
-
 /// The layout walk shared by `measure` (`target: None`) and `paint_once`
 /// (`target: Some(_)`): both build `elems` from `build_elements` and call
 /// this with the same content box, so a line either measures and paints
@@ -413,6 +425,7 @@ fn layout_pass(
     let font_name = HSTRING::from(theme.font_name.as_str());
     let mut y = 0.0f32;
     let mut clamped = false;
+    let mut reserved_w = 0.0f32;
 
     for elem in elems {
         let drawn_height = match elem {
@@ -435,8 +448,32 @@ fn layout_pass(
                 }
                 h
             }
+            Elem::Corner(line) => {
+                let (layout, m) = build_text_layout(dwrite, &font_name, line, content_w)?;
+                // Decoration: skipped, never a truncation marker.
+                if m.height > content_h {
+                    continue;
+                }
+                unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
+                if let Some(t) = target {
+                    let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
+                    unsafe {
+                        t.DrawTextLayout(
+                            Vector2 { X: origin_x, Y: origin_y + y },
+                            &layout,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        )
+                    };
+                }
+                reserved_w = m.width + CORNER_GAP;
+                0.0
+            }
             Elem::Text(line) => {
-                let (layout, h) = build_text_layout(dwrite, &font_name, line, content_w)?;
+                let avail_w = (content_w - reserved_w).max(1.0);
+                reserved_w = 0.0;
+                let (layout, m) = build_text_layout(dwrite, &font_name, line, avail_w)?;
+                let h = m.height;
                 if y + line.top_gap + h > content_h {
                     clamped = true;
                     break;
@@ -466,7 +503,8 @@ fn layout_pass(
             size: theme.body_size,
             top_gap: SECTION_GAP,
         };
-        let (layout, h) = build_text_layout(dwrite, &font_name, &marker, content_w)?;
+        let (layout, m) = build_text_layout(dwrite, &font_name, &marker, content_w)?;
+        let h = m.height;
         if y + marker.top_gap + h <= content_h {
             y += marker.top_gap;
             if let Some(t) = target {
@@ -500,7 +538,7 @@ fn build_text_layout(
     font_name: &HSTRING,
     line: &Line,
     max_w: f32,
-) -> windows::core::Result<(IDWriteTextLayout, f32)> {
+) -> windows::core::Result<(IDWriteTextLayout, DWRITE_TEXT_METRICS)> {
     let format = unsafe {
         dwrite.CreateTextFormat(
             font_name,
@@ -516,5 +554,79 @@ fn build_text_layout(
     let layout = unsafe { dwrite.CreateTextLayout(&wide, &format, max_w.max(1.0), f32::MAX) }?;
     let mut metrics = DWRITE_TEXT_METRICS::default();
     unsafe { layout.GetMetrics(&mut metrics) }?;
-    Ok((layout, metrics.height))
+    Ok((layout, metrics))
+}
+
+/// Covers `build_elements` only - the pure half of this module. The layout
+/// walk needs a real DirectWrite factory and a device, so it stays verified
+/// by eye rather than here.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::present::{Card, GlossBlock};
+
+    fn one_card(pos: &[&str], freq: Option<i64>) -> Presentation {
+        Presentation {
+            top: Some(Card {
+                written: Some("雑談".into()),
+                reading: Some("ざつだん".into()),
+                pos: pos.iter().map(|s| s.to_string()).collect(),
+                freq,
+                blocks: vec![GlossBlock {
+                    dict_name: "Jitendex".into(),
+                    glosses: vec!["chatting".into()],
+                }],
+            }),
+            collapsed: vec![],
+        }
+    }
+
+    /// It must come first: the walk draws a corner at whatever `y` it has
+    /// reached, so anything before it would push the frequency down out of
+    /// the top-right corner it is supposed to sit in.
+    #[test]
+    fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
+        let theme = Theme::dark();
+        let elems = build_elements(&one_card(&[], Some(7671)), &theme);
+        match &elems[0] {
+            Elem::Corner(line) => {
+                assert_eq!("freq 7671", line.text);
+                assert_eq!(theme.dimmed_text, line.color);
+            }
+            _ => panic!("the frequency corner must be the first element"),
+        }
+    }
+
+    #[test]
+    fn an_unranked_entry_draws_no_corner() {
+        let elems = build_elements(&one_card(&[], None), &Theme::dark());
+        assert!(!elems.iter().any(|e| matches!(e, Elem::Corner(_))));
+    }
+
+    #[test]
+    fn part_of_speech_is_dimmed_metadata_not_body_text() {
+        let theme = Theme::dark();
+        let elems = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme);
+        let pos = elems
+            .iter()
+            .find_map(|e| match e {
+                Elem::Text(line) if line.text.contains("noun") => Some(line),
+                _ => None,
+            })
+            .expect("a POS line must be drawn");
+        assert_eq!("noun · suru", pos.text);
+        assert_eq!(theme.dimmed_text, pos.color);
+        assert_ne!(theme.body_text, pos.color, "POS must not read as body text");
+        assert_eq!(theme.collapsed_size, pos.size);
+    }
+
+    /// 大辞林 carries no POS markup, so its cards have none - and an empty
+    /// `pos` must draw nothing rather than a bare separator line.
+    #[test]
+    fn an_entry_without_part_of_speech_draws_no_pos_line() {
+        let elems = build_elements(&one_card(&[], Some(1)), &Theme::dark());
+        assert!(!elems
+            .iter()
+            .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
+    }
 }

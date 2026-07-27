@@ -28,13 +28,15 @@ pub struct Theme {
     pub headword_text: (u8, u8, u8),
     /// The top card's reading (e.g. `きのう`).
     pub reading_text: (u8, u8, u8),
-    /// Gloss text, POS and frequency in the top card.
+    /// Gloss text in the top card.
     pub body_text: (u8, u8, u8),
     /// A `GlossBlock`'s dictionary-name label.
     pub dict_label_text: (u8, u8, u8),
     /// Collapsed rows below the top card.
     pub collapsed_text: (u8, u8, u8),
-    /// The trailing `…` marker drawn when content was clamped (M3-D4).
+    /// De-emphasised metadata: the frequency in the card's top-right
+    /// corner, the POS line, and the trailing `…` marker drawn when
+    /// content was clamped (M3-D4).
     pub dimmed_text: (u8, u8, u8),
 
     /// Yu Gothic UI in both themes, per spec §4.2/§4.3 - already present on
@@ -42,10 +44,11 @@ pub struct Theme {
     pub font_name: String,
     /// The top card's headword.
     pub headword_size: f32,
-    /// Everything else in the top card: reading, POS, frequency, glosses.
+    /// Everything else in the top card: reading and glosses.
     pub body_size: f32,
     /// Collapsed rows - deliberately smaller than the card (render.rs's
-    /// spec'd requirement that collapsed rows read as visibly smaller).
+    /// spec'd requirement that collapsed rows read as visibly smaller) -
+    /// and the card's own de-emphasised metadata, POS and frequency.
     pub collapsed_size: f32,
 
     /// Inner panel padding, in physical pixels.
