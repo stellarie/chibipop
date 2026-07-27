@@ -77,7 +77,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// give on a second registration.
 unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
-    if REGISTERED.swap(true, Ordering::SeqCst) {
+    if REGISTERED.load(Ordering::SeqCst) {
         return Ok(());
     }
 
@@ -94,6 +94,15 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     if atom == 0 {
         return Err(Error::from_thread()).context("RegisterClassExW");
     }
+
+    // Only latch success *after* `RegisterClassExW` has actually returned
+    // one - not before, the way a `swap(true, ..)` up front would. Claiming
+    // "registered" ahead of the result would leave a failed first attempt
+    // stuck true for the rest of the process: every later `Popup::create()`
+    // would then skip registration entirely and fail confusingly at
+    // `CreateWindowExW` against a class that was never created, instead of
+    // retrying registration and surfacing the real `RegisterClassExW` error.
+    REGISTERED.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -166,7 +175,14 @@ impl Popup {
             if region.is_invalid() {
                 anyhow::bail!("CreateRoundRectRgn({}, {}) returned a null region", r.w, r.h);
             }
+            // Ownership of `region`: `SetWindowRgn` transfers it to the OS,
+            // but only on success - the window owns it from then on, so it
+            // must NOT be deleted below on that path (that would be a
+            // double-free of a handle the OS also thinks it owns). On
+            // failure, ownership never transferred: nobody else will ever
+            // free this handle, so it must be deleted here or it leaks.
             if SetWindowRgn(self.hwnd, Some(region), true) == 0 {
+                let _ = DeleteObject(region.into());
                 anyhow::bail!("SetWindowRgn failed to apply the rounded silhouette");
             }
 
