@@ -353,4 +353,54 @@ mod tests {
         );
         assert_eq!(PhysRect { x: 1100, y: 550, w: 20, h: 20 }, got);
     }
+
+    /// Gap: the byte offset is computed once while assembling the *raw*
+    /// text, then recomputed by normalising the prefix, because
+    /// normalisation can change byte length (ASCII '-' is 1 byte; the 'ー'
+    /// it can become is 3). This line hits that head-on: the hyphen sits
+    /// before the hit character, so the raw offset would land mid-character
+    /// if the recompute were skipped.
+    #[test]
+    fn cursor_byte_offset_is_recomputed_after_normalisation_changes_length() {
+        let line = OcrLine {
+            words: vec![
+                w("ツ", 100, 100, 20, 20),
+                w("-", 130, 100, 20, 20),
+                w("ル", 160, 100, 20, 20),
+                w("箱", 190, 100, 20, 20),
+            ],
+        };
+        let got = resolve(&[line], p(195, 105)).unwrap();
+        assert_eq!("ツール箱", got.span.text);
+        assert!(got.span.text[got.span.cursor_byte_offset..].starts_with('箱'));
+        // "ツール" is 3 characters, 3 bytes each in UTF-8 = 9.
+        assert_eq!(9, got.span.cursor_byte_offset);
+    }
+
+    /// Gap: word identity during assembly is resolved with `std::ptr::eq`,
+    /// not by comparing `text`, specifically because Japanese lines repeat
+    /// characters. "々" appears three times here, twice *after* the hit.
+    /// The assembly loop has no early-exit — it overwrites the offset on
+    /// every match it sees — so a text-equality comparison would settle on
+    /// the *last* same-text word rather than the hit itself, landing on the
+    /// trailing "々" instead of the hit at index 2. (A line with only two
+    /// occurrences, with the hit on the last one, can't tell the two
+    /// comparisons apart: there is nothing after the hit left to wrongly
+    /// match, so both approaches land on the same offset by coincidence.)
+    #[test]
+    fn repeated_character_resolves_to_the_hit_occurrence() {
+        let line = OcrLine {
+            words: vec![
+                w("々", 100, 100, 20, 20),
+                w("人", 130, 100, 20, 20),
+                w("々", 160, 100, 20, 20), // the hit: second "々", third word
+                w("々", 190, 100, 20, 20), // trailing repeat, see doc comment
+            ],
+        };
+        let got = resolve(&[line], p(170, 110)).unwrap();
+        assert_eq!("々人々々", got.span.text);
+        // "々人" is 2 characters, 3 bytes each in UTF-8 = 6.
+        assert_eq!(6, got.span.cursor_byte_offset);
+        assert_eq!("々々", &got.span.text[got.span.cursor_byte_offset..]);
+    }
 }
