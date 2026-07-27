@@ -59,6 +59,18 @@ pub struct Theme {
     /// show as background poking past the silhouette, or a visible gap
     /// between the two.
     pub corner_radius: i32,
+
+    /// `ui::overlay`'s outline colour for a pass-1 capture box - the
+    /// cursor-centred box drawn on every hover, so it is deliberately the
+    /// dimmest of the three scan colours.
+    pub scan_pass1: (u8, u8, u8),
+    /// `ui::overlay`'s outline colour for a forward tile - the accent hue,
+    /// between `scan_pass1` and `scan_anchor`.
+    pub scan_tile: (u8, u8, u8),
+    /// `ui::overlay`'s outline colour for the resolved word's anchor box -
+    /// the brightest of the three, since it marks the answer the other two
+    /// exist to find.
+    pub scan_anchor: (u8, u8, u8),
 }
 
 impl Theme {
@@ -82,6 +94,9 @@ impl Theme {
             collapsed_size: 13.0,
             padding: 12,
             corner_radius: 12,
+            scan_pass1: (110, 150, 200),
+            scan_tile: (240, 160, 50),
+            scan_anchor: (255, 240, 120),
         }
     }
 
@@ -103,6 +118,25 @@ impl Theme {
             collapsed_size: 13.0,
             padding: 12,
             corner_radius: 12,
+            scan_pass1: (70, 100, 150),
+            scan_tile: (210, 110, 20),
+            scan_anchor: (200, 20, 20),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Three outlines drawn at one alpha over arbitrary screen content are
+    /// only readable if the colours differ from each other.
+    #[test]
+    fn scan_colours_are_distinct_in_both_themes() {
+        for t in [Theme::dark(), Theme::light()] {
+            assert_ne!(t.scan_pass1, t.scan_tile);
+            assert_ne!(t.scan_tile, t.scan_anchor);
+            assert_ne!(t.scan_pass1, t.scan_anchor);
         }
     }
 }
