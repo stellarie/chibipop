@@ -289,4 +289,25 @@ mod tests {
         assert_eq!(3, c.ocr.max_ocr_passes, "missing section takes the default");
         let _ = std::fs::remove_file(&p);
     }
+
+    /// A hand-edit can leave `[ocr]` present but blank - the section
+    /// header survived, only the `max_ocr_passes` line under it was
+    /// deleted. That exercises the *field-level*
+    /// `#[serde(default = "default_max_ocr_passes")]`, distinct from the
+    /// container-level `#[serde(default)]` on `Config::ocr` that the test
+    /// above (whole section missing) exercises instead.
+    #[test]
+    fn an_empty_ocr_section_still_defaults_max_ocr_passes_to_three() {
+        let p = tmp("empty_ocr_section");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n\n",
+            "[ocr]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("an empty [ocr] section must still load");
+        assert_eq!(3, c.ocr.max_ocr_passes, "missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
+    }
 }
