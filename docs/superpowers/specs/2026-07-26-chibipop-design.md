@@ -1,7 +1,7 @@
 # chibipop — Design
 
 **Date:** 2026-07-26
-**Status:** M0 and M1 built and merged. M2–M5 not started.
+**Status:** M0, M1 and M2 built and merged. M3–M5 not started.
 **Revision:** 3 — spec corrected against the completed M0+M1 build: the §5 POS-vocabulary claim was
 false and is replaced with the real `term.pos`/`deconjugator.json` mapping; schema, ranking, the
 `Dictionary` trait, the golden corpus, and one non-goal now match the shipped code; threading,
@@ -108,7 +108,7 @@ src/
     mod.rs         trait TextSource; the tiered resolver
     uia.rs         tier 1 — ElementFromPoint → TextPattern → RangeFromPoint
     ocr.rs         tier 2 — Windows.Media.Ocr over a cursor-local capture
-    capture.rs     screen grab of a ~600×200px region around the cursor
+    capture.rs     screen grab of a 900×300px region around the cursor, upscaled 2×
   lookup/
     mod.rs         re-exports the submodules below
     deconj.rs      BFS deconjugator over a loaded rule set
@@ -185,7 +185,9 @@ weikipop's documented misplacement bugs come from three coordinate spaces coexis
 
 > **Every internal coordinate is a physical pixel in virtual-desktop space.**
 
-Conversion happens only at the OS boundary, only inside `geom.rs`. The process is per-monitor-v2 DPI
+Conversion happens only at the OS boundary. `geom.rs` owns the arithmetic and `text/layout.rs`
+composes it — `map_from_upscaled` divides the upscale factor out and translates by the capture
+origin, so nothing downstream ever learns that upscaling happened. The process is per-monitor-v2 DPI
 aware. `PhysPoint` and `PhysRect` are distinct types from any logical-pixel type, so mixing them is a
 compile error rather than a rendering bug.
 

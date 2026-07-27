@@ -1,7 +1,7 @@
 # chibipop M2 — OCR Text-Acquisition Tier
 
 **Date:** 2026-07-27
-**Status:** Approved (design); not yet implemented
+**Status:** Built and merged. 83 tests green; `probe` and `watch` verified against live screen text.
 **Parent spec:** `docs/superpowers/specs/2026-07-26-chibipop-design.md` (rev 3). Where the two
 disagree, the parent governs — reconcile before coding.
 **Depends on:** M0 (OCR availability, answered: `ja` is present) and M1 (the lookup core, built and
@@ -70,7 +70,9 @@ src/text/
 **Every file above is new.** M1 built only `src/lookup/`; neither `geom.rs` nor `src/text/` exists
 yet, and `TextSource`/`TextSpan` appear in the parent spec as a contract but have never been written.
 This milestone introduces the `windows` crate to the project for the first time — `Cargo.toml` gains
-exactly one dependency.
+two dependencies: `windows` 0.62.2 and `windows-future` 0.3.2. The second is unavoidable — `windows`
+does not re-export the `IAsyncOperation`/`AsyncStatus` types that its own generated APIs return, so
+without it the async result type cannot be named in a signature.
 
 **Hard rule, inherited from the parent spec and extended:** `geom.rs`, `text/mod.rs`, and
 `text/layout.rs` must not depend on the `windows` crate. They must compile and test on any platform.
@@ -100,7 +102,9 @@ behind UIA without changing anything downstream.
 ### 4.2 Data flow, one resolution
 
 1. **Capture.** `capture.rs` BitBlts a 900×300 physical-pixel box centred on the cursor in
-   virtual-desktop space, clamped to the virtual desktop's bounds, and upscales it 2×.
+   virtual-desktop space, and upscales it 2×. The region is **not** clamped to the desktop bounds:
+   a virtual desktop legitimately has negative coordinates when a monitor sits left of the primary,
+   and BitBlt accepts out-of-bounds source coordinates, returning background for the uncovered part.
 2. **Recognise.** `ocr.rs` runs `Windows.Media.Ocr` with the `ja` recogniser, then converts
    `OcrResult` into `Vec<OcrLine>`, **mapping every coordinate back out of upscaled-image space into
    virtual-desktop space**: `virtual = region_origin + (ocr_coord / UPSCALE)`. This conversion is the
@@ -162,7 +166,7 @@ cursor sits still.
 | BitBlt fails | `Err` — a genuine failure. Logged; no result. |
 | Captured region contains no recognisable text | `Ok(None)` — expected, not an error |
 | Cursor is not within tolerance of any word | `Ok(None)` — expected |
-| Word rect falls outside the captured region after coordinate mapping | Clamp to the region. Coordinate arithmetic must never panic. |
+| Word rect falls outside the captured region after coordinate mapping | Left as-is, **not** clamped. Such a box simply fails to hit-scan, which is the correct outcome. The binding requirement is that the coordinate arithmetic never panics — pure `i32` operations, tested against negative origins. |
 | A resolution fails inside `watch` | Print the error and keep polling. One bad frame must not end the session. |
 
 ## 7. Testing
@@ -182,9 +186,14 @@ cursor sits still.
 
 **Integration, against the real engine:**
 
-Render known Japanese to a fixture PNG, run the actual OCR engine, and assert both the recognised text
+Feed a committed **raw BGRA fixture** to the actual OCR engine, and assert both the recognised text
 and that a chosen pixel resolves to the expected character. Skips when the engine is unavailable —
 the same approved pattern the M1 golden corpus uses, for the same reason.
+
+A raw BGRA dump rather than a PNG, deliberately: it is byte-for-byte the format `capture.rs`
+produces, so the test exercises the production path exactly, and it needs no image decoder — hence no
+extra dependency. It is also immune to the CRLF-mangling risk a text-sniffable fixture would carry on
+Windows (the file contains no `0x0A` or `0x0D` bytes at all).
 
 **Honestly untestable, and reported as such:** BitBlt against real applications, and OCR accuracy on
 real rendering rather than rendered fixtures. These get a written manual checklist executed with
