@@ -185,6 +185,47 @@ pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32
     }
 }
 
+/// Selects the OCR line nearest `perpendicular_centre` on the perpendicular
+/// axis — y for `Horizontal`, x for `Vertical`, `band_of`'s own convention.
+///
+/// Windows' OCR reports furigana as its own line, separate from the text it
+/// annotates, even when both sit inside one tall capture tile. Picking the
+/// line actually centred near the hover — instead of flattening every line
+/// the tile saw into one word list — drops the ruby with no pixel threshold
+/// to tune, and stays correct if the ruby sits below the text rather than
+/// above it.
+///
+/// A line's centre is the mean of its own words' centres on that axis, not
+/// its bounding box's midpoint, so one unusually wide or short word can't
+/// drag it. Ties keep the first line in `lines`, matching `hit_scan`'s
+/// document-order rule. `None` when `lines` is empty or every line has no
+/// words — callers turn that into an empty `Vec`, same as no lines at all.
+pub fn nearest_line(
+    lines: &[OcrLine],
+    perpendicular_centre: i32,
+    orientation: Orientation,
+) -> Option<&OcrLine> {
+    let axis = |p: PhysPoint| match orientation {
+        Orientation::Horizontal => p.y,
+        Orientation::Vertical => p.x,
+    };
+
+    let mut best: Option<(&OcrLine, i32)> = None;
+    for line in lines {
+        if line.words.is_empty() {
+            continue;
+        }
+        let sum: i32 = line.words.iter().map(|w| axis(w.rect.center())).sum();
+        let centre = sum / line.words.len() as i32;
+        let d = (centre - perpendicular_centre).abs();
+        match best {
+            Some((_, bd)) if d >= bd => {}
+            _ => best = Some((line, d)),
+        }
+    }
+    best.map(|(line, _)| line)
+}
+
 /// How close a word's trailing edge may come to a tile's trailing edge before
 /// it is treated as possibly clipped.
 pub const EDGE_MARGIN: i32 = 4;
@@ -649,6 +690,60 @@ mod tests {
 
         let v = tile_after(band, 500, Orientation::Vertical, TILE_LEN);
         assert_eq!(PhysRect { x: 100, y: 500, w: 40, h: TILE_LEN }, v);
+    }
+
+    /// Furigana-fix measurement: furigana at y=1345 h=11 (centre 1350)
+    /// vs. the real line at y=1362 h=22 (mean centre 1373 - ~1px from
+    /// the spec's own bounding-box midpoint of 1372; see `nearest_line`
+    /// on mean vs. midpoint). Hovering 1372 must pick the real line.
+    #[test]
+    fn nearest_line_picks_the_real_line_over_furigana() {
+        let furigana = OcrLine {
+            words: (0..3).map(|i| w("furi", 3320 + i * 13, 1345, 13, 11)).collect(),
+        };
+        let real_line = OcrLine {
+            words: (0..18).map(|i| w("real", 2873 + i * 22, 1362, 22, 22)).collect(),
+        };
+        let lines = vec![furigana, real_line.clone()];
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal));
+    }
+
+    /// Same measurement, rotated: a vertical line's perpendicular axis
+    /// is x, so the same two centres (1350, 1373) now come from
+    /// word.rect.x/w instead of y/h.
+    #[test]
+    fn nearest_line_mirrors_axes_for_vertical_text() {
+        let furigana = OcrLine {
+            words: (0..3).map(|i| w("furi", 1345, 3320 + i * 13, 11, 13)).collect(),
+        };
+        let real_line = OcrLine {
+            words: (0..18).map(|i| w("real", 1362, 2873 + i * 22, 22, 22)).collect(),
+        };
+        let lines = vec![furigana, real_line.clone()];
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Vertical));
+    }
+
+    #[test]
+    fn nearest_line_empty_input_returns_none() {
+        assert_eq!(None, nearest_line(&[], 1372, Orientation::Horizontal));
+    }
+
+    #[test]
+    fn nearest_line_skips_a_line_with_no_words() {
+        let empty = OcrLine { words: vec![] };
+        let real_line = OcrLine { words: vec![w("real", 100, 1372, 20, 20)] };
+        let lines = vec![empty, real_line.clone()];
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal));
+    }
+
+    /// A genuine tie: both centres (110, 150) sit 20px from target 130,
+    /// so document order alone must decide.
+    #[test]
+    fn nearest_line_ties_break_by_document_order() {
+        let first_line = OcrLine { words: vec![w("a", 0, 100, 20, 20)] };
+        let second_line = OcrLine { words: vec![w("b", 0, 140, 20, 20)] };
+        let lines = vec![first_line.clone(), second_line];
+        assert_eq!(Some(&first_line), nearest_line(&lines, 130, Orientation::Horizontal));
     }
 
     fn hword(text: &str, x: i32, width: i32) -> OcrWord {

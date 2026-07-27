@@ -8,8 +8,8 @@ use crate::geom::{PhysPoint, PhysRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::capture::{capture_upscaled, cursor_position, init_dpi_awareness, UPSCALE};
 use crate::text::layout::{
-    band_of, map_from_upscaled, region_around, resolve, tile_forward, OcrLine, OcrWord,
-    Orientation, Resolved,
+    band_of, map_from_upscaled, nearest_line, region_around, resolve, tile_forward, OcrLine,
+    OcrWord, Orientation, Resolved,
 };
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
@@ -194,6 +194,10 @@ impl OcrTextSource {
             Orientation::Horizontal => first.span.anchor.x,
             Orientation::Vertical => first.span.anchor.y,
         };
+        let perpendicular_centre = match first.orientation {
+            Orientation::Horizontal => first.span.anchor.center().y,
+            Orientation::Vertical => first.span.anchor.center().x,
+        };
 
         let mut failed = false;
         let text = tile_forward(
@@ -202,7 +206,7 @@ impl OcrTextSource {
             first.orientation,
             usize::from(self.max_passes - 1),
             MAX_LOOKUP_CHARS,
-            |tile| match self.words_in(tile) {
+            |tile| match self.words_in(tile, perpendicular_centre, first.orientation) {
                 Ok(words) => words,
                 Err(e) => {
                     if !failed {
@@ -223,18 +227,38 @@ impl OcrTextSource {
         }))
     }
 
-    /// One capture-and-recognise, flattened to words in desktop coordinates.
-    fn words_in(&self, tile: PhysRect) -> Result<Vec<OcrWord>> {
+    /// One capture-and-recognise, keeping only the line under the hover.
+    ///
+    /// The tall tile `band_of` now produces can contain furigana as its own
+    /// OCR line above or below the text it annotates. Flattening every line
+    /// back into one word list would splice that ruby into the sentence, so
+    /// `nearest_line` keeps only the line actually centred near
+    /// `perpendicular_centre` and drops the rest. See its doc comment for
+    /// the axis convention.
+    fn words_in(
+        &self,
+        tile: PhysRect,
+        perpendicular_centre: i32,
+        orientation: Orientation,
+    ) -> Result<Vec<OcrWord>> {
         let (buf, w, h) = capture_upscaled(tile)?;
         let origin = PhysPoint { x: tile.x, y: tile.y };
-        Ok(recognise(&self.engine, &buf, w, h)?
+        let lines: Vec<OcrLine> = recognise(&self.engine, &buf, w, h)?
             .into_iter()
-            .flat_map(|l| l.words)
-            .map(|word| OcrWord {
-                rect: map_from_upscaled(word.rect, origin, UPSCALE),
-                text: word.text,
+            .map(|l| OcrLine {
+                words: l
+                    .words
+                    .into_iter()
+                    .map(|word| OcrWord {
+                        rect: map_from_upscaled(word.rect, origin, UPSCALE),
+                        text: word.text,
+                    })
+                    .collect(),
             })
-            .collect())
+            .collect();
+        Ok(nearest_line(&lines, perpendicular_centre, orientation)
+            .map(|line| line.words.clone())
+            .unwrap_or_default())
     }
 
     /// Where the pointer is now.
