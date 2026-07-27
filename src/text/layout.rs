@@ -112,12 +112,34 @@ pub fn map_from_upscaled(rect: PhysRect, origin: PhysPoint, factor: i32) -> Phys
     rect.scaled_down(factor).translated(origin.x, origin.y)
 }
 
-/// The capture box: 900×300 physical pixels centred on the cursor.
+/// The capture box: 500×100 physical pixels centred on the cursor.
 ///
-/// The lookup engine reads only forward from the cursor and truncates at 25
-/// characters, so this comfortably covers everything that can ever be used.
-pub const REGION_W: i32 = 900;
-pub const REGION_H: i32 = 300;
+/// **Smaller is more accurate, and this was measured, not assumed.** Windows'
+/// OCR segments a whole captured image at once rather than reading character
+/// by character, so everything else in the box competes for its attention.
+/// Against a visual novel at ~40px text, hovering ten characters of one line
+/// and comparing the character handed to lookup:
+///
+/// | box | correct |
+/// |---|---|
+/// | 900×300 (the original) | 6/10 — `通`→`過`, `に`→`0`, `風` and `私` dropped |
+/// | 500×100 | **10/10** |
+/// | 400×100 | 10/10 on that line, but `ロ`→`回` on the next one |
+///
+/// The wide box was not buying reading distance either: it returned *six*
+/// forward characters of `…を過抜ける` against the narrow box's seven of
+/// `…を通り抜ける。制`, because the extra width was spent on mangling rather
+/// than on more text. A 300-tall box also swallows the neighbouring line and
+/// lets the recogniser blend the two.
+///
+/// The height is not independently risky: `hit_scan` already refuses a cursor
+/// further than half a word's height from the text, so a hover this box would
+/// clip is one that would not have resolved anyway.
+///
+/// Tuned against one game at one text size. `probe --region W,H` exists to
+/// re-measure this rather than trusting it — see `OcrTextSource::resolve_in_region`.
+pub const REGION_W: i32 = 500;
+pub const REGION_H: i32 = 100;
 
 pub fn region_around(cursor: PhysPoint) -> PhysRect {
     PhysRect {
@@ -420,12 +442,31 @@ mod tests {
         assert_eq!("々々", &got.span.text[got.span.cursor_byte_offset..]);
     }
 
+    /// The centring is the contract; the size is a measured tuning that may
+    /// move again (see `REGION_W`'s table), so this asserts centring against
+    /// whatever the constants currently are rather than restating them.
     #[test]
-    fn region_is_900x300_centred_on_the_cursor() {
+    fn the_region_is_centred_on_the_cursor() {
         let r = region_around(p(1000, 500));
-        assert_eq!(900, r.w);
-        assert_eq!(300, r.h);
-        assert_eq!(1000 - 450, r.x);
-        assert_eq!(500 - 150, r.y);
+        assert_eq!(REGION_W, r.w);
+        assert_eq!(REGION_H, r.h);
+        assert_eq!(1000 - REGION_W / 2, r.x);
+        assert_eq!(500 - REGION_H / 2, r.y);
+    }
+
+    /// The box must stay wide enough to out-reach `hit_scan`'s own tolerance
+    /// vertically - otherwise a hover that resolves would capture a text row
+    /// the box has clipped, which is the one shape that makes OCR return
+    /// nothing at all rather than something imperfect.
+    #[test]
+    fn the_region_is_taller_than_a_resolvable_hover_can_be_off_by() {
+        let typical_word_h = 40;
+        let worst_offset = typical_word_h / 2;
+        let needed = worst_offset + typical_word_h / 2;
+        assert!(
+            REGION_H / 2 >= needed,
+            "REGION_H/2 = {} must cover {needed}px of hit-scan slack plus half a glyph",
+            REGION_H / 2
+        );
     }
 }

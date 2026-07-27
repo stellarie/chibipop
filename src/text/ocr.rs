@@ -120,7 +120,22 @@ impl OcrTextSource {
         &self,
         cursor: PhysPoint,
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        let region = region_around(cursor);
+        self.resolve_in_region(cursor, region_around(cursor))
+    }
+
+    /// [`resolve_at_verbose`](Self::resolve_at_verbose) against an explicit
+    /// capture box instead of the standard one centred on `cursor`.
+    ///
+    /// Windows' OCR segments a whole captured image at once, so the framing
+    /// of that image changes what it reads - the same screen text recognises
+    /// differently when the box shifts by 50 pixels. This exists so `probe`
+    /// can vary the box and measure that, rather than the region size being
+    /// a constant nobody can test.
+    pub fn resolve_in_region(
+        &self,
+        cursor: PhysPoint,
+        region: PhysRect,
+    ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
         let (buf, w, h) = capture_upscaled(region)?;
         let raw = recognise(&self.engine, &buf, w, h)?;
         let origin = PhysPoint { x: region.x, y: region.y };

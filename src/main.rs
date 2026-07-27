@@ -28,6 +28,11 @@ enum Command {
         /// Screen coordinates as X,Y in physical pixels.
         #[arg(long, value_name = "X,Y")]
         at: String,
+        /// Capture box size as W,H, centred on --at. Defaults to the
+        /// shipped REGION_W,REGION_H. Windows' OCR reads a whole image at
+        /// once, so this changes what it recognises - vary it to measure.
+        #[arg(long, value_name = "W,H")]
+        region: Option<String>,
         #[arg(long, default_value = "data/chibipop.sqlite")]
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
@@ -75,7 +80,7 @@ fn main() -> Result<()> {
             print_hits(&hits);
             Ok(())
         }
-        Command::Probe { at, dict, rules } => {
+        Command::Probe { at, region, dict, rules } => {
             let (xs, ys) = at
                 .split_once(',')
                 .context("--at must be X,Y (e.g. --at 1200,400)")?;
@@ -85,11 +90,21 @@ fn main() -> Result<()> {
             };
 
             let source = chibipop::text::ocr::OcrTextSource::new()?;
-            let region = chibipop::text::layout::region_around(cursor);
+            let region = match region {
+                None => chibipop::text::layout::region_around(cursor),
+                Some(spec) => {
+                    let (ws, hs) = spec
+                        .split_once(',')
+                        .context("--region must be W,H (e.g. --region 900,300)")?;
+                    let w: i32 = ws.trim().parse().context("W in --region is not an integer")?;
+                    let h: i32 = hs.trim().parse().context("H in --region is not an integer")?;
+                    chibipop::geom::PhysRect { x: cursor.x - w / 2, y: cursor.y - h / 2, w, h }
+                }
+            };
             println!("cursor:  ({}, {})", cursor.x, cursor.y);
             println!("region:  x={} y={} w={} h={}", region.x, region.y, region.w, region.h);
 
-            let (lines, resolved) = source.resolve_at_verbose(cursor)?;
+            let (lines, resolved) = source.resolve_in_region(cursor, region)?;
 
             println!();
             if lines.is_empty() {
