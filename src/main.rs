@@ -33,6 +33,11 @@ enum Command {
         /// once, so this changes what it recognises - vary it to measure.
         #[arg(long, value_name = "W,H")]
         region: Option<String>,
+        /// Total OCR passes, as [ocr] max_ocr_passes would set. 1 is single
+        /// capture. Ignored when --region is given, which is single-capture
+        /// by definition.
+        #[arg(long, default_value_t = 3)]
+        tiles: u8,
         #[arg(long, default_value = "data/chibipop.sqlite")]
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
@@ -80,7 +85,7 @@ fn main() -> Result<()> {
             print_hits(&hits);
             Ok(())
         }
-        Command::Probe { at, region, dict, rules } => {
+        Command::Probe { at, region, tiles, dict, rules } => {
             let (xs, ys) = at
                 .split_once(',')
                 .context("--at must be X,Y (e.g. --at 1200,400)")?;
@@ -89,7 +94,8 @@ fn main() -> Result<()> {
                 y: ys.trim().parse().context("Y in --at is not an integer")?,
             };
 
-            let source = chibipop::text::ocr::OcrTextSource::new()?;
+            let source = chibipop::text::ocr::OcrTextSource::new(tiles)?;
+            let region_was_default = region.is_none();
             let region = match region {
                 None => chibipop::text::layout::region_around(cursor),
                 Some(spec) => {
@@ -147,10 +153,17 @@ fn main() -> Result<()> {
                     print_hits(&hits);
                 }
             }
+
+            if region_was_default && tiles > 1 {
+                match source.resolve_at_tiled(cursor)? {
+                    None => println!("\ntiled:   nothing resolved"),
+                    Some(r) => println!("\ntiled:   {:?}  ({} chars)", r.span.text, r.span.text.chars().count()),
+                }
+            }
             Ok(())
         }
         Command::Watch { dict, rules } => {
-            let source = chibipop::text::ocr::OcrTextSource::new()?;
+            let source = chibipop::text::ocr::OcrTextSource::new(3)?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
 
@@ -176,7 +189,7 @@ fn main() -> Result<()> {
                 last_pos = Some(cursor);
 
                 // One bad frame must not end the session.
-                let resolved = match source.resolve_at(cursor) {
+                let resolved = match source.resolve_at_tiled(cursor) {
                     Ok(r) => r,
                     Err(e) => { eprintln!("resolve: {e}"); continue; }
                 };

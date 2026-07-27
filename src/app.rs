@@ -130,7 +130,7 @@ struct WorkerResult {
 }
 
 enum WorkerOutcome {
-    /// Nothing to show: either `resolve_at` found no text under the cursor,
+    /// Nothing to show: either `resolve_at_tiled` found no text under the cursor,
     /// or it did but the dictionary had zero hits for it (e.g. punctuation).
     /// Neither is an error - most hover positions are not Japanese text, and
     /// logging that would be pure noise (decision 4).
@@ -246,6 +246,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // id of whichever thread calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();
+    let max_ocr_passes = cfg.ocr.max_ocr_passes;
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
@@ -254,6 +255,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             dict_path,
             rules_path,
             present_cfg,
+            max_ocr_passes,
             main_tid,
             trigger_rx,
             result_tx,
@@ -487,6 +489,7 @@ fn worker_main(
     dict_path: PathBuf,
     rules_path: PathBuf,
     present_cfg: PresentConfig,
+    max_ocr_passes: u8,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -495,7 +498,7 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
-    let ocr = match OcrTextSource::new().context("creating the OCR text source") {
+    let ocr = match OcrTextSource::new(max_ocr_passes).context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
             let _ = startup_tx.send(Err(e));
@@ -575,7 +578,7 @@ fn worker_main(
         // the run. AssertUnwindSafe: none of ocr/dict/engine/dicts/guard
         // retain any externally-observable partial-mutation state across a
         // panic inside resolve_trigger - each is only ever used through
-        // shared, read-style calls (resolve_at, run, hide_for_capture /
+        // shared, read-style calls (resolve_at_tiled, run, hide_for_capture /
         // restore_after_capture, both of which only ever send on an mpsc
         // `Sender` - never poisoned by a panicking receiver the way a
         // `Mutex` would be) - so there is nothing for a caught panic to
@@ -594,11 +597,11 @@ fn worker_main(
     }
 }
 
-/// One hover's worth of work: `OcrTextSource::resolve_at` -> lookup ->
+/// One hover's worth of work: `OcrTextSource::resolve_at_tiled` -> lookup ->
 /// `present::build`, exactly the pipeline the brief specifies.
 ///
-/// `capture_guard`, when `Some`, wraps the capture inside `resolve_at` with a
-/// hide-before/reshow-after around it (spec §5.1) - `text::ocr`/`text::capture`
+/// `capture_guard`, when `Some`, wraps the capture inside `resolve_at_tiled`
+/// with a hide-before/reshow-after around it (spec §5.1) - `text::ocr`/`text::capture`
 /// stay exactly as M2 left them (spec section 4: "M3 adds no lookup logic"),
 /// so the guard wraps the call from here rather than reaching inside it.
 /// This does mean the popup stays hidden for the OCR recognition step too,
@@ -617,11 +620,11 @@ fn resolve_trigger(
     let raw = match capture_guard {
         Some(guard) => {
             guard.hide_for_capture();
-            let r = ocr.resolve_at(cursor);
+            let r = ocr.resolve_at_tiled(cursor);
             guard.restore_after_capture();
             r
         }
-        None => ocr.resolve_at(cursor),
+        None => ocr.resolve_at_tiled(cursor),
     };
     let resolved = match raw {
         Ok(Some(r)) => r,

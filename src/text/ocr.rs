@@ -5,8 +5,12 @@
 //! actual reasoning.
 
 use crate::geom::{PhysPoint, PhysRect};
+use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::capture::{capture_upscaled, cursor_position, init_dpi_awareness, UPSCALE};
-use crate::text::layout::{map_from_upscaled, region_around, resolve, OcrLine, OcrWord, Resolved};
+use crate::text::layout::{
+    band_of, map_from_upscaled, region_around, resolve, tile_forward, OcrLine, OcrWord,
+    Orientation, Resolved,
+};
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -87,13 +91,18 @@ pub fn recognise(engine: &OcrEngine, buf: &[u8], w: i32, h: i32) -> Result<Vec<O
 
 pub struct OcrTextSource {
     engine: OcrEngine,
+    max_passes: u8,
 }
 
 impl OcrTextSource {
     /// Initialises the process for capture and WinRT, and creates the
     /// Japanese recogniser once so every later frame can reuse it. Fails
     /// loudly here rather than on the first hover.
-    pub fn new() -> Result<Self> {
+    ///
+    /// `max_passes` is the total captures a hover spends: one to locate the
+    /// word, the rest reading forward from it in
+    /// [`resolve_at_tiled`](Self::resolve_at_tiled). `1` disables tiling.
+    pub fn new(max_passes: u8) -> Result<Self> {
         init_dpi_awareness()?;
         // WinRT activation fails with CO_E_NOTINITIALIZED without this.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
@@ -102,7 +111,7 @@ impl OcrTextSource {
             "no Japanese OCR recogniser available - see \
              docs/superpowers/findings/2026-07-26-m0-ocr-availability.md",
         )?;
-        Ok(OcrTextSource { engine })
+        Ok(OcrTextSource { engine, max_passes })
     }
 
     /// The engine created in `new`, for callers that need to drive
@@ -161,6 +170,71 @@ impl OcrTextSource {
     /// does not even want the orientation.
     pub fn resolve_at(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
         Ok(self.resolve_at_verbose(cursor)?.1)
+    }
+
+    /// Resolve a hover, reading forward in tiles (the two-pass spec).
+    ///
+    /// Pass 1 is [`resolve_at_verbose`](Self::resolve_at_verbose)'s capture,
+    /// used for geometry only - its text is edge-clipped at its own boundary
+    /// and is discarded (spec D1). Tiles then re-read forward from the hovered
+    /// word's leading edge.
+    ///
+    /// Falls back to pass 1's own span whenever tiling adds nothing: one
+    /// configured pass, an empty tiling result, or a tile that errors. Tiling
+    /// must never turn a working hover into a failed one.
+    pub fn resolve_at_tiled(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
+        let (_, resolved) = self.resolve_at_verbose(cursor)?;
+        let Some(first) = resolved else { return Ok(None) };
+        if self.max_passes <= 1 {
+            return Ok(Some(first));
+        }
+
+        let band = band_of(first.span.anchor, first.orientation);
+        let start = match first.orientation {
+            Orientation::Horizontal => first.span.anchor.x,
+            Orientation::Vertical => first.span.anchor.y,
+        };
+
+        let mut failed = false;
+        let text = tile_forward(
+            band,
+            start,
+            first.orientation,
+            usize::from(self.max_passes - 1),
+            MAX_LOOKUP_CHARS,
+            |tile| match self.words_in(tile) {
+                Ok(words) => words,
+                Err(e) => {
+                    if !failed {
+                        eprintln!("chibipop: tile capture failed, using what was read: {e:#}");
+                        failed = true;
+                    }
+                    Vec::new()
+                }
+            },
+        );
+
+        if text.is_empty() {
+            return Ok(Some(first));
+        }
+        Ok(Some(Resolved {
+            span: TextSpan { text, cursor_byte_offset: 0, anchor: first.span.anchor },
+            orientation: first.orientation,
+        }))
+    }
+
+    /// One capture-and-recognise, flattened to words in desktop coordinates.
+    fn words_in(&self, tile: PhysRect) -> Result<Vec<OcrWord>> {
+        let (buf, w, h) = capture_upscaled(tile)?;
+        let origin = PhysPoint { x: tile.x, y: tile.y };
+        Ok(recognise(&self.engine, &buf, w, h)?
+            .into_iter()
+            .flat_map(|l| l.words)
+            .map(|word| OcrWord {
+                rect: map_from_upscaled(word.rect, origin, UPSCALE),
+                text: word.text,
+            })
+            .collect())
     }
 
     /// Where the pointer is now.
