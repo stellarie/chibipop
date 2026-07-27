@@ -7,6 +7,7 @@ use crate::geom::{PhysPoint, PhysRect};
 use anyhow::Result;
 
 /// A run of text with a position inside it.
+#[derive(Debug)]
 pub struct TextSpan {
     pub text: String,
     /// Byte offset into `text`, on a char boundary, of the first byte of the
