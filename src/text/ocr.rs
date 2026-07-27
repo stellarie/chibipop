@@ -13,12 +13,17 @@ use crate::text::layout::{
 };
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
+use std::mem::size_of;
 use std::time::Duration;
 use windows::core::HSTRING;
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
+use windows::Win32::Foundation::POINT;
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
 /// Block on a WinRT async operation.
@@ -87,6 +92,27 @@ pub fn recognise(engine: &OcrEngine, buf: &[u8], w: i32, h: i32) -> Result<Vec<O
         }
     }
     Ok(lines)
+}
+
+/// The bounds of the monitor containing `p` (spec §5) - same
+/// `MonitorFromPoint` + `GetMonitorInfoW` pair `app.rs`'s `monitor_rect_for`
+/// already uses to place the popup, applied here to keep a tile from
+/// reading a neighbouring monitor's pixels (I2). `MONITOR_DEFAULTTONEAREST`
+/// never yields a null `HMONITOR`, so only `GetMonitorInfoW` itself can
+/// fail; on that unreachable-in-practice path this falls back to a
+/// generous box centred on `p` rather than an absolute-origin guess, so a
+/// clamp still has real room to work with instead of collapsing to nothing.
+fn monitor_bounds_containing(p: PhysPoint) -> PhysRect {
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x: p.x, y: p.y }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            let rc = mi.rcMonitor;
+            PhysRect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top }
+        } else {
+            PhysRect { x: p.x - 960, y: p.y - 540, w: 1920, h: 1080 }
+        }
+    }
 }
 
 pub struct OcrTextSource {
@@ -182,6 +208,13 @@ impl OcrTextSource {
     /// Falls back to pass 1's own span whenever tiling adds nothing: one
     /// configured pass, an empty tiling result, or a tile that errors. Tiling
     /// must never turn a working hover into a failed one.
+    ///
+    /// Two more guards travel with every tile (both pure, in `layout.rs`):
+    /// `line_tolerance` is half the hovered word's own perpendicular size,
+    /// mirroring `hit_scan`'s bound, so `nearest_line` cannot silently
+    /// borrow a neighbouring line an empty tile has no line of its own near
+    /// (I3). `bounds` is the monitor containing the hover, so a tile is
+    /// clamped rather than reading a neighbouring monitor's pixels (I2).
     pub fn resolve_at_tiled(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
         let (_, resolved) = self.resolve_at_verbose(cursor)?;
         let Some(first) = resolved else { return Ok(None) };
@@ -198,6 +231,11 @@ impl OcrTextSource {
             Orientation::Horizontal => first.span.anchor.center().y,
             Orientation::Vertical => first.span.anchor.center().x,
         };
+        let line_tolerance = match first.orientation {
+            Orientation::Horizontal => first.span.anchor.h / 2,
+            Orientation::Vertical => first.span.anchor.w / 2,
+        };
+        let bounds = monitor_bounds_containing(band.center());
 
         let mut failed = false;
         let text = tile_forward(
@@ -206,7 +244,8 @@ impl OcrTextSource {
             first.orientation,
             usize::from(self.max_passes - 1),
             MAX_LOOKUP_CHARS,
-            |tile| match self.words_in(tile, perpendicular_centre, first.orientation) {
+            bounds,
+            |tile| match self.words_in(tile, perpendicular_centre, first.orientation, line_tolerance) {
                 Ok(words) => words,
                 Err(e) => {
                     if !failed {
@@ -233,13 +272,14 @@ impl OcrTextSource {
     /// OCR line above or below the text it annotates. Flattening every line
     /// back into one word list would splice that ruby into the sentence, so
     /// `nearest_line` keeps only the line actually centred near
-    /// `perpendicular_centre` and drops the rest. See its doc comment for
-    /// the axis convention.
+    /// `perpendicular_centre`, within `tolerance`, and drops the rest. See
+    /// its doc comment for the axis convention and the distance bound.
     fn words_in(
         &self,
         tile: PhysRect,
         perpendicular_centre: i32,
         orientation: Orientation,
+        tolerance: i32,
     ) -> Result<Vec<OcrWord>> {
         let (buf, w, h) = capture_upscaled(tile)?;
         let origin = PhysPoint { x: tile.x, y: tile.y };
@@ -256,7 +296,7 @@ impl OcrTextSource {
                     .collect(),
             })
             .collect();
-        Ok(nearest_line(&lines, perpendicular_centre, orientation)
+        Ok(nearest_line(&lines, perpendicular_centre, orientation, tolerance)
             .map(|line| line.words.clone())
             .unwrap_or_default())
     }

@@ -185,6 +185,20 @@ pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32
     }
 }
 
+/// Intersects `tile` with `bounds`, the region it is actually allowed to
+/// read. `None` when the intersection has zero-or-negative width or height -
+/// two-pass spec §5: *"Tile extends past the monitor -> Clamp; if it clamps
+/// to zero extent, stop."* Orientation-agnostic: a plain rect intersection
+/// clamps whichever edge - forward or perpendicular - actually overruns.
+pub fn clamp_tile(tile: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
+    let x0 = tile.x.max(bounds.x);
+    let y0 = tile.y.max(bounds.y);
+    let x1 = (tile.x + tile.w).min(bounds.x + bounds.w);
+    let y1 = (tile.y + tile.h).min(bounds.y + bounds.h);
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w <= 0 || h <= 0 { None } else { Some(PhysRect { x: x0, y: y0, w, h }) }
+}
+
 /// Selects the OCR line nearest `perpendicular_centre` on the perpendicular
 /// axis — y for `Horizontal`, x for `Vertical`, `band_of`'s own convention.
 ///
@@ -198,12 +212,15 @@ pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32
 /// A line's centre is the mean of its own words' centres on that axis, not
 /// its bounding box's midpoint, so one unusually wide or short word can't
 /// drag it. Ties keep the first line in `lines`, matching `hit_scan`'s
-/// document-order rule. `None` when `lines` is empty or every line has no
-/// words — callers turn that into an empty `Vec`, same as no lines at all.
+/// document-order rule. `None` when `lines` is empty, every line has no
+/// words, or the nearest candidate is still further than `tolerance` from
+/// `perpendicular_centre` — mirroring `hit_scan`'s own half-word-height
+/// bound, so an empty tile cannot silently borrow a neighbouring line.
 pub fn nearest_line(
     lines: &[OcrLine],
     perpendicular_centre: i32,
     orientation: Orientation,
+    tolerance: i32,
 ) -> Option<&OcrLine> {
     let axis = |p: PhysPoint| match orientation {
         Orientation::Horizontal => p.y,
@@ -218,6 +235,9 @@ pub fn nearest_line(
         let sum: i32 = line.words.iter().map(|w| axis(w.rect.center())).sum();
         let centre = sum / line.words.len() as i32;
         let d = (centre - perpendicular_centre).abs();
+        if d > tolerance {
+            continue;
+        }
         match best {
             Some((_, bd)) if d >= bd => {}
             _ => best = Some((line, d)),
@@ -281,12 +301,20 @@ pub fn split_at_clipped(
 ///
 /// The result is normalised once at the end rather than per tile, so a
 /// sequence split across a seam still normalises as one string.
+///
+/// `bounds` is the region tiles are allowed to read - the monitor containing
+/// the hover (spec §5). Every tile is clamped to it before `read` ever sees
+/// it, so a tile that would otherwise reach past a monitor edge is shrunk to
+/// what that monitor actually has, and `split_at_clipped` then judges
+/// clipping against the clamped edge, not the unclamped one. A clamp that
+/// leaves nothing usable stops the loop, same as a tile recognising nothing.
 pub fn tile_forward<F>(
     band: PhysRect,
     start: i32,
     orientation: Orientation,
     max_tiles: usize,
     max_chars: usize,
+    bounds: PhysRect,
     mut read: F,
 ) -> String
 where
@@ -300,6 +328,9 @@ where
             break;
         }
         let tile = tile_after(band, start, orientation, TILE_LEN);
+        let Some(tile) = clamp_tile(tile, bounds) else {
+            break;
+        };
         let words = read(tile);
         if words.is_empty() {
             break;
@@ -696,6 +727,8 @@ mod tests {
     /// vs. the real line at y=1362 h=22 (mean centre 1373 - ~1px from
     /// the spec's own bounding-box midpoint of 1372; see `nearest_line`
     /// on mean vs. midpoint). Hovering 1372 must pick the real line.
+    /// Tolerance 11 (half the real line's 22px word height) excludes the
+    /// furigana outright - its distance of 22 is not merely outscored.
     #[test]
     fn nearest_line_picks_the_real_line_over_furigana() {
         let furigana = OcrLine {
@@ -705,7 +738,7 @@ mod tests {
             words: (0..18).map(|i| w("real", 2873 + i * 22, 1362, 22, 22)).collect(),
         };
         let lines = vec![furigana, real_line.clone()];
-        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal));
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal, 11));
     }
 
     /// Same measurement, rotated: a vertical line's perpendicular axis
@@ -720,12 +753,12 @@ mod tests {
             words: (0..18).map(|i| w("real", 1362, 2873 + i * 22, 22, 22)).collect(),
         };
         let lines = vec![furigana, real_line.clone()];
-        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Vertical));
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Vertical, 11));
     }
 
     #[test]
     fn nearest_line_empty_input_returns_none() {
-        assert_eq!(None, nearest_line(&[], 1372, Orientation::Horizontal));
+        assert_eq!(None, nearest_line(&[], 1372, Orientation::Horizontal, 20));
     }
 
     #[test]
@@ -733,21 +766,92 @@ mod tests {
         let empty = OcrLine { words: vec![] };
         let real_line = OcrLine { words: vec![w("real", 100, 1372, 20, 20)] };
         let lines = vec![empty, real_line.clone()];
-        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal));
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal, 15));
     }
 
     /// A genuine tie: both centres (110, 150) sit 20px from target 130,
-    /// so document order alone must decide.
+    /// so document order alone must decide. Tolerance 20 keeps both
+    /// candidates in play so the tie-break itself is what's exercised.
     #[test]
     fn nearest_line_ties_break_by_document_order() {
         let first_line = OcrLine { words: vec![w("a", 0, 100, 20, 20)] };
         let second_line = OcrLine { words: vec![w("b", 0, 140, 20, 20)] };
         let lines = vec![first_line.clone(), second_line];
-        assert_eq!(Some(&first_line), nearest_line(&lines, 130, Orientation::Horizontal));
+        assert_eq!(Some(&first_line), nearest_line(&lines, 130, Orientation::Horizontal, 20));
+    }
+
+    /// I3: a line comfortably inside the tolerance is selected - word
+    /// centre y=1370 is 2px from the target, well under tolerance 10.
+    #[test]
+    fn nearest_line_within_the_bound_is_selected() {
+        let line = OcrLine { words: vec![w("a", 100, 1360, 20, 20)] };
+        let lines = vec![line.clone()];
+        assert_eq!(Some(&line), nearest_line(&lines, 1372, Orientation::Horizontal, 10));
+    }
+
+    /// I3: without a bound this would still be "nearest" (the only
+    /// candidate) and get returned - a neighbouring line silently borrowed
+    /// into an empty tile. Word centre y=1310 is 62px from the target,
+    /// past tolerance 10, so this must be `None` instead.
+    #[test]
+    fn nearest_line_beyond_the_bound_returns_none() {
+        let far_line = OcrLine { words: vec![w("a", 100, 1300, 20, 20)] };
+        assert_eq!(None, nearest_line(&[far_line], 1372, Orientation::Horizontal, 10));
     }
 
     fn hword(text: &str, x: i32, width: i32) -> OcrWord {
         OcrWord { text: text.to_string(), rect: PhysRect { x, y: 100, w: width, h: 40 } }
+    }
+
+    /// A `bounds` rect too large for any fixture tile in this file to ever
+    /// reach its edges - stands in for "no monitor clamp applies" so tests
+    /// written before I2 keep exercising exactly what they did before.
+    fn unbounded() -> PhysRect {
+        PhysRect { x: -1_000_000, y: -1_000_000, w: 3_000_000, h: 3_000_000 }
+    }
+
+    #[test]
+    fn clamp_tile_is_unchanged_when_fully_inside_bounds() {
+        let tile = PhysRect { x: 100, y: 100, w: 50, h: 50 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1000, h: 1000 };
+        assert_eq!(Some(tile), clamp_tile(tile, bounds));
+    }
+
+    /// A wide, short tile - what `tile_after` produces for Horizontal text.
+    #[test]
+    fn clamp_tile_shrinks_a_horizontal_tile_past_the_right_edge() {
+        let tile = PhysRect { x: 2300, y: 500, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(Some(PhysRect { x: 2300, y: 500, w: 260, h: 80 }), clamp_tile(tile, bounds));
+    }
+
+    /// A tall, narrow tile - what `tile_after` produces for Vertical text.
+    #[test]
+    fn clamp_tile_shrinks_a_vertical_tile_past_the_bottom_edge() {
+        let tile = PhysRect { x: 500, y: 900, w: 80, h: 500 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1080, h: 1200 };
+        assert_eq!(Some(PhysRect { x: 500, y: 900, w: 80, h: 300 }), clamp_tile(tile, bounds));
+    }
+
+    #[test]
+    fn clamp_tile_returns_none_when_the_tile_starts_beyond_bounds() {
+        let tile = PhysRect { x: 3000, y: 0, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(None, clamp_tile(tile, bounds));
+    }
+
+    #[test]
+    fn clamp_tile_returns_none_when_clamped_to_exactly_zero_extent() {
+        let tile = PhysRect { x: 2560, y: 0, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(None, clamp_tile(tile, bounds));
+    }
+
+    #[test]
+    fn clamp_tile_also_clamps_the_perpendicular_axis() {
+        let tile = PhysRect { x: 100, y: -20, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(Some(PhysRect { x: 100, y: 0, w: 500, h: 60 }), clamp_tile(tile, bounds));
     }
 
     #[test]
@@ -843,7 +947,7 @@ mod tests {
     fn tiling_concatenates_successive_tiles() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
         let mut calls = 0;
-        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, |tile| {
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, unbounded(), |tile| {
             calls += 1;
             vec![hword("あ", tile.x + 10, 40), hword("い", tile.x + 60, 40)]
         });
@@ -855,7 +959,7 @@ mod tests {
     fn each_tile_reads_the_region_after_the_last_one() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
         let mut seen = Vec::new();
-        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, |tile| {
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, unbounded(), |tile| {
             seen.push(tile.x);
             let label = (tile.x / TILE_LEN).to_string();
             vec![hword(&label, tile.x + 10, 40)]
@@ -864,11 +968,34 @@ mod tests {
         assert_eq!("012", text, "a loop that never advances would repeat one region");
     }
 
+    /// M3 / spec D5. The reader clips its own tile's one word (trailing edge
+    /// 510, past tile 1's 496 threshold), so `split_at_clipped` returns 470 -
+    /// the word's leading edge - as the next start, not `tile.x + TILE_LEN`.
+    /// A regression that hardcodes `start += TILE_LEN` passes every other
+    /// test in this file but not this one: it would see tile 2 open at 500.
+    #[test]
+    fn tile_forward_restarts_from_the_clipped_words_own_leading_edge() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut seen_starts = Vec::new();
+        let mut call = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 2, 25, unbounded(), |tile| {
+            seen_starts.push(tile.x);
+            call += 1;
+            if call == 1 {
+                vec![hword("あ", 470, 40)]
+            } else {
+                vec![hword("い", tile.x + 10, 40)]
+            }
+        });
+        assert_eq!(vec![0, 470], seen_starts, "tile 2 must open at the clipped word's own edge");
+        assert_eq!("い", text, "tile 1's clipped word contributes nothing");
+    }
+
     #[test]
     fn tiling_stops_once_max_chars_is_reached() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
         let mut calls = 0;
-        tile_forward(band, 0, Orientation::Horizontal, 5, 2, |tile| {
+        tile_forward(band, 0, Orientation::Horizontal, 5, 2, unbounded(), |tile| {
             calls += 1;
             vec![hword("あ", tile.x + 10, 40), hword("い", tile.x + 60, 40)]
         });
@@ -879,7 +1006,7 @@ mod tests {
     fn tiling_stops_when_a_tile_recognises_nothing() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
         let mut calls = 0;
-        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, |_| {
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, unbounded(), |_| {
             calls += 1;
             Vec::new()
         });
@@ -895,7 +1022,7 @@ mod tests {
     fn tiling_stops_when_the_next_start_does_not_advance() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
         let mut calls = 0;
-        tile_forward(band, 0, Orientation::Horizontal, 100, 25, |tile| {
+        tile_forward(band, 0, Orientation::Horizontal, 100, 25, unbounded(), |tile| {
             calls += 1;
             vec![hword("あ", tile.x, tile.w)]
         });
@@ -906,7 +1033,7 @@ mod tests {
     fn tiling_normalises_across_a_seam() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
         let mut first = true;
-        let text = tile_forward(band, 0, Orientation::Horizontal, 2, 25, |tile| {
+        let text = tile_forward(band, 0, Orientation::Horizontal, 2, 25, unbounded(), |tile| {
             let out = if first {
                 vec![hword("ツ", tile.x + 10, 40)]
             } else {
@@ -916,5 +1043,58 @@ mod tests {
             out
         });
         assert_eq!("ツール", text, "the hyphen after kana normalises across the join");
+    }
+
+    /// I2: a tile that would reach past the monitor is clamped, not left to
+    /// read the pixels beyond it. Bounds end at x=520; tile 2 would
+    /// naturally run to 1000, so it must be handed to `read` already
+    /// shrunk to width 20. The word sits well clear of either tile's own
+    /// trailing edge, so this exercises the clamp itself, not
+    /// `split_at_clipped`'s separate edge-margin behaviour.
+    #[test]
+    fn tiling_clamps_a_tile_that_would_cross_a_monitor_edge() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let bounds = PhysRect { x: 0, y: 0, w: 520, h: 1000 };
+        let mut widths = Vec::new();
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, bounds, |tile| {
+            widths.push(tile.w);
+            vec![hword("あ", tile.x, 10)]
+        });
+        assert_eq!(vec![TILE_LEN, 20], widths, "tile 2 is clamped to what the monitor has left");
+        assert_eq!("ああ", text, "the clamped tile is still read, not skipped");
+    }
+
+    /// I2: once the clamp leaves nothing usable, tiling stops - spec §5's
+    /// "if it clamps to zero extent, stop", exercised through `tile_forward`
+    /// rather than `clamp_tile` directly. Bounds end exactly at start (0),
+    /// so even the first tile clamps to zero width and `read` is never called.
+    #[test]
+    fn tiling_stops_without_reading_when_the_first_tile_clamps_to_nothing() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let bounds = PhysRect { x: -500, y: 0, w: 500, h: 1000 };
+        let mut calls = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, bounds, |_| {
+            calls += 1;
+            Vec::new()
+        });
+        assert_eq!(0, calls, "a tile clamped to zero extent must never be read");
+        assert_eq!("", text);
+    }
+
+    /// I2, vertical orientation: the same clamp applies reading downward,
+    /// against a monitor bottom edge instead of a right edge. As above, the
+    /// word stays clear of each tile's own trailing edge so only the clamp
+    /// is under test.
+    #[test]
+    fn tiling_clamps_a_tile_that_would_cross_a_monitor_edge_for_vertical_text() {
+        let band = PhysRect { x: 90, y: 0, w: 60, h: 40 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1000, h: 520 };
+        let mut heights = Vec::new();
+        let text = tile_forward(band, 0, Orientation::Vertical, 3, 25, bounds, |tile| {
+            heights.push(tile.h);
+            vec![OcrWord { text: "上".into(), rect: PhysRect { x: tile.x, y: tile.y, w: tile.w, h: 10 } }]
+        });
+        assert_eq!(vec![TILE_LEN, 20], heights, "tile 2 is clamped to what the monitor has left");
+        assert_eq!("上上", text);
     }
 }
