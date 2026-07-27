@@ -116,13 +116,13 @@ would overwrite an edit made while it was running.
 cargo test
 ```
 
-103 tests. Plus the dictionary builder, from `tools/build-dict`:
+150 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-39 tests.
+48 tests.
 
 ## Status
 
