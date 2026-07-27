@@ -609,8 +609,8 @@ fn worker_main(
 /// `present::build`, exactly the pipeline the brief specifies.
 ///
 /// `capture_guard`, when `Some`, wraps the capture inside `resolve_at_tiled`
-/// with a hide-before/reshow-after around it (spec §5.1) - `text::ocr`/`text::capture`
-/// stay exactly as M2 left them (spec section 4: "M3 adds no lookup logic"),
+/// with a hide-before/reshow-after around it (spec §5.1) - `text::capture`
+/// stays exactly as M2 left it (spec section 4: "M3 adds no lookup logic"),
 /// so the guard wraps the call from here rather than reaching inside it.
 /// This does mean the popup stays hidden for the OCR recognition step too,
 /// not only the BitBlt itself - a longer hidden window than the minimum
