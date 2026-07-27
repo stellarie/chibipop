@@ -191,9 +191,11 @@ pub const EDGE_MARGIN: i32 = 4;
 /// what turns 通 into 過. Such a word is discarded and its leading edge becomes
 /// the next tile's start, so it is re-read whole.
 ///
-/// Returns the tile's trailing edge when nothing was clipped, and `tile`'s own
-/// leading edge when even the first word was - the caller treats a start that
-/// does not advance as a stop.
+/// Returns the tile's trailing edge when nothing was clipped, and the
+/// clipped word's own leading edge otherwise, so the next tile re-reads
+/// it whole. That edge only equals `tile`'s own start when the clipped
+/// word began there too - the caller still treats a start that does not
+/// advance as a stop.
 pub fn split_at_clipped<'a>(
     words: &'a [OcrWord],
     tile: PhysRect,
@@ -596,6 +598,31 @@ mod tests {
         assert_eq!(500, next);
     }
 
+    /// end=500, threshold=496 (500-4). Landing exactly on the threshold
+    /// must be kept, since `trail > threshold` is false when equal - the
+    /// one fact the fixtures elsewhere in this file never pin, because
+    /// they all clip 10px past `end` rather than 1px past the threshold.
+    #[test]
+    fn trailing_edge_exactly_at_the_margin_boundary_is_kept() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 456, 40)]; // trail = 456+40 = 496
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(1, kept.len(), "496 must not be treated as clipped");
+        assert_eq!(500, next);
+    }
+
+    /// Same tile, same word, one pixel further right: trail becomes 497
+    /// and must flip to discarded. The only difference from the previous
+    /// test is that single pixel.
+    #[test]
+    fn trailing_edge_one_pixel_past_the_margin_boundary_is_discarded() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 457, 40)]; // trail = 457+40 = 497
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert!(kept.is_empty());
+        assert_eq!(457, next, "must return the clipped word's own leading edge");
+    }
+
     /// Spec D3: a tile too narrow to hold one whole word keeps nothing and
     /// returns its own start, which D5's strict-advance rule turns into a stop.
     #[test]
@@ -605,6 +632,20 @@ mod tests {
         let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert!(kept.is_empty());
         assert_eq!(400, next, "must not advance past the tile's own start");
+    }
+
+    /// The general case the doc comment describes: a clipped word does
+    /// not always begin where the tile does, and the returned edge is
+    /// the word's own - here strictly greater than the tile's start,
+    /// unlike the coincidental case above where the two are equal.
+    #[test]
+    fn a_clipped_first_word_starting_mid_tile_returns_its_own_leading_edge() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 200, 400)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert!(kept.is_empty());
+        assert_eq!(200, next);
+        assert!(next > tile.x, "must be the word's edge, not the tile's start");
     }
 
     #[test]
