@@ -605,13 +605,16 @@ In `src/text/ocr.rs`, change the signature at line 96 and store the field:
     pub fn new(max_passes: u8) -> Result<Self> {
 ```
 
-Add `max_passes: u8` to the `OcrTextSource` struct and set it in the constructor's struct literal. Then update the two existing call sites — `src/app.rs:498` becomes:
+Add `max_passes: u8` to the `OcrTextSource` struct and set it in the constructor's struct literal. There are **three** call sites — verify with `grep -rn "OcrTextSource::new()" src/` before and after:
+
+- `src/app.rs:498` becomes:
 
 ```rust
     let ocr = match OcrTextSource::new(cfg.ocr.max_ocr_passes).context("creating the OCR text source") {
 ```
 
-and each `OcrTextSource::new()` in `src/main.rs` becomes `OcrTextSource::new(3)`.
+- `src/main.rs:92` (the `Probe` arm) — takes the `tiles` flag added in Step 4.
+- `src/main.rs:153` (the `Watch` arm) — `OcrTextSource::new(3)`.
 
 - [ ] **Step 2: Add `resolve_at_tiled`**
 
@@ -688,7 +691,11 @@ Add the needed imports to the `use` lines at the top of `ocr.rs`: `band_of`, `ti
 
 - [ ] **Step 3: Point the app and `watch` at the tiled path**
 
-In `src/app.rs`, replace the worker's `resolve_at(` call with `resolve_at_tiled(`. In `src/main.rs`'s `Watch` arm, replace `source.resolve_at(cursor)` with `source.resolve_at_tiled(cursor)`.
+In `src/app.rs`, `resolve_trigger` calls `resolve_at` **twice** — once inside the capture-guard branch (line 620) and once without it (line 624). **Both** become `resolve_at_tiled`. In `src/main.rs`'s `Watch` arm (line 179), replace `source.resolve_at(cursor)` with `source.resolve_at_tiled(cursor)`.
+
+Note the guard's shape is already correct for tiling: `hide_for_capture()` / `restore_after_capture()` bracket the whole resolve, so all of a hover's tiles happen inside **one** hide window rather than flickering per tile. Do not move the guard inside the tiling loop.
+
+**Accepted consequence (user decision, 2026-07-27):** with `exclude_from_capture = false` that single hide window now spans 2-3 captures instead of 1, so the popup's blink on re-resolution gets roughly 3× longer. Accepted as-is rather than capping tiles while recording. Task 6 reports the measured duration as an observation.
 
 Leave `TextSource::at` and `probe`'s `resolve_in_region` on the single-pass path — `probe` is the diagnostic that must still be able to isolate one capture.
 
