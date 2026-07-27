@@ -29,6 +29,11 @@ _DROP_CONTENT = {
     "example-sentence-a", "example-sentence-b",
 }
 
+# Part-of-speech labels are extracted by extract_pos() and shown as
+# their own de-emphasised field, so they must not also be fused into
+# the gloss text ("noun; suru; intransitive; chatting; idle talk").
+_POS_CONTENT = "part-of-speech-info"
+
 # Sentinel marking a block boundary: list items, and any Jitendex node
 # carrying a data.content marker (part-of-speech-info, sense, glossary,
 # xref, forms, ...). _tidy() turns runs of these into "; "-separated
@@ -50,7 +55,7 @@ def _render(node):
         return ""
 
     content_marker = (node.get("data") or {}).get("content")
-    if content_marker in _DROP_CONTENT:
+    if content_marker in _DROP_CONTENT or content_marker == _POS_CONTENT:
         return ""
 
     tag = node.get("tag")
@@ -72,6 +77,42 @@ def _tidy(text):
     text = _WS.sub(" ", text)
     text = "\n".join(line.strip() for line in text.split("\n"))
     return text.strip()
+
+
+def _collect_pos(node, out):
+    """Append part-of-speech labels found under node, in order."""
+    if isinstance(node, list):
+        for child in node:
+            _collect_pos(child, out)
+        return
+    if not isinstance(node, dict):
+        return
+
+    marker = (node.get("data") or {}).get("content")
+    if marker in _DROP_CONTENT:
+        return
+    if marker == _POS_CONTENT:
+        label = _tidy(_render(node.get("content")))
+        if label and label not in out:
+            out.append(label)
+        return
+
+    _collect_pos(node.get("content"), out)
+
+
+def extract_pos(glossary):
+    """Ordered, de-duplicated part-of-speech labels for one sense.
+
+    Jitendex marks these with data.content == "part-of-speech-info"
+    (e.g. "noun", "suru", "intransitive"); 大辞林 carries no such
+    markup and yields []. Labels inside a dropped subtree - an example
+    sentence, an attribution - are not definitions and are ignored.
+    """
+    out = []
+    for item in glossary or []:
+        if isinstance(item, dict):
+            _collect_pos(item, out)
+    return out
 
 
 def flatten_glossary(glossary):

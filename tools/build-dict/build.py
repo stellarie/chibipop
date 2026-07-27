@@ -6,7 +6,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from flatten import flatten_glossary
+from flatten import extract_pos, flatten_glossary
 from freq import lookup_freq, parse_freq_rows
 from schema import create_schema
 from yomitan import iter_freq_rows, iter_terms, read_index
@@ -41,8 +41,10 @@ def build(term_archives, freq_archives, out_path):
             if not glosses:
                 continue
             entry_id += 1
+            # Human-readable labels for display, not t.rules: the
+            # deconjugation filter reads the term.pos column instead.
             senses = [{"glosses": glosses,
-                       "pos": t.rules.split() if t.rules else [],
+                       "pos": extract_pos(t.glossary),
                        "misc": []}]
             entries.append(
                 (entry_id, dict_id, json.dumps(senses, ensure_ascii=False)))
