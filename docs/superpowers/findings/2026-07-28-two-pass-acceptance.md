@@ -241,3 +241,78 @@ round-trip test — not on an end-to-end manual hover, which the screen constrai
   confirmed identical (md5 match) at the end. Not a tracked file; no diff exists to show.
 - No `src/` file was modified. `Cargo.toml` carries a pre-existing uncommitted formatting-only
   diff (multi-line feature list, same features) unrelated to this task, left untouched.
+
+---
+
+## Correction — criterion 2 re-measured after two root-cause fixes
+
+The FAIL recorded above was real, and diagnosing it found **two** defects. Both are now fixed and
+criterion 2 passes. This section supersedes section 2; the original is kept because the failure is
+what led to the fixes.
+
+### Root cause 1 — the band was too thin to recognise anything
+
+`band_of` sized a tile's perpendicular extent at `BAND_FACTOR (2.0) x the hovered word`. For the
+22px glyphs on this line that is a **44px-tall** strip, and Windows' OCR recognises *nothing at all*
+that thin. Every tile after the first returned no words, so tiling stopped after one tile — exactly
+the 17-character ceiling section 2 measured.
+
+Same 500px-wide strip of the same screen text, height varied:
+
+```
+500x44  -> no lines recognised     <- what BAND_FACTOR=2.0 produced here
+500x60  -> no lines recognised
+500x66  -> "想だな」"
+500x100 -> "想だな」"
+500x130 -> "想だな」"
+```
+
+Threshold sits between **60 and 66px** for 22-26px glyphs. Fixed by raising `BAND_FACTOR` to 3.0 and
+flooring the band at `REGION_H` (100) — the height pass 1 already uses successfully, so a tile is
+never thinner than a capture known to work.
+
+### Root cause 2 — the taller band swallowed furigana
+
+Making the band tall enough to recognise text also made it tall enough to contain the **ruby
+annotations above the kanji**. Windows' OCR correctly reported those as a separate line, but
+`words_in` flattened *every* line into one word list, splicing the ruby into the sentence:
+
+```
+ocr line 0: "かわい"                                <- furigana, y=1345..1356, glyph height ~11
+ocr line 1: "に寂しくて参るだろうよ。若いのに可哀"   <- the real line, y=1359..1385, height ~22-26
+```
+
+Symptom: `...若いのに可かわ辰想だな」` against a truth of `...若いのに可哀想だな」`.
+
+Fixed by selecting the OCR line whose perpendicular centre is nearest the hovered word's, rather
+than flattening all of them. This uses the recognizer's own line grouping, so it introduces no new
+tuned constant and stays correct if ruby sits below rather than above.
+
+### Criterion 2 re-measured — PASS
+
+Anchor A (2885,1372), 22 characters physically available forward:
+
+```
+tiles=1 -> こんなところ、今に寂しくて参るだろこ     (10 forward, last one wrong: こ for う)
+tiles=2 -> "に寂しくて参るだろうよ。若いのに可かわ"   (19)   [before the furigana fix]
+tiles=3 -> "に寂しくて参るだろうよ。若いのに可辰想だな」"  (22)
+```
+
+**10 -> 22 forward characters, criterion >= 20 met**, and the count now equals the line's full
+remaining length, so the feature is no longer the limiting factor.
+
+**Residual, not hidden:** `哀` still reads as `辰`. That is a Windows OCR glyph misread present in
+the pre-fix output too — independent of tiling, and not something this feature can address.
+
+### Criterion 3 re-measured after the band grew
+
+A 100px band is more pixels per tile than 44px, so latency was re-checked. Five runs each:
+
+```
+tiles=1  1618 1696 1801 1662 1810   median 1696ms
+tiles=3  1792 1672 1849 1706 1749   median 1749ms
+```
+
+**Delta +53ms**, against a +150ms budget — still PASS, and consistent with the +37ms measured
+earlier. The absolute figures are far above the earlier 108/145ms because the machine was under
+heavy load when these ran; only the delta is meaningful, which is why it is the criterion.
