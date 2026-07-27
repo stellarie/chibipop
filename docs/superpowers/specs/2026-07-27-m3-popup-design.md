@@ -201,6 +201,9 @@ font = "Yu Gothic UI"
 
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]
+
+[ocr]
+max_ocr_passes = 3      # 1 disables forward tiling - see the two-pass spec
 ```
 
 ## 5. Capture exclusion — measured, not assumed

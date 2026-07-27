@@ -28,6 +28,8 @@ pub struct Config {
     pub trigger: TriggerConfig,
     pub popup: PopupConfig,
     pub dictionaries: DictionariesConfig,
+    #[serde(default)]
+    pub ocr: OcrConfig,
 }
 
 /// `[trigger]`.
@@ -92,6 +94,35 @@ pub struct DictionariesConfig {
     pub display_order: Vec<String>,
 }
 
+/// `[ocr]`. Carries `#[serde(default)]` at the `Config` level so a file
+/// written before this section existed still loads - see `load_or_create`,
+/// which treats malformed TOML as a hard error rather than falling back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OcrConfig {
+    /// Total OCR captures per hover: one to locate the hovered word, the
+    /// rest to read forward from it.
+    ///
+    /// **`1` disables tiling entirely** and restores the single-capture
+    /// behaviour that shipped before two-pass. That is the point of the
+    /// setting: `TILE_LEN` was derived from one game at one text size, so if
+    /// tiling misbehaves elsewhere this reverts to known-good with one line
+    /// and no rebuild. Capping the work is the secondary benefit - the
+    /// tiling loop already stops at 25 characters on its own, so this rarely
+    /// binds.
+    #[serde(default = "default_max_ocr_passes")]
+    pub max_ocr_passes: u8,
+}
+
+fn default_max_ocr_passes() -> u8 {
+    3
+}
+
+impl Default for OcrConfig {
+    fn default() -> OcrConfig {
+        OcrConfig { max_ocr_passes: default_max_ocr_passes() }
+    }
+}
+
 impl Default for Config {
     /// Spec §4.3's shipped defaults, verbatim.
     fn default() -> Config {
@@ -107,6 +138,7 @@ impl Default for Config {
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
             },
+            ocr: OcrConfig::default(),
         }
     }
 }
@@ -220,6 +252,41 @@ mod tests {
         let err = load_or_create(&p).expect_err("must not silently fall back to defaults");
         let msg = format!("{err:#}");
         assert!(msg.contains("chibipop_cfg_"), "error must name the file, got: {msg}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn ocr_passes_defaults_to_three() {
+        assert_eq!(3, Config::default().ocr.max_ocr_passes);
+    }
+
+    /// The kill switch (spec D6): one pass is today's known-good single
+    /// capture, reachable by editing one line with no rebuild.
+    #[test]
+    fn a_single_pass_round_trips() {
+        let p = tmp("onepass");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.ocr.max_ocr_passes = 1;
+        c.save(&p).unwrap();
+        assert_eq!(1, load_or_create(&p).unwrap().ocr.max_ocr_passes);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Every config file written before this feature existed lacks an [ocr]
+    /// section. Without serde(default) they stop loading and chibipop refuses
+    /// to start, because malformed TOML is deliberately a hard error here.
+    #[test]
+    fn a_config_written_before_the_ocr_section_existed_still_loads() {
+        let p = tmp("no_ocr_section");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-[ocr] config must still load");
+        assert_eq!(3, c.ocr.max_ocr_passes, "missing section takes the default");
         let _ = std::fs::remove_file(&p);
     }
 }

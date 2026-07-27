@@ -87,6 +87,9 @@ font = "Yu Gothic UI"
 
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
+
+[ocr]
+max_ocr_passes = 3      # 1 disables forward tiling - see the two-pass spec
 ```
 
 **`exclude_from_capture`** is **off by default**, so the popup records normally.
@@ -96,6 +99,12 @@ plainly visible on your own display. Either way chibipop hides the popup around
 its own OCR captures, so it never reads its own rendered text back into the
 next lookup. Exclusion was the original default; measured in real use the
 hide/reshow guard costs no noticeable lookup latency, so being recordable won.
+
+**`max_ocr_passes`** is how many screen captures each hover costs: one to find
+the word under the cursor, the rest to read forward from it. Set it to `1` to
+turn forward tiling off entirely and get the older, shorter-reaching behaviour
+back — useful if OCR misbehaves on content very different from what the tile
+width was tuned against.
 
 The setting is read **once at startup** — edit the file with chibipop stopped,
 since switching mode from the tray rewrites the whole file from memory and
