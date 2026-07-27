@@ -302,7 +302,7 @@ Add the struct next to the other section structs:
 /// `[debug]`. Carries `#[serde(default)]` at the `Config` level so a file
 /// written before this section existed still loads - `load_or_create` treats
 /// malformed TOML as a hard error rather than falling back.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
     /// Draw a faint outline around every region a hover captured: pass 1's
     /// box, each forward tile, and the resolved word's anchor.
@@ -312,13 +312,11 @@ pub struct DebugConfig {
     #[serde(default)]
     pub show_scan_region: bool,
 }
-
-impl Default for DebugConfig {
-    fn default() -> DebugConfig {
-        DebugConfig { show_scan_region: false }
-    }
-}
 ```
+
+`#[derive(Default)]` is correct here and no hand-written impl is needed: the default is `false`, which
+is already `bool`'s. This differs from `OcrConfig`, which needs a hand-written default because its
+value is `3` rather than `u8`'s `0` — do not copy that pattern here.
 
 Add to `impl Default for Config`, after `ocr`:
 
