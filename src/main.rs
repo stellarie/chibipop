@@ -33,6 +33,13 @@ enum Command {
         #[arg(long, default_value = "data/deconjugator.json")]
         rules: PathBuf,
     },
+    /// Follow the cursor and print a lookup whenever the hovered word changes.
+    Watch {
+        #[arg(long, default_value = "data/chibipop.sqlite")]
+        dict: PathBuf,
+        #[arg(long, default_value = "data/deconjugator.json")]
+        rules: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -88,6 +95,54 @@ fn main() -> Result<()> {
                 }
             }
             Ok(())
+        }
+        Command::Watch { dict, rules } => {
+            let source = chibipop::text::ocr::OcrTextSource::new()?;
+            let dictionary = SqliteDictionary::open(&dict)?;
+            let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
+
+            println!("watching - hover over Japanese text. Ctrl-C to stop.\n");
+
+            let mut last_pos: Option<chibipop::geom::PhysPoint> = None;
+            let mut last_key: Option<(String, usize)> = None;
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(125));
+
+                let cursor = match source.cursor() {
+                    Ok(c) => c,
+                    Err(e) => { eprintln!("cursor: {e}"); continue; }
+                };
+
+                // Skip the work entirely unless the pointer actually moved.
+                if let Some(prev) = last_pos {
+                    if (cursor.x - prev.x).abs() <= 4 && (cursor.y - prev.y).abs() <= 4 {
+                        continue;
+                    }
+                }
+                last_pos = Some(cursor);
+
+                // One bad frame must not end the session.
+                let resolved = match source.resolve_at(cursor) {
+                    Ok(r) => r,
+                    Err(e) => { eprintln!("resolve: {e}"); continue; }
+                };
+                let Some(r) = resolved else { continue };
+
+                let key = (r.span.text.clone(), r.span.cursor_byte_offset);
+                if last_key.as_ref() == Some(&key) {
+                    continue;
+                }
+                last_key = Some(key);
+
+                let ch = r.span.text[r.span.cursor_byte_offset..].chars().next();
+                println!("── ({}, {})  {:?}  {:?}", cursor.x, cursor.y, r.orientation, ch);
+                match engine.run(&dictionary, &r.span.text[r.span.cursor_byte_offset..]) {
+                    Ok(hits) => print_hits(&hits),
+                    Err(e) => eprintln!("lookup: {e}"),
+                }
+                println!();
+            }
         }
     }
 }
