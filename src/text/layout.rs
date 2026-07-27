@@ -179,6 +179,44 @@ pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32
     }
 }
 
+/// How close a word's trailing edge may come to a tile's trailing edge before
+/// it is treated as possibly clipped.
+pub const EDGE_MARGIN: i32 = 4;
+
+/// Split a tile's words into those safely inside it and the start of the next
+/// tile (spec D3).
+///
+/// A word whose trailing edge lies within [`EDGE_MARGIN`] of the tile's own
+/// trailing edge may have been cut by the capture boundary, and a cut glyph is
+/// what turns 通 into 過. Such a word is discarded and its leading edge becomes
+/// the next tile's start, so it is re-read whole.
+///
+/// Returns the tile's trailing edge when nothing was clipped, and `tile`'s own
+/// leading edge when even the first word was - the caller treats a start that
+/// does not advance as a stop.
+pub fn split_at_clipped<'a>(
+    words: &'a [OcrWord],
+    tile: PhysRect,
+    orientation: Orientation,
+) -> (Vec<&'a OcrWord>, i32) {
+    let (end, lead, trail): (i32, fn(&PhysRect) -> i32, fn(&PhysRect) -> i32) = match orientation {
+        Orientation::Horizontal => (tile.x + tile.w, |r| r.x, |r| r.x + r.w),
+        Orientation::Vertical => (tile.y + tile.h, |r| r.y, |r| r.y + r.h),
+    };
+
+    let mut ordered: Vec<&OcrWord> = words.iter().collect();
+    ordered.sort_by_key(|word| lead(&word.rect));
+
+    let mut kept = Vec::new();
+    for word in ordered {
+        if trail(&word.rect) > end - EDGE_MARGIN {
+            return (kept, lead(&word.rect));
+        }
+        kept.push(word);
+    }
+    (kept, end)
+}
+
 pub fn region_around(cursor: PhysPoint) -> PhysRect {
     PhysRect {
         x: cursor.x - REGION_W / 2,
@@ -534,5 +572,59 @@ mod tests {
 
         let v = tile_after(band, 500, Orientation::Vertical, TILE_LEN);
         assert_eq!(PhysRect { x: 100, y: 500, w: 40, h: TILE_LEN }, v);
+    }
+
+    fn hword(text: &str, x: i32, width: i32) -> OcrWord {
+        OcrWord { text: text.to_string(), rect: PhysRect { x, y: 100, w: width, h: 40 } }
+    }
+
+    #[test]
+    fn a_word_touching_the_trailing_edge_is_dropped_and_becomes_the_next_start() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 10, 40), hword("い", 60, 40), hword("う", 470, 40)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
+        assert_eq!(470, next, "the clipped word's leading edge starts the next tile");
+    }
+
+    #[test]
+    fn with_nothing_clipped_the_next_start_is_the_tiles_own_edge() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 10, 40), hword("い", 60, 40)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(2, kept.len());
+        assert_eq!(500, next);
+    }
+
+    /// Spec D3: a tile too narrow to hold one whole word keeps nothing and
+    /// returns its own start, which D5's strict-advance rule turns into a stop.
+    #[test]
+    fn a_first_word_already_clipped_keeps_nothing_and_does_not_advance() {
+        let tile = PhysRect { x: 400, y: 90, w: 100, h: 60 };
+        let words = vec![hword("あ", 400, 120)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert!(kept.is_empty());
+        assert_eq!(400, next, "must not advance past the tile's own start");
+    }
+
+    #[test]
+    fn the_split_reads_top_to_bottom_for_vertical_text() {
+        let tile = PhysRect { x: 90, y: 0, w: 60, h: 500 };
+        let words = vec![
+            OcrWord { text: "上".into(), rect: PhysRect { x: 100, y: 10, w: 40, h: 40 } },
+            OcrWord { text: "下".into(), rect: PhysRect { x: 100, y: 470, w: 40, h: 40 } },
+        ];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Vertical);
+        assert_eq!(vec!["上"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
+        assert_eq!(470, next);
+    }
+
+    /// OCR does not promise reading order, so the split must not rely on it.
+    #[test]
+    fn words_arriving_out_of_order_are_sorted_before_splitting() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("い", 60, 40), hword("あ", 10, 40)];
+        let (kept, _) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
     }
 }
