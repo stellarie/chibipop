@@ -223,8 +223,11 @@ pub fn split_at_clipped<'a>(
 ///
 /// `read` performs one capture-and-recognise for a tile and returns its words
 /// in virtual-desktop coordinates; injecting it keeps this loop testable with
-/// no screen. Stops on any of: `max_chars` reached, a tile recognising
-/// nothing, a start that does not advance (spec D5), or `max_tiles`.
+/// no screen. The `for _ in 0..max_tiles` bound is what guarantees this loop
+/// ends; the other stops - `max_chars` reached, a tile recognising nothing,
+/// or a start that does not advance (spec D5) - just end it early, saving up
+/// to `max_tiles` real OCR round-trips (each one a screen capture) once a
+/// tile can no longer make progress.
 ///
 /// The result is normalised once at the end rather than per tile, so a
 /// sequence split across a seam still normalises as one string.
@@ -724,6 +727,19 @@ mod tests {
         });
         assert_eq!(3, calls, "runs up to max_tiles");
         assert_eq!("あいあいあい", text);
+    }
+
+    #[test]
+    fn each_tile_reads_the_region_after_the_last_one() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut seen = Vec::new();
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, |tile| {
+            seen.push(tile.x);
+            let label = (tile.x / TILE_LEN).to_string();
+            vec![hword(&label, tile.x + 10, 40)]
+        });
+        assert_eq!(vec![0, TILE_LEN, TILE_LEN * 2], seen, "each tile starts where the last ended");
+        assert_eq!("012", text, "a loop that never advances would repeat one region");
     }
 
     #[test]
