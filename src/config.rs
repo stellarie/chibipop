@@ -54,6 +54,23 @@ pub struct PopupConfig {
     /// with `ui::theme`, since that module stays Windows-adjacent-free but
     /// otherwise independent of `config.rs`.
     pub theme: String,
+    /// Whether the popup asks the OS to exclude it from screen captures
+    /// (`WDA_EXCLUDEFROMCAPTURE` - spec §5). Defaults `true` so ordinary
+    /// reading is unaffected: M2 captures a region around the cursor on
+    /// every hover, and an unexcluded popup photographs its own rendered
+    /// text back into the next lookup unless something else guards it (see
+    /// `app.rs`'s capture guard).
+    ///
+    /// Set `false` to opt out (spec §5.1) when the user wants to
+    /// screen-record, screenshot, or screen-share the popup - exclusion
+    /// hides it from *every* capture API, not just chibipop's own, so this
+    /// is the only way to make the popup's rendered text visible to
+    /// anything other than the user's own eyes. Costs a brief hide/reshow
+    /// flicker on every re-resolution while it is `false` - never a silent
+    /// skip of the guard, which is why `Popup::create` takes this as a
+    /// plain `bool` rather than the caller deciding whether to call
+    /// `SetWindowDisplayAffinity` at all.
+    pub exclude_from_capture: bool,
     /// Popup height cap, as a percentage of the current monitor's height
     /// (spec M3-D4). 0-100 fits comfortably in a `u8`.
     pub max_height_percent: u8,
@@ -80,6 +97,7 @@ impl Default for Config {
             trigger: TriggerConfig { mode: TriggerMode::Live },
             popup: PopupConfig {
                 theme: "dark".to_string(),
+                exclude_from_capture: true,
                 max_height_percent: 45,
                 summary_chars: 40,
                 font: "Yu Gothic UI".to_string(),
@@ -151,6 +169,22 @@ mod tests {
         assert_eq!("Yu Gothic UI", c.popup.font);
         assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()],
                    c.dictionaries.display_order);
+    }
+
+    /// Spec §5.1: exclusion opts *out*, so ordinary reading must be
+    /// unaffected by default - a future change that flips this default
+    /// would silently turn every fresh install into "the popup is
+    /// recordable, at the cost of a flicker on every hover", which is
+    /// exactly backwards from the opt-in this was designed to be. Kept as
+    /// its own test (not folded into `defaults_match_the_spec`) so that
+    /// exact regression fails with its own name, not a generic multi-field
+    /// assertion.
+    #[test]
+    fn capture_exclusion_defaults_to_true() {
+        assert!(
+            Config::default().popup.exclude_from_capture,
+            "capture exclusion must default on - it is an opt-out (spec section 5.1), not an opt-in"
+        );
     }
 
     #[test]

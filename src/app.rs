@@ -52,7 +52,7 @@ use crate::text::ocr::OcrTextSource;
 use crate::ui::render::Renderer;
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
-use crate::ui::window::Popup;
+use crate::ui::window::{CaptureExclusion, Popup};
 use anyhow::{Context, Result};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -60,6 +60,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -74,6 +75,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// application messages (winuser.h). The worker posts this after pushing a
 /// result, so the main thread's message loop knows to check `result_rx`.
 const WM_APP_RESULT: u32 = WM_APP + 1;
+
+/// `WM_APP + 2` is already `ui::tray`'s `WM_TRAYICON`. The worker posts this
+/// to wake the main thread's `GetMessageW` loop whenever it queues a
+/// `CaptureGuardMsg` - see `CaptureGuard`.
+const WM_APP_CAPTURE_GUARD: u32 = WM_APP + 3;
+
+/// How long `CaptureGuard::hide_for_capture` waits for the main thread to
+/// confirm the popup is hidden before giving up and capturing anyway.
+/// Generous relative to the sub-millisecond cost of `ShowWindow` itself -
+/// this only matters if the main thread is unusually busy (or, at shutdown,
+/// briefly not pumping at all; `run`'s shutdown sequence pumps
+/// `capture_guard_rx` specifically to avoid ever needing this backstop, so
+/// it firing in practice would itself be worth investigating, not just
+/// silently tolerating).
+const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How often the main thread checks `Hooks::take_pending()`. `take_pending`
 /// is a single atomic swap - cheap even when nothing is pending - so polling
@@ -126,6 +142,79 @@ enum WorkerOutcome {
     Ready { presentation: Presentation, anchor: PhysRect },
 }
 
+/// A request from the worker thread to the main thread, guarding one
+/// capture against the popup's own pixels landing in it (spec §5.1). Only
+/// ever sent when `Popup::capture_exclusion().needs_capture_guard()` is
+/// true - seeing `Excluded` from the OS means M3-D7 already keeps the
+/// popup out of every capture, and this whole dance is unnecessary
+/// overhead on the default, overwhelmingly common path.
+///
+/// The `Popup` these act on lives on the main thread (created in `run`,
+/// HWND-affine); the worker thread only ever reaches it through this
+/// channel plus a `PostThreadMessageW` wake-up, never directly - see
+/// `CaptureGuard` and the module docs' thread-ownership section.
+enum CaptureGuardMsg {
+    /// Hide the popup now; reply on `ack` once done, so the worker can be
+    /// certain the popup is actually off-screen before it captures. Carries
+    /// no position or content - `Popup::hide()` needs none.
+    Hide { ack: mpsc::Sender<()> },
+    /// Undo the most recent `Hide` - re-show the popup, but only if it was
+    /// actually visible immediately beforehand (`run` remembers that in
+    /// `capture_guard_prev_visible`, since this message carries nothing to
+    /// decide it by). Fire-and-forget: nothing downstream waits for this to
+    /// complete, since the capture it was guarding has already finished by
+    /// the time it is sent.
+    Restore,
+}
+
+/// The worker thread's handle onto the capture guard - `resolve_trigger`
+/// holds `Option<&CaptureGuard>`, `None` whenever exclusion is already
+/// active, so the default path sends no message, posts no thread message,
+/// and waits on nothing at all.
+struct CaptureGuard {
+    main_tid: u32,
+    request_tx: mpsc::Sender<CaptureGuardMsg>,
+}
+
+impl CaptureGuard {
+    /// Blocks until the main thread confirms the popup is hidden, or until
+    /// `ACK_TIMEOUT` elapses. The timeout exists purely as a backstop against
+    /// the unforeseen - the ordinary case is a round trip through a main
+    /// thread that is almost always idle inside `GetMessageW` - and giving up
+    /// means capturing anyway rather than hanging the worker (and, by
+    /// extension, every future hover) forever.
+    fn hide_for_capture(&self) {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if self.request_tx.send(CaptureGuardMsg::Hide { ack: ack_tx }).is_err() {
+            return; // main thread gone - nothing left to hide.
+        }
+        self.wake_main_thread();
+        if ack_rx.recv_timeout(ACK_TIMEOUT).is_err() {
+            eprintln!(
+                "chibipop: capture guard: hide was not acknowledged within {ACK_TIMEOUT:?}; \
+                 capturing anyway - this capture may include the popup itself"
+            );
+        }
+    }
+
+    /// Undoes `hide_for_capture`. Fire-and-forget - see `CaptureGuardMsg::Restore`.
+    fn restore_after_capture(&self) {
+        let _ = self.request_tx.send(CaptureGuardMsg::Restore);
+        self.wake_main_thread();
+    }
+
+    /// `PostThreadMessageW`, not `PostMessageW`: this targets the main
+    /// thread's queue directly (hwnd = NULL in the posted message, exactly
+    /// like `WM_APP_RESULT` below), not any particular window. The main
+    /// loop's `GetMessageW(&mut msg, None, 0, 0)` picks up thread messages
+    /// and window messages alike.
+    fn wake_main_thread(&self) {
+        unsafe {
+            let _ = PostThreadMessageW(self.main_tid, WM_APP_CAPTURE_GUARD, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// Runs the popup application until the user quits. Installs the hooks,
 /// creates the popup window and the tray icon, and pumps messages on this
 /// (the calling) thread; spawns one worker thread for OCR/lookup/present.
@@ -142,12 +231,23 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     let (startup_tx, startup_rx) = mpsc::channel::<Result<()>>();
+    // Starts `false` regardless of `cfg.popup.exclude_from_capture`: this
+    // thread cannot yet know whether the OS actually accepted
+    // `WDA_EXCLUDEFROMCAPTURE` (or whether it was even asked to) until
+    // `Popup::create` runs below, which - per contract 3 - cannot happen
+    // until *after* the worker thread has completed its own DPI-awareness
+    // setup. Read fresh by the worker on every trigger (never cached), so
+    // there is no ordering requirement between that later `.store()` and
+    // whichever trigger happens to be first - see `worker_main`.
+    let capture_guard_active = Arc::new(AtomicBool::new(false));
+    let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
 
     // Safety: FFI call with no preconditions - always succeeds, returns the
     // id of whichever thread calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();
     let worker_running = Arc::clone(&running);
+    let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
     let worker_handle = thread::spawn(move || {
         worker_main(
@@ -159,6 +259,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             result_tx,
             worker_running,
             startup_tx,
+            worker_capture_guard_active,
+            capture_guard_tx,
         );
     });
 
@@ -173,23 +275,41 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         .recv()
         .context("worker thread ended before completing startup")??;
 
-    let popup = Popup::create().context("creating the popup window")?;
+    let popup = Popup::create(cfg.popup.exclude_from_capture).context("creating the popup window")?;
 
-    // Contract 2: a false here must be loud. Silence is how the popup starts
-    // photographing itself on every hover and feeding its own rendered text
-    // back into the next OCR lookup.
-    if popup.capture_excluded() {
-        println!(
-            "chibipop: capture exclusion active - the popup will not appear in its own OCR captures"
-        );
-    } else {
-        eprintln!("chibipop: ============================================================");
-        eprintln!("chibipop: WARNING: capture exclusion is NOT active for the popup window.");
-        eprintln!("chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted.");
-        eprintln!("chibipop: Every hover will now photograph the popup itself and feed its own");
-        eprintln!("chibipop: rendered text back into the next OCR lookup. This is a real defect");
-        eprintln!("chibipop: - do not trust lookup results until it is fixed.");
-        eprintln!("chibipop: ============================================================");
+    // Contract 2: anything other than clean exclusion must be loud - and the
+    // two ways to land there (asked-and-refused vs. deliberately-off) must
+    // stay distinguishable here, or a genuine OS-level failure gets read as
+    // an intentional setting (or vice versa). Both still need the capture
+    // guard below - `needs_capture_guard` does not distinguish them, only
+    // this report does.
+    match popup.capture_exclusion() {
+        CaptureExclusion::Excluded => {
+            println!(
+                "chibipop: capture exclusion active - the popup will not appear in its own OCR captures"
+            );
+        }
+        CaptureExclusion::DeliberatelyNotExcluded => {
+            println!("chibipop: capture exclusion disabled (exclude_from_capture = false in the config)");
+            println!("chibipop: the popup IS recordable now - each capture briefly hides and reshows it,");
+            println!("chibipop: so hovering keeps resolving the real text underneath, not its own");
+        }
+        CaptureExclusion::AttemptFailed => {
+            eprintln!("chibipop: ============================================================");
+            eprintln!("chibipop: WARNING: capture exclusion is NOT active for the popup window.");
+            eprintln!("chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,");
+            eprintln!("chibipop: even though exclude_from_capture = true. This was NOT requested.");
+            eprintln!("chibipop: The capture guard below will still hide/reshow the popup around");
+            eprintln!("chibipop: every capture, so lookups stay correct, at the cost of a flicker");
+            eprintln!("chibipop: this build did not expect to pay. Investigate why the OS refused.");
+            eprintln!("chibipop: ============================================================");
+        }
+    }
+    // The default, overwhelmingly common path (exclusion genuinely active)
+    // leaves this `false`: M3-D7 depends on the guard never running at all
+    // then, or "no flicker while reading" would be false too.
+    if popup.capture_exclusion().needs_capture_guard() {
+        capture_guard_active.store(true, Ordering::SeqCst);
     }
 
     let mut renderer =
@@ -221,6 +341,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
     let mut next_id: u64 = 0;
     let mut latest_dispatched = RequestId(0);
+    // Whether the popup was visible immediately before the most recent
+    // `CaptureGuardMsg::Hide` - the one piece of state that message cannot
+    // carry itself (see its doc comment), and the thing that keeps
+    // `Restore` from forcing the popup to appear when it was rightfully
+    // hidden already (e.g. the cursor is over non-text and nothing is
+    // showing).
+    let mut capture_guard_prev_visible = false;
     let mut msg = MSG::default();
 
     loop {
@@ -262,6 +389,28 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     );
                 }
             }
+        } else if msg.message == WM_APP_CAPTURE_GUARD {
+            // Drain everything queued right now rather than one-per-wakeup:
+            // harmless even though the worker only ever has one request
+            // outstanding at a time (it blocks on `Hide`'s ack before doing
+            // anything else, and only ever processes one trigger at once -
+            // see `worker_main`), and it means a burst can never pile up
+            // behind a slow main thread the way it could if this only ever
+            // handled a single message per wakeup.
+            while let Ok(req) = capture_guard_rx.try_recv() {
+                match req {
+                    CaptureGuardMsg::Hide { ack } => {
+                        capture_guard_prev_visible = popup.is_visible();
+                        let _ = popup.hide();
+                        let _ = ack.send(());
+                    }
+                    CaptureGuardMsg::Restore => {
+                        if capture_guard_prev_visible {
+                            let _ = popup.show_without_activating();
+                        }
+                    }
+                }
+            }
         } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam) {
             match cmd {
                 TrayCommand::SetMode(mode) => {
@@ -298,7 +447,32 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     }
     running.store(false, Ordering::SeqCst); // 1. clear the run flag
     drop(trigger_tx); // 2. drop the sender - worker's recv() unblocks with Err and exits
-    let _ = worker_handle.join(); // wait for the worker to actually finish before tearing down further
+
+    // The worker may right now be blocked inside `CaptureGuard::hide_for_capture`,
+    // waiting for this thread to service a `Hide` - but this thread has
+    // already left the `GetMessageW` loop above (that is what ended it), so
+    // a bare `worker_handle.join()` here would deadlock: nothing would ever
+    // answer that `Hide`, and nothing would ever unblock this join. Keep
+    // draining `capture_guard_rx` - answering `Hide` so the worker can
+    // finish its current capture, discarding `Restore` since a popup about
+    // to be destroyed has nothing worth restoring to - until the worker
+    // actually finishes. `is_finished` is a non-blocking poll, not a wait,
+    // so this loop is what does the waiting; `hide_for_capture`'s own
+    // `ACK_TIMEOUT` is a second, independent backstop, not relied on here.
+    while !worker_handle.is_finished() {
+        while let Ok(req) = capture_guard_rx.try_recv() {
+            match req {
+                CaptureGuardMsg::Hide { ack } => {
+                    let _ = popup.hide();
+                    let _ = ack.send(());
+                }
+                CaptureGuardMsg::Restore => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    let _ = worker_handle.join(); // now instant: the worker has already finished.
+
     drop(hooks); // 3. drop Hooks - unhooks both WH_MOUSE_LL and WH_KEYBOARD_LL
     drop(tray); // 4. drop Tray - removes the notification-area icon and its owner window
 
@@ -318,6 +492,8 @@ fn worker_main(
     result_tx: mpsc::Sender<WorkerResult>,
     running: Arc<AtomicBool>,
     startup_tx: mpsc::Sender<Result<()>>,
+    capture_guard_active: Arc<AtomicBool>,
+    capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
     let ocr = match OcrTextSource::new().context("creating the OCR text source") {
         Ok(o) => o,
@@ -357,6 +533,11 @@ fn worker_main(
         }
     };
 
+    // Built once and reused for every trigger below, same as `engine`/`dicts`
+    // above - cheap regardless (a `u32` and a channel `Sender`), but there is
+    // also no reason to rebuild it per hover.
+    let capture_guard = CaptureGuard { main_tid, request_tx: capture_guard_tx };
+
     if startup_tx.send(Ok(())).is_err() {
         return; // main thread gave up waiting; nothing left to do.
     }
@@ -376,17 +557,31 @@ fn worker_main(
             break;
         }
 
+        // Read fresh every trigger rather than once at the top of this
+        // function: cheap (one atomic load), and it removes any need to
+        // reason about exactly when `run` finishes setting this relative to
+        // when the first trigger could possibly arrive - see this flag's
+        // own doc comment in `run`.
+        let guard = if capture_guard_active.load(Ordering::SeqCst) {
+            Some(&capture_guard)
+        } else {
+            None
+        };
+
         // One bad frame must not end the session - the same discipline
         // main.rs's `watch` command already applies per-iteration, extended
         // here to a real panic (not just a returned Err) so a single
         // unexpected failure can't silently kill hovering for the rest of
-        // the run. AssertUnwindSafe: none of ocr/dict/engine/dicts retain
-        // any externally-observable partial-mutation state across a panic
-        // inside resolve_trigger - each is only ever used through shared,
-        // read-style calls (resolve_at, run) - so there is nothing for a
-        // caught panic to leave torn.
+        // the run. AssertUnwindSafe: none of ocr/dict/engine/dicts/guard
+        // retain any externally-observable partial-mutation state across a
+        // panic inside resolve_trigger - each is only ever used through
+        // shared, read-style calls (resolve_at, run, hide_for_capture /
+        // restore_after_capture, both of which only ever send on an mpsc
+        // `Sender` - never poisoned by a panicking receiver the way a
+        // `Mutex` would be) - so there is nothing for a caught panic to
+        // leave torn.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            resolve_trigger(&ocr, &dict, &engine, &dicts, &present_cfg, trigger.cursor)
+            resolve_trigger(&ocr, &dict, &engine, &dicts, &present_cfg, trigger.cursor, guard)
         }))
         .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
 
@@ -401,6 +596,15 @@ fn worker_main(
 
 /// One hover's worth of work: `OcrTextSource::resolve_at` -> lookup ->
 /// `present::build`, exactly the pipeline the brief specifies.
+///
+/// `capture_guard`, when `Some`, wraps the capture inside `resolve_at` with a
+/// hide-before/reshow-after around it (spec §5.1) - `text::ocr`/`text::capture`
+/// stay exactly as M2 left them (spec section 4: "M3 adds no lookup logic"),
+/// so the guard wraps the call from here rather than reaching inside it.
+/// This does mean the popup stays hidden for the OCR recognition step too,
+/// not only the BitBlt itself - a longer hidden window than the minimum
+/// that correctness requires, traded deliberately for not touching M2 at
+/// all; see the task report.
 fn resolve_trigger(
     ocr: &OcrTextSource,
     dict: &SqliteDictionary,
@@ -408,8 +612,18 @@ fn resolve_trigger(
     dicts: &[DictInfo],
     present_cfg: &PresentConfig,
     cursor: PhysPoint,
+    capture_guard: Option<&CaptureGuard>,
 ) -> WorkerOutcome {
-    let resolved = match ocr.resolve_at(cursor) {
+    let raw = match capture_guard {
+        Some(guard) => {
+            guard.hide_for_capture();
+            let r = ocr.resolve_at(cursor);
+            guard.restore_after_capture();
+            r
+        }
+        None => ocr.resolve_at(cursor),
+    };
+    let resolved = match raw {
         Ok(Some(r)) => r,
         Ok(None) => return WorkerOutcome::Hide,
         Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
