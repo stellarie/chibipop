@@ -90,6 +90,9 @@ display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in pr
 
 [ocr]
 max_ocr_passes = 3      # 1 disables forward tiling - see the two-pass spec
+
+[debug]
+show_scan_region = false   # outline what each hover captured - see the scan-overlay spec
 ```
 
 **`exclude_from_capture`** is **off by default**, so the popup records normally.
@@ -109,6 +112,12 @@ width was tuned against.
 The setting is read **once at startup** — edit the file with chibipop stopped,
 since switching mode from the tray rewrites the whole file from memory and
 would overwrite an edit made while it was running.
+
+**`show_scan_region`** draws a faint outline around every region a hover
+captured — pass 1's box, each forward tile, and the word it resolved. It is a
+debugging aid: turn it on when OCR is behaving oddly and you want to see what
+it actually looked at rather than infer it. `probe --show-region` shows the
+same outlines for a single coordinate without running the app.
 
 ## Tests
 
