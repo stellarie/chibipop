@@ -37,6 +37,7 @@ an event-driven main thread with **one** worker and staleness resolved by a mono
 | M3-D3 | **Two trigger modes: always-live and hold-Shift**, switchable from the tray | Always-live is what M2's `watch` proved pleasant for sustained reading. Hold-Shift is what stops a popup appearing while writing code. Neither is right for every session, so it is a mode, not a default. |
 | M3-D4 | **Cap the popup at 45% of monitor height and truncate with a visible marker; no scrolling** | weikipop's wiki records popup scrolling as a bug source: scroll expansion, scroll-race guards, a render epoch to stop stale content flashing. Scrolling also needs wheel capture in the hook and per-lookup scroll state. The cost is losing the tail of very long 大辞林 entries — usually its archaic and literary senses. |
 | M3-D5 | **A pure `present.rs` with no Windows dependency** | Every content decision — what merges, what order, what collapses, where truncation falls — is a pure function from `Vec<Hit>` to a `Presentation`. This is the part of M3 most likely to be wrong, and it is the part that can be fully unit-tested. Only painting touches Win32. |
+| M3-D7 | **Constant-alpha layered window (`SetLayeredWindowAttributes` + `WM_PAINT`), not per-pixel alpha** | Verified by controlled experiment: `WDA_EXCLUDEFROMCAPTURE` is **incompatible with `UpdateLayeredWindow`**. See §5. Capture exclusion wins, because without it the popup must be hidden and re-shown around every capture — in live mode, on every >4px move — which is a constant flicker while reading. Cost: `SetWindowRgn`-clipped corners are hard-edged rather than antialiased, and no soft/variable transparency. |
 | M3-D6 | **Dark theme by default** | The reading contexts are manga, visual novels and terminals — mostly dark. A light popup flashing over dark content at night is genuinely unpleasant; the reverse is milder. |
 
 ### Rejected alternatives
@@ -187,22 +188,40 @@ font = "Yu Gothic UI"
 display_order = ["大辞林", "Jitendex"]
 ```
 
-## 5. The capture-exclusion probe
+## 5. Capture exclusion — measured, not assumed
 
-`WDA_EXCLUDEFROMCAPTURE` has been unverified since the first spec, and M3 is where it becomes
-load-bearing: M2 captures a region around the cursor on **every hover**, so a popup that is not
-excluded will photograph itself and OCR its own text — feeding its own output back into the next
-lookup.
+`WDA_EXCLUDEFROMCAPTURE` was unverified from the first spec until now. It matters more here than
+anywhere: M2 captures a region around the cursor on **every hover**, so a popup that is not excluded
+photographs itself and feeds its own text into the next lookup.
 
-**The first task of M3 is a probe**, before any rendering work: create a layered
-`NOACTIVATE | TOPMOST | TOOLWINDOW` window with `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`,
-draw something identifiable in it, BitBlt the region it occupies, and check whether the drawn content
-appears in the captured pixels.
+A throwaway spike settled it with an A/B/control test on this machine, measuring captured pixels
+rather than trusting a return value:
 
-**If it fails**, the fallback is hiding the popup for the duration of the capture — one extra state
-transition inside `window.rs`, local, and it does not reach the engine. That is the same mechanism
-weikipop uses (a `screen_lock` between capture and popup); the exclusion API is simply cleaner if it
-works.
+| Window | `SetWindowDisplayAffinity` | Popup pixels in a BitBlt |
+|---|---|---|
+| Layered, per-pixel alpha via `UpdateLayeredWindow` | **Fails** — `HRESULT(0x80070008)` | **69,908 / 76,800 (91%)** |
+| Layered, constant alpha via `SetLayeredWindowAttributes(LWA_ALPHA)`, `WM_PAINT`-painted | Succeeds | **0 / 76,800 (0%)** |
+| **Control:** not layered at all, opaque `WM_PAINT` | Succeeds | 0 / 76,800 (0%) |
+| Constant alpha **plus** `SetWindowRgn` rounded silhouette | Succeeds | 0 / 76,800 (0%) |
+
+Two things that would have destroyed a plan written from documentation:
+
+1. **The error message lies.** `0x80070008` is "not enough memory". It has nothing to do with memory —
+   it is how Windows reports that display affinity is unsupported for this window flavour. Worse, code
+   that ignores the return value gets a **silent no-op**: the call appears to work and the popup is
+   captured anyway.
+2. **The control run is what makes this conclusive.** A plain non-layered window also excludes cleanly,
+   which isolates `UpdateLayeredWindow` specifically as the trigger — not `WS_EX_LAYERED` in general,
+   and not `TOPMOST`/`NOACTIVATE`/`TOOLWINDOW`.
+
+**Consequence, baked into M3-D7:** the popup is `WS_EX_LAYERED` + `SetLayeredWindowAttributes(LWA_ALPHA)`,
+painted through an `ID2D1HwndRenderTarget` on `WM_PAINT`, with `SetWindowRgn(CreateRoundRectRgn(...))`
+for a rounded silhouette. Not `ID2D1DCRenderTarget` + `UpdateLayeredWindow`, which is prettier and
+cannot be excluded.
+
+**Implementation requirement:** `SetWindowDisplayAffinity`'s result must be **checked and reported at
+startup**, never discarded. A silent no-op here is the failure mode that turns the whole OCR tier into
+a feedback loop.
 
 ## 6. Error handling
 
@@ -260,5 +279,5 @@ None blocking. Two risks, each with a stated fallback:
 
 | Risk | If it bites |
 |---|---|
-| `WDA_EXCLUDEFROMCAPTURE` does not hold against BitBlt | Hide the popup for the duration of the capture. Local to `window.rs`. Probed first, before any rendering work. |
+| ~~`WDA_EXCLUDEFROMCAPTURE` does not hold against BitBlt~~ | **Resolved before implementation** — measured working with constant alpha, measured broken with per-pixel alpha. See §5. |
 | Resident memory exceeds the 50MB hard bar | Report it. The likely culprits are the D2D/DirectWrite device stack and the OCR engine, both of which are one-time allocations — the measurement tells us which, and neither is addressed by guessing now. |
