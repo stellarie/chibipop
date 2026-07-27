@@ -62,6 +62,66 @@ impl PhysRect {
     }
 }
 
+/// Places a `size`-shaped popup relative to `anchor`, so it never covers
+/// `anchor` and never crosses `monitor`'s edges.
+///
+/// Default position (spec §4.2): flush with the anchor's left edge, `gap`
+/// pixels below its bottom edge - "below and to the right". Each axis flips
+/// independently to the anchor's *other* side when the default would cross
+/// that axis's monitor edge:
+/// - X carries no gap in either direction - flush-left with the anchor
+///   normally, flush-right with it when flipped - because X is never what
+///   keeps the popup off the anchor; Y does that job unconditionally below.
+/// - Y always carries `gap`, on both the below and the above placement,
+///   because Y is the axis that actually separates the popup from the
+///   character being read.
+///
+/// That split is what makes the anchor provably uncovered on every call,
+/// not just the cases this module happens to test: whichever branch Y takes,
+/// the popup's Y-span lands entirely before or entirely after the anchor's
+/// (given `gap >= 0`), and a 2D overlap needs both axes to overlap - so X
+/// landing anywhere on-screen can never re-introduce it.
+///
+/// The result is finally clamped into `monitor`. That clamp is a no-op
+/// whenever a flip alone already fits (true for every case exercised
+/// below); it exists because the secondary monitor here is only 1080px
+/// wide, so a popup that grows wide with many collapsed rows could
+/// plausibly need it even after flipping.
+///
+/// The clamp is also the one place the anchor-uncovered proof above can
+/// break: if neither the space above nor below the anchor is large enough
+/// to hold `gap + h`, the Y clamp pulls the popup back toward the anchor
+/// and it can genuinely end up covering it. This was checked, not just
+/// reasoned about: an ad hoc sweep (anchor swept across three monitors incl.
+/// non-zero and negative origins, both orientations, sizes at and above the
+/// M3-D4 45%-of-monitor-height contract) found overlap in exactly the
+/// bucket that broke that contract - `h` at 74% of a 1080px-tall monitor -
+/// and nowhere else, including the identical 800px height at 41.7% of the
+/// 1920px-tall portrait monitor. So: any anchor, any monitor origin
+/// (incl. negative), either orientation, is safe *provided* the caller caps
+/// `size` to the M3-D4 45%-of-monitor-height contract first (`present.rs`'s
+/// height cap exists for exactly this) - which is a fine bar for a real
+/// display (the cap can't force this failure until the monitor is under
+/// roughly 240px tall). That call belongs to the code that already knows
+/// the clamp happened - Task 5's `measure()` - not here.
+pub fn place_popup(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, gap: i32) -> PhysRect {
+    let (w, h) = size;
+
+    let mut x = anchor.x;
+    if x + w > monitor.x + monitor.w {
+        x = anchor.x + anchor.w - w;
+    }
+    x = x.max(monitor.x).min(monitor.x + monitor.w - w);
+
+    let mut y = anchor.y + anchor.h + gap;
+    if y + h > monitor.y + monitor.h {
+        y = anchor.y - gap - h;
+    }
+    y = y.max(monitor.y).min(monitor.y + monitor.h - h);
+
+    PhysRect { x, y, w, h }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +219,62 @@ mod tests {
         // -11/2 = -5.5, -21/2 = -10.5 -- Rust's `/` truncates toward zero, so
         // these land on -5 and -10, not floor's -6 and -11.
         assert_eq!(r(-5, -10, 15, 20), r(-11, -21, 30, 40).scaled_down(2));
+    }
+
+    #[test]
+    fn popup_sits_below_right_of_the_anchor_when_it_fits() {
+        let mon = r(0, 0, 1920, 1080);
+        let got = place_popup(r(100, 100, 20, 20), (300, 200), mon, 12);
+        assert_eq!(100, got.x);
+        assert_eq!(132, got.y, "anchor bottom 120 plus a 12px gap");
+    }
+
+    #[test]
+    fn popup_flips_left_at_the_right_edge() {
+        let mon = r(0, 0, 1920, 1080);
+        let got = place_popup(r(1800, 100, 20, 20), (300, 200), mon, 12);
+        assert!(got.x + got.w <= mon.x + mon.w, "must not cross the right edge");
+        assert!(got.x < 1800, "must flip to the anchor's left");
+    }
+
+    #[test]
+    fn popup_flips_up_at_the_bottom_edge() {
+        let mon = r(0, 0, 1920, 1080);
+        let got = place_popup(r(100, 1000, 20, 20), (300, 200), mon, 12);
+        assert!(got.y + got.h <= mon.y + mon.h);
+        assert!(got.y < 1000, "must flip above the anchor");
+    }
+
+    #[test]
+    fn popup_flips_both_axes_in_the_corner() {
+        let mon = r(0, 0, 1920, 1080);
+        let got = place_popup(r(1850, 1040, 20, 20), (300, 200), mon, 12);
+        assert!(got.x + got.w <= mon.x + mon.w);
+        assert!(got.y + got.h <= mon.y + mon.h);
+    }
+
+    #[test]
+    fn popup_respects_a_monitor_with_a_non_zero_origin() {
+        // The secondary monitor on this machine starts at x=2560.
+        let mon = r(2560, 0, 1080, 1920);
+        let got = place_popup(r(3500, 100, 20, 20), (300, 200), mon, 12);
+        assert!(got.x >= mon.x, "must not spill onto the primary monitor");
+        assert!(got.x + got.w <= mon.x + mon.w);
+    }
+
+    #[test]
+    fn popup_never_covers_the_anchor() {
+        let mon = r(0, 0, 1920, 1080);
+        for ax in [100, 900, 1800] {
+            for ay in [100, 500, 1040] {
+                let anchor = r(ax, ay, 20, 20);
+                let got = place_popup(anchor, (300, 200), mon, 12);
+                let overlaps = got.x < anchor.x + anchor.w
+                    && anchor.x < got.x + got.w
+                    && got.y < anchor.y + anchor.h
+                    && anchor.y < got.y + got.h;
+                assert!(!overlaps, "popup covered the anchor at ({ax},{ay})");
+            }
+        }
     }
 }
