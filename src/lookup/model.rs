@@ -56,6 +56,10 @@ pub struct Hit {
 pub trait Dictionary {
     fn terms_for(&self, surface: &str) -> Result<Vec<TermRow>>;
     fn entries(&self, ids: &[i64]) -> Result<Vec<Entry>>;
+
+    /// Dictionary identities, read once at startup. The `dict` table has a
+    /// handful of rows; this is not a hot-path call.
+    fn dicts(&self) -> Result<Vec<crate::present::DictInfo>>;
 }
 
 /// In-memory `Dictionary` for tests.
@@ -63,6 +67,7 @@ pub trait Dictionary {
 pub struct FakeDictionary {
     terms: HashMap<String, Vec<TermRow>>,
     entries: HashMap<i64, Entry>,
+    dicts: Vec<crate::present::DictInfo>,
 }
 
 impl FakeDictionary {
@@ -94,6 +99,10 @@ impl FakeDictionary {
     pub fn add_entry(&mut self, entry_id: i64, dict_id: i64, senses: Vec<Sense>) {
         self.entries.insert(entry_id, Entry { entry_id, dict_id, senses });
     }
+
+    pub fn add_dict(&mut self, dict_id: i64, name: &str) {
+        self.dicts.push(crate::present::DictInfo { dict_id, name: name.to_string() });
+    }
 }
 
 impl Dictionary for FakeDictionary {
@@ -103,6 +112,10 @@ impl Dictionary for FakeDictionary {
 
     fn entries(&self, ids: &[i64]) -> Result<Vec<Entry>> {
         Ok(ids.iter().filter_map(|i| self.entries.get(i).cloned()).collect())
+    }
+
+    fn dicts(&self) -> Result<Vec<crate::present::DictInfo>> {
+        Ok(self.dicts.clone())
     }
 }
 

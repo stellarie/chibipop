@@ -1,6 +1,7 @@
 //! Read-only, memory-mapped SQLite implementation of `Dictionary`.
 
 use crate::lookup::model::{Dictionary, Entry, Sense, TermRow};
+use crate::present::DictInfo;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
@@ -94,6 +95,15 @@ impl Dictionary for SqliteDictionary {
             }
         }
         Ok(out)
+    }
+
+    fn dicts(&self) -> Result<Vec<DictInfo>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT dict_id, name FROM dict ORDER BY dict_id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DictInfo { dict_id: r.get(0)?, name: r.get(1)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 
