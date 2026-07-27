@@ -456,6 +456,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     running.store(false, Ordering::SeqCst); // 1. clear the run flag
     drop(trigger_tx); // 2. drop the sender - worker's recv() unblocks with Err and exits
 
+    // I5: unhook before draining.
+    drop(hooks); // 3. drop Hooks - unhooks both WH_MOUSE_LL and WH_KEYBOARD_LL
+
     // The worker may right now be blocked inside `CaptureGuard::hide_for_capture`,
     // waiting for this thread to service a `Hide` - but this thread has
     // already left the `GetMessageW` loop above (that is what ended it), so
@@ -481,7 +484,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     }
     let _ = worker_handle.join(); // now instant: the worker has already finished.
 
-    drop(hooks); // 3. drop Hooks - unhooks both WH_MOUSE_LL and WH_KEYBOARD_LL
     drop(tray); // 4. drop Tray - removes the notification-area icon and its owner window
 
     Ok(())
