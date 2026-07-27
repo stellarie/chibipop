@@ -183,6 +183,9 @@ pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32
 /// it is treated as possibly clipped.
 pub const EDGE_MARGIN: i32 = 4;
 
+/// Maps a rect to a position along the reading axis.
+type AxisEdge = fn(&PhysRect) -> i32;
+
 /// Split a tile's words into those safely inside it and the start of the next
 /// tile (spec D3).
 ///
@@ -196,12 +199,12 @@ pub const EDGE_MARGIN: i32 = 4;
 /// it whole. That edge only equals `tile`'s own start when the clipped
 /// word began there too - the caller still treats a start that does not
 /// advance as a stop.
-pub fn split_at_clipped<'a>(
-    words: &'a [OcrWord],
+pub fn split_at_clipped(
+    words: &[OcrWord],
     tile: PhysRect,
     orientation: Orientation,
-) -> (Vec<&'a OcrWord>, i32) {
-    let (end, lead, trail): (i32, fn(&PhysRect) -> i32, fn(&PhysRect) -> i32) = match orientation {
+) -> (Vec<&OcrWord>, i32) {
+    let (end, lead, trail): (i32, AxisEdge, AxisEdge) = match orientation {
         Orientation::Horizontal => (tile.x + tile.w, |r| r.x, |r| r.x + r.w),
         Orientation::Vertical => (tile.y + tile.h, |r| r.y, |r| r.y + r.h),
     };
