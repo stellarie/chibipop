@@ -242,7 +242,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let capture_guard_active = Arc::new(AtomicBool::new(false));
     let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
 
-    // Safety: FFI call with no preconditions - always succeeds, returns the
+    // SAFETY: FFI call with no preconditions - always succeeds, returns the
     // id of whichever thread calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();

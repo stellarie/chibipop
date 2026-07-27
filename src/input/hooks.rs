@@ -118,6 +118,10 @@ fn mode_currently_eligible() -> bool {
 /// the mode gate then the movement gate, and updates the two statics -
 /// nothing here allocates, blocks, or touches I/O.
 unsafe fn record_mouse_move(lparam: LPARAM) {
+    // SAFETY: mouse_hook_proc only calls this when code >= 0 and
+    // wparam == WM_MOUSEMOVE - the WH_MOUSE_LL contract that guarantees
+    // lparam is a valid, aligned pointer to an MSLLHOOKSTRUCT for the
+    // duration of this call.
     let data = &*(lparam.0 as *const MSLLHOOKSTRUCT);
     let p = PhysPoint { x: data.pt.x, y: data.pt.y };
 
