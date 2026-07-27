@@ -51,6 +51,7 @@ use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::text::ocr::OcrTextSource;
 use crate::ui::render::Renderer;
 use crate::ui::theme::Theme;
+use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::Popup;
 use anyhow::{Context, Result};
 use std::mem::size_of;
@@ -65,8 +66,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, KillTimer, PostThreadMessageW, SetTimer, TranslateMessage,
-    MSG, WM_APP, WM_QUIT, WM_TIMER,
+    DispatchMessageW, GetMessageW, KillTimer, PostQuitMessage, PostThreadMessageW, SetTimer,
+    TranslateMessage, MSG, WM_APP, WM_TIMER,
 };
 
 /// `WM_APP` (32768) is the first value Windows guarantees free for private
@@ -126,9 +127,14 @@ enum WorkerOutcome {
 }
 
 /// Runs the popup application until the user quits. Installs the hooks,
-/// creates the popup window, and pumps messages on this (the calling)
-/// thread; spawns one worker thread for OCR/lookup/present.
-pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path) -> Result<()> {
+/// creates the popup window and the tray icon, and pumps messages on this
+/// (the calling) thread; spawns one worker thread for OCR/lookup/present.
+///
+/// `config_path` is where `cfg` was loaded from (`main.rs`'s
+/// `default_config_path()` or `--config`) - needed here, not just at load
+/// time, because a tray mode change must persist back to the same file or
+/// the setting silently reverts on the next restart.
+pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
     let dict_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
@@ -194,6 +200,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path) -> Result<()> {
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
 
+    // Hard failure per spec section 6: the tray is the only way to change
+    // mode or quit, so a running process without one cannot be controlled.
+    // Uses popup.hwnd() only as Shell_NotifyIconW's message target - see
+    // ui::tray's module docs for why the menu itself does not use popup as
+    // its owner.
+    let tray = Tray::create(popup.hwnd(), cfg.trigger.mode).context("creating the tray icon")?;
+
     // hwnd = None: a thread timer, not bound to any window. WM_TIMER is
     // delivered straight into this thread's message queue (msg.hwnd = NULL)
     // and picked up by the same GetMessageW loop below that also dispatches
@@ -203,15 +216,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path) -> Result<()> {
         anyhow::bail!("SetTimer failed to install the dispatch tick");
     }
 
-    // Task 8 adds the tray's Quit menu item; until then, this is the only
-    // user-facing way to stop `run`. PostThreadMessageW (not PostQuitMessage)
-    // is required here specifically because this reader runs on its own
-    // thread: PostQuitMessage always posts WM_QUIT to whichever thread calls
-    // it, which would be this reader thread - one nobody ever pumps messages
-    // for - not the main thread running the loop below.
-    spawn_quit_reader(main_tid);
     println!("chibipop: running - hover Japanese text anywhere on screen.");
-    println!("chibipop: type 'q' and press Enter in this console to quit.");
+    println!("chibipop: right-click the tray icon to change mode or quit.");
 
     let mut next_id: u64 = 0;
     let mut latest_dispatched = RequestId(0);
@@ -220,7 +226,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path) -> Result<()> {
     loop {
         // hwnd = None: messages for any window this thread owns, PLUS
         // thread-targeted messages (WM_TIMER above, WM_APP_RESULT below,
-        // WM_QUIT from the quit reader) whose own hwnd is NULL.
+        // WM_QUIT from the tray's Quit item below) whose own hwnd is NULL.
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if got.0 <= 0 {
             break; // 0 = WM_QUIT, -1 = error. Either way, stop pumping.
@@ -256,6 +262,27 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path) -> Result<()> {
                     );
                 }
             }
+        } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam) {
+            match cmd {
+                TrayCommand::SetMode(mode) => {
+                    // AppState, hooks, and disk all updated together here -
+                    // skipping any one of the three is exactly how "the
+                    // toggle looks broken after a restart" bugs happen.
+                    cfg.trigger.mode = mode;
+                    Hooks::set_mode(mode);
+                    if let Err(e) = cfg.save(config_path) {
+                        eprintln!("chibipop: failed to save the mode change to {}: {e:#}",
+                                  config_path.display());
+                    }
+                }
+                TrayCommand::Quit => unsafe {
+                    // Literal PostQuitMessage, not PostThreadMessageW: unlike
+                    // Task 7's interim console reader, this runs ON the main
+                    // thread (inside this same GetMessageW loop), so posting
+                    // to "whichever thread calls this" is already correct.
+                    PostQuitMessage(0);
+                },
+            }
         } else {
             unsafe {
                 let _ = TranslateMessage(&msg);
@@ -264,9 +291,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path) -> Result<()> {
         }
     }
 
-    // Shutdown (decision 5), in order. PostQuitMessage-equivalent has
-    // already fired - it is what ended the loop above - so the remaining
-    // three steps happen here:
+    // Shutdown (decision 5), in order. PostQuitMessage has already fired -
+    // it is what ended the loop above - so the remaining steps happen here:
     unsafe {
         let _ = KillTimer(None, timer_id);
     }
@@ -274,6 +300,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path) -> Result<()> {
     drop(trigger_tx); // 2. drop the sender - worker's recv() unblocks with Err and exits
     let _ = worker_handle.join(); // wait for the worker to actually finish before tearing down further
     drop(hooks); // 3. drop Hooks - unhooks both WH_MOUSE_LL and WH_KEYBOARD_LL
+    drop(tray); // 4. drop Tray - removes the notification-area icon and its owner window
 
     Ok(())
 }
@@ -486,28 +513,4 @@ fn theme_from_config(theme_name: &str) -> Theme {
         "light" => Theme::light(),
         _ => Theme::dark(),
     }
-}
-
-/// The interim way to stop `run` before Task 8's tray exists: typing 'q' +
-/// Enter in the console. See the call site in `run` for why
-/// `PostThreadMessageW` is required here rather than `PostQuitMessage`.
-fn spawn_quit_reader(main_tid: u32) {
-    thread::spawn(move || {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match std::io::stdin().read_line(&mut line) {
-                Ok(0) => break, // stdin closed / EOF
-                Ok(_) => {
-                    if line.trim().eq_ignore_ascii_case("q") {
-                        unsafe {
-                            let _ = PostThreadMessageW(main_tid, WM_QUIT, WPARAM(0), LPARAM(0));
-                        }
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
 }

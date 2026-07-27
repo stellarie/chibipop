@@ -41,7 +41,8 @@ enum Command {
         rules: PathBuf,
     },
     /// Run the popup application: hover Japanese text anywhere on screen to
-    /// see its definition beside it. Type 'q' + Enter in this console to quit.
+    /// see its definition beside it. Right-click the tray icon to change
+    /// mode or quit.
     Run {
         #[arg(long, default_value = "data/chibipop.sqlite")]
         dict: PathBuf,
@@ -192,7 +193,7 @@ fn main() -> Result<()> {
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
-            chibipop::app::run(cfg, &dict, &rules)
+            chibipop::app::run(cfg, &dict, &rules, &config_path)
         }
     }
 }
