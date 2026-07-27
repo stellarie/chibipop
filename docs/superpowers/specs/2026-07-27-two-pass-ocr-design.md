@@ -217,9 +217,11 @@ cursor
 |---|---|---|
 | `REGION_W` × `REGION_H` | 500 × 100 | unchanged; pass 1 is today's box |
 | `TILE_LEN` | 500 | the measured accurate width (§1.1) |
-| `BAND_FACTOR` | 2.0 | band extent = factor × hovered word's perpendicular size, **centred on that word's centre** — margin for ascenders and slight line drift |
+| `BAND_FACTOR` | 3.0, floored at `REGION_H` | band extent = max(factor × hovered word's perpendicular size, `REGION_H`), **centred on that word's centre** — margin for ascenders and slight line drift, with a floor so small text still clears the recogniser's threshold |
 | `EDGE_MARGIN` | 4px | a word whose trailing edge is within this of the tile's trailing edge counts as clipped (D3) |
 | default `max_ocr_passes` | 3 | 1 (pass 1) + 2 tiles ≈ 1000px ≈ 25 chars at VN size |
+
+Measured on real on-screen Japanese at a fixed 500px width: a 44px-tall band (what `BAND_FACTOR = 2.0` produced for ~22-26px glyphs) recognised nothing, and the threshold between failure and success sat between 60px and 66px.
 
 ### 4.2 Behaviour change: `cursor_byte_offset` becomes 0
 

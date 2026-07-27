@@ -150,9 +150,15 @@ pub const TILE_LEN: i32 = 500;
 
 /// A tile's perpendicular extent, as a multiple of the hovered word's own
 /// perpendicular size. Margin for ascenders and slight line drift.
-pub const BAND_FACTOR: f32 = 2.0;
+/// `band_of` also floors this at `REGION_H`; see its doc comment.
+pub const BAND_FACTOR: f32 = 3.0;
 
 /// The line's perpendicular extent, derived from the hovered word.
+///
+/// Floored at `REGION_H`: a 44px-tall capture measured on real on-screen
+/// text recognised nothing at all, and the threshold sat between 60 and
+/// 66px, so the tile is never thinner than the capture pass 1 already
+/// proves works.
 ///
 /// The parallel axis is left at the word's own position and size; it carries
 /// no meaning here, and `tile_after` replaces it.
@@ -160,11 +166,11 @@ pub fn band_of(word: PhysRect, orientation: Orientation) -> PhysRect {
     let c = word.center();
     match orientation {
         Orientation::Horizontal => {
-            let h = ((word.h as f32) * BAND_FACTOR).round() as i32;
+            let h = (((word.h as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
             PhysRect { x: word.x, y: c.y - h / 2, w: word.w, h }
         }
         Orientation::Vertical => {
-            let w = ((word.w as f32) * BAND_FACTOR).round() as i32;
+            let w = (((word.w as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
             PhysRect { x: c.x - w / 2, y: word.y, w, h: word.h }
         }
     }
@@ -603,7 +609,7 @@ mod tests {
     fn band_expands_perpendicular_and_keeps_the_word_centred() {
         let word = PhysRect { x: 1499, y: 870, w: 35, h: 34 };
         let b = band_of(word, Orientation::Horizontal);
-        assert_eq!(68, b.h, "2.0x the word height");
+        assert_eq!(102, b.h, "max(3.0x the word height, REGION_H)");
         assert_eq!(word.center().y, b.center().y, "same centre line");
         assert_eq!(word.x, b.x, "parallel axis untouched");
     }
@@ -612,9 +618,27 @@ mod tests {
     fn band_swaps_axes_for_vertical_text() {
         let word = PhysRect { x: 1438, y: 344, w: 64, h: 70 };
         let b = band_of(word, Orientation::Vertical);
-        assert_eq!(128, b.w, "2.0x the word width");
+        assert_eq!(192, b.w, "max(3.0x the word width, REGION_H)");
         assert_eq!(word.center().x, b.center().x);
         assert_eq!(word.y, b.y, "parallel axis untouched");
+    }
+
+    /// A 44px band (2.0 x 22px, the old factor) measured on real on-screen
+    /// text recognised nothing at all - REGION_H must floor small text.
+    #[test]
+    fn band_floors_small_text_at_region_h() {
+        let word = PhysRect { x: 1499, y: 870, w: 20, h: 22 };
+        let b = band_of(word, Orientation::Horizontal);
+        assert_eq!(REGION_H, b.h, "3.0x22=66 must be floored to REGION_H");
+        assert_eq!(word.center().y, b.center().y, "same centre line");
+    }
+
+    #[test]
+    fn band_factor_still_applies_above_the_floor() {
+        let word = PhysRect { x: 1499, y: 870, w: 20, h: 60 };
+        let b = band_of(word, Orientation::Horizontal);
+        assert_eq!(180, b.h, "3.0x60=180 must not be clamped down to REGION_H");
+        assert_eq!(word.center().y, b.center().y, "same centre line");
     }
 
     #[test]
