@@ -112,6 +112,22 @@ pub fn map_from_upscaled(rect: PhysRect, origin: PhysPoint, factor: i32) -> Phys
     rect.scaled_down(factor).translated(origin.x, origin.y)
 }
 
+/// The capture box: 900×300 physical pixels centred on the cursor.
+///
+/// The lookup engine reads only forward from the cursor and truncates at 25
+/// characters, so this comfortably covers everything that can ever be used.
+pub const REGION_W: i32 = 900;
+pub const REGION_H: i32 = 300;
+
+pub fn region_around(cursor: PhysPoint) -> PhysRect {
+    PhysRect {
+        x: cursor.x - REGION_W / 2,
+        y: cursor.y - REGION_H / 2,
+        w: REGION_W,
+        h: REGION_H,
+    }
+}
+
 /// Resolve a cursor position against recognised text.
 pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
     let (li, wi) = hit_scan(lines, cursor)?;
@@ -402,5 +418,14 @@ mod tests {
         // "々人" is 2 characters, 3 bytes each in UTF-8 = 6.
         assert_eq!(6, got.span.cursor_byte_offset);
         assert_eq!("々々", &got.span.text[got.span.cursor_byte_offset..]);
+    }
+
+    #[test]
+    fn region_is_900x300_centred_on_the_cursor() {
+        let r = region_around(p(1000, 500));
+        assert_eq!(900, r.w);
+        assert_eq!(300, r.h);
+        assert_eq!(1000 - 450, r.x);
+        assert_eq!(500 - 150, r.y);
     }
 }

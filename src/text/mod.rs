@@ -2,6 +2,7 @@
 //! character the cursor is on.
 
 pub mod layout;
+pub mod capture;
 
 use crate::geom::{PhysPoint, PhysRect};
 use anyhow::Result;
