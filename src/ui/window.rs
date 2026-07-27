@@ -26,6 +26,7 @@
 use crate::geom::PhysRect;
 use anyhow::{Context, Result};
 use std::mem::size_of;
+use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -46,13 +47,25 @@ fn class_name() -> PCWSTR {
     w!("ChibipopPopupClass")
 }
 
+/// The actual `WM_PAINT` work, split out so it can be run inside
+/// `catch_unwind` from `wndproc` - same shape as `input::hooks`'s
+/// `record_mouse_move`/`mouse_hook_proc` split (W).
+unsafe fn validate_paint_region(hwnd: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let _ = BeginPaint(hwnd, &mut ps);
+    let _ = EndPaint(hwnd, &ps);
+}
+
 /// Validates the update region on `WM_PAINT` and draws nothing itself -
 /// see the module docs for why real content isn't painted here.
+///
+/// A panic must never unwind across this `extern "system"` boundary (M3
+/// spec §6) - it would unwind into whichever window procedure the OS calls
+/// next, not just this one. `catch_unwind` wraps the working half, same
+/// discipline `input::hooks`'s callbacks already apply.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_PAINT {
-        let mut ps = PAINTSTRUCT::default();
-        let _ = BeginPaint(hwnd, &mut ps);
-        let _ = EndPaint(hwnd, &ps);
+        let _ = catch_unwind(|| unsafe { validate_paint_region(hwnd) });
         return LRESULT(0);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
