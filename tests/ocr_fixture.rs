@@ -22,7 +22,7 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         eprintln!("SKIP: tests/fixtures/japanese_bgra.bin not present");
         return;
     };
-    let source = match chibipop::text::ocr::OcrTextSource::new() {
+    let source = match chibipop::text::ocr::OcrTextSource::new(1) {
         Ok(source) => source,
         Err(_) => {
             eprintln!("SKIP: no Japanese OCR engine available");

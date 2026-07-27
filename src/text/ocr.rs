@@ -5,16 +5,25 @@
 //! actual reasoning.
 
 use crate::geom::{PhysPoint, PhysRect};
+use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::capture::{capture_upscaled, cursor_position, init_dpi_awareness, UPSCALE};
-use crate::text::layout::{map_from_upscaled, region_around, resolve, OcrLine, OcrWord, Resolved};
+use crate::text::layout::{
+    band_of, map_from_upscaled, nearest_line, region_around, resolve, tile_forward, OcrLine,
+    OcrWord, Orientation, Resolved,
+};
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
+use std::mem::size_of;
 use std::time::Duration;
 use windows::core::HSTRING;
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
+use windows::Win32::Foundation::POINT;
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
 /// Block on a WinRT async operation.
@@ -85,15 +94,41 @@ pub fn recognise(engine: &OcrEngine, buf: &[u8], w: i32, h: i32) -> Result<Vec<O
     Ok(lines)
 }
 
+/// The bounds of the monitor containing `p` (spec §5) - same
+/// `MonitorFromPoint` + `GetMonitorInfoW` pair `app.rs`'s `monitor_rect_for`
+/// already uses to place the popup, applied here to keep a tile from
+/// reading a neighbouring monitor's pixels (I2). `MONITOR_DEFAULTTONEAREST`
+/// never yields a null `HMONITOR`, so only `GetMonitorInfoW` itself can
+/// fail; on that unreachable-in-practice path this falls back to a
+/// generous box centred on `p` rather than an absolute-origin guess, so a
+/// clamp still has real room to work with instead of collapsing to nothing.
+fn monitor_bounds_containing(p: PhysPoint) -> PhysRect {
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x: p.x, y: p.y }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            let rc = mi.rcMonitor;
+            PhysRect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top }
+        } else {
+            PhysRect { x: p.x - 960, y: p.y - 540, w: 1920, h: 1080 }
+        }
+    }
+}
+
 pub struct OcrTextSource {
     engine: OcrEngine,
+    max_passes: u8,
 }
 
 impl OcrTextSource {
     /// Initialises the process for capture and WinRT, and creates the
     /// Japanese recogniser once so every later frame can reuse it. Fails
     /// loudly here rather than on the first hover.
-    pub fn new() -> Result<Self> {
+    ///
+    /// `max_passes` is the total captures a hover spends: one to locate the
+    /// word, the rest reading forward from it in
+    /// [`resolve_at_tiled`](Self::resolve_at_tiled). `1` disables tiling.
+    pub fn new(max_passes: u8) -> Result<Self> {
         init_dpi_awareness()?;
         // WinRT activation fails with CO_E_NOTINITIALIZED without this.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
@@ -102,7 +137,7 @@ impl OcrTextSource {
             "no Japanese OCR recogniser available - see \
              docs/superpowers/findings/2026-07-26-m0-ocr-availability.md",
         )?;
-        Ok(OcrTextSource { engine })
+        Ok(OcrTextSource { engine, max_passes })
     }
 
     /// The engine created in `new`, for callers that need to drive
@@ -120,7 +155,22 @@ impl OcrTextSource {
         &self,
         cursor: PhysPoint,
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        let region = region_around(cursor);
+        self.resolve_in_region(cursor, region_around(cursor))
+    }
+
+    /// [`resolve_at_verbose`](Self::resolve_at_verbose) against an explicit
+    /// capture box instead of the standard one centred on `cursor`.
+    ///
+    /// Windows' OCR segments a whole captured image at once, so the framing
+    /// of that image changes what it reads - the same screen text recognises
+    /// differently when the box shifts by 50 pixels. This exists so `probe`
+    /// can vary the box and measure that, rather than the region size being
+    /// a constant nobody can test.
+    pub fn resolve_in_region(
+        &self,
+        cursor: PhysPoint,
+        region: PhysRect,
+    ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
         let (buf, w, h) = capture_upscaled(region)?;
         let raw = recognise(&self.engine, &buf, w, h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
@@ -146,6 +196,109 @@ impl OcrTextSource {
     /// does not even want the orientation.
     pub fn resolve_at(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
         Ok(self.resolve_at_verbose(cursor)?.1)
+    }
+
+    /// Resolve a hover, reading forward in tiles (the two-pass spec).
+    ///
+    /// Pass 1 is [`resolve_at_verbose`](Self::resolve_at_verbose)'s capture,
+    /// used for geometry only - its text is edge-clipped at its own boundary
+    /// and is discarded (spec D1). Tiles then re-read forward from the hovered
+    /// word's leading edge.
+    ///
+    /// Falls back to pass 1's own span whenever tiling adds nothing: one
+    /// configured pass, an empty tiling result, or a tile that errors. Tiling
+    /// must never turn a working hover into a failed one.
+    ///
+    /// Two more guards travel with every tile (both pure, in `layout.rs`):
+    /// `line_tolerance` is half the hovered word's own perpendicular size,
+    /// mirroring `hit_scan`'s bound, so `nearest_line` cannot silently
+    /// borrow a neighbouring line an empty tile has no line of its own near
+    /// (I3). `bounds` is the monitor containing the hover, so a tile is
+    /// clamped rather than reading a neighbouring monitor's pixels (I2).
+    pub fn resolve_at_tiled(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
+        let (_, resolved) = self.resolve_at_verbose(cursor)?;
+        let Some(first) = resolved else { return Ok(None) };
+        if self.max_passes <= 1 {
+            return Ok(Some(first));
+        }
+
+        let band = band_of(first.span.anchor, first.orientation);
+        let start = match first.orientation {
+            Orientation::Horizontal => first.span.anchor.x,
+            Orientation::Vertical => first.span.anchor.y,
+        };
+        let perpendicular_centre = match first.orientation {
+            Orientation::Horizontal => first.span.anchor.center().y,
+            Orientation::Vertical => first.span.anchor.center().x,
+        };
+        let line_tolerance = match first.orientation {
+            Orientation::Horizontal => first.span.anchor.h / 2,
+            Orientation::Vertical => first.span.anchor.w / 2,
+        };
+        let bounds = monitor_bounds_containing(band.center());
+
+        let mut failed = false;
+        let text = tile_forward(
+            band,
+            start,
+            first.orientation,
+            usize::from(self.max_passes - 1),
+            MAX_LOOKUP_CHARS,
+            bounds,
+            |tile| match self.words_in(tile, perpendicular_centre, first.orientation, line_tolerance) {
+                Ok(words) => words,
+                Err(e) => {
+                    if !failed {
+                        eprintln!("chibipop: tile capture failed, using what was read: {e:#}");
+                        failed = true;
+                    }
+                    Vec::new()
+                }
+            },
+        );
+
+        if text.is_empty() {
+            return Ok(Some(first));
+        }
+        Ok(Some(Resolved {
+            span: TextSpan { text, cursor_byte_offset: 0, anchor: first.span.anchor },
+            orientation: first.orientation,
+        }))
+    }
+
+    /// One capture-and-recognise, keeping only the line under the hover.
+    ///
+    /// The tall tile `band_of` now produces can contain furigana as its own
+    /// OCR line above or below the text it annotates. Flattening every line
+    /// back into one word list would splice that ruby into the sentence, so
+    /// `nearest_line` keeps only the line actually centred near
+    /// `perpendicular_centre`, within `tolerance`, and drops the rest. See
+    /// its doc comment for the axis convention and the distance bound.
+    fn words_in(
+        &self,
+        tile: PhysRect,
+        perpendicular_centre: i32,
+        orientation: Orientation,
+        tolerance: i32,
+    ) -> Result<Vec<OcrWord>> {
+        let (buf, w, h) = capture_upscaled(tile)?;
+        let origin = PhysPoint { x: tile.x, y: tile.y };
+        let lines: Vec<OcrLine> = recognise(&self.engine, &buf, w, h)?
+            .into_iter()
+            .map(|l| OcrLine {
+                words: l
+                    .words
+                    .into_iter()
+                    .map(|word| OcrWord {
+                        rect: map_from_upscaled(word.rect, origin, UPSCALE),
+                        text: word.text,
+                    })
+                    .collect(),
+            })
+            .collect();
+        Ok(nearest_line(&lines, perpendicular_centre, orientation, tolerance)
+            .map(|line| line.words.clone())
+            .unwrap_or_default())
     }
 
     /// Where the pointer is now.

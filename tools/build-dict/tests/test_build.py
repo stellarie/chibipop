@@ -25,8 +25,13 @@ class TestBuild(unittest.TestCase):
             self.tmp / "terms.zip", {"title": "TestDict", "format": 3},
             {"term_bank_1.json": [
                 ["食べる", "たべる", "", "v1", 0,
-                 [{"type": "structured-content",
-                   "content": {"tag": "span", "content": "to eat"}}]],
+                 [{"type": "structured-content", "content": [
+                     {"tag": "span", "data": {"content": "part-of-speech-info"},
+                      "content": "1-dan"},
+                     {"tag": "span", "data": {"content": "part-of-speech-info"},
+                      "content": "transitive"},
+                     {"tag": "span", "content": "to eat"},
+                 ]}]],
                 ["ねこ", "ねこ", "", "", 0, ["cat"]],
             ]})
         self.freqs = make_archive(
@@ -83,6 +88,23 @@ class TestBuild(unittest.TestCase):
             "WHERE surface='食べる'").fetchone()[0]
         conn.close()
         self.assertEqual(["to eat"], json.loads(row)[0]["glosses"])
+
+    def test_part_of_speech_stored_separately_from_glosses(self):
+        _, conn = self._build()
+        row = conn.execute(
+            "SELECT senses FROM entry JOIN term USING(entry_id) "
+            "WHERE surface='食べる'").fetchone()[0]
+        conn.close()
+        sense = json.loads(row)[0]
+        self.assertEqual(["1-dan", "transitive"], sense["pos"])
+
+    def test_entry_without_pos_markup_gets_empty_pos(self):
+        _, conn = self._build()
+        row = conn.execute(
+            "SELECT senses FROM entry JOIN term USING(entry_id) "
+            "WHERE surface='ねこ'").fetchone()[0]
+        conn.close()
+        self.assertEqual([], json.loads(row)[0]["pos"])
 
     def test_frequency_applied(self):
         _, conn = self._build()

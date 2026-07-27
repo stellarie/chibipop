@@ -359,10 +359,25 @@ which bakes its rendering at import time rather than query time (`Dictionary-Loo
 runtime stays a dumb consumer of strings, and the tree-walking complexity lives where it costs no
 memory and is trivially unit-testable.
 
-v1 flattening rules: keep gloss text and POS labels; keep `ruby` base text and **drop `rt` furigana**;
-drop `img` and `gaiji` references; drop styling; render cross-references as their plain label. Rich
-rendering at runtime remains a non-goal (§7) — but *flattened* structured content is a v1 requirement,
-not an extra.
+v1 flattening rules: keep gloss text; keep `ruby` base text and **drop `rt` furigana**; drop `img` and
+`gaiji` references; drop styling; render cross-references as their plain label. Rich rendering at
+runtime remains a non-goal (§7) — but *flattened* structured content is a v1 requirement, not an extra.
+
+**POS labels are extracted, not flattened in (revised 2026-07-27).** The original rule kept them
+inside the gloss text, which is how a Jitendex card rendered as
+`noun; suru; intransitive; chatting; idle talk` — the part of speech fused into the definition with
+the same separator, weight and colour as the definition itself. `flatten.extract_pos` now pulls every
+`data.content == "part-of-speech-info"` node out into `sense.pos`, and `_render` drops those nodes
+from the gloss, so the same card reads `chatting; idle talk` with `["noun", "suru", "intransitive"]`
+alongside it. The popup draws that as its own de-emphasised line (M3 §4.2). Labels inside a dropped
+subtree — an example sentence, an attribution — are not definitions and are not collected. 大辞林
+carries no such markup and yields `[]`, so its cards show no POS line at all.
+
+This repurposes `sense.pos`, which previously held the raw Yomitan `rules` string split on whitespace
+(`v1`, `vs`). Nothing read it: the deconjugation filter matches against the **`term.pos` column**
+(§4.2), which is still built from `rules` and is untouched. Keeping two different POS vocabularies in
+one field is exactly the confusion that caused the v5k bug, so `sense.pos` is now display-only and
+`term.pos` is filter-only.
 
 **Residual, measured against the built database:** roughly 11% of Jitendex glosses still show some
 mangling after flattening. Almost all of it is one shape — a `reference-label` sitting flush against

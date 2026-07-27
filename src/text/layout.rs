@@ -112,12 +112,241 @@ pub fn map_from_upscaled(rect: PhysRect, origin: PhysPoint, factor: i32) -> Phys
     rect.scaled_down(factor).translated(origin.x, origin.y)
 }
 
-/// The capture box: 900×300 physical pixels centred on the cursor.
+/// The capture box: 500×100 physical pixels centred on the cursor.
 ///
-/// The lookup engine reads only forward from the cursor and truncates at 25
-/// characters, so this comfortably covers everything that can ever be used.
-pub const REGION_W: i32 = 900;
-pub const REGION_H: i32 = 300;
+/// **Smaller is more accurate, and this was measured, not assumed.** Windows'
+/// OCR segments a whole captured image at once rather than reading character
+/// by character, so everything else in the box competes for its attention.
+/// Against a visual novel at ~40px text, hovering ten characters of one line
+/// and comparing the character handed to lookup:
+///
+/// | box | correct |
+/// |---|---|
+/// | 900×300 (the original) | 6/10 — `通`→`過`, `に`→`0`, `風` and `私` dropped |
+/// | 500×100 | **10/10** |
+/// | 400×100 | 10/10 on that line, but `ロ`→`回` on the next one |
+///
+/// The wide box was not buying reading distance either: it returned *six*
+/// forward characters of `…を過抜ける` against the narrow box's seven of
+/// `…を通り抜ける。制`, because the extra width was spent on mangling rather
+/// than on more text. A 300-tall box also swallows the neighbouring line and
+/// lets the recogniser blend the two.
+///
+/// The height is not independently risky: `hit_scan` already refuses a cursor
+/// further than half a word's height from the text, so a hover this box would
+/// clip is one that would not have resolved anyway.
+///
+/// Tuned against one game at one text size. `probe --region W,H` exists to
+/// re-measure this rather than trusting it — see `OcrTextSource::resolve_in_region`.
+pub const REGION_W: i32 = 500;
+pub const REGION_H: i32 = 100;
+
+/// How far a tile reads along the line, in physical pixels.
+///
+/// The same measured limit as `REGION_W`: Windows' OCR degrades as more text
+/// enters one captured image, and 400-500px is the band where a visual novel
+/// at ~40px text recognises correctly. See the two-pass spec section 1.1.
+pub const TILE_LEN: i32 = 500;
+
+/// A tile's perpendicular extent, as a multiple of the hovered word's own
+/// perpendicular size. Margin for ascenders and slight line drift.
+/// `band_of` also floors this at `REGION_H`; see its doc comment.
+pub const BAND_FACTOR: f32 = 3.0;
+
+/// The line's perpendicular extent, derived from the hovered word.
+///
+/// Floored at `REGION_H`: a 44px-tall capture measured on real on-screen
+/// text recognised nothing at all, and the threshold sat between 60 and
+/// 66px, so the tile is never thinner than the capture pass 1 already
+/// proves works.
+///
+/// The parallel axis is left at the word's own position and size; it carries
+/// no meaning here, and `tile_after` replaces it.
+pub fn band_of(word: PhysRect, orientation: Orientation) -> PhysRect {
+    let c = word.center();
+    match orientation {
+        Orientation::Horizontal => {
+            let h = (((word.h as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
+            PhysRect { x: word.x, y: c.y - h / 2, w: word.w, h }
+        }
+        Orientation::Vertical => {
+            let w = (((word.w as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
+            PhysRect { x: c.x - w / 2, y: word.y, w, h: word.h }
+        }
+    }
+}
+
+/// A capture box `len` long down the reading direction from `start`, carrying
+/// `band`'s perpendicular extent.
+pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32) -> PhysRect {
+    match orientation {
+        Orientation::Horizontal => PhysRect { x: start, y: band.y, w: len, h: band.h },
+        Orientation::Vertical => PhysRect { x: band.x, y: start, w: band.w, h: len },
+    }
+}
+
+/// Intersects `tile` with `bounds`, the region it is actually allowed to
+/// read. `None` when the intersection has zero-or-negative width or height -
+/// two-pass spec §5: *"Tile extends past the monitor -> Clamp; if it clamps
+/// to zero extent, stop."* Orientation-agnostic: a plain rect intersection
+/// clamps whichever edge - forward or perpendicular - actually overruns.
+pub fn clamp_tile(tile: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
+    let x0 = tile.x.max(bounds.x);
+    let y0 = tile.y.max(bounds.y);
+    let x1 = (tile.x + tile.w).min(bounds.x + bounds.w);
+    let y1 = (tile.y + tile.h).min(bounds.y + bounds.h);
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w <= 0 || h <= 0 { None } else { Some(PhysRect { x: x0, y: y0, w, h }) }
+}
+
+/// Selects the OCR line nearest `perpendicular_centre` on the perpendicular
+/// axis — y for `Horizontal`, x for `Vertical`, `band_of`'s own convention.
+///
+/// Windows' OCR reports furigana as its own line, separate from the text it
+/// annotates, even when both sit inside one tall capture tile. Picking the
+/// line actually centred near the hover — instead of flattening every line
+/// the tile saw into one word list — drops the ruby with no pixel threshold
+/// to tune, and stays correct if the ruby sits below the text rather than
+/// above it.
+///
+/// A line's centre is the mean of its own words' centres on that axis, not
+/// its bounding box's midpoint, so one unusually wide or short word can't
+/// drag it. Ties keep the first line in `lines`, matching `hit_scan`'s
+/// document-order rule. `None` when `lines` is empty, every line has no
+/// words, or the nearest candidate is still further than `tolerance` from
+/// `perpendicular_centre` — mirroring `hit_scan`'s own half-word-height
+/// bound, so an empty tile cannot silently borrow a neighbouring line.
+pub fn nearest_line(
+    lines: &[OcrLine],
+    perpendicular_centre: i32,
+    orientation: Orientation,
+    tolerance: i32,
+) -> Option<&OcrLine> {
+    let axis = |p: PhysPoint| match orientation {
+        Orientation::Horizontal => p.y,
+        Orientation::Vertical => p.x,
+    };
+
+    let mut best: Option<(&OcrLine, i32)> = None;
+    for line in lines {
+        if line.words.is_empty() {
+            continue;
+        }
+        let sum: i32 = line.words.iter().map(|w| axis(w.rect.center())).sum();
+        let centre = sum / line.words.len() as i32;
+        let d = (centre - perpendicular_centre).abs();
+        if d > tolerance {
+            continue;
+        }
+        match best {
+            Some((_, bd)) if d >= bd => {}
+            _ => best = Some((line, d)),
+        }
+    }
+    best.map(|(line, _)| line)
+}
+
+/// How close a word's trailing edge may come to a tile's trailing edge before
+/// it is treated as possibly clipped.
+pub const EDGE_MARGIN: i32 = 4;
+
+/// Maps a rect to a position along the reading axis.
+type AxisEdge = fn(&PhysRect) -> i32;
+
+/// Split a tile's words into those safely inside it and the start of the next
+/// tile (spec D3).
+///
+/// A word whose trailing edge lies within [`EDGE_MARGIN`] of the tile's own
+/// trailing edge may have been cut by the capture boundary, and a cut glyph is
+/// what turns 通 into 過. Such a word is discarded and its leading edge becomes
+/// the next tile's start, so it is re-read whole.
+///
+/// Returns the tile's trailing edge when nothing was clipped, and the
+/// clipped word's own leading edge otherwise, so the next tile re-reads
+/// it whole. That edge only equals `tile`'s own start when the clipped
+/// word began there too - the caller still treats a start that does not
+/// advance as a stop.
+pub fn split_at_clipped(
+    words: &[OcrWord],
+    tile: PhysRect,
+    orientation: Orientation,
+) -> (Vec<&OcrWord>, i32) {
+    let (end, lead, trail): (i32, AxisEdge, AxisEdge) = match orientation {
+        Orientation::Horizontal => (tile.x + tile.w, |r| r.x, |r| r.x + r.w),
+        Orientation::Vertical => (tile.y + tile.h, |r| r.y, |r| r.y + r.h),
+    };
+
+    let mut ordered: Vec<&OcrWord> = words.iter().collect();
+    ordered.sort_by_key(|word| lead(&word.rect));
+
+    let mut kept = Vec::new();
+    for word in ordered {
+        if trail(&word.rect) > end - EDGE_MARGIN {
+            return (kept, lead(&word.rect));
+        }
+        kept.push(word);
+    }
+    (kept, end)
+}
+
+/// Read forward along a line in tiles, returning the concatenated text.
+///
+/// `read` performs one capture-and-recognise for a tile and returns its words
+/// in virtual-desktop coordinates; injecting it keeps this loop testable with
+/// no screen. The `for _ in 0..max_tiles` bound is what guarantees this loop
+/// ends; the other stops - `max_chars` reached, a tile recognising nothing,
+/// or a start that does not advance (spec D5) - just end it early, saving up
+/// to `max_tiles` real OCR round-trips (each one a screen capture) once a
+/// tile can no longer make progress.
+///
+/// The result is normalised once at the end rather than per tile, so a
+/// sequence split across a seam still normalises as one string.
+///
+/// `bounds` is the region tiles are allowed to read - the monitor containing
+/// the hover (spec §5). Every tile is clamped to it before `read` ever sees
+/// it, so a tile that would otherwise reach past a monitor edge is shrunk to
+/// what that monitor actually has, and `split_at_clipped` then judges
+/// clipping against the clamped edge, not the unclamped one. A clamp that
+/// leaves nothing usable stops the loop, same as a tile recognising nothing.
+pub fn tile_forward<F>(
+    band: PhysRect,
+    start: i32,
+    orientation: Orientation,
+    max_tiles: usize,
+    max_chars: usize,
+    bounds: PhysRect,
+    mut read: F,
+) -> String
+where
+    F: FnMut(PhysRect) -> Vec<OcrWord>,
+{
+    let mut out = String::new();
+    let mut start = start;
+
+    for _ in 0..max_tiles {
+        if out.chars().count() >= max_chars {
+            break;
+        }
+        let tile = tile_after(band, start, orientation, TILE_LEN);
+        let Some(tile) = clamp_tile(tile, bounds) else {
+            break;
+        };
+        let words = read(tile);
+        if words.is_empty() {
+            break;
+        }
+        let (kept, next) = split_at_clipped(&words, tile, orientation);
+        for word in kept {
+            out.push_str(&word.text);
+        }
+        if next <= start {
+            break;
+        }
+        start = next;
+    }
+
+    normalise(&out)
+}
 
 pub fn region_around(cursor: PhysPoint) -> PhysRect {
     PhysRect {
@@ -420,12 +649,452 @@ mod tests {
         assert_eq!("々々", &got.span.text[got.span.cursor_byte_offset..]);
     }
 
+    /// The centring is the contract; the size is a measured tuning that may
+    /// move again (see `REGION_W`'s table), so this asserts centring against
+    /// whatever the constants currently are rather than restating them.
     #[test]
-    fn region_is_900x300_centred_on_the_cursor() {
+    fn the_region_is_centred_on_the_cursor() {
         let r = region_around(p(1000, 500));
-        assert_eq!(900, r.w);
-        assert_eq!(300, r.h);
-        assert_eq!(1000 - 450, r.x);
-        assert_eq!(500 - 150, r.y);
+        assert_eq!(REGION_W, r.w);
+        assert_eq!(REGION_H, r.h);
+        assert_eq!(1000 - REGION_W / 2, r.x);
+        assert_eq!(500 - REGION_H / 2, r.y);
+    }
+
+    /// The box must stay wide enough to out-reach `hit_scan`'s own tolerance
+    /// vertically - otherwise a hover that resolves would capture a text row
+    /// the box has clipped, which is the one shape that makes OCR return
+    /// nothing at all rather than something imperfect.
+    #[test]
+    fn the_region_is_taller_than_a_resolvable_hover_can_be_off_by() {
+        let typical_word_h = 40;
+        let worst_offset = typical_word_h / 2;
+        let needed = worst_offset + typical_word_h / 2;
+        assert!(
+            REGION_H / 2 >= needed,
+            "REGION_H/2 = {} must cover {needed}px of hit-scan slack plus half a glyph",
+            REGION_H / 2
+        );
+    }
+
+    #[test]
+    fn band_expands_perpendicular_and_keeps_the_word_centred() {
+        let word = PhysRect { x: 1499, y: 870, w: 35, h: 34 };
+        let b = band_of(word, Orientation::Horizontal);
+        assert_eq!(102, b.h, "max(3.0x the word height, REGION_H)");
+        assert_eq!(word.center().y, b.center().y, "same centre line");
+        assert_eq!(word.x, b.x, "parallel axis untouched");
+    }
+
+    #[test]
+    fn band_swaps_axes_for_vertical_text() {
+        let word = PhysRect { x: 1438, y: 344, w: 64, h: 70 };
+        let b = band_of(word, Orientation::Vertical);
+        assert_eq!(192, b.w, "max(3.0x the word width, REGION_H)");
+        assert_eq!(word.center().x, b.center().x);
+        assert_eq!(word.y, b.y, "parallel axis untouched");
+    }
+
+    /// A 44px band (2.0 x 22px, the old factor) measured on real on-screen
+    /// text recognised nothing at all - REGION_H must floor small text.
+    #[test]
+    fn band_floors_small_text_at_region_h() {
+        let word = PhysRect { x: 1499, y: 870, w: 20, h: 22 };
+        let b = band_of(word, Orientation::Horizontal);
+        assert_eq!(REGION_H, b.h, "3.0x22=66 must be floored to REGION_H");
+        assert_eq!(word.center().y, b.center().y, "same centre line");
+    }
+
+    #[test]
+    fn band_factor_still_applies_above_the_floor() {
+        let word = PhysRect { x: 1499, y: 870, w: 20, h: 60 };
+        let b = band_of(word, Orientation::Horizontal);
+        assert_eq!(180, b.h, "3.0x60=180 must not be clamped down to REGION_H");
+        assert_eq!(word.center().y, b.center().y, "same centre line");
+    }
+
+    #[test]
+    fn tile_runs_along_the_reading_direction() {
+        let band = PhysRect { x: 100, y: 200, w: 40, h: 80 };
+        let h = tile_after(band, 500, Orientation::Horizontal, TILE_LEN);
+        assert_eq!(PhysRect { x: 500, y: 200, w: TILE_LEN, h: 80 }, h);
+
+        let v = tile_after(band, 500, Orientation::Vertical, TILE_LEN);
+        assert_eq!(PhysRect { x: 100, y: 500, w: 40, h: TILE_LEN }, v);
+    }
+
+    /// Furigana-fix measurement: furigana at y=1345 h=11 (centre 1350)
+    /// vs. the real line at y=1362 h=22 (mean centre 1373 - ~1px from
+    /// the spec's own bounding-box midpoint of 1372; see `nearest_line`
+    /// on mean vs. midpoint). Hovering 1372 must pick the real line.
+    /// Tolerance 11 (half the real line's 22px word height) excludes the
+    /// furigana outright - its distance of 22 is not merely outscored.
+    #[test]
+    fn nearest_line_picks_the_real_line_over_furigana() {
+        let furigana = OcrLine {
+            words: (0..3).map(|i| w("furi", 3320 + i * 13, 1345, 13, 11)).collect(),
+        };
+        let real_line = OcrLine {
+            words: (0..18).map(|i| w("real", 2873 + i * 22, 1362, 22, 22)).collect(),
+        };
+        let lines = vec![furigana, real_line.clone()];
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal, 11));
+    }
+
+    /// Same measurement, rotated: a vertical line's perpendicular axis
+    /// is x, so the same two centres (1350, 1373) now come from
+    /// word.rect.x/w instead of y/h.
+    #[test]
+    fn nearest_line_mirrors_axes_for_vertical_text() {
+        let furigana = OcrLine {
+            words: (0..3).map(|i| w("furi", 1345, 3320 + i * 13, 11, 13)).collect(),
+        };
+        let real_line = OcrLine {
+            words: (0..18).map(|i| w("real", 1362, 2873 + i * 22, 22, 22)).collect(),
+        };
+        let lines = vec![furigana, real_line.clone()];
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Vertical, 11));
+    }
+
+    #[test]
+    fn nearest_line_empty_input_returns_none() {
+        assert_eq!(None, nearest_line(&[], 1372, Orientation::Horizontal, 20));
+    }
+
+    #[test]
+    fn nearest_line_skips_a_line_with_no_words() {
+        let empty = OcrLine { words: vec![] };
+        let real_line = OcrLine { words: vec![w("real", 100, 1372, 20, 20)] };
+        let lines = vec![empty, real_line.clone()];
+        assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal, 15));
+    }
+
+    /// A genuine tie: both centres (110, 150) sit 20px from target 130,
+    /// so document order alone must decide. Tolerance 20 keeps both
+    /// candidates in play so the tie-break itself is what's exercised.
+    #[test]
+    fn nearest_line_ties_break_by_document_order() {
+        let first_line = OcrLine { words: vec![w("a", 0, 100, 20, 20)] };
+        let second_line = OcrLine { words: vec![w("b", 0, 140, 20, 20)] };
+        let lines = vec![first_line.clone(), second_line];
+        assert_eq!(Some(&first_line), nearest_line(&lines, 130, Orientation::Horizontal, 20));
+    }
+
+    /// I3: a line comfortably inside the tolerance is selected - word
+    /// centre y=1370 is 2px from the target, well under tolerance 10.
+    #[test]
+    fn nearest_line_within_the_bound_is_selected() {
+        let line = OcrLine { words: vec![w("a", 100, 1360, 20, 20)] };
+        let lines = vec![line.clone()];
+        assert_eq!(Some(&line), nearest_line(&lines, 1372, Orientation::Horizontal, 10));
+    }
+
+    /// I3: without a bound this would still be "nearest" (the only
+    /// candidate) and get returned - a neighbouring line silently borrowed
+    /// into an empty tile. Word centre y=1310 is 62px from the target,
+    /// past tolerance 10, so this must be `None` instead.
+    #[test]
+    fn nearest_line_beyond_the_bound_returns_none() {
+        let far_line = OcrLine { words: vec![w("a", 100, 1300, 20, 20)] };
+        assert_eq!(None, nearest_line(&[far_line], 1372, Orientation::Horizontal, 10));
+    }
+
+    fn hword(text: &str, x: i32, width: i32) -> OcrWord {
+        OcrWord { text: text.to_string(), rect: PhysRect { x, y: 100, w: width, h: 40 } }
+    }
+
+    /// A `bounds` rect too large for any fixture tile in this file to ever
+    /// reach its edges - stands in for "no monitor clamp applies" so tests
+    /// written before I2 keep exercising exactly what they did before.
+    fn unbounded() -> PhysRect {
+        PhysRect { x: -1_000_000, y: -1_000_000, w: 3_000_000, h: 3_000_000 }
+    }
+
+    #[test]
+    fn clamp_tile_is_unchanged_when_fully_inside_bounds() {
+        let tile = PhysRect { x: 100, y: 100, w: 50, h: 50 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1000, h: 1000 };
+        assert_eq!(Some(tile), clamp_tile(tile, bounds));
+    }
+
+    /// A wide, short tile - what `tile_after` produces for Horizontal text.
+    #[test]
+    fn clamp_tile_shrinks_a_horizontal_tile_past_the_right_edge() {
+        let tile = PhysRect { x: 2300, y: 500, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(Some(PhysRect { x: 2300, y: 500, w: 260, h: 80 }), clamp_tile(tile, bounds));
+    }
+
+    /// A tall, narrow tile - what `tile_after` produces for Vertical text.
+    #[test]
+    fn clamp_tile_shrinks_a_vertical_tile_past_the_bottom_edge() {
+        let tile = PhysRect { x: 500, y: 900, w: 80, h: 500 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1080, h: 1200 };
+        assert_eq!(Some(PhysRect { x: 500, y: 900, w: 80, h: 300 }), clamp_tile(tile, bounds));
+    }
+
+    #[test]
+    fn clamp_tile_returns_none_when_the_tile_starts_beyond_bounds() {
+        let tile = PhysRect { x: 3000, y: 0, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(None, clamp_tile(tile, bounds));
+    }
+
+    #[test]
+    fn clamp_tile_returns_none_when_clamped_to_exactly_zero_extent() {
+        let tile = PhysRect { x: 2560, y: 0, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(None, clamp_tile(tile, bounds));
+    }
+
+    #[test]
+    fn clamp_tile_also_clamps_the_perpendicular_axis() {
+        let tile = PhysRect { x: 100, y: -20, w: 500, h: 80 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2560, h: 1080 };
+        assert_eq!(Some(PhysRect { x: 100, y: 0, w: 500, h: 60 }), clamp_tile(tile, bounds));
+    }
+
+    #[test]
+    fn a_word_touching_the_trailing_edge_is_dropped_and_becomes_the_next_start() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 10, 40), hword("い", 60, 40), hword("う", 470, 40)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
+        assert_eq!(470, next, "the clipped word's leading edge starts the next tile");
+    }
+
+    #[test]
+    fn with_nothing_clipped_the_next_start_is_the_tiles_own_edge() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 10, 40), hword("い", 60, 40)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(2, kept.len());
+        assert_eq!(500, next);
+    }
+
+    /// end=500, threshold=496 (500-4). Landing exactly on the threshold
+    /// must be kept, since `trail > threshold` is false when equal - the
+    /// one fact the fixtures elsewhere in this file never pin, because
+    /// they all clip 10px past `end` rather than 1px past the threshold.
+    #[test]
+    fn trailing_edge_exactly_at_the_margin_boundary_is_kept() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 456, 40)]; // trail = 456+40 = 496
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(1, kept.len(), "496 must not be treated as clipped");
+        assert_eq!(500, next);
+    }
+
+    /// Same tile, same word, one pixel further right: trail becomes 497
+    /// and must flip to discarded. The only difference from the previous
+    /// test is that single pixel.
+    #[test]
+    fn trailing_edge_one_pixel_past_the_margin_boundary_is_discarded() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 457, 40)]; // trail = 457+40 = 497
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert!(kept.is_empty());
+        assert_eq!(457, next, "must return the clipped word's own leading edge");
+    }
+
+    /// Spec D3: a tile too narrow to hold one whole word keeps nothing and
+    /// returns its own start, which D5's strict-advance rule turns into a stop.
+    #[test]
+    fn a_first_word_already_clipped_keeps_nothing_and_does_not_advance() {
+        let tile = PhysRect { x: 400, y: 90, w: 100, h: 60 };
+        let words = vec![hword("あ", 400, 120)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert!(kept.is_empty());
+        assert_eq!(400, next, "must not advance past the tile's own start");
+    }
+
+    /// The general case the doc comment describes: a clipped word does
+    /// not always begin where the tile does, and the returned edge is
+    /// the word's own - here strictly greater than the tile's start,
+    /// unlike the coincidental case above where the two are equal.
+    #[test]
+    fn a_clipped_first_word_starting_mid_tile_returns_its_own_leading_edge() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("あ", 200, 400)];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert!(kept.is_empty());
+        assert_eq!(200, next);
+        assert!(next > tile.x, "must be the word's edge, not the tile's start");
+    }
+
+    #[test]
+    fn the_split_reads_top_to_bottom_for_vertical_text() {
+        let tile = PhysRect { x: 90, y: 0, w: 60, h: 500 };
+        let words = vec![
+            OcrWord { text: "上".into(), rect: PhysRect { x: 100, y: 10, w: 40, h: 40 } },
+            OcrWord { text: "下".into(), rect: PhysRect { x: 100, y: 470, w: 40, h: 40 } },
+        ];
+        let (kept, next) = split_at_clipped(&words, tile, Orientation::Vertical);
+        assert_eq!(vec!["上"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
+        assert_eq!(470, next);
+    }
+
+    /// OCR does not promise reading order, so the split must not rely on it.
+    #[test]
+    fn words_arriving_out_of_order_are_sorted_before_splitting() {
+        let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
+        let words = vec![hword("い", 60, 40), hword("あ", 10, 40)];
+        let (kept, _) = split_at_clipped(&words, tile, Orientation::Horizontal);
+        assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn tiling_concatenates_successive_tiles() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, unbounded(), |tile| {
+            calls += 1;
+            vec![hword("あ", tile.x + 10, 40), hword("い", tile.x + 60, 40)]
+        });
+        assert_eq!(3, calls, "runs up to max_tiles");
+        assert_eq!("あいあいあい", text);
+    }
+
+    #[test]
+    fn each_tile_reads_the_region_after_the_last_one() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut seen = Vec::new();
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, unbounded(), |tile| {
+            seen.push(tile.x);
+            let label = (tile.x / TILE_LEN).to_string();
+            vec![hword(&label, tile.x + 10, 40)]
+        });
+        assert_eq!(vec![0, TILE_LEN, TILE_LEN * 2], seen, "each tile starts where the last ended");
+        assert_eq!("012", text, "a loop that never advances would repeat one region");
+    }
+
+    /// M3 / spec D5. The reader clips its own tile's one word (trailing edge
+    /// 510, past tile 1's 496 threshold), so `split_at_clipped` returns 470 -
+    /// the word's leading edge - as the next start, not `tile.x + TILE_LEN`.
+    /// A regression that hardcodes `start += TILE_LEN` passes every other
+    /// test in this file but not this one: it would see tile 2 open at 500.
+    #[test]
+    fn tile_forward_restarts_from_the_clipped_words_own_leading_edge() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut seen_starts = Vec::new();
+        let mut call = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 2, 25, unbounded(), |tile| {
+            seen_starts.push(tile.x);
+            call += 1;
+            if call == 1 {
+                vec![hword("あ", 470, 40)]
+            } else {
+                vec![hword("い", tile.x + 10, 40)]
+            }
+        });
+        assert_eq!(vec![0, 470], seen_starts, "tile 2 must open at the clipped word's own edge");
+        assert_eq!("い", text, "tile 1's clipped word contributes nothing");
+    }
+
+    #[test]
+    fn tiling_stops_once_max_chars_is_reached() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        tile_forward(band, 0, Orientation::Horizontal, 5, 2, unbounded(), |tile| {
+            calls += 1;
+            vec![hword("あ", tile.x + 10, 40), hword("い", tile.x + 60, 40)]
+        });
+        assert_eq!(1, calls, "two characters already meet the budget");
+    }
+
+    #[test]
+    fn tiling_stops_when_a_tile_recognises_nothing() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, unbounded(), |_| {
+            calls += 1;
+            Vec::new()
+        });
+        assert_eq!(1, calls);
+        assert_eq!("", text);
+    }
+
+    /// Spec D5. Without the strict-advance guard this loops until max_tiles,
+    /// and with a larger cap it would not terminate at all. The reader here
+    /// always returns one word that fills its whole tile, so every split
+    /// reports the tile's own start back.
+    #[test]
+    fn tiling_stops_when_the_next_start_does_not_advance() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut calls = 0;
+        tile_forward(band, 0, Orientation::Horizontal, 100, 25, unbounded(), |tile| {
+            calls += 1;
+            vec![hword("あ", tile.x, tile.w)]
+        });
+        assert_eq!(1, calls, "a start that cannot advance must stop the loop");
+    }
+
+    #[test]
+    fn tiling_normalises_across_a_seam() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let mut first = true;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 2, 25, unbounded(), |tile| {
+            let out = if first {
+                vec![hword("ツ", tile.x + 10, 40)]
+            } else {
+                vec![hword("-ル", tile.x + 10, 40)]
+            };
+            first = false;
+            out
+        });
+        assert_eq!("ツール", text, "the hyphen after kana normalises across the join");
+    }
+
+    /// I2: a tile that would reach past the monitor is clamped, not left to
+    /// read the pixels beyond it. Bounds end at x=520; tile 2 would
+    /// naturally run to 1000, so it must be handed to `read` already
+    /// shrunk to width 20. The word sits well clear of either tile's own
+    /// trailing edge, so this exercises the clamp itself, not
+    /// `split_at_clipped`'s separate edge-margin behaviour.
+    #[test]
+    fn tiling_clamps_a_tile_that_would_cross_a_monitor_edge() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let bounds = PhysRect { x: 0, y: 0, w: 520, h: 1000 };
+        let mut widths = Vec::new();
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, bounds, |tile| {
+            widths.push(tile.w);
+            vec![hword("あ", tile.x, 10)]
+        });
+        assert_eq!(vec![TILE_LEN, 20], widths, "tile 2 is clamped to what the monitor has left");
+        assert_eq!("ああ", text, "the clamped tile is still read, not skipped");
+    }
+
+    /// I2: once the clamp leaves nothing usable, tiling stops - spec §5's
+    /// "if it clamps to zero extent, stop", exercised through `tile_forward`
+    /// rather than `clamp_tile` directly. Bounds end exactly at start (0),
+    /// so even the first tile clamps to zero width and `read` is never called.
+    #[test]
+    fn tiling_stops_without_reading_when_the_first_tile_clamps_to_nothing() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let bounds = PhysRect { x: -500, y: 0, w: 500, h: 1000 };
+        let mut calls = 0;
+        let text = tile_forward(band, 0, Orientation::Horizontal, 3, 25, bounds, |_| {
+            calls += 1;
+            Vec::new()
+        });
+        assert_eq!(0, calls, "a tile clamped to zero extent must never be read");
+        assert_eq!("", text);
+    }
+
+    /// I2, vertical orientation: the same clamp applies reading downward,
+    /// against a monitor bottom edge instead of a right edge. As above, the
+    /// word stays clear of each tile's own trailing edge so only the clamp
+    /// is under test.
+    #[test]
+    fn tiling_clamps_a_tile_that_would_cross_a_monitor_edge_for_vertical_text() {
+        let band = PhysRect { x: 90, y: 0, w: 60, h: 40 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1000, h: 520 };
+        let mut heights = Vec::new();
+        let text = tile_forward(band, 0, Orientation::Vertical, 3, 25, bounds, |tile| {
+            heights.push(tile.h);
+            vec![OcrWord { text: "上".into(), rect: PhysRect { x: tile.x, y: tile.y, w: tile.w, h: 10 } }]
+        });
+        assert_eq!(vec![TILE_LEN, 20], heights, "tile 2 is clamped to what the monitor has left");
+        assert_eq!("上上", text);
     }
 }

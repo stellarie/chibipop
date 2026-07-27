@@ -28,6 +28,16 @@ enum Command {
         /// Screen coordinates as X,Y in physical pixels.
         #[arg(long, value_name = "X,Y")]
         at: String,
+        /// Capture box size as W,H, centred on --at. Defaults to the
+        /// shipped REGION_W,REGION_H. Windows' OCR reads a whole image at
+        /// once, so this changes what it recognises - vary it to measure.
+        #[arg(long, value_name = "W,H")]
+        region: Option<String>,
+        /// Total OCR passes, as [ocr] max_ocr_passes would set. 1 is single
+        /// capture. Ignored when --region is given, which is single-capture
+        /// by definition.
+        #[arg(long, default_value_t = 3)]
+        tiles: u8,
         #[arg(long, default_value = "data/chibipop.sqlite")]
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
@@ -39,6 +49,20 @@ enum Command {
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
         rules: PathBuf,
+    },
+    /// Run the popup application: hover Japanese text anywhere on screen to
+    /// see its definition beside it. Right-click the tray icon to change
+    /// mode or quit.
+    Run {
+        #[arg(long, default_value = "data/chibipop.sqlite")]
+        dict: PathBuf,
+        #[arg(long, default_value = "data/deconjugator.json")]
+        rules: PathBuf,
+        /// Defaults to chibipop.toml beside the running executable (spec
+        /// section 4.3), not this crate's data/-relative CWD convention -
+        /// so a shortcut-launched chibipop.exe still finds its settings.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -61,7 +85,7 @@ fn main() -> Result<()> {
             print_hits(&hits);
             Ok(())
         }
-        Command::Probe { at, dict, rules } => {
+        Command::Probe { at, region, tiles, dict, rules } => {
             let (xs, ys) = at
                 .split_once(',')
                 .context("--at must be X,Y (e.g. --at 1200,400)")?;
@@ -70,12 +94,23 @@ fn main() -> Result<()> {
                 y: ys.trim().parse().context("Y in --at is not an integer")?,
             };
 
-            let source = chibipop::text::ocr::OcrTextSource::new()?;
-            let region = chibipop::text::layout::region_around(cursor);
+            let source = chibipop::text::ocr::OcrTextSource::new(tiles)?;
+            let region_was_default = region.is_none();
+            let region = match region {
+                None => chibipop::text::layout::region_around(cursor),
+                Some(spec) => {
+                    let (ws, hs) = spec
+                        .split_once(',')
+                        .context("--region must be W,H (e.g. --region 900,300)")?;
+                    let w: i32 = ws.trim().parse().context("W in --region is not an integer")?;
+                    let h: i32 = hs.trim().parse().context("H in --region is not an integer")?;
+                    chibipop::geom::PhysRect { x: cursor.x - w / 2, y: cursor.y - h / 2, w, h }
+                }
+            };
             println!("cursor:  ({}, {})", cursor.x, cursor.y);
             println!("region:  x={} y={} w={} h={}", region.x, region.y, region.w, region.h);
 
-            let (lines, resolved) = source.resolve_at_verbose(cursor)?;
+            let (lines, resolved) = source.resolve_in_region(cursor, region)?;
 
             println!();
             if lines.is_empty() {
@@ -118,10 +153,17 @@ fn main() -> Result<()> {
                     print_hits(&hits);
                 }
             }
+
+            if region_was_default && tiles > 1 {
+                match source.resolve_at_tiled(cursor)? {
+                    None => println!("\ntiled:   nothing resolved"),
+                    Some(r) => println!("\ntiled:   {:?}  ({} chars)", r.span.text, r.span.text.chars().count()),
+                }
+            }
             Ok(())
         }
         Command::Watch { dict, rules } => {
-            let source = chibipop::text::ocr::OcrTextSource::new()?;
+            let source = chibipop::text::ocr::OcrTextSource::new(3)?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
 
@@ -147,7 +189,7 @@ fn main() -> Result<()> {
                 last_pos = Some(cursor);
 
                 // One bad frame must not end the session.
-                let resolved = match source.resolve_at(cursor) {
+                let resolved = match source.resolve_at_tiled(cursor) {
                     Ok(r) => r,
                     Err(e) => { eprintln!("resolve: {e}"); continue; }
                 };
@@ -175,7 +217,23 @@ fn main() -> Result<()> {
                 println!();
             }
         }
+        Command::Run { dict, rules, config } => {
+            let config_path = config.unwrap_or_else(default_config_path);
+            let cfg = chibipop::config::load_or_create(&config_path)
+                .with_context(|| format!("loading config from {}", config_path.display()))?;
+            chibipop::app::run(cfg, &dict, &rules, &config_path)
+        }
     }
+}
+
+/// `chibipop.toml` beside the running executable (spec section 4.3). Falls
+/// back to the current directory if the executable's own path can't be
+/// determined, which should not happen in practice.
+fn default_config_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|dir| dir.join("chibipop.toml")))
+        .unwrap_or_else(|| PathBuf::from("chibipop.toml"))
 }
 
 fn print_hits(hits: &[chibipop::lookup::model::Hit]) {
