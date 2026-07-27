@@ -3,6 +3,7 @@
 
 pub mod layout;
 pub mod capture;
+pub mod ocr;
 
 use crate::geom::{PhysPoint, PhysRect};
 use anyhow::Result;
