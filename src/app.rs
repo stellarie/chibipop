@@ -40,7 +40,7 @@
 //! decision 5 names.
 
 use crate::config::Config;
-use crate::geom::{place_popup, PhysPoint, PhysRect};
+use crate::geom::{place_popup, PhysPoint, PhysRect, ScanRect};
 use crate::input::hooks::Hooks;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
@@ -49,6 +49,7 @@ use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::text::ocr::OcrTextSource;
+use crate::ui::overlay::Overlay;
 use crate::ui::render::Renderer;
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
@@ -67,8 +68,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, KillTimer, PostQuitMessage, PostThreadMessageW, SetTimer,
-    TranslateMessage, MSG, WM_APP, WM_TIMER,
+    DispatchMessageW, GetMessageW, IsWindowVisible, KillTimer, PostQuitMessage,
+    PostThreadMessageW, SetTimer, ShowWindow, TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE,
+    WM_APP, WM_TIMER,
 };
 
 /// `WM_APP` (32768) is the first value Windows guarantees free for private
@@ -130,16 +132,18 @@ struct WorkerResult {
 }
 
 enum WorkerOutcome {
-    /// Nothing to show: either `resolve_at_tiled` found no text under the cursor,
-    /// or it did but the dictionary had zero hits for it (e.g. punctuation).
-    /// Neither is an error - most hover positions are not Japanese text, and
-    /// logging that would be pure noise (decision 4).
+    /// Nothing to show: either `resolve_at_tiled_scanned` found no text
+    /// under the cursor, or it did but the dictionary had zero hits for it
+    /// (e.g. punctuation). Neither is an error - most hover positions are
+    /// not Japanese text, and logging that would be pure noise (decision 4).
     Hide,
     /// Capture, OCR or lookup failed. Logged once by the main thread; the
     /// popup hides and the app keeps running (spec section 6 - a failed
     /// hover is never fatal).
     Failed(String),
-    Ready { presentation: Presentation, anchor: PhysRect },
+    /// `scan` is always empty when the debug toggle is off - see
+    /// `resolve_at_tiled_scanned`'s own doc comment (M3 task 4).
+    Ready { presentation: Presentation, anchor: PhysRect, scan: Vec<ScanRect> },
 }
 
 /// A request from the worker thread to the main thread, guarding one
@@ -219,6 +223,11 @@ impl CaptureGuard {
 /// creates the popup window and the tray icon, and pumps messages on this
 /// (the calling) thread; spawns one worker thread for OCR/lookup/present.
 ///
+/// Also creates the scan overlay (`cfg.debug.show_scan_region`) alongside
+/// the popup - `None` when the toggle is off, so the feature stays inert
+/// (M3 task 4). It tracks the popup through both `handle_worker_outcome`'s
+/// ordinary show/hide and `drain_capture_guard`'s capture-time hide/reshow.
+///
 /// `config_path` is where `cfg` was loaded from (`main.rs`'s
 /// `default_config_path()` or `--config`) - needed here, not just at load
 /// time, because a tray mode change must persist back to the same file or
@@ -247,6 +256,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();
     let max_ocr_passes = cfg.ocr.max_ocr_passes;
+    let collect_scan = cfg.debug.show_scan_region;
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
@@ -256,6 +266,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             rules_path,
             present_cfg,
             max_ocr_passes,
+            collect_scan,
             main_tid,
             trigger_rx,
             result_tx,
@@ -314,6 +325,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         capture_guard_active.store(true, Ordering::SeqCst);
     }
 
+    let overlay = if cfg.debug.show_scan_region {
+        Some(
+            Overlay::create(cfg.popup.exclude_from_capture)
+                .context("creating the scan overlay window")?,
+        )
+    } else {
+        None
+    };
+    let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
+
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
     let theme = theme_from_config(&cfg.popup);
@@ -350,6 +371,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // hidden already (e.g. the cursor is over non-text and nothing is
     // showing).
     let mut capture_guard_prev_visible = false;
+    // Overlay's own visibility.
+    let mut overlay_prev_visible = false;
 
     // I4: kept in one place.
     let mut drain_capture_guard = || {
@@ -358,11 +381,30 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 CaptureGuardMsg::Hide { ack } => {
                     capture_guard_prev_visible = popup.is_visible();
                     let _ = popup.hide();
+                    if let Some(hwnd) = overlay_hwnd {
+                        // SAFETY: `hwnd` is `Overlay::hwnd()`'s own handle;
+                        // the `Overlay` that owns it lives in `run`'s local
+                        // `overlay` for this whole loop, so the window is
+                        // still live here. Both calls only read/set
+                        // visibility - no other precondition applies.
+                        overlay_prev_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_HIDE);
+                        }
+                    }
                     let _ = ack.send(());
                 }
                 CaptureGuardMsg::Restore => {
                     if capture_guard_prev_visible {
                         let _ = popup.show_without_activating();
+                    }
+                    if let Some(hwnd) = overlay_hwnd {
+                        if overlay_prev_visible {
+                            // SAFETY: same handle, same guarantee as above.
+                            unsafe {
+                                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                            }
+                        }
                     }
                 }
             }
@@ -406,6 +448,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         &mut renderer,
                         &theme,
                         max_height_percent,
+                        overlay.as_ref(),
                         result.outcome,
                     );
                 }
@@ -498,6 +541,7 @@ fn worker_main(
     rules_path: PathBuf,
     present_cfg: PresentConfig,
     max_ocr_passes: u8,
+    collect_scan: bool,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -586,13 +630,23 @@ fn worker_main(
         // the run. AssertUnwindSafe: none of ocr/dict/engine/dicts/guard
         // retain any externally-observable partial-mutation state across a
         // panic inside resolve_trigger - each is only ever used through
-        // shared, read-style calls (resolve_at_tiled, run, hide_for_capture /
-        // restore_after_capture, both of which only ever send on an mpsc
+        // shared, read-style calls (resolve_at_tiled_scanned, run,
+        // hide_for_capture / restore_after_capture, both of which only ever
+        // send on an mpsc
         // `Sender` - never poisoned by a panicking receiver the way a
         // `Mutex` would be) - so there is nothing for a caught panic to
         // leave torn.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            resolve_trigger(&ocr, &dict, &engine, &dicts, &present_cfg, trigger.cursor, guard)
+            resolve_trigger(
+                &ocr,
+                &dict,
+                &engine,
+                &dicts,
+                &present_cfg,
+                trigger.cursor,
+                guard,
+                collect_scan,
+            )
         }))
         .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
 
@@ -605,17 +659,21 @@ fn worker_main(
     }
 }
 
-/// One hover's worth of work: `OcrTextSource::resolve_at_tiled` -> lookup ->
-/// `present::build`, exactly the pipeline the brief specifies.
+/// One hover's worth of work: `OcrTextSource::resolve_at_tiled_scanned` ->
+/// lookup -> `present::build`, exactly the pipeline the brief specifies.
 ///
-/// `capture_guard`, when `Some`, wraps the capture inside `resolve_at_tiled`
-/// with a hide-before/reshow-after around it (spec §5.1) - `text::capture`
-/// stays exactly as M2 left it (spec section 4: "M3 adds no lookup logic"),
-/// so the guard wraps the call from here rather than reaching inside it.
-/// This does mean the popup stays hidden for the OCR recognition step too,
-/// not only the BitBlt itself - a longer hidden window than the minimum
-/// that correctness requires, traded deliberately for not touching M2 at
-/// all; see the task report.
+/// `capture_guard`, when `Some`, wraps the capture inside
+/// `resolve_at_tiled_scanned` with a hide-before/reshow-after around it
+/// (spec §5.1) - `text::capture` stays exactly as M2 left it (spec section
+/// 4: "M3 adds no lookup logic"), so the guard wraps the call from here
+/// rather than reaching inside it. This does mean the popup stays hidden
+/// for the OCR recognition step too, not only the BitBlt itself - a longer
+/// hidden window than the minimum that correctness requires, traded
+/// deliberately for not touching M2 at all; see the task report.
+///
+/// `collect_scan` is `cfg.debug.show_scan_region`, threaded down from `run`
+/// through `worker_main` - see `WorkerOutcome::Ready`'s own `scan` field.
+#[allow(clippy::too_many_arguments)]
 fn resolve_trigger(
     ocr: &OcrTextSource,
     dict: &SqliteDictionary,
@@ -624,19 +682,20 @@ fn resolve_trigger(
     present_cfg: &PresentConfig,
     cursor: PhysPoint,
     capture_guard: Option<&CaptureGuard>,
+    collect_scan: bool,
 ) -> WorkerOutcome {
     let raw = match capture_guard {
         Some(guard) => {
             guard.hide_for_capture();
-            let r = ocr.resolve_at_tiled(cursor);
+            let r = ocr.resolve_at_tiled_scanned(cursor, collect_scan);
             guard.restore_after_capture();
             r
         }
-        None => ocr.resolve_at_tiled(cursor),
+        None => ocr.resolve_at_tiled_scanned(cursor, collect_scan),
     };
-    let resolved = match raw {
-        Ok(Some(r)) => r,
-        Ok(None) => return WorkerOutcome::Hide,
+    let (resolved, scan) = match raw {
+        Ok((Some(r), scan)) => (r, scan),
+        Ok((None, _)) => return WorkerOutcome::Hide,
         Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
     };
 
@@ -650,30 +709,47 @@ fn resolve_trigger(
     }
 
     let presentation = present::build(&hits, dicts, present_cfg);
-    WorkerOutcome::Ready { presentation, anchor: resolved.span.anchor }
+    WorkerOutcome::Ready { presentation, anchor: resolved.span.anchor, scan }
 }
 
+/// Applies one `WorkerOutcome` to the popup and - when the debug toggle
+/// created one - the scan overlay, which moves in lock-step with the popup
+/// on every arm below (M3 task 4).
 fn handle_worker_outcome(
     popup: &Popup,
     renderer: &mut Renderer,
     theme: &Theme,
     max_height_percent: i32,
+    overlay: Option<&Overlay>,
     outcome: WorkerOutcome,
 ) {
     match outcome {
         WorkerOutcome::Hide => {
             let _ = popup.hide();
+            if let Some(ov) = overlay {
+                ov.hide();
+            }
         }
         WorkerOutcome::Failed(msg) => {
             eprintln!("chibipop: hover lookup failed: {msg}");
             let _ = popup.hide();
+            if let Some(ov) = overlay {
+                ov.hide();
+            }
         }
-        WorkerOutcome::Ready { presentation, anchor } => {
+        WorkerOutcome::Ready { presentation, anchor, scan } => {
             if let Err(e) =
                 show_presentation(popup, renderer, theme, max_height_percent, &presentation, anchor)
             {
                 eprintln!("chibipop: showing the popup failed: {e:#}");
                 let _ = popup.hide();
+                if let Some(ov) = overlay {
+                    ov.hide();
+                }
+            } else if let Some(ov) = overlay {
+                if let Err(e) = ov.show_rects(&scan, theme) {
+                    eprintln!("chibipop: showing the scan overlay failed: {e:#}");
+                }
             }
         }
     }
