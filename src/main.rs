@@ -98,13 +98,63 @@ enum Command {
     },
 }
 
-/// Reattach a parent console.
+/// Reattach a parent console, then repair std handles that
+/// `AttachConsole` leaves invalid - it moves the process into
+/// the console but does not repoint stdout/stderr. A handle
+/// that is already valid (a redirected file, an inherited pipe
+/// under MSYS2/bash) is left alone; only an invalid one gets a
+/// freshly opened `CONOUT$` installed via `SetStdHandle`.
 fn attach_parent_console() {
-    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+    use windows::core::w;
+
     // SAFETY: FFI call with no preconditions. It fails harmlessly when the
     // parent has no console, which is every double-click.
     unsafe {
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
+    for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: `id` is one of the STD_*_HANDLE constants above;
+        // GetStdHandle only reads the slot, no other preconditions.
+        if unsafe { GetStdHandle(id) }.is_ok() {
+            continue;
+        }
+        // SAFETY: "CONOUT$" is the documented device name for the
+        // console's active screen buffer, valid once a console is
+        // attached, which this only runs after. The security
+        // attributes and template-file arguments are `None`, and
+        // every other argument is a plain flag value, so nothing
+        // here relies on aliasing or lifetime invariants beyond
+        // `w!`'s own NUL-terminated, valid-for-the-call UTF-16
+        // string.
+        let conout = unsafe {
+            CreateFileW(
+                w!("CONOUT$"),
+                (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        };
+        if let Ok(handle) = conout {
+            // SAFETY: `handle` is what `CreateFileW` just returned
+            // above; SetStdHandle only stores it as the slot's
+            // value for future GetStdHandle callers - the slot
+            // this loop is trying to fix.
+            unsafe {
+                let _ = SetStdHandle(id, handle);
+            }
+        }
     }
 }
 
