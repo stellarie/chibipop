@@ -130,7 +130,7 @@ fn main() -> Result<()> {
                 }
             }
 
-            match resolved {
+            match &resolved {
                 // Distinguish "OCR itself found nothing" from "OCR found
                 // text, but none of it was close enough to the cursor" -
                 // probe exists to tell these two failure stages apart.
@@ -158,23 +158,45 @@ fn main() -> Result<()> {
                 }
             }
 
+            let mut tiled_scan: Option<Vec<chibipop::geom::ScanRect>> = None;
             if region_was_default && tiles > 1 {
-                match source.resolve_at_tiled(cursor)? {
+                let (tiled, scan) = source.resolve_at_tiled_scanned(cursor, show_region.is_some())?;
+                match tiled {
                     None => println!("\ntiled:   nothing resolved"),
                     Some(r) => println!("\ntiled:   {:?}  ({} chars)", r.span.text, r.span.text.chars().count()),
                 }
+                tiled_scan = Some(scan);
             }
 
             if let Some(seconds) = show_region {
-                let (_, scan) = source.resolve_at_tiled_scanned(cursor, true)?;
+                let scan = tiled_scan.unwrap_or_else(|| {
+                    let mut scan = vec![chibipop::geom::ScanRect {
+                        rect: region,
+                        kind: chibipop::geom::ScanKind::Pass1,
+                    }];
+                    if let Some(r) = &resolved {
+                        scan.push(chibipop::geom::ScanRect {
+                            rect: r.span.anchor,
+                            kind: chibipop::geom::ScanKind::Anchor,
+                        });
+                    }
+                    scan
+                });
+
                 if scan.is_empty() {
                     println!("\nshow-region: nothing was captured");
                 } else {
-                    let overlay = chibipop::ui::overlay::Overlay::create(false)
-                        .context("creating the scan overlay")?;
-                    overlay.show_rects(&scan, &chibipop::ui::theme::Theme::dark())?;
-                    println!("\nshow-region: {} rect(s) for {seconds}s", scan.len());
-                    pump_messages_for(std::time::Duration::from_secs(seconds));
+                    match chibipop::ui::overlay::Overlay::create(false) {
+                        Err(e) => eprintln!("chibipop: creating the scan overlay failed: {e:#}"),
+                        Ok(overlay) => {
+                            if let Err(e) = overlay.show_rects(&scan, &chibipop::ui::theme::Theme::dark()) {
+                                eprintln!("chibipop: showing the scan overlay failed: {e:#}");
+                            } else {
+                                println!("\nshow-region: {} rect(s) for {seconds}s", scan.len());
+                                pump_messages_for(std::time::Duration::from_secs(seconds));
+                            }
+                        }
+                    }
                 }
             }
             Ok(())
