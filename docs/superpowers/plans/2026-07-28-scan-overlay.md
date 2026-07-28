@@ -570,22 +570,36 @@ In the `Probe` variant:
 At the **end** of the `Probe` arm, after every capture and print that run performs:
 
 ```rust
-            if let Some(seconds) = show_region {
-                let (_, scan) = source.resolve_at_tiled_scanned(cursor, true)?;
-                if scan.is_empty() {
-                    println!("\nshow-region: nothing was captured");
-                } else {
-                    let overlay = chibipop::ui::overlay::Overlay::create(false)
-                        .context("creating the scan overlay")?;
-                    overlay.show_rects(&scan, &chibipop::ui::theme::Theme::dark())?;
-                    println!("\nshow-region: {} rect(s) for {seconds}s", scan.len());
-                    pump_messages_for(std::time::Duration::from_secs(seconds));
-                }
-            }
-```
+**Corrected 2026-07-28 after review — the original snippet here had two defects, both caught in
+Task 5's review. It is replaced by requirements rather than a snippet, because the right shape depends
+on which path the run took.**
 
-Ordering is the safety property: the overlay is created strictly after every capture this run makes,
-so it can never appear inside one.
+The overlay must be built from **captures the run already performed**. Do not add a capture just to
+draw. Concretely:
+
+- When the tiled path already runs (`tiles > 1`, no `--region`), use the collecting variant for that
+  existing call and keep the rectangles it returns. One call serves both the printed `tiled:` line and
+  the overlay.
+- When `--region W,H` was given — single-capture by definition — build the rectangles from what is
+  already known, with no new capture: the explicit region as `ScanKind::Pass1`, plus the resolved
+  word's anchor as `ScanKind::Anchor` when something resolved.
+- When `--show-region` is absent, collect and capture nothing.
+
+**Do not use `?` on `Overlay::create` or `show_rects`.** Spec §5 requires that a failure to create the
+overlay prints the probe's normal results, reports the failure on **stderr**, and **exits 0** — the
+overlay is a debug aid and must never turn a successful measurement into a failed command. Propagating
+with `?` exits 1 after the measurement has already printed successfully.
+
+**Why the original was wrong**, recorded so it is not reintroduced: it called
+`resolve_at_tiled_scanned` purely to obtain rectangles, which performs a whole extra screen capture
+via `region_around(cursor)` — the *default* box. With `--region` given, the drawn outlines then
+described a different capture than the printed numbers; and even at defaults it is a second, later
+screenshot, so on a screen that changed in between the outlines show geometry unrelated to the output.
+For an instrument whose purpose is making a measurement visible, drawing a *different* measurement is
+the worst available failure.
+
+Ordering remains the safety property: the overlay is created strictly after every capture this run
+makes, so it can never appear inside one.
 
 Add the pump helper to `src/main.rs`:
 
