@@ -196,6 +196,12 @@ without running the app.
 cargo test
 ```
 
+**After any large change, work through
+[`docs/REGRESSION.md`](docs/REGRESSION.md)** — a cheapest-first checklist: the
+automated gate, then what can be verified against real pixels with `probe`, then
+the dozen things only a human at the keyboard can check. It also lists the traps
+that have bitten more than once.
+
 237 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
