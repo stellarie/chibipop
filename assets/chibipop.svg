@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- chibipop mascot: a chibi baby bottle. Original artwork. -->
+  <defs>
+    <clipPath id="capClip">
+      <rect x="189" y="84" width="134" height="68" rx="18"/>
+    </clipPath>
+  </defs>
+  <g transform="rotate(25 256 256)">
+    <rect x="150" y="190" width="212" height="250" rx="44"
+          fill="#F5F0E1" stroke="#B8C9D4" stroke-width="8"/>
+    <rect x="206" y="145" width="100" height="55" rx="14"
+          fill="#F5F0E1" stroke="#B8C9D4" stroke-width="8"/>
+    <rect x="189" y="84" width="134" height="68" rx="18"
+          fill="#3DA9E0" stroke="#B8C9D4" stroke-width="8"/>
+    <g clip-path="url(#capClip)">
+      <line x1="180" y1="130" x2="230" y2="70" stroke="#7DC8EA" stroke-width="16"/>
+      <line x1="214" y1="130" x2="264" y2="70" stroke="#7DC8EA" stroke-width="16"/>
+      <line x1="248" y1="130" x2="298" y2="70" stroke="#7DC8EA" stroke-width="16"/>
+      <line x1="282" y1="130" x2="332" y2="70" stroke="#7DC8EA" stroke-width="16"/>
+    </g>
+    <ellipse cx="256" cy="76" rx="30" ry="40"
+             fill="#FFA726" stroke="#B8C9D4" stroke-width="6"/>
+    <circle cx="204" cy="300" r="32" fill="#4A3728"/>
+    <circle cx="308" cy="300" r="32" fill="#4A3728"/>
+    <circle cx="193" cy="288" r="10" fill="#FFFFFF"/>
+    <circle cx="297" cy="288" r="10" fill="#FFFFFF"/>
+    <rect x="239" y="358" width="34" height="12" rx="6" fill="#4A3728"/>
+  </g>
+</svg>

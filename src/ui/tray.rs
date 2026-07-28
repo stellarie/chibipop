@@ -62,6 +62,12 @@ const ID_QUIT: u32 = 1003;
 /// This process only ever shows one icon.
 const TRAY_UID: u32 = 1;
 
+/// chibipop's own tray icon (see `assets/chibipop.svg` for the source
+/// artwork) - the `.ico` container built from it, 16/32/48/256px
+/// PNG-format frames. `load_tray_icon` embeds this rather than using
+/// the OS's generic `IDI_APPLICATION`.
+const ICON_BYTES: &[u8] = include_bytes!("../../assets/chibipop.ico");
+
 /// What the user picked from the tray menu. `app::run`'s loop matches on
 /// this and is the only thing that touches `AppState`/`Hooks`/the TOML -
 /// `Tray` itself never does.
@@ -127,6 +133,14 @@ pub struct Tray {
     /// `Tray`'s own menu produces a `SetMode` - the only path that can ever
     /// change it - so it can never drift from what the menu last offered.
     mode: Cell<TriggerMode>,
+    /// The notification-area icon's handle - chibipop's own mascot when
+    /// `hicon_owned`, the OS's shared default otherwise. Destroyed in
+    /// `Drop`, but only when owned - see that impl for why.
+    hicon: HICON,
+    /// Whether `hicon` came from `CreateIconFromResourceEx` (an owned
+    /// handle, which must be destroyed) rather than `LoadIconW` (a
+    /// shared handle, which must not be - see `load_tray_icon`).
+    hicon_owned: bool,
 }
 
 impl Tray {
@@ -144,7 +158,7 @@ impl Tray {
             // error path, since it would then be the only fallible step
             // between a successful CreateWindowExW and the NIM_ADD check
             // that already handles its own cleanup.
-            let hicon = LoadIconW(None, IDI_APPLICATION).context("LoadIconW(IDI_APPLICATION)")?;
+            let (hicon, hicon_owned) = load_tray_icon()?;
 
             register_owner_class(hinstance)?;
 
@@ -183,7 +197,14 @@ impl Tray {
                 );
             }
 
-            Ok(Tray { notify_hwnd: hwnd, uid: TRAY_UID, menu_owner, mode: Cell::new(initial_mode) })
+            Ok(Tray {
+                notify_hwnd: hwnd,
+                uid: TRAY_UID,
+                menu_owner,
+                mode: Cell::new(initial_mode),
+                hicon,
+                hicon_owned,
+            })
         }
     }
 
@@ -267,10 +288,11 @@ impl Tray {
 }
 
 impl Drop for Tray {
-    /// Removes the notification-area icon and destroys the owner window.
-    /// Deliberately best-effort (errors swallowed): by the time `Drop` runs
-    /// there is nothing left to hand an `Err` to, matching `input::hooks`'s
-    /// own `Drop` (see that module's comment for the fuller argument). This
+    /// Removes the notification-area icon, destroys the owner window,
+    /// and - if owned - the icon resource itself. Deliberately
+    /// best-effort (errors swallowed): by the time `Drop` runs there is
+    /// nothing left to hand an `Err` to, matching `input::hooks`'s own
+    /// `Drop` (see that module's comment for the fuller argument). This
     /// is the fix for the exact bug the brief calls out: without it, the
     /// icon outlives the process and sits as a ghost in the notification
     /// area until the user happens to hover it.
@@ -284,6 +306,18 @@ impl Drop for Tray {
             };
             let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
             let _ = DestroyWindow(self.menu_owner);
+
+            if self.hicon_owned {
+                // SAFETY: reached only after Shell_NotifyIconW(NIM_DELETE)
+                // above, so the shell can no longer be displaying this
+                // icon - destroying it any earlier would be the exact
+                // ordering bug this function exists to avoid. `hicon_owned`
+                // is true only when `hicon` came from
+                // CreateIconFromResourceEx (an owned handle this process
+                // must free); LoadIconW's shared handle always leaves it
+                // false, so this branch can never DestroyIcon a shared one.
+                let _ = DestroyIcon(self.hicon);
+            }
         }
     }
 }
@@ -340,4 +374,69 @@ unsafe fn append_radio_item(hmenu: HMENU, id: u32, label: PCWSTR, checked: bool)
     };
     SetMenuItemInfoW(hmenu, id, false, &mii).context("SetMenuItemInfoW radio state")?;
     Ok(())
+}
+
+/// Loads chibipop's own tray icon, falling back to the OS's shared
+/// default on any failure - only the fallback itself failing is a hard
+/// error here, matching the contract `create()` already had for this
+/// step before this icon existed (module docs: tray creation failing
+/// is the one hard startup failure). Returns whether *this* call owns
+/// the returned handle: `true` from `CreateIconFromResourceEx` (an
+/// owned handle, which `Drop` must destroy), `false` from `LoadIconW`
+/// (a shared handle, which `Drop` must never destroy).
+unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
+    if let Some(hicon) = load_embedded_icon() {
+        return Ok((hicon, true));
+    }
+    eprintln!("chibipop: could not load the tray's own icon, using the default");
+    let hicon = LoadIconW(None, IDI_APPLICATION).context("LoadIconW(IDI_APPLICATION)")?;
+    Ok((hicon, false))
+}
+
+/// Picks the embedded `.ico`'s frame closest to the system's small-icon
+/// size and turns it into an owned `HICON`. `None` on any failure -
+/// malformed directory, out-of-range offsets, or `CreateIconFromResourceEx`
+/// itself rejecting the bytes - so the caller can fall back cleanly.
+unsafe fn load_embedded_icon() -> Option<HICON> {
+    let desired = GetSystemMetrics(SM_CXSMICON) as u32;
+    let bytes = ico_frame_bytes(ICON_BYTES, desired)?;
+    // SAFETY: `bytes` is a sub-slice of `ICON_BYTES`, a `'static`
+    // buffer embedded in this binary, so the pointer and length
+    // `CreateIconFromResourceEx` reads from stay valid for the whole
+    // call - the only precondition its docs place on `presbits` /
+    // `dwResSize`. `0x0003_0000` is `dwVer`'s documented "generally
+    // set to" value (MS Learn, CreateIconFromResourceEx).
+    let icon = CreateIconFromResourceEx(bytes, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR);
+    icon.ok()
+}
+
+/// Finds the `.ico` frame closest in size to `desired` and returns its
+/// raw bytes. `.ico` files and `RT_ICON` resources share one directory
+/// format - a 6-byte header then one 16-byte entry per frame (MS Learn,
+/// "Resource File Formats") - read directly here rather than pulling in
+/// a crate for it. `None` on any malformed input rather than panicking,
+/// so a bad asset degrades to the caller's fallback icon instead of a
+/// crash.
+fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
+    let header = ico.get(0..6)?;
+    if header[0..4] != [0, 0, 1, 0] {
+        return None; // reserved=0, type=1
+    }
+    let count = u16::from_le_bytes([header[4], header[5]]);
+
+    let mut best: Option<(u32, &[u8])> = None;
+    for i in 0..count {
+        let off = 6 + usize::from(i) * 16;
+        let entry = ico.get(off..off + 16)?;
+        let width = if entry[0] == 0 { 256 } else { u32::from(entry[0]) };
+        let nbytes = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize;
+        let offset = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as usize;
+        let end = offset.checked_add(nbytes)?;
+        let bytes = ico.get(offset..end)?;
+        let is_closer = best.is_none_or(|(w, _)| width.abs_diff(desired) < w.abs_diff(desired));
+        if is_closer {
+            best = Some((width, bytes));
+        }
+    }
+    best.map(|(_, bytes)| bytes)
 }
