@@ -39,10 +39,12 @@ enum Command {
         /// once, so this changes what it recognises - vary it to measure.
         #[arg(long, value_name = "W,H")]
         region: Option<String>,
-        /// Total OCR passes, as [ocr] max_ocr_passes would set. 1 is single
-        /// capture. Ignored when --region is given, which is single-capture
-        /// by definition.
-        #[arg(long, default_value_t = 3)]
+        /// Total OCR passes, as [ocr] max_ocr_passes would set. Defaults to
+        /// 1 because that is what the app ships: a diagnostic that defaults
+        /// to a configuration production does not use measures the wrong
+        /// thing. Ignored when --region is given, which is single-capture by
+        /// definition.
+        #[arg(long, default_value_t = 1)]
         tiles: u8,
         #[arg(long, default_value = "data/chibipop.sqlite")]
         dict: PathBuf,
@@ -73,6 +75,10 @@ enum Command {
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
         rules: PathBuf,
+        /// Total OCR passes, as [ocr] max_ocr_passes would set. The memory
+        /// figures in docs/REGRESSION.md were taken at 3.
+        #[arg(long, default_value_t = 1)]
+        tiles: u8,
     },
     /// Run the popup application: hover Japanese text anywhere on screen to
     /// see its definition beside it. Right-click the tray icon to change
@@ -246,8 +252,8 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Watch { dict, rules } => {
-            let source = chibipop::text::ocr::OcrTextSource::new(3)?;
+        Command::Watch { dict, rules, tiles } => {
+            let source = chibipop::text::ocr::OcrTextSource::new(tiles)?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
 
