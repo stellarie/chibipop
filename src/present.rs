@@ -219,7 +219,12 @@ fn dict_name_for(dict_id: i64, dicts: &[DictInfo]) -> String {
 /// Position of the first `dict_order` entry whose substring appears in
 /// `dict_name`, case-insensitively. `None` when nothing matches, which the
 /// caller sorts last.
-fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> {
+///
+/// Public so the settings window orders its dictionary list by exactly the
+/// rule the popup orders blocks by. A window that computed its own ordering
+/// could disagree with what the user then sees, which is worse than showing
+/// no order at all.
+pub fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> {
     let lower = dict_name.to_lowercase();
     dict_order.iter().position(|s| lower.contains(&s.to_lowercase()))
 }
