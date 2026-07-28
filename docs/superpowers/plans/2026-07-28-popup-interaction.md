@@ -1215,3 +1215,34 @@ git commit -m "docs: popup interaction acceptance and the manual script"
 **Placeholder scan:** none. Task 6 Step 1 is deliberately investigative with an explicit instruction to report which step blocked, because the outcome is genuinely unknown before running it.
 
 **Type consistency:** `sticky_region(PhysRect, PhysRect) -> [PhysRect; 3]` and `in_sticky(PhysPoint, PhysRect, PhysRect) -> bool` defined in Task 1, consumed in Tasks 2 and 5. `Shown` defined in Task 2 with three fields, extended in Task 4 to six; Task 3's `same_content` reads only `presentation` and `anchor`, so it is unaffected by the extension. `measure -> (i32, i32, i32)` in Task 4 is consumed only by `show_presentation` in the same task. `show_presentation -> Result<PhysRect>` in Task 2 becomes `Result<(PhysRect, i32, i32)>` in Task 4 — both call sites are in the tasks that change it. `max_scroll(i32, i32) -> i32` defined in Task 4 Step 4, used in Task 4 Step 7 and Task 5 Step 7. `Hooks::set_scroll_armed(bool)` / `Hooks::take_scroll() -> i32` defined in Task 5 Step 4, used in Step 7. `SCROLLBAR_W`/`SCROLLBAR_MIN_THUMB` defined in Task 4 Step 3, used in Steps 4 and 7.
+
+---
+
+## Defects found in this plan while executing it
+
+Recorded so future plans do not repeat them.
+
+**1. A task that adds a struct field must be the task that reads it.** Task 2 stores
+`Shown.presentation` and Task 3 is what reads it, so Task 2 alone produced a *sixth* clippy error
+(`field never read`) against a "must stay at exactly 5" constraint. Tasks 2 and 3 had to land as one
+commit. The same shape bit twice: Task 4's `SCROLLBAR_W` import is unused until Step 7, so it had to
+be held back rather than added with the constant it belongs to.
+
+**2. Task 4 Step 9 broke a test helper the plan never mentioned.** Extending `Shown` from three
+fields to six breaks `shown_of` in Task 3's test module — a struct literal, so every field is
+mandatory. The plan's own Self-Review reasoned about `same_content` surviving the extension and
+missed the builder entirely, even though it got the equivalent case right for `popup_config` one
+task later. **Grep for every construction site of a struct before extending it**, and list them in
+the step.
+
+**3. "Both drawing calls" was wrong — there are three.** Task 4 Step 6 said two `DrawTextLayout`
+origins needed the scroll offset. The `Elem::Separator` arm positions a `FillRectangle` at
+`origin_y + y` too, and missing it would have left the rule between the top card and the collapsed
+rows detached from the content as it scrolled. No unit test could have caught it: `layout_pass`
+needs a real device. Count the sites, do not describe them by shape.
+
+**4. Two decisions in the spec were wrong, and an adversarial review found both.** The wheel arm
+predicate (D7) and the mitigation count (D9) — see the spec's own revision notes and
+`427919e`. Neither was a coding error; both were reasoning errors that would have shipped as
+working code doing the wrong thing. The plan faithfully implemented what the spec said, which is
+exactly why the spec needed attacking separately.

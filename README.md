@@ -168,7 +168,7 @@ without running the app.
 cargo test
 ```
 
-187 tests. Plus the dictionary builder, from `tools/build-dict`:
+216 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
@@ -199,7 +199,13 @@ selectable) and M5 (DPI and Magpie polish) are not started.
   37 MB working set / 15 MB private, flat over 417 hovers with no handle growth, and
   the app idles at 12 MB. But sustained real hovering also drives the Direct2D text
   renderer, and that configuration measured 94.8 MB / 60 MB at M3 and has not been
-  re-measured since. Binary size is 3.3 MB; CPU is under 1% while hovering.
+  re-measured since. Binary size is 3.3 MB; CPU is under 1% while hovering and
+  0.000% idle.
+- **Sticky hover, scrolling and the anti-flicker check are shipped but not yet
+  accepted.** Their unit coverage is thorough and the wheel's swallow decision is
+  verified on both branches, but every *hover* behaviour needs a human — synthetic
+  mouse movement cannot reach a global low-level hook. The nine-item script is in
+  [the acceptance findings](docs/superpowers/findings/2026-07-28-popup-interaction-acceptance.md).
 
 Design specs, plans, and verification findings live in `docs/superpowers/`;
 deferred work with its evidence lives in [`docs/BACKLOG.md`](docs/BACKLOG.md).
