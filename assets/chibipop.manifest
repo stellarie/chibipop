@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="chibipop" version="1.0.0.0" processorArchitecture="*"/>
+
+  <!--
+    Common Controls v6 ONLY.
+
+    Deliberately absent: any <dpiAware> or <dpiAwareness> element.
+    text::capture::init_dpi_awareness() calls SetProcessDpiAwarenessContext at
+    runtime, and that call is documented to fail once a process's DPI
+    awareness has already been established. A manifest establishes it before
+    main runs, so declaring it here would silently break the runtime call the
+    entire capture path depends on.
+  -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+          type="win32"
+          name="Microsoft.Windows.Common-Controls"
+          version="6.0.0.0"
+          processorArchitecture="*"
+          publicKeyToken="6595b64144ccf1df"
+          language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

@@ -88,9 +88,12 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
 
 ## 4. Smaller carried items
 
-- **Executable icon.** Deferred at Task 1 but **proven feasible with no new crate**: `rc.exe` +
-  a `build.rs` that only emits `cargo:rustc-link-arg`, POC'd end to end. Note `rc.exe` fails
-  under git-bash (MSYS2 mangles `/flag` arguments) — run it from PowerShell.
+- ~~**Executable icon.**~~ **SHIPPED** in the settings-GUI round: `assets/chibipop.rc` +
+  `assets/chibipop.manifest` compiled once to a committed `chibipop.res`, linked by a `build.rs`
+  that only emits `cargo:rustc-link-arg-bins`. Verified by extracting the icon back out of the
+  built exe and locating `RT_MANIFEST` id 1 inside it. No `Cargo.toml` change was needed — Cargo
+  runs a root `build.rs` by convention. `rc.exe` must still be run from PowerShell; MSYS2 mangles
+  its `/flag` arguments under git-bash.
 - **`TextSource::at` / `resolve_at` are unreachable *and* single-pass.** An M4 hazard: the UIA
   tier will come in through that trait and silently get the old behaviour.
 - **Ruby hover on pass 1.** `nearest_line` keeps the tiled path from splicing furigana, but

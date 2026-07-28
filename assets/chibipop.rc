@@ -1,0 +1,16 @@
+// Windows resources for chibipop: the executable's icon and the application
+// manifest that asks for Common Controls v6.
+//
+// Compiled to chibipop.res once and committed; build.rs only links it. See
+// docs/superpowers/plans/2026-07-28-settings-gui.md Task 1 Step 3 for the
+// regeneration command, and note rc.exe must be run from PowerShell - MSYS2
+// mangles its /flag arguments under git-bash.
+
+#define IDI_CHIBIPOP                        1
+#define CREATEPROCESS_MANIFEST_RESOURCE_ID  1
+#define RT_MANIFEST                        24
+
+// Id 1: Explorer shows the lowest-numbered icon resource as the file's icon.
+IDI_CHIBIPOP ICON "chibipop.ico"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "chibipop.manifest"
