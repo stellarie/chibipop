@@ -122,6 +122,41 @@ the same rule `geom::inset` already applies — rather than producing a rect who
 `x + w` arithmetic reads as a containment. The anchor and popup are adjacent in that case, so
 containment still works without the bridge. A test covers `gap = 0`.
 
+**Because `PhysRect::contains` is inclusive of the top-left edge and exclusive of the
+bottom-right, the three rects tile with no seam:** the anchor excludes `y = anchor.y + anchor.h`,
+which is exactly the bridge's first row; the bridge excludes `y = popup.y`, which is exactly the
+popup's first row. No pixel between the word and the popup is left out. Asserted by test.
+
+### D2a — what "you cannot fall down the crack" actually guarantees
+
+Worked out on paper before implementation, because the obvious stronger claim is **false** and it
+would have been written as a test that could not pass.
+
+With anchor `(100, 100, 26, 27)` and the popup at `y = 139`, the straight segment from the
+*anchor's centre* to the *popup's centre* leaves the anchor's right edge at about `y = 126` — one
+pixel before the bridge begins at `y = 127`. So:
+
+> ❌ **NOT guaranteed:** every straight path from the anchor's centre to the popup's centre stays
+> inside the sticky region.
+
+The guarantee is directional, and the reason is a genuine tension rather than an oversight. Covering
+the strip *beside* the anchor at the anchor's own height is exactly what would break scanning
+sideways along a line of text (see D2). The region that a shallow diagonal needs and the region
+side-scanning must not have are the same region. They cannot both be satisfied.
+
+> ✅ **Guaranteed:** the vertical path from the anchor's centre down (or up) into the popup is
+> entirely sticky, and any approach **steeper than roughly 45°** stays sticky. For the geometry
+> above, staying inside the anchor until the bridge requires `dx < 13` over `dy = 14`.
+
+**A shallower approach exits sideways onto the neighbouring character, and that is correct
+behaviour, not a defect** — the cursor genuinely moved onto a different word, and showing that word
+is what the user asked for. Once past the anchor's bottom edge the bridge spans the full combined
+x-extent, so diagonals are unrestricted from there on.
+
+The line below the hovered word is not a new hazard: the bridge occupies exactly the strip between
+the word and the popup, and the popup itself already occludes everything below that strip. Anything
+the bridge makes sticky was already hidden behind the popup.
+
 ### D3 — sticky suppresses dispatch entirely
 
 While `in_sticky(cursor)`, `run` **does not send a `Trigger` at all**.
@@ -298,12 +333,19 @@ until something else clears the state. Every row above that says "clear `Shown`"
 
 - `in_sticky` / `sticky_region`: every point of each of the three rects is inside; points outside
   all three are not; the bridge is correct for popup-below **and** popup-above.
-- **The path property, by sweep.** For a grid of anchor positions and popup sizes over a virtual
-  desktop matching this machine's (including the portrait secondary and negative coordinates),
-  assert that **every point on the straight line from the anchor's centre to the popup's centre is
-  inside the sticky region.** This is the actual requirement — "you cannot fall down the crack on
-  the way in" — and it is provable without a screen. Modelled on the existing 12,201-case
-  `place_popup` sweep.
+- **Seam-free tiling**, per D2a: for every `y` from the anchor's top through the popup's bottom, a
+  point at the anchor's centre `x` is sticky. No pixel between the word and the popup is missed.
+- **The vertical-path property, by sweep** — the guarantee D2a actually establishes. For a grid of
+  anchor positions and popup sizes over a virtual desktop matching this machine's (including the
+  portrait secondary and negative coordinates), assert that every point on the **vertical** segment
+  from the anchor's centre into the popup is sticky, for popup-below and popup-above alike.
+  Modelled on the existing 12,201-case `place_popup` sweep.
+- **The documented non-property**, asserted so it cannot silently change: with the D2a geometry, a
+  shallow diagonal *does* leave the sticky region, and the test says so explicitly. Pinning it
+  keeps a future "improvement" that widens the bridge from silently breaking side-scanning.
+- **Side-scanning is not sticky**: a point at the neighbouring character's position — same line,
+  one glyph to the right of the anchor — must **not** be sticky. This is the assertion that would
+  fail if anyone replaced the three rects with their bounding box.
 - `max_scroll`: zero when content fits; exact when it does not; never negative.
 - `scrollbar_thumb`: `None` when content fits; thumb inside the track at scroll 0 and at
   `max_scroll`; minimum thumb height honoured; thumb bottom flush with the track bottom at
