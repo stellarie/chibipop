@@ -318,12 +318,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             eprintln!("chibipop: ============================================================");
         }
     }
-    // The default, overwhelmingly common path (exclusion genuinely active)
-    // leaves this `false`: M3-D7 depends on the guard never running at all
-    // then, or "no flicker while reading" would be false too.
-    if popup.capture_exclusion().needs_capture_guard() {
-        capture_guard_active.store(true, Ordering::SeqCst);
-    }
 
     // The overlay is a debug aid (spec §5): a creation failure must never
     // take the app down with it, unlike every other `.context(..)?` in this
@@ -342,6 +336,32 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         None
     };
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
+
+    // I3/spec D5: the overlay gets the same `exclude_from_capture` input as
+    // the popup, but the OS accepts or refuses each window's affinity call
+    // independently - a silent divergence here means the overlay's own
+    // outlines land inside every later capture with nothing to say so.
+    if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion) {
+        eprintln!("chibipop: ============================================================");
+        eprintln!("chibipop: WARNING: capture exclusion is NOT active for the scan overlay window.");
+        eprintln!("chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,");
+        eprintln!("chibipop: even though exclude_from_capture = true. This was NOT requested.");
+        eprintln!("chibipop: The capture guard below will still hide/reshow the overlay around");
+        eprintln!("chibipop: every capture, so its outlines never land inside one, at the cost");
+        eprintln!("chibipop: of a flicker this build did not expect to pay. Investigate why the OS refused.");
+        eprintln!("chibipop: ============================================================");
+    }
+
+    // The default, overwhelmingly common path (exclusion genuinely active
+    // for both windows) leaves this `false`: M3-D7 depends on the guard
+    // never running at all then, or "no flicker while reading" would be
+    // false too. Spec D5: the overlay follows the popup's guard as well as
+    // its setting, so the guard arms if EITHER window still needs it.
+    if popup.capture_exclusion().needs_capture_guard()
+        || overlay.as_ref().is_some_and(|ov| ov.capture_exclusion().needs_capture_guard())
+    {
+        capture_guard_active.store(true, Ordering::SeqCst);
+    }
 
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;

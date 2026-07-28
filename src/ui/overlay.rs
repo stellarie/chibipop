@@ -24,6 +24,7 @@
 
 use crate::geom::{inset, overlay_layout, PhysRect, ScanKind, ScanRect};
 use crate::ui::theme::Theme;
+use crate::ui::window::CaptureExclusion;
 use anyhow::{Context, Result};
 use std::cell::RefCell;
 use std::mem::size_of;
@@ -301,6 +302,7 @@ unsafe fn build_region(rects: &[ScanRect]) -> Result<HRGN> {
 /// docs for why it is shaped rather than made transparent.
 pub struct Overlay {
     hwnd: HWND,
+    capture_exclusion: CaptureExclusion,
 }
 
 /// Guards against a second live `Overlay` - see `create`'s docs for why
@@ -329,12 +331,12 @@ impl Overlay {
     /// When `exclude_from_capture` is true, `SetWindowDisplayAffinity` is
     /// attempted the same way `Popup::create` attempts it for the popup -
     /// deliberately not propagated via `?`, since whether the OS accepts it
-    /// is not grounds to fail window creation. Unlike `Popup`, this task's
-    /// pinned interface has no `capture_exclusion()`-style accessor for the
-    /// outcome, so - deviating from `Popup::create` - it is not captured
-    /// into a stored enum; adding one with no caller would be dead code
-    /// under this crate's `-D warnings` clippy gate. Flagged here rather
-    /// than silently matched to `Popup`'s fuller tracking.
+    /// is not grounds to fail window creation. The outcome is captured into
+    /// a `CaptureExclusion`, exactly like `Popup::create` does, and readable
+    /// back via `capture_exclusion()` - `app.rs`'s `run` uses it so the
+    /// overlay's own affinity result (which can differ from the popup's) is
+    /// never silently dropped: it is reported on `AttemptFailed` and folded
+    /// into whether the capture guard needs to run, same as `Popup`'s.
     pub fn create(exclude_from_capture: bool) -> Result<Overlay> {
         if OVERLAY_LIVE.load(Ordering::SeqCst) {
             anyhow::bail!("an Overlay already exists; only one may be alive at a time");
@@ -371,12 +373,23 @@ impl Overlay {
             SetLayeredWindowAttributes(hwnd, COLORREF(0), OVERLAY_ALPHA, LWA_ALPHA)
                 .context("SetLayeredWindowAttributes(LWA_ALPHA)")?;
 
-            if exclude_from_capture {
-                let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-            }
+            // Deliberately not `?`, matching `Popup::create` exactly
+            // (see the module docs' `WDA_EXCLUDEFROMCAPTURE` measurement):
+            // whether the OS accepts this is not grounds to fail window
+            // creation, but it is never just discarded either - see this
+            // fn's own doc comment on `capture_exclusion()`'s caller.
+            let capture_exclusion = if exclude_from_capture {
+                if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok() {
+                    CaptureExclusion::Excluded
+                } else {
+                    CaptureExclusion::AttemptFailed
+                }
+            } else {
+                CaptureExclusion::DeliberatelyNotExcluded
+            };
 
             OVERLAY_LIVE.store(true, Ordering::SeqCst);
-            Ok(Overlay { hwnd })
+            Ok(Overlay { hwnd, capture_exclusion })
         }
     }
 
@@ -441,6 +454,16 @@ impl Overlay {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// Whether (and why not) this overlay is excluded from the app's own
+    /// screen captures - see `CaptureExclusion`. Independent of
+    /// `Popup::capture_exclusion()`: the two windows get the same
+    /// `exclude_from_capture` input but the OS accepts or refuses each
+    /// window's affinity call on its own, so one can diverge from the
+    /// other.
+    pub fn capture_exclusion(&self) -> CaptureExclusion {
+        self.capture_exclusion
     }
 }
 
