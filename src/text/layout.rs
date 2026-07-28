@@ -368,11 +368,16 @@ pub struct TextGeom {
 /// `None` when the run is empty or `from` lies past its end - which is also
 /// what a caller gets from a path that carries no geometry at all, so an
 /// absent highlight is the failure mode rather than a wrong one.
+///
+/// `from + len` saturates rather than wrapping: `from` is a character index
+/// into one OCR line and `len` is a match length from the lookup engine, two
+/// independently produced numbers. A wrap would turn "cover everything from
+/// here on" into "cover nothing" - silently, and only in release.
 pub fn union_chars(geom: &[TextGeom], from: usize, len: usize, pad: i32) -> Option<PhysRect> {
     if len == 0 {
         return None;
     }
-    let end = from + len;
+    let end = from.saturating_add(len);
     let mut at = 0usize;
     let mut acc: Option<PhysRect> = None;
 
@@ -1182,6 +1187,15 @@ mod tests {
     fn union_of_nothing_is_none() {
         assert!(union_chars(&[], 0, 3, 0).is_none());
         assert!(union_chars(&[g(1, 100, 30)], 5, 1, 0).is_none());
+    }
+
+    /// `from + len` must saturate, not wrap. Wrapped, `end` would land below
+    /// every entry and the run would silently box nothing - in release only.
+    #[test]
+    fn an_absurd_match_length_covers_the_rest_rather_than_wrapping() {
+        let geom = vec![g(1, 100, 30), g(1, 130, 30), g(1, 160, 30)];
+        let r = union_chars(&geom, 1, usize::MAX, 0).unwrap();
+        assert_eq!(PhysRect { x: 130, y: 100, w: 60, h: 40 }, r);
     }
 
     /// The highlight maps character indices through normalise, so a

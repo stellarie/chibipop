@@ -145,7 +145,7 @@ without running the app.
 cargo test
 ```
 
-150 tests. Plus the dictionary builder, from `tools/build-dict`:
+187 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
@@ -160,14 +160,26 @@ M0–M3 are built and merged: OCR text acquisition, the lookup core
 M4 (UI Automation tier, for a cheaper path than OCR where the text is already
 selectable) and M5 (DPI and Magpie polish) are not started.
 
-The 50 MB memory target is **not** met under sustained real use — measured at
-94.8 MB working set / 60 MB private. Working set is largely reclaimable
-(a forced trim drops it to 0.05 MB while private bytes hold at 2.5 MB), and
-the OCR→lookup→present pipeline measures as a floor rather than a leak, but
-the Direct2D paint path's curve is unproven. Details in
-[`docs/superpowers/findings/2026-07-27-m3-acceptance.md`](docs/superpowers/findings/2026-07-27-m3-acceptance.md).
+**Known limits**, measured rather than assumed:
 
-Design specs, plans, and verification findings live in `docs/superpowers/`.
+- **Vertical text does not work at the shipped capture shape.** Worse than reading
+  short: the 500×100 box spans several columns, so it can return a sentence spliced
+  out of unrelated ones. Measured 2/6 correct hovers; a transposed 100×500 probe
+  scores 6/6. The fix has its own round —
+  [measurement](docs/superpowers/findings/2026-07-28-vertical-text-measurement.md).
+- **Forward tiling is off** (`max_ocr_passes = 1`) because it sometimes resolved a
+  different character than the one under the cursor. The rework is designed and
+  reviewed, not built — see [`docs/BACKLOG.md`](docs/BACKLOG.md).
+- **Text clipped by a window edge cannot be read** at any capture shape. The glyphs
+  are physically incomplete on screen; this is a ceiling, not a bug.
+- **The 50 MB memory target is not confirmed met.** The OCR→lookup path measures at
+  37 MB working set / 15 MB private, flat over 417 hovers with no handle growth, and
+  the app idles at 12 MB. But sustained real hovering also drives the Direct2D text
+  renderer, and that configuration measured 94.8 MB / 60 MB at M3 and has not been
+  re-measured since. Binary size is 3.3 MB; CPU is under 1% while hovering.
+
+Design specs, plans, and verification findings live in `docs/superpowers/`;
+deferred work with its evidence lives in [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ## Dictionaries
 

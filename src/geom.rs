@@ -106,12 +106,12 @@ pub struct ScanDisplay {
 }
 
 impl ScanDisplay {
-    pub fn new(show_scan_region: bool, highlight_match: bool) -> ScanDisplay {
-        ScanDisplay { captures: show_scan_region, highlight: highlight_match }
-    }
-
     /// Whether an overlay window is needed at all. Both off means no window is
     /// ever created.
+    ///
+    /// Built by struct literal on purpose - there is no `new`, because two
+    /// adjacent `bool` parameters are a silent swap waiting to happen and the
+    /// field names are the only thing that tells the two settings apart.
     pub fn any(self) -> bool {
         self.captures || self.highlight
     }
@@ -410,7 +410,7 @@ mod tests {
     /// would put four overlapping rectangles on the default path.
     #[test]
     fn the_capture_kinds_are_not_shown_when_only_the_highlight_is_on() {
-        let d = ScanDisplay::new(false, true);
+        let d = ScanDisplay { captures: false, highlight: true };
         assert!(!d.captures);
         assert!(d.highlight);
         assert!(d.any(), "a window is still needed - the highlight draws in it");
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn the_debug_view_shows_the_captures_as_well() {
-        let d = ScanDisplay::new(true, true);
+        let d = ScanDisplay { captures: true, highlight: true };
         assert!(d.captures);
         assert!(d.highlight);
     }
@@ -427,12 +427,12 @@ mod tests {
     /// hidden" rule survives the highlight being added beside it.
     #[test]
     fn both_settings_off_needs_no_overlay_window() {
-        assert!(!ScanDisplay::new(false, false).any());
+        assert!(!ScanDisplay { captures: false, highlight: false }.any());
     }
 
     #[test]
     fn the_debug_view_alone_still_shows_the_captures() {
-        let d = ScanDisplay::new(true, false);
+        let d = ScanDisplay { captures: true, highlight: false };
         assert!(d.captures);
         assert!(!d.highlight);
         assert!(d.any());

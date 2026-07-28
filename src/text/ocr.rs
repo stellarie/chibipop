@@ -303,7 +303,7 @@ impl OcrTextSource {
         }
         Ok((
             Some(Resolved {
-                // No geom: stitched from several captures.
+                // Stitched: no geometry.
                 span: TextSpan {
                     text,
                     cursor_byte_offset: 0,

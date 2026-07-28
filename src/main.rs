@@ -43,8 +43,12 @@ enum Command {
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
         rules: PathBuf,
-        /// Draw the captured regions for this many seconds after probing.
-        /// Bare `--show-region` shows them for 3s. Omitted, nothing is drawn.
+        /// Draw the captured regions, and the match box, for this many
+        /// seconds after probing. Bare `--show-region` shows them for 3s.
+        /// Omitted, nothing is drawn. Note probe always draws both, being
+        /// the diagnostic view; the app draws the capture regions only
+        /// under `[debug] show_scan_region`, so a real hover on the shipped
+        /// defaults shows one box where this shows several.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "3")]
         show_region: Option<u64>,
     },
@@ -158,9 +162,7 @@ fn main() -> Result<()> {
                     println!();
                     print_hits(&hits);
 
-                    // What the app would highlight, from the same function
-                    // it uses - an instrument that computes its own answer
-                    // separately is one that can quietly disagree.
+                    // The app's own highlight fn.
                     let presentation = chibipop::present::build(
                         &hits,
                         &dictionary.dicts()?,
@@ -203,9 +205,7 @@ fn main() -> Result<()> {
                     scan
                 });
 
-                // Drawn last so it reads on top of the capture boxes it
-                // overlaps. probe always shows both; the app shows the
-                // capture kinds only under [debug] show_scan_region.
+                // Last: drawn over the captures.
                 if let Some(rect) = highlight {
                     scan.push(chibipop::geom::ScanRect {
                         rect,

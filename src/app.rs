@@ -256,7 +256,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();
     let max_ocr_passes = cfg.ocr.max_ocr_passes;
-    let scan_display = ScanDisplay::new(cfg.debug.show_scan_region, cfg.popup.highlight_match);
+    let scan_display = ScanDisplay {
+        captures: cfg.debug.show_scan_region,
+        highlight: cfg.popup.highlight_match,
+    };
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 

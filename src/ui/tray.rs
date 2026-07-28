@@ -147,17 +147,20 @@ impl Tray {
     /// Adds the notification-area icon and creates the hidden menu-owner
     /// window. `Err` here must be treated by the caller as a hard startup
     /// failure (spec section 6) - see the module docs.
+    ///
+    /// **Cleanup ordering is load-bearing on the error paths.** The icon is
+    /// loaded *first*, before the owner window exists, so a failure to load
+    /// has nothing else to clean up; swapping the two would leak the owner
+    /// window on that one path. In exchange, because `load_tray_icon` can
+    /// return an **owned** handle, every fallible step after it must destroy
+    /// that handle on its own error path - `create` returns `Err` before any
+    /// `Tray` exists, so `Drop` never runs to do it for them.
     pub fn create(hwnd: HWND, initial_mode: TriggerMode) -> Result<Tray> {
         unsafe {
             let hinstance: HINSTANCE =
                 GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
 
-            // Loaded before the owner window is created (below) so a
-            // failure here has nothing else to clean up - swapping this
-            // order would leak the owner window on this particular error
-            // path. Loading can return an owned handle (see
-            // `load_tray_icon`), so every fallible step from here on
-            // destroys it on its own error path too.
+            // First: nothing to unwind yet.
             let (hicon, hicon_owned) = load_tray_icon()?;
 
             if let Err(e) = register_owner_class(hinstance) {
