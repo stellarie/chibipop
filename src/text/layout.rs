@@ -348,6 +348,54 @@ where
     normalise(&out)
 }
 
+/// One entry of a run's geometry: an OCR word's box and how many characters
+/// of the text it accounts for.
+///
+/// `char_count` rather than one entry per character, because an OCR "word" is
+/// not always one character - a page counter on a Japanese line arrived as
+/// `338` in a single box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextGeom {
+    pub char_count: usize,
+    pub rect: PhysRect,
+}
+
+/// The padded box covering `len` characters starting at character `from`.
+///
+/// A match ending inside a multi-character entry rounds **outward** to that
+/// entry's whole box: geometry for part of an OCR word was never supplied, and
+/// a box slightly wider than the match is honest where a guessed split is not.
+/// `None` when the run is empty or `from` lies past its end - which is also
+/// what a caller gets from a path that carries no geometry at all, so an
+/// absent highlight is the failure mode rather than a wrong one.
+pub fn union_chars(geom: &[TextGeom], from: usize, len: usize, pad: i32) -> Option<PhysRect> {
+    if len == 0 {
+        return None;
+    }
+    let end = from + len;
+    let mut at = 0usize;
+    let mut acc: Option<PhysRect> = None;
+
+    for entry in geom {
+        let next = at + entry.char_count;
+        if next > from && at < end {
+            acc = Some(match acc {
+                None => entry.rect,
+                Some(a) => {
+                    let l = a.x.min(entry.rect.x);
+                    let t = a.y.min(entry.rect.y);
+                    let r = (a.x + a.w).max(entry.rect.x + entry.rect.w);
+                    let b = (a.y + a.h).max(entry.rect.y + entry.rect.h);
+                    PhysRect { x: l, y: t, w: r - l, h: b - t }
+                }
+            });
+        }
+        at = next;
+    }
+
+    acc.map(|r| PhysRect { x: r.x - pad, y: r.y - pad, w: r.w + 2 * pad, h: r.h + 2 * pad })
+}
+
 pub fn region_around(cursor: PhysPoint) -> PhysRect {
     PhysRect {
         x: cursor.x - REGION_W / 2,
@@ -374,12 +422,14 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
 
     let hit = &line.words[wi];
     let mut text = String::new();
+    let mut geom: Vec<TextGeom> = Vec::with_capacity(ordered.len());
     let mut cursor_byte_offset = 0usize;
     for w in &ordered {
         if std::ptr::eq(*w, hit) {
             cursor_byte_offset = text.len();
         }
         text.push_str(&w.text);
+        geom.push(TextGeom { char_count: w.text.chars().count(), rect: w.rect });
     }
 
     // Normalisation can only substitute one char for another of the same
@@ -395,6 +445,7 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
             text,
             cursor_byte_offset: prefix_len,
             anchor: hit.rect,
+            geom,
         },
         orientation,
     })
@@ -1096,5 +1147,88 @@ mod tests {
         });
         assert_eq!(vec![TILE_LEN, 20], heights, "tile 2 is clamped to what the monitor has left");
         assert_eq!("上上", text);
+    }
+
+    fn g(n: usize, x: i32, w: i32) -> TextGeom {
+        TextGeom { char_count: n, rect: PhysRect { x, y: 100, w, h: 40 } }
+    }
+
+    #[test]
+    fn union_covers_exactly_the_matched_run_padded() {
+        let geom = vec![g(1, 100, 30), g(1, 130, 30), g(1, 160, 30)];
+        let r = union_chars(&geom, 0, 2, 3).unwrap();
+        assert_eq!(PhysRect { x: 97, y: 97, w: 66, h: 46 }, r);
+    }
+
+    #[test]
+    fn union_starts_at_the_requested_offset_not_the_beginning() {
+        let geom = vec![g(1, 100, 30), g(1, 130, 30), g(1, 160, 30)];
+        let r = union_chars(&geom, 2, 1, 0).unwrap();
+        assert_eq!(PhysRect { x: 160, y: 100, w: 30, h: 40 }, r);
+    }
+
+    /// An OCR word is not always one character - a page counter on the same
+    /// line arrived as "338" in a single box. A match ending inside one
+    /// rounds outward to that box, because geometry for part of it was never
+    /// supplied.
+    #[test]
+    fn a_match_ending_inside_a_multi_char_entry_rounds_outward() {
+        let geom = vec![g(1, 100, 30), g(3, 130, 90)];
+        let r = union_chars(&geom, 0, 2, 0).unwrap();
+        assert_eq!(PhysRect { x: 100, y: 100, w: 120, h: 40 }, r);
+    }
+
+    #[test]
+    fn union_of_nothing_is_none() {
+        assert!(union_chars(&[], 0, 3, 0).is_none());
+        assert!(union_chars(&[g(1, 100, 30)], 5, 1, 0).is_none());
+    }
+
+    /// The highlight maps character indices through normalise, so a
+    /// substitution that changed the count would shift every box after it.
+    #[test]
+    fn normalise_preserves_character_count() {
+        for s in ["ツ-ル", "ツ‐ル", "ツ–ル", "ツ—ル", "abc", "日本語", ""] {
+            assert_eq!(s.chars().count(), normalise(s).chars().count(), "input {s:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_carries_one_geom_entry_per_word_aligned_to_the_text() {
+        let line = OcrLine {
+            words: vec![w("可", 100, 100, 30, 40), w("哀", 130, 100, 30, 40),
+                        w("想", 160, 100, 30, 40)],
+        };
+        let r = resolve(&[line], p(145, 120)).unwrap();
+        assert_eq!(3, r.span.geom.len());
+        assert_eq!(r.span.text.chars().count(),
+                   r.span.geom.iter().map(|g| g.char_count).sum::<usize>());
+    }
+
+    /// D3, the shipped single-pass path: `resolve` builds text for the whole
+    /// line, so `cursor_byte_offset` is NOT zero and the highlight must start
+    /// from the hovered character. Boxing "the first match_len characters"
+    /// would frame the start of the line instead - revision 1 of the spec did
+    /// exactly that.
+    #[test]
+    fn the_highlight_boxes_the_hovered_word_not_the_lines_start() {
+        let line = OcrLine {
+            words: vec![w("そ", 100, 100, 30, 40), w("の", 130, 100, 30, 40),
+                        w("可", 160, 100, 30, 40), w("哀", 190, 100, 30, 40),
+                        w("想", 220, 100, 30, 40)],
+        };
+        let r = resolve(&[line], p(175, 120)).unwrap();
+        assert_ne!(0, r.span.cursor_byte_offset, "the fixture must exercise a non-zero offset");
+
+        let from = r.span.text[..r.span.cursor_byte_offset].chars().count();
+        let boxed = union_chars(&r.span.geom, from, 3, 0).unwrap();
+        assert_eq!(PhysRect { x: 160, y: 100, w: 90, h: 40 }, boxed);
+    }
+
+    /// The tiled path stitches text from several captures and supplies no
+    /// geometry. An absent highlight is the contract; a wrong one is not.
+    #[test]
+    fn no_geometry_yields_no_highlight_rather_than_a_wrong_one() {
+        assert_eq!(None, union_chars(&[], 0, 3, 3));
     }
 }
