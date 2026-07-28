@@ -34,10 +34,13 @@ TERM_BANK = [
 
 FREQ_INDEX = {"title": "FixtureFreq", "format": 3, "frequencyMode": "rank-based"}
 
-# Both row shapes: reading-agnostic, and reading-scoped with the extra nesting.
+# Both row shapes, plus a competing pair: 猫 has a reading-scoped rank of 42
+# and a reading-agnostic one of 9999. lookup_freq must prefer the first, so a
+# reader that ignores the reading dimension fails rather than passing quietly.
 FREQ_BANK = [
     ["食べる", "freq", {"value": 7}],
     ["猫", "freq", {"reading": "ねこ", "frequency": {"value": 42}}],
+    ["猫", "freq", {"value": 9999}],
 ]
 
 

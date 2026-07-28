@@ -79,6 +79,15 @@ class TestFixtureArchive(unittest.TestCase):
             "SELECT freq FROM term WHERE surface='猫'").fetchone()[0]
         self.assertEqual(42, f)
 
+    def test_a_reading_scoped_rank_beats_a_reading_agnostic_one(self):
+        # 猫 carries both: 42 scoped to ねこ, and a bare 9999. Preferring the
+        # scoped one is what stops a rare spelling inheriting its homophone's
+        # rank - see freq.py's own docstring.
+        f = self.conn.execute(
+            "SELECT freq FROM term WHERE surface='猫'").fetchone()[0]
+        self.assertEqual(42, f)
+        self.assertNotEqual(9999, f)
+
     def test_a_term_with_no_frequency_row_is_null(self):
         f = self.conn.execute(
             "SELECT freq FROM term "
