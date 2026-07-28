@@ -449,6 +449,44 @@ mod tests {
         assert_eq!(0, Hooks::take_whole_notches());
     }
 
+    /// The single riskiest line in this crate: an armed wheel event must be
+    /// consumed (`LRESULT(1)`) and its delta banked.
+    ///
+    /// Only the **armed** path is exercised here, because that path returns
+    /// before `CallNextHookEx` and so touches no hook chain. The unarmed path
+    /// is verified live instead - chibipop running, wheel over a browser, page
+    /// still scrolls - see
+    /// `docs/superpowers/findings/2026-07-28-popup-interaction-acceptance.md`.
+    #[test]
+    fn an_armed_wheel_event_is_swallowed_and_banked() {
+        Hooks::discard_scroll();
+        Hooks::set_scroll_armed(true);
+
+        let data = MSLLHOOKSTRUCT {
+            pt: POINT { x: 0, y: 0 },
+            mouseData: (WHEEL_DELTA_UNITS as u32) << 16,
+            flags: 0,
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        let lparam = LPARAM(&data as *const MSLLHOOKSTRUCT as isize);
+
+        // SAFETY: this is the exact contract the OS provides for a
+        // WM_MOUSEWHEEL delivery - code >= 0 and lparam pointing at a live,
+        // aligned MSLLHOOKSTRUCT that outlives the call (it is on this
+        // frame's stack). Armed, so the callback returns before ever
+        // reaching `CallNextHookEx`.
+        let result = unsafe {
+            mouse_hook_proc(0, WPARAM(WM_MOUSEWHEEL as usize), lparam)
+        };
+
+        assert_eq!(1, result.0, "an armed wheel event must be swallowed");
+        assert_eq!(1, Hooks::take_whole_notches(), "and its delta banked");
+
+        Hooks::set_scroll_armed(false);
+        Hooks::discard_scroll();
+    }
+
     /// A long stall pins the accumulator instead of wrapping; the notch count
     /// derived from it must still be sane, and the caller's pixel conversion
     /// saturates rather than overflowing.

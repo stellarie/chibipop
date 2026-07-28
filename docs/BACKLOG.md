@@ -98,3 +98,25 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
   to the base text. Reproduced live at (3550,1450) → `ん` from `かんたん`.
 - **Text clipped by a window edge is unrecoverable** at any capture shape. Worth a line in the
   README if users report it as a bug; it is a ceiling, not a defect.
+
+---
+
+## 5. Single-instance guard
+
+**Raised 2026-07-28** by the adversarial review of the wheel-swallow feature. There is no
+`CreateMutexW` or equivalent anywhere in `src/`, so two `chibipop run` processes install two
+`WH_MOUSE_LL` hooks.
+
+That was harmless before wheel capture existed. It is not now: the armed instance swallows wheel
+events for everybody, and quitting the instance whose popup is visible does not necessarily fix it,
+because the other one's arm is independent. One named mutex at startup, with a clear message and a
+non-zero exit, closes it.
+
+Related smaller items from the same review, all accepted-not-fixed and recorded in the spec's §8:
+
+- The arm is stale for up to one 20 ms tick after the cursor leaves the popup.
+- The arm survives a capture-guard hide, so a capture in flight while the cursor sits in the popup's
+  rectangle leaves the wheel briefly dead with no popup visible. Gating on `IsWindowVisible` was
+  considered and rejected — it would hand the wheel to the window underneath mid-read.
+- `LLMHF_INJECTED` is unchecked, so synthetic wheel input is swallowed like any other. Deliberate:
+  it is also the only reason an agent can verify this feature at all.
