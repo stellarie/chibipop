@@ -365,7 +365,9 @@ mod tests {
         .unwrap();
         assert_eq!(PhysRect { x: 100, y: 180, w: 350, h: 60 }, bounds);
         assert_eq!(PhysRect { x: 0, y: 20, w: 50, h: 20 }, local[0].rect);
+        assert_eq!(ScanKind::Pass1, local[0].kind);
         assert_eq!(PhysRect { x: 300, y: 0, w: 50, h: 60 }, local[1].rect);
+        assert_eq!(ScanKind::Tile, local[1].kind);
     }
 
     /// Tiles routinely overlap the pass-1 box they were derived from, so the
