@@ -48,10 +48,12 @@ use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
+use crate::settings::{self};
 use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{max_scroll, Renderer};
+use crate::ui::settings_window::{SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{CaptureExclusion, Popup};
@@ -69,7 +71,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetCursorPos, GetMessageW, IsWindowVisible, KillTimer, PostQuitMessage,
+    DispatchMessageW, GetCursorPos, GetMessageW, IsDialogMessageW, IsWindowVisible, KillTimer,
+    PostQuitMessage,
     PostThreadMessageW, SetTimer, ShowWindow, TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE,
     WM_APP, WM_TIMER,
 };
@@ -270,7 +273,7 @@ impl CaptureGuard {
 /// `default_config_path()` or `--config`) - needed here, not just at load
 /// time, because a tray mode change must persist back to the same file or
 /// the setting silently reverts on the next restart.
-pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
+pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
     let dict_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
@@ -329,7 +332,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // needs them for the settings window's dictionary list. Sending them
     // across the handshake it already performs avoids opening a second
     // SQLite connection here purely to read two names.
-    let _dicts: Vec<DictInfo> = startup_rx
+    let dicts: Vec<DictInfo> = startup_rx
         .recv()
         .context("worker thread ended before completing startup")??;
 
@@ -413,7 +416,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // Uses popup.hwnd() only as Shell_NotifyIconW's message target - see
     // ui::tray's module docs for why the menu itself does not use popup as
     // its owner.
-    let tray = Tray::create(popup.hwnd(), cfg.trigger.mode).context("creating the tray icon")?;
+    let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
 
     // hwnd = None: a thread timer, not bound to any window. WM_TIMER is
     // delivered straight into this thread's message queue (msg.hwnd = NULL)
@@ -440,6 +443,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut overlay_prev_visible = false;
     // What is on screen, and therefore what holds the cursor - see `Shown`.
     let mut shown: Option<Shown> = None;
+    let mut settings: Option<SettingsWindow> = None;
     // Consecutive ticks the wheel has been captured - see ARM_WARN_TICKS.
     let mut armed_ticks: u32 = 0;
 
@@ -491,6 +495,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             break; // 0 = WM_QUIT, -1 = error. Either way, stop pumping.
         }
 
+        // Modeless dialog routing. This branch is what gives the settings
+        // window Tab, Shift-Tab, arrow keys between radios and Escape -
+        // without `DialogBoxParamW`'s nested pump, which would stop WM_TIMER
+        // arriving and latch the wheel arm (spec D2).
+        if let Some(w) = &settings {
+            // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
+            // dropped, and `msg` is this loop's own stack storage.
+            if unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool() {
+                continue;
+            }
+        }
+
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             // Spec D7: the popup's OWN rect, never the sticky region. The
             // sticky region includes the hovered word, and the cursor is on
@@ -528,6 +544,30 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
                         }
                     }
+                }
+            }
+
+            if let Some(w) = &settings {
+                match w.take_outcome() {
+                    Some(SettingsOutcome::Cancel) => settings = None,
+                    Some(SettingsOutcome::Apply) => {
+                        let updated = settings::apply_to(&w.read(&settings::from_config(&cfg, &dicts)), &cfg);
+                        // Both failures leave the running instance alive and
+                        // the window open. A settings round-trip that half
+                        // applies - new file on disk with old settings
+                        // running, or nothing running at all - is the one
+                        // outcome worth refusing outright.
+                        if let Err(e) = updated.save(config_path) {
+                            eprintln!("chibipop: could not save settings to {}: {e:#}",
+                                      config_path.display());
+                        } else if let Err(e) = restart_self() {
+                            eprintln!("chibipop: settings saved, but the restart failed: {e:#}");
+                            eprintln!("chibipop: they will apply next time you start chibipop.");
+                        } else {
+                            unsafe { PostQuitMessage(0) };
+                        }
+                    }
+                    None => {}
                 }
             }
 
@@ -587,18 +627,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             drain_capture_guard();
         }) {
             match cmd {
-                TrayCommand::SetMode(mode) => {
-                    // AppState, hooks, and disk all updated together here -
-                    // skipping any one of the three is exactly how "the
-                    // toggle looks broken after a restart" bugs happen.
-                    cfg.trigger.mode = mode;
-                    Hooks::set_mode(mode);
-                    // No sticky region may survive a mode change.
-                    shown = None;
-                    Hooks::set_scroll_armed(false);
-                    if let Err(e) = cfg.save(config_path) {
-                        eprintln!("chibipop: failed to save the mode change to {}: {e:#}",
-                                  config_path.display());
+                TrayCommand::OpenSettings => {
+                    if let Some(w) = &settings {
+                        w.focus();
+                    } else {
+                        let form = settings::from_config(&cfg, &dicts);
+                        let stale = settings::stale_order_entries(&cfg, &dicts);
+                        match SettingsWindow::open(&form, &stale) {
+                            // Never fatal - the same rule the overlay
+                            // follows. Settings is not worth killing the
+                            // app for.
+                            Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
+                            Ok(w) => settings = Some(w),
+                        }
                     }
                 }
                 TrayCommand::Quit => unsafe {
@@ -1056,6 +1097,30 @@ fn hold_region(anchor: PhysRect, matched: Option<PhysRect>, orientation: Orienta
             h: span.h,
         },
     }
+}
+
+/// Launch a replacement chibipop with this process's own argv.
+///
+/// Passing the original arguments is what makes `--dict`, `--rules` and
+/// `--config` survive a settings change; a restart that silently reverted to
+/// the defaults would be worse than not restarting at all.
+///
+/// The caller posts a quit **only after this returns `Ok`**, so a failure to
+/// spawn leaves the working instance running rather than leaving the user with
+/// nothing. Startup measures 0.18s to a live tray icon, so the gap is
+/// imperceptible - see the settings spec's D8.
+///
+/// `std::process::Command` rather than `CreateProcessW`: it is in the standard
+/// library, it handles argument quoting, and nothing here needs to be
+/// Windows-specific.
+fn restart_self() -> Result<()> {
+    let exe = std::env::current_exe().context("locating this executable")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::Command::new(exe)
+        .args(args)
+        .spawn()
+        .context("spawning the replacement process")?;
+    Ok(())
 }
 
 /// The pointer's position right now.

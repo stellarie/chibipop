@@ -1,5 +1,5 @@
 //! System tray icon: the app's only user-facing control surface (spec
-//! section 6) - a right-click menu to change trigger mode and to quit.
+//! section 6) - a right-click menu to open Settings and to quit.
 //! Once this exists, `app.rs` removes its Task 7 interim `q`+Enter console
 //! quit - see that file's module docs.
 //!
@@ -40,9 +40,7 @@
 //! `lparam` for the tray's own callback message (Shell32's documented
 //! "version 0" callback shape) - no `wparam` needed at all.
 
-use crate::config::TriggerMode;
 use anyhow::{Context, Result};
-use std::cell::Cell;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::*;
@@ -55,8 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 /// `app.rs`'s `WM_APP_RESULT`; `+ 2` keeps this one distinct.
 const WM_TRAYICON: u32 = WM_APP + 2;
 
-const ID_MODE_LIVE: u32 = 1001;
-const ID_MODE_HOLD_SHIFT: u32 = 1002;
+const ID_SETTINGS: u32 = 1001;
 const ID_QUIT: u32 = 1003;
 
 /// This process only ever shows one icon.
@@ -72,7 +69,7 @@ const ICON_BYTES: &[u8] = include_bytes!("../../assets/chibipop.ico");
 /// this and is the only thing that touches `AppState`/`Hooks`/the TOML -
 /// `Tray` itself never does.
 pub enum TrayCommand {
-    SetMode(TriggerMode),
+    OpenSettings,
     Quit,
 }
 
@@ -129,10 +126,6 @@ pub struct Tray {
     /// `TrackPopupMenu`/`SetForegroundWindow`'s target. Owned by this
     /// `Tray`, destroyed in `Drop`.
     menu_owner: HWND,
-    /// The mode the menu currently shows checked. Updated the moment this
-    /// `Tray`'s own menu produces a `SetMode` - the only path that can ever
-    /// change it - so it can never drift from what the menu last offered.
-    mode: Cell<TriggerMode>,
     /// The notification-area icon's handle - chibipop's own mascot when
     /// `hicon_owned`, the OS's shared default otherwise. Destroyed in
     /// `Drop`, but only when owned - see that impl for why.
@@ -155,7 +148,7 @@ impl Tray {
     /// return an **owned** handle, every fallible step after it must destroy
     /// that handle on its own error path - `create` returns `Err` before any
     /// `Tray` exists, so `Drop` never runs to do it for them.
-    pub fn create(hwnd: HWND, initial_mode: TriggerMode) -> Result<Tray> {
+    pub fn create(hwnd: HWND) -> Result<Tray> {
         unsafe {
             let hinstance: HINSTANCE =
                 GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
@@ -221,7 +214,6 @@ impl Tray {
                 notify_hwnd: hwnd,
                 uid: TRAY_UID,
                 menu_owner,
-                mode: Cell::new(initial_mode),
                 hicon,
                 hicon_owned,
             })
@@ -264,7 +256,7 @@ impl Tray {
     /// have triggered, *before* this call can swallow it - see I4.
     fn show_menu(&self, before_blocking: impl FnOnce()) -> Option<TrayCommand> {
         unsafe {
-            let hmenu = match build_menu(self.mode.get()) {
+            let hmenu = match build_menu() {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("chibipop: building the tray menu failed: {e:#}");
@@ -292,14 +284,7 @@ impl Tray {
             let _ = DestroyMenu(hmenu);
 
             match cmd.0 as u32 {
-                ID_MODE_LIVE => {
-                    self.mode.set(TriggerMode::Live);
-                    Some(TrayCommand::SetMode(TriggerMode::Live))
-                }
-                ID_MODE_HOLD_SHIFT => {
-                    self.mode.set(TriggerMode::HoldShift);
-                    Some(TrayCommand::SetMode(TriggerMode::HoldShift))
-                }
+                ID_SETTINGS => Some(TrayCommand::OpenSettings),
                 ID_QUIT => Some(TrayCommand::Quit),
                 _ => None, // dismissed with no selection
             }
@@ -352,47 +337,29 @@ fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
     nid.szTip[..n].copy_from_slice(&wide[..n]);
 }
 
-/// Builds the right-click menu fresh: two radio-style mode items reflecting
-/// `mode`, a separator, and Quit. Destroys the partially-built `HMENU` on any
+/// Builds the right-click menu fresh: Settings, a separator, and Quit.
+///
+/// The trigger mode used to live here as two radio items, and moved into the
+/// settings window when that window gained the other ten settings - it was
+/// only ever on the menu because it happened to be the first setting that
+/// needed changing at runtime, not because it is the most important.
+///
+/// Destroys the partially-built `HMENU` on any
 /// failure so a construction error can never leak it.
-unsafe fn build_menu(mode: TriggerMode) -> Result<HMENU> {
+unsafe fn build_menu() -> Result<HMENU> {
     let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
-    if let Err(e) = populate_menu(hmenu, mode) {
+    if let Err(e) = populate_menu(hmenu) {
         let _ = DestroyMenu(hmenu);
         return Err(e);
     }
     Ok(hmenu)
 }
 
-unsafe fn populate_menu(hmenu: HMENU, mode: TriggerMode) -> Result<()> {
-    append_radio_item(hmenu, ID_MODE_LIVE, w!("Live"), mode == TriggerMode::Live)?;
-    append_radio_item(
-        hmenu,
-        ID_MODE_HOLD_SHIFT,
-        w!("Hold Shift"),
-        mode == TriggerMode::HoldShift,
-    )?;
+unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
+    AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
+        .context("AppendMenuW Settings")?;
     AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator")?;
     AppendMenuW(hmenu, MF_STRING, ID_QUIT as usize, w!("Quit")).context("AppendMenuW Quit")?;
-    Ok(())
-}
-
-/// Appends a string item, then marks it `MFT_RADIOCHECK` (a bullet, not a
-/// checkmark - these two items are mutually exclusive, not independent
-/// toggles) via a second call rather than `InsertMenuItemW`, so the item's
-/// text never has to be re-encoded into a `PWSTR` this function would have
-/// to keep alive - `AppendMenuW` already owns that via its own `PCWSTR`
-/// parameter, which Windows copies internally.
-unsafe fn append_radio_item(hmenu: HMENU, id: u32, label: PCWSTR, checked: bool) -> Result<()> {
-    AppendMenuW(hmenu, MF_STRING, id as usize, label).context("AppendMenuW mode item")?;
-    let mii = MENUITEMINFOW {
-        cbSize: size_of::<MENUITEMINFOW>() as u32,
-        fMask: MIIM_FTYPE | MIIM_STATE,
-        fType: MFT_STRING | MFT_RADIOCHECK,
-        fState: if checked { MFS_CHECKED } else { MFS_UNCHECKED },
-        ..Default::default()
-    };
-    SetMenuItemInfoW(hmenu, id, false, &mii).context("SetMenuItemInfoW radio state")?;
     Ok(())
 }
 
