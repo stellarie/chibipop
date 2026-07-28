@@ -68,7 +68,7 @@ const WIN_W: i32 = 470;
 const PAD: i32 = 14;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
-const LABEL_W: i32 = 150;
+const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 
@@ -461,9 +461,9 @@ impl SettingsWindow {
             // the window opened with no way to accept anything. Measuring the
             // content means that cannot recur, at any DPI or font size.
             let content_h = win.build(form, stale)?;
+            // Sizes AND shows - see `fit_to` for why showing cannot go
+            // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
-
-            let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             Ok(win)
         }
@@ -499,7 +499,8 @@ impl SettingsWindow {
         })
     }
 
-    /// Resize so the client area holds `client_w` x `client_h` 96-DPI pixels.
+    /// Resize so the client area holds `client_w` x `client_h` 96-DPI pixels,
+    /// and show the window.
     ///
     /// `CreateWindowExW` takes the **outer** size, so the caption and frame
     /// must be added on top - `AdjustWindowRectEx` is what knows how much that
@@ -525,7 +526,15 @@ impl SettingsWindow {
                     0,
                     rc.right - rc.left,
                     rc.bottom - rc.top,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    // SWP_SHOWWINDOW, not a separate `ShowWindow` call: the
+                    // FIRST ShowWindow in a process ignores its nCmdShow and
+                    // uses STARTUPINFO.wShowWindow instead. A chibipop
+                    // launched hidden - from a shortcut set to "minimized", a
+                    // scheduled task, or `Start-Process -WindowStyle Hidden` -
+                    // therefore had its settings window created, sized, and
+                    // then silently forced invisible, with no error anywhere.
+                    // SetWindowPos sets WS_VISIBLE directly and is immune.
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW,
                 );
             }
         }
@@ -713,10 +722,11 @@ impl SettingsWindow {
             // ---- Apply / Cancel ----
             child(h, w!("STATIC"),
                 "Applying saves your settings and restarts chibipop.",
-                WINDOW_STYLE(0), PAD, y + 6, 250, ROW_H, 0, f)?;
-            child(h, w!("BUTTON"), "Apply & Restart",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 16, ROW_H, 0, f)?;
+            y += ROW_H + 2;
+            child(h, w!("BUTTON"), "Apply && Restart",
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
-                  WIN_W - PAD - 230, y, 120, ROW_H + 4, ID_APPLY, f)?;
+                  WIN_W - PAD - 238, y, 128, ROW_H + 4, ID_APPLY, f)?;
             child(h, w!("BUTTON"), "Cancel", WS_TABSTOP,
                   WIN_W - PAD - 104, y, 96, ROW_H + 4, ID_CANCEL, f)?;
 
