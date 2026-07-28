@@ -49,13 +49,14 @@ one box where `probe` shows several.
 
 ### Paths
 
-`--dict` and `--rules` default to `data/chibipop.sqlite` and
-`data/deconjugator.json` **relative to the working directory**, so run from
-the repository root or pass absolute paths.
+`--dict` and `--rules` look **beside the executable first**, and fall back to
+the working directory when nothing is there. That serves both layouts: a
+shipped chibipop keeps its data beside the exe, while a development tree has
+the binary in `target/release/` and the data at the repository root.
 
-`--config` is different on purpose: it defaults to `chibipop.toml` **beside
-the executable**, so a shortcut-launched `chibipop.exe` still finds its
-settings.
+`--config` deliberately has no fallback — it resolves **beside the executable**
+only. It is created when absent, so a fallback would write a first run's
+settings to whichever directory happened to launch it.
 
 ---
 

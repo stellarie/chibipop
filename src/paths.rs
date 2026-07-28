@@ -1,4 +1,4 @@
-//! Where chibipop's own files live.
+//! chibipop's own file paths.
 
 use std::path::PathBuf;
 

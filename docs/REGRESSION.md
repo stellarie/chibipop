@@ -192,6 +192,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
 | **`cargo fmt` is not run here** | The repo has never been rustfmt-clean. Do not "fix" it. |
 | **`Cargo.toml` carries an unstaged reformat** | Never `git add -u`/`-A`. Stage by name. |
+| **A copy of `data/` beside the exe shadows the repo's** | `--dict` prefers beside-exe and only falls back to the working directory. A stray `target/release/data/` therefore wins silently, and keeps winning after the real data changes. Delete it rather than refreshing it. |
 
 ## When something fails
 

@@ -338,12 +338,12 @@ fn main() -> Result<()> {
     }
 }
 
-/// --dict, or the shipped default.
+/// --dict, or the default.
 fn dict_path(given: Option<PathBuf>) -> PathBuf {
     given.unwrap_or_else(|| chibipop::paths::data_file("data/chibipop.sqlite"))
 }
 
-/// --rules, or the shipped default.
+/// --rules, or the default.
 fn rules_path(given: Option<PathBuf>) -> PathBuf {
     given.unwrap_or_else(|| chibipop::paths::data_file("data/deconjugator.json"))
 }
