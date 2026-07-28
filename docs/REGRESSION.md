@@ -148,8 +148,14 @@ doubts it.
 9. **Tray menu open + wheel** → wheel still works. *(D9: `TrackPopupMenuEx` pumps its own loop and
    discards `WM_TIMER`, so the arm cannot be recomputed while it is open.)*
 10. **Quit chibipop, then wheel** → still works. The one failure that would outlive the app.
-11. **Right-click tray → Settings…** → window opens, **both buttons visible**, values match the
-    TOML, controls look native (not Windows-95 grey — that is the manifest).
+11. **`chibipop run` → the settings window opens by itself**, **both buttons visible**, values match
+    the TOML, controls look native (not Windows-95 grey — that is the manifest). Cancel dismisses it
+    and hovering works normally underneath.
+11a. **Right-click the tray icon → still shows NOTHING.** Known broken, BACKLOG 7. *If a menu ever
+    appears here, something changed — find out what before celebrating.* Note the icon lives behind
+    the `^` chevron, not in the visible tray.
+11b. **`chibipop settings`** → the same window, captioned **"Apply"** and "Restart chibipop to use
+    them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
 12. **Reorder dictionaries → Apply** → order changes, and **`chibipop.toml` still holds the
     original substrings**, merely reordered. Invisible from the UI; check the file.
 13. **Open Settings, touch nothing, Apply** → the TOML is unchanged apart from formatting.

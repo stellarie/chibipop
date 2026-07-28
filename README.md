@@ -53,8 +53,13 @@ chibipop run
 ```
 
 Starts the popup. Hover Japanese text; the definition appears beside it.
-Right-click the tray icon for **Settings…** and **Quit**. If the tray menu does
-not open, `chibipop settings` reaches the same window directly.
+**The settings window opens by itself at startup** — Cancel or the X dismisses
+it and hovering works normally underneath. That is the way in for now because
+**right-clicking the tray icon does not open its menu** (a real bug, not a
+missing feature — [`docs/BACKLOG.md`](docs/BACKLOG.md) §7). `chibipop settings`
+reaches the same window without starting the popup at all. **Quit** is still on
+the tray menu, so until §7 is fixed, close chibipop from Task Manager or
+`Stop-Process -Name chibipop`.
 
 Three diagnostic subcommands, useful when something isn't working:
 
