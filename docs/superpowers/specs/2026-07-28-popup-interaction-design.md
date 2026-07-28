@@ -224,7 +224,24 @@ static PENDING_SCROLL: AtomicI32   // hook accumulates, main thread drains
 ```
 
 - **Main thread**, on its existing 50 Hz dispatch tick: read the live cursor with `GetCursorPos`
-  and set `SCROLL_ARMED = in_sticky(p) && content_h > view_h`.
+  and set `SCROLL_ARMED = popup.contains(p) && content_h > view_h`.
+
+  **The popup's own rectangle, NOT `in_sticky`.** Revision 1 of this spec said `in_sticky`, and
+  that was a daily-use defect: the sticky region includes the *hovered word*, and the cursor is on
+  the hovered word **by construction** whenever a popup appears — that is how it got there. So
+  "hover a word in a document, then wheel to scroll the page" would have found the page frozen and
+  the popup scrolling instead, whenever the entry happened to overflow. Hover-then-scroll is the
+  core loop of reading Japanese, and it would have failed *intermittently* — short entry, page
+  scrolls; long entry, page dead — which is worse than failing consistently.
+
+  §2's acceptance criterion already said "the wheel still scrolls the app underneath **when the
+  cursor is not in the popup**". `in_sticky` and that sentence name different regions; this spec
+  contradicted itself and the acceptance criterion is the one that was right.
+
+  Dispatch suppression (D3) still uses all three rects — it must, or the popup runs away as you
+  reach for it. **The two predicates are deliberately different**, and that is the point rather
+  than an inconsistency: freezing the *content* while crossing the gap is wanted; capturing the
+  *wheel* while merely hovering a word is not.
 
   **Read the live cursor, not `Hooks::take_pending`.** `take_pending` is gated at
   `MOVEMENT_GATE_PX`, so easing into the popup in small steps could leave the arm stale. From the
@@ -234,6 +251,18 @@ static PENDING_SCROLL: AtomicI32   // hook accumulates, main thread drains
   swallow the event. Otherwise fall through to `CallNextHookEx` exactly as now.
 - **Main thread**, on tick: drain `PENDING_SCROLL`, convert `WHEEL_DELTA` (120) units to pixels by
   `SCROLL_STEP_PX` per notch, clamp to `0..=max_scroll`, and repaint if it changed.
+
+  **The sub-notch remainder must be carried, not discarded.** Win32 documents that finer-resolution
+  wheels send deltas *smaller* than `WHEEL_DELTA` and that the application must accumulate them —
+  high-resolution mice and Precision Touchpads do exactly that. A naive `notches / 120` on a tick
+  that collected `40` yields zero: the event was **already swallowed**, nothing scrolls, and the
+  remainder is thrown away, so the gesture vanishes entirely rather than going to either window.
+  The consumption arithmetic and the swallow decision must agree — keep `notches % 120` in the
+  accumulator.
+
+  **`PENDING_SCROLL` is discarded whenever `Shown` is replaced.** Otherwise notches accumulated for
+  the previous popup land on the new one's fresh `scroll: 0`, and a newly hovered word opens
+  mid-definition.
 
 Scrolling **repaints only** — no re-measure, no `show_at`, no capture, no lookup.
 
@@ -250,12 +279,42 @@ comment that has silently stopped being true is worse than no comment.
 ### D9 — the risk this feature carries
 
 **A stuck `SCROLL_ARMED` disables the scroll wheel system-wide** until chibipop exits. This is the
-most user-hostile failure in the design and it earns three independent mitigations:
+most user-hostile failure in the design.
 
-1. It is recomputed from scratch every 20 ms from the live cursor, so it cannot remain stuck while
-   the app is running and pumping.
-2. It is cleared on every path that hides the popup.
-3. `Hooks::drop` clears it, so the panic path and shutdown both restore the wheel.
+Revision 1 claimed three independent mitigations. **There is one**, and the padding was the harm —
+a three-item list reads as defence in depth and stops the reviewer asking the only question that
+matters: *what if the recompute stops?*
+
+- **The one real mechanism:** the arm is recomputed from scratch every 20 ms from the live cursor,
+  so it cannot latch while the main thread is servicing its own timer.
+- Clearing it on every hide path is an **eager version of the same mechanism**, not a second one.
+  Worth doing — it closes the 20 ms window — but it is not independent.
+- `Hooks::drop` clearing it is **decorative, and marked as such in the code.** Trace it: if `Drop`
+  runs, `UnhookWindowsHookEx` in the same function removes the hook and restores the wheel whatever
+  the flag says; if `Drop` does not run, the process is dying and the hook dies with it. There is no
+  state of the world in which that store changes an outcome. It stays as cheap defensiveness; it is
+  **not** evidence of safety.
+
+### The exception to the one mechanism — a nested message pump
+
+**`TrackPopupMenuEx` runs its own message pump on the main thread and discards thread-targeted
+messages.** `src/ui/tray.rs`'s `show_menu` already documents this: a thread message "is picked up
+and discarded with nowhere to go, not left on the queue for `run`'s own loop to find once this call
+returns." `WM_TIMER` from `SetTimer(None, 0, …)` is exactly such a message.
+
+So while the tray menu is open the recompute **stops** — while the hook keeps being called, because
+a nested pump is still a message-retrieval point. That is the worst possible combination: pumping
+enough to swallow, not enough to disarm. `LowLevelHooksTimeout` cannot rescue it either, since the
+callback itself is fast; what is stalled is the decision loop, which Windows cannot see.
+
+**Therefore `SCROLL_ARMED` is cleared in `show_menu`'s `before_blocking` callback**, which exists
+for precisely this class of bug (recorded there as I4). Any future nested pump added to the main
+thread must do the same, and this paragraph is the reason why.
+
+**A stuck arm must also be self-reporting.** If some other nested pump is ever introduced without
+that clear, the symptom is "chibipop broke my mouse wheel" with nothing in the log to correlate.
+So an arm held continuously for more than `ARM_WARN_TICKS` logs **once**, naming the flag — bounded
+output, and it turns a mystery into a searchable string.
 
 `highlight_match`-style escape hatch: **`[popup] scroll_popup = false` disables the arm and the
 swallow, and nothing else.** The scrollbar is still drawn.
@@ -356,12 +415,22 @@ until something else clears the state. Every row above that says "clear `Shown`"
   `#[serde(default)]` — same trap `highlight_match` documents, for the same reason.
 
 **Not verifiable by an agent, and therefore assigned to the user.** Every acceptance item in §2 is
-a hover behaviour, and synthetic input does not reach a global low-level hook from an agent
-environment (see `findings/2026-07-28-accuracy-and-polish-acceptance.md`). The implementation
-round must ship a **numbered manual test script** covering: reaching the popup at ordinary speed;
-scrolling a known-overflowing 大辞林 entry to its end and back; confirming the wheel still scrolls
-the window underneath with the cursor outside the popup; confirming no flicker on a held hover; and
-confirming the wheel still works after chibipop exits.
+a hover behaviour, and mouse *movement* cannot be injected into a global low-level hook from an
+agent environment — `SendInput` returns 0, i.e. the call is rejected outright (see
+`findings/2026-07-28-accuracy-and-polish-acceptance.md`). Wheel input **can** be injected, via the
+Windows-MCP server's own tools.
+
+The implementation round must ship a **numbered manual test script**. It must include, beyond the
+obvious items:
+
+- **Hover a long entry, do not move the cursor, and wheel — the page underneath must scroll.**
+  This is the item that catches the `in_sticky`-versus-`popup.contains` defect above, and revision
+  1's script could not fail on it: it tested "cursor in the popup" and "cursor off the popup", never
+  "cursor on the word", which is where a popup always starts.
+- **Open the tray menu while a long entry's popup is up, then wheel** — the D9 nested-pump case.
+- **Quit chibipop, then wheel** — the one failure that would outlive the app.
+- If a high-resolution wheel or a Precision Touchpad is available, scroll slowly enough to send
+  sub-`WHEEL_DELTA` deltas and confirm the popup still moves.
 
 These are reported as **user-verified or unverified**, never as passing on the strength of the unit
 tests.
@@ -383,3 +452,26 @@ load. That risk stands as the overlay spec §8 recorded it.
 **Scroll position is not preserved across leaving and re-entering a word.** Leaving the sticky
 region clears `Shown`, so returning to the same word starts at the top. Deliberate: keeping
 per-word scroll memory needs a cache with an eviction rule, and the value is speculative.
+
+**The arm is stale for up to one tick (20 ms) after the cursor leaves the popup.** In that window a
+wheel event aimed at the window underneath is swallowed and applied to the popup instead. Accepted:
+a one-frame glitch, and the alternative — deciding in the hook — needs the popup rect inside the
+callback, which means either a lock (forbidden there) or a torn multi-atomic read.
+
+**The wheel stays armed while the capture guard has the popup hidden.** `drain_capture_guard` hides
+the window without touching `Shown`, correctly, since the hide is paired with a restore. But the arm
+keys on `Shown`, not on visibility. So with the capture guard active — `exclude_from_capture = false`,
+**or** the OS refusing `WDA_EXCLUDEFROMCAPTURE`, which is not the user's choice — a capture in flight
+while the cursor sits inside the popup's rectangle leaves the wheel swallowed for the duration of
+that hide, which `resolve_trigger` spans across the OCR step too. The user would see no popup and a
+wheel that does nothing. Not fixed by gating the arm on `IsWindowVisible`: that would hand the wheel
+to the window underneath mid-read every time a capture ran, jumping the page while the user is
+reading the popup. The narrow dead-wheel window is the better of the two.
+
+**Two chibipop processes would install two hooks**, and the armed one swallows for both. There is no
+single-instance guard today (no `CreateMutexW` anywhere in `src/`). Pre-existing, but this feature
+upgrades it from harmless to wheel-killing — recorded in `docs/BACKLOG.md`.
+
+**Injected wheel input is not filtered.** `LLMHF_INJECTED` is unchecked, so synthetic wheel events
+from accessibility tools or automation are swallowed like any other. Deliberate for now: it is also
+the only reason an agent can verify this feature at all.
