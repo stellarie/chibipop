@@ -152,17 +152,22 @@ impl Tray {
             let hinstance: HINSTANCE =
                 GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
 
-            // Loaded before the owner window is created (below) specifically
-            // so that a failure here has nothing to clean up yet - swapping
-            // this order would leak the owner window on this particular
-            // error path, since it would then be the only fallible step
-            // between a successful CreateWindowExW and the NIM_ADD check
-            // that already handles its own cleanup.
+            // Loaded before the owner window is created (below) so a
+            // failure here has nothing else to clean up - swapping this
+            // order would leak the owner window on this particular error
+            // path. Loading can return an owned handle (see
+            // `load_tray_icon`), so every fallible step from here on
+            // destroys it on its own error path too.
             let (hicon, hicon_owned) = load_tray_icon()?;
 
-            register_owner_class(hinstance)?;
+            if let Err(e) = register_owner_class(hinstance) {
+                if hicon_owned {
+                    let _ = DestroyIcon(hicon);
+                }
+                return Err(e);
+            }
 
-            let menu_owner = CreateWindowExW(
+            let menu_owner_result = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 owner_class_name(),
                 w!("chibipop tray"),
@@ -176,7 +181,16 @@ impl Tray {
                 Some(hinstance),
                 None,
             )
-            .context("CreateWindowExW for the tray owner window")?;
+            .context("CreateWindowExW for the tray owner window");
+            let menu_owner = match menu_owner_result {
+                Ok(h) => h,
+                Err(e) => {
+                    if hicon_owned {
+                        let _ = DestroyIcon(hicon);
+                    }
+                    return Err(e);
+                }
+            };
 
             let mut nid = NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -191,6 +205,9 @@ impl Tray {
 
             if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
                 let _ = DestroyWindow(menu_owner);
+                if hicon_owned {
+                    let _ = DestroyIcon(hicon);
+                }
                 anyhow::bail!(
                     "Shell_NotifyIconW(NIM_ADD) failed - no tray icon, and the tray is the only \
                      way to change mode or quit"
