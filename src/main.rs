@@ -338,14 +338,14 @@ fn main() -> Result<()> {
     }
 }
 
-/// `--dict`, or the default beside the exe.
+/// --dict, or the shipped default.
 fn dict_path(given: Option<PathBuf>) -> PathBuf {
-    given.unwrap_or_else(|| chibipop::paths::beside_exe("data/chibipop.sqlite"))
+    given.unwrap_or_else(|| chibipop::paths::data_file("data/chibipop.sqlite"))
 }
 
-/// `--rules`, or the default beside the exe.
+/// --rules, or the shipped default.
 fn rules_path(given: Option<PathBuf>) -> PathBuf {
-    given.unwrap_or_else(|| chibipop::paths::beside_exe("data/deconjugator.json"))
+    given.unwrap_or_else(|| chibipop::paths::data_file("data/deconjugator.json"))
 }
 
 /// `chibipop.toml` beside the running executable (spec section 4.3). Falls

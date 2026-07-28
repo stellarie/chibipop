@@ -10,6 +10,16 @@ pub fn beside_exe(relative: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(relative))
 }
 
+/// Beside the exe, else the cwd.
+pub fn data_file(relative: &str) -> PathBuf {
+    let beside = beside_exe(relative);
+    if beside.exists() {
+        beside
+    } else {
+        PathBuf::from(relative)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -27,5 +37,11 @@ mod tests {
         let got = beside_exe("chibipop.toml");
         let exe = std::env::current_exe().unwrap();
         assert_eq!(exe.parent().unwrap(), got.parent().unwrap());
+    }
+
+    #[test]
+    fn a_data_file_missing_beside_the_exe_falls_back_to_the_cwd() {
+        let name = "definitely-not-a-real-chibipop-file.sqlite";
+        assert_eq!(PathBuf::from(name), data_file(name));
     }
 }
