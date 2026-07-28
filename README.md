@@ -84,6 +84,7 @@ exclude_from_capture = false
 max_height_percent = 45 # cap, as a percentage of the monitor's height
 summary_chars = 40      # collapsed-row summary length
 font = "Yu Gothic UI"
+highlight_match = true  # box the characters the popup is defining
 
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
@@ -118,11 +119,25 @@ The setting is read **once at startup** — edit the file with chibipop stopped,
 since switching mode from the tray rewrites the whole file from memory and
 would overwrite an edit made while it was running.
 
-**`show_scan_region`** draws a faint outline around every region a hover
-captured — pass 1's box, each forward tile, and the word it resolved. It is a
-debugging aid: turn it on when OCR is behaving oddly and you want to see what
-it actually looked at rather than infer it. `probe --show-region` shows the
-same outlines for a single coordinate without running the app.
+**`highlight_match`** draws **one** faint box around the characters the popup
+is currently defining, and is **on by default**. Hover 可哀想 and the box
+surrounds 可哀想 — the visible answer to "is it defining the word I am pointing
+at?", which otherwise means reading numbers out of `probe`. It follows the
+*match*, so a deconjugated verb is boxed across everything it consumed
+(食べさせられた, not just 食べ).
+
+It does not draw on a hover where the match cannot be located honestly: no
+dictionary hit, or `max_ocr_passes ≥ 2`, where text is stitched from several
+captures that do not carry their character boxes with them. An absent box is
+the designed behaviour there; a misplaced one would not be.
+
+**`show_scan_region`** is the separate *debug* view: a faint outline around
+every region a hover captured — pass 1's box, each forward tile, and the word
+it resolved. Turn it on when OCR is behaving oddly and you want to see what it
+actually looked at rather than infer it. It is **off by default**, and the two
+settings are independent: with only `highlight_match` on you get one box, not
+four. `probe --show-region` shows the capture outlines for a single coordinate
+without running the app.
 
 ## Tests
 
@@ -130,7 +145,7 @@ same outlines for a single coordinate without running the app.
 cargo test
 ```
 
-150 tests. Plus the dictionary builder, from `tools/build-dict`:
+187 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
@@ -145,14 +160,26 @@ M0–M3 are built and merged: OCR text acquisition, the lookup core
 M4 (UI Automation tier, for a cheaper path than OCR where the text is already
 selectable) and M5 (DPI and Magpie polish) are not started.
 
-The 50 MB memory target is **not** met under sustained real use — measured at
-94.8 MB working set / 60 MB private. Working set is largely reclaimable
-(a forced trim drops it to 0.05 MB while private bytes hold at 2.5 MB), and
-the OCR→lookup→present pipeline measures as a floor rather than a leak, but
-the Direct2D paint path's curve is unproven. Details in
-[`docs/superpowers/findings/2026-07-27-m3-acceptance.md`](docs/superpowers/findings/2026-07-27-m3-acceptance.md).
+**Known limits**, measured rather than assumed:
 
-Design specs, plans, and verification findings live in `docs/superpowers/`.
+- **Vertical text does not work at the shipped capture shape.** Worse than reading
+  short: the 500×100 box spans several columns, so it can return a sentence spliced
+  out of unrelated ones. Measured 2/6 correct hovers; a transposed 100×500 probe
+  scores 6/6. The fix has its own round —
+  [measurement](docs/superpowers/findings/2026-07-28-vertical-text-measurement.md).
+- **Forward tiling is off** (`max_ocr_passes = 1`) because it sometimes resolved a
+  different character than the one under the cursor. The rework is designed and
+  reviewed, not built — see [`docs/BACKLOG.md`](docs/BACKLOG.md).
+- **Text clipped by a window edge cannot be read** at any capture shape. The glyphs
+  are physically incomplete on screen; this is a ceiling, not a bug.
+- **The 50 MB memory target is not confirmed met.** The OCR→lookup path measures at
+  37 MB working set / 15 MB private, flat over 417 hovers with no handle growth, and
+  the app idles at 12 MB. But sustained real hovering also drives the Direct2D text
+  renderer, and that configuration measured 94.8 MB / 60 MB at M3 and has not been
+  re-measured since. Binary size is 3.3 MB; CPU is under 1% while hovering.
+
+Design specs, plans, and verification findings live in `docs/superpowers/`;
+deferred work with its evidence lives in [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ## Dictionaries
 

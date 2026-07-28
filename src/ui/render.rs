@@ -576,6 +576,7 @@ mod tests {
                     dict_name: "Jitendex".into(),
                     glosses: vec!["chatting".into()],
                 }],
+                match_len: 2,
             }),
             collapsed: vec![],
         }

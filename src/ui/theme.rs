@@ -71,6 +71,14 @@ pub struct Theme {
     /// the brightest of the three, since it marks the answer the other two
     /// exist to find.
     pub scan_anchor: (u8, u8, u8),
+    /// `ui::overlay`'s outline colour for the characters the popup is
+    /// defining.
+    ///
+    /// Deliberately a *brighter, more saturated* blue than `scan_pass1`
+    /// rather than merely a different hue: this is the everyday case, drawn
+    /// on every hover, while the three capture colours are the debug case.
+    /// The one the user sees constantly should read first.
+    pub scan_match: (u8, u8, u8),
 }
 
 impl Theme {
@@ -97,6 +105,7 @@ impl Theme {
             scan_pass1: (110, 150, 200),
             scan_tile: (240, 160, 50),
             scan_anchor: (255, 240, 120),
+            scan_match: (80, 190, 255),
         }
     }
 
@@ -121,6 +130,7 @@ impl Theme {
             scan_pass1: (70, 100, 150),
             scan_tile: (210, 110, 20),
             scan_anchor: (200, 20, 20),
+            scan_match: (0, 120, 255),
         }
     }
 }
@@ -129,14 +139,34 @@ impl Theme {
 mod tests {
     use super::*;
 
-    /// Three outlines drawn at one alpha over arbitrary screen content are
-    /// only readable if the colours differ from each other.
+    /// Four outlines drawn at one alpha over arbitrary screen content are
+    /// only readable if the colours differ from each other. Pairwise, since
+    /// any two of them can end up adjacent.
     #[test]
     fn scan_colours_are_distinct_in_both_themes() {
         for t in [Theme::dark(), Theme::light()] {
-            assert_ne!(t.scan_pass1, t.scan_tile);
-            assert_ne!(t.scan_tile, t.scan_anchor);
-            assert_ne!(t.scan_pass1, t.scan_anchor);
+            let all = [
+                ("pass1", t.scan_pass1),
+                ("tile", t.scan_tile),
+                ("anchor", t.scan_anchor),
+                ("match", t.scan_match),
+            ];
+            for (i, (an, a)) in all.iter().enumerate() {
+                for (bn, b) in all.iter().skip(i + 1) {
+                    assert_ne!(a, b, "scan_{an} and scan_{bn} are the same colour");
+                }
+            }
         }
+    }
+
+    /// D6: the highlight is the everyday case and the pass-1 box is the debug
+    /// case, so the highlight must read as the brighter of the two blues
+    /// rather than merely a different one.
+    #[test]
+    fn the_match_highlight_is_brighter_than_the_pass1_box_in_dark_theme() {
+        let t = Theme::dark();
+        let sum = |c: (u8, u8, u8)| u32::from(c.0) + u32::from(c.1) + u32::from(c.2);
+        assert!(sum(t.scan_match) > sum(t.scan_pass1),
+                "scan_match {:?} must outshine scan_pass1 {:?}", t.scan_match, t.scan_pass1);
     }
 }

@@ -216,6 +216,13 @@ impl OcrTextSource {
     /// configured pass, an empty tiling result, or a tile that errors. Tiling
     /// must never turn a working hover into a failed one.
     ///
+    /// **A stitched span carries no `TextSpan::geom`**, because `tile_forward`
+    /// returns a `String` and drops the boxes. The match highlight therefore
+    /// does not draw on the tiled path - `union_chars` returns `None` on empty
+    /// geometry, so it is absent rather than wrong. The default is one pass, on
+    /// which the highlight works; carrying geometry through the seam is
+    /// deferred with the rest of the tiling rework (`docs/BACKLOG.md`).
+    ///
     /// Two more guards travel with every tile (both pure, in `layout.rs`):
     /// `line_tolerance` is half the hovered word's own perpendicular size,
     /// mirroring `hit_scan`'s bound, so `nearest_line` cannot silently
@@ -296,7 +303,13 @@ impl OcrTextSource {
         }
         Ok((
             Some(Resolved {
-                span: TextSpan { text, cursor_byte_offset: 0, anchor: first.span.anchor },
+                // Stitched: no geometry.
+                span: TextSpan {
+                    text,
+                    cursor_byte_offset: 0,
+                    anchor: first.span.anchor,
+                    geom: Vec::new(),
+                },
                 orientation: first.orientation,
             }),
             scan,

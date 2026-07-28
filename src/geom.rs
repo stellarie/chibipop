@@ -73,6 +73,10 @@ pub enum ScanKind {
     Tile,
     /// The resolved word's own box.
     Anchor,
+    /// The characters the popup is defining - not a capture at all, but the
+    /// decision the captures exist to reach. The everyday case, and the only
+    /// kind drawn when `[debug] show_scan_region` is off.
+    Match,
 }
 
 /// One rectangle the overlay draws, tagged with where it came from.
@@ -80,6 +84,37 @@ pub enum ScanKind {
 pub struct ScanRect {
     pub rect: PhysRect,
     pub kind: ScanKind,
+}
+
+/// What one hover's overlay is allowed to show, resolved from the two
+/// independent settings that feed it.
+///
+/// They are genuinely independent: `[popup] highlight_match` is the everyday
+/// answer to "is it defining the word I am pointing at?", while `[debug]
+/// show_scan_region` is the diagnostic view of where chibipop looked. Keeping
+/// them in one value is what makes "the capture boxes are **not** drawn when
+/// only the highlight is on" a checkable statement instead of a convention -
+/// four overlapping rectangles on every hover is precisely what the highlight
+/// exists to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanDisplay {
+    /// `Pass1`, `Tile` and `Anchor`. Never collected when false, so "off" is
+    /// inert rather than collected-and-filtered.
+    pub captures: bool,
+    /// `Match`.
+    pub highlight: bool,
+}
+
+impl ScanDisplay {
+    /// Whether an overlay window is needed at all. Both off means no window is
+    /// ever created.
+    ///
+    /// Built by struct literal on purpose - there is no `new`, because two
+    /// adjacent `bool` parameters are a silent swap waiting to happen and the
+    /// field names are the only thing that tells the two settings apart.
+    pub fn any(self) -> bool {
+        self.captures || self.highlight
+    }
 }
 
 /// The overlay window's bounds, and every rectangle translated into that
@@ -368,6 +403,39 @@ mod tests {
         assert_eq!(ScanKind::Pass1, local[0].kind);
         assert_eq!(PhysRect { x: 300, y: 0, w: 50, h: 60 }, local[1].rect);
         assert_eq!(ScanKind::Tile, local[1].kind);
+    }
+
+    /// Spec D2, the whole point of the setting being separate: with only the
+    /// highlight on, a hover must draw ONE box. Collecting the capture kinds
+    /// would put four overlapping rectangles on the default path.
+    #[test]
+    fn the_capture_kinds_are_not_shown_when_only_the_highlight_is_on() {
+        let d = ScanDisplay { captures: false, highlight: true };
+        assert!(!d.captures);
+        assert!(d.highlight);
+        assert!(d.any(), "a window is still needed - the highlight draws in it");
+    }
+
+    #[test]
+    fn the_debug_view_shows_the_captures_as_well() {
+        let d = ScanDisplay { captures: true, highlight: true };
+        assert!(d.captures);
+        assert!(d.highlight);
+    }
+
+    /// Both off must create no window at all - the M3 "inert, not merely
+    /// hidden" rule survives the highlight being added beside it.
+    #[test]
+    fn both_settings_off_needs_no_overlay_window() {
+        assert!(!ScanDisplay { captures: false, highlight: false }.any());
+    }
+
+    #[test]
+    fn the_debug_view_alone_still_shows_the_captures() {
+        let d = ScanDisplay { captures: true, highlight: false };
+        assert!(d.captures);
+        assert!(!d.highlight);
+        assert!(d.any());
     }
 
     /// Tiles routinely overlap the pass-1 box they were derived from, so the

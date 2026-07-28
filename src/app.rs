@@ -40,7 +40,7 @@
 //! decision 5 names.
 
 use crate::config::Config;
-use crate::geom::{place_popup, PhysPoint, PhysRect, ScanRect};
+use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
@@ -256,7 +256,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();
     let max_ocr_passes = cfg.ocr.max_ocr_passes;
-    let collect_scan = cfg.debug.show_scan_region;
+    let scan_display = ScanDisplay {
+        captures: cfg.debug.show_scan_region,
+        highlight: cfg.popup.highlight_match,
+    };
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
@@ -266,7 +269,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             rules_path,
             present_cfg,
             max_ocr_passes,
-            collect_scan,
+            scan_display,
             main_tid,
             trigger_rx,
             result_tx,
@@ -320,7 +323,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     }
 
     // Never fatal - spec §5.
-    let overlay = if cfg.debug.show_scan_region {
+    let overlay = if scan_display.any() {
         match Overlay::create(cfg.popup.exclude_from_capture) {
             Ok(o) => Some(o),
             Err(e) => {
@@ -564,7 +567,7 @@ fn worker_main(
     rules_path: PathBuf,
     present_cfg: PresentConfig,
     max_ocr_passes: u8,
-    collect_scan: bool,
+    scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -668,7 +671,7 @@ fn worker_main(
                 &present_cfg,
                 trigger.cursor,
                 guard,
-                collect_scan,
+                scan_display,
             )
         }))
         .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
@@ -694,8 +697,12 @@ fn worker_main(
 /// hidden window than the minimum that correctness requires, traded
 /// deliberately for not touching M2 at all; see the task report.
 ///
-/// `collect_scan` is `cfg.debug.show_scan_region`, threaded down from `run`
-/// through `worker_main` - see `WorkerOutcome::Ready`'s own `scan` field.
+/// `scan_display` decides what the overlay is handed: its `captures` half is
+/// the old `cfg.debug.show_scan_region` and is the only thing the OCR layer
+/// ever collects, while its `highlight` half is computed here from the top
+/// card. That split is what keeps the default path to **one** rectangle
+/// instead of four - the capture kinds are never collected rather than
+/// collected and filtered (spec D2).
 #[allow(clippy::too_many_arguments)]
 fn resolve_trigger(
     ocr: &OcrTextSource,
@@ -705,18 +712,18 @@ fn resolve_trigger(
     present_cfg: &PresentConfig,
     cursor: PhysPoint,
     capture_guard: Option<&CaptureGuard>,
-    collect_scan: bool,
+    scan_display: ScanDisplay,
 ) -> WorkerOutcome {
     let raw = match capture_guard {
         Some(guard) => {
             guard.hide_for_capture();
-            let r = ocr.resolve_at_tiled_scanned(cursor, collect_scan);
+            let r = ocr.resolve_at_tiled_scanned(cursor, scan_display.captures);
             guard.restore_after_capture();
             r
         }
-        None => ocr.resolve_at_tiled_scanned(cursor, collect_scan),
+        None => ocr.resolve_at_tiled_scanned(cursor, scan_display.captures),
     };
-    let (resolved, scan) = match raw {
+    let (resolved, mut scan) = match raw {
         Ok((Some(r), scan)) => (r, scan),
         Ok((None, _)) => return WorkerOutcome::Hide,
         Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
@@ -732,8 +739,14 @@ fn resolve_trigger(
     }
 
     let presentation = present::build(&hits, dicts, present_cfg);
+    if scan_display.highlight {
+        if let Some(rect) = present::match_highlight(&resolved.span, presentation.top.as_ref()) {
+            scan.push(ScanRect { rect, kind: ScanKind::Match });
+        }
+    }
     WorkerOutcome::Ready { presentation, anchor: resolved.span.anchor, scan }
 }
+
 
 /// Applies one `WorkerOutcome` to the popup and - when the debug toggle
 /// created one - the scan overlay, which moves in lock-step with the popup
@@ -856,6 +869,7 @@ mod tests {
             max_height_percent: 45,
             summary_chars: 40,
             font: font.to_string(),
+            highlight_match: true,
         }
     }
 

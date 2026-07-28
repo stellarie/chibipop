@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;
+use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
 use clap::{Parser, Subcommand};
@@ -42,8 +43,12 @@ enum Command {
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
         rules: PathBuf,
-        /// Draw the captured regions for this many seconds after probing.
-        /// Bare `--show-region` shows them for 3s. Omitted, nothing is drawn.
+        /// Draw the captured regions, and the match box, for this many
+        /// seconds after probing. Bare `--show-region` shows them for 3s.
+        /// Omitted, nothing is drawn. Note probe always draws both, being
+        /// the diagnostic view; the app draws the capture regions only
+        /// under `[debug] show_scan_region`, so a real hover on the shipped
+        /// defaults shows one box where this shows several.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "3")]
         show_region: Option<u64>,
     },
@@ -130,6 +135,7 @@ fn main() -> Result<()> {
                 }
             }
 
+            let mut highlight: Option<chibipop::geom::PhysRect> = None;
             match &resolved {
                 // Distinguish "OCR itself found nothing" from "OCR found
                 // text, but none of it was close enough to the cursor" -
@@ -155,6 +161,22 @@ fn main() -> Result<()> {
                     let hits = engine.run(&dictionary, &r.span.text[r.span.cursor_byte_offset..])?;
                     println!();
                     print_hits(&hits);
+
+                    // The app's own highlight fn.
+                    let presentation = chibipop::present::build(
+                        &hits,
+                        &dictionary.dicts()?,
+                        &chibipop::config::Config::default().present_config(),
+                    );
+                    match chibipop::present::match_highlight(&r.span, presentation.top.as_ref()) {
+                        Some(m) => {
+                            println!("\nmatch:   x={} y={} w={} h={}  ({} chars)",
+                                     m.x, m.y, m.w, m.h,
+                                     presentation.top.as_ref().map_or(0, |c| c.match_len));
+                            highlight = Some(m);
+                        }
+                        None => println!("\nmatch:   none (no hit, or no geometry on this path)"),
+                    }
                 }
             }
 
@@ -169,7 +191,7 @@ fn main() -> Result<()> {
             }
 
             if let Some(seconds) = show_region {
-                let scan = tiled_scan.unwrap_or_else(|| {
+                let mut scan = tiled_scan.unwrap_or_else(|| {
                     let mut scan = vec![chibipop::geom::ScanRect {
                         rect: region,
                         kind: chibipop::geom::ScanKind::Pass1,
@@ -182,6 +204,14 @@ fn main() -> Result<()> {
                     }
                     scan
                 });
+
+                // Last: drawn over the captures.
+                if let Some(rect) = highlight {
+                    scan.push(chibipop::geom::ScanRect {
+                        rect,
+                        kind: chibipop::geom::ScanKind::Match,
+                    });
+                }
 
                 if scan.is_empty() {
                     println!("\nshow-region: nothing was captured");
