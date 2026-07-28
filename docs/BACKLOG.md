@@ -120,3 +120,31 @@ Related smaller items from the same review, all accepted-not-fixed and recorded 
   considered and rejected — it would hand the wheel to the window underneath mid-read.
 - `LLMHF_INJECTED` is unchecked, so synthetic wheel input is swallowed like any other. Deliberate:
   it is also the only reason an agent can verify this feature at all.
+
+---
+
+## 6. Lookup ranking: a long match loses to a short common one
+
+**Measured 2026-07-28** while investigating popup flicker. Not a rendering problem — the popup
+faithfully shows what the engine ranked first, and the engine ranks the wrong thing.
+
+Hovering 振 in 振り向けた:
+
+| candidate | match | freq | score |
+|---|---|---|---|
+| 振り [ぶり] | 2 | 1 501 | **6.71** ← wins |
+| 振り向ける [ふりむける] | **5** | 37 505 | 5.38 |
+
+Both are found. `lookup 振り向けた` on clean text returns 振り向ける correctly, so this is neither a
+dictionary gap nor a deconjugation failure — `score()` in `lookup/engine.rs` adds `match_len` but
+then adds up to 10 for frequency and subtracts one per deconjugation step, so a 25×-commoner
+2-character match outweighs three extra matched characters plus two steps.
+
+Scanning 振り向けた one character at a time currently gives **five different popups, four of them
+wrong**: 振り / 理 / 向ける / 桁 / 多. The sticky-hold shipped alongside this note collapses runs
+whose *first* answer is right (通ってる → 通る holds across 通って), but it cannot help when the
+first answer is a short wrong one — the span it holds is only as long as the match.
+
+Worth its own round because the score formula affects every lookup: weighting `match_len` more
+heavily fixes this but risks promoting long junk matches elsewhere. Needs a measured sweep over
+real text, not a guess — the same discipline `REGION_W`/`REGION_H` got.

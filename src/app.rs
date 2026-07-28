@@ -166,7 +166,18 @@ enum WorkerOutcome {
     Failed(String),
     /// `scan` is always empty when the debug toggle is off - see
     /// `resolve_at_tiled_scanned`'s own doc comment (M3 task 4).
-    Ready { presentation: Presentation, anchor: PhysRect, scan: Vec<ScanRect> },
+    Ready {
+        presentation: Presentation,
+        anchor: PhysRect,
+        /// The characters the top card matched, when they could be located.
+        ///
+        /// Computed **regardless of `[popup] highlight_match`**, because it
+        /// decides where the popup holds still as well as where the box is
+        /// drawn. Deriving it from the drawn rectangle instead would mean
+        /// turning off a *visual* setting silently changed *interaction*.
+        matched: Option<PhysRect>,
+        scan: Vec<ScanRect>,
+    },
 }
 
 /// A request from the worker thread to the main thread, guarding one
@@ -516,7 +527,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 // Spec D3: on the word or its popup, change nothing.
                 let frozen = shown
                     .as_ref()
-                    .is_some_and(|s| in_sticky(cursor, s.anchor, s.popup));
+                    .is_some_and(|s| in_sticky(cursor, s.hold, s.popup));
                 if !frozen {
                     next_id += 1;
                     latest_dispatched = RequestId(next_id);
@@ -824,12 +835,13 @@ fn resolve_trigger(
     }
 
     let presentation = present::build(&hits, dicts, present_cfg);
+    let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if scan_display.highlight {
-        if let Some(rect) = present::match_highlight(&resolved.span, presentation.top.as_ref()) {
+        if let Some(rect) = matched {
             scan.push(ScanRect { rect, kind: ScanKind::Match });
         }
     }
-    WorkerOutcome::Ready { presentation, anchor: resolved.span.anchor, scan }
+    WorkerOutcome::Ready { presentation, anchor: resolved.span.anchor, matched, scan }
 }
 
 
@@ -846,6 +858,16 @@ struct Shown {
     anchor: PhysRect,
     /// Where `place_popup` put the window — stored, never re-derived.
     popup: PhysRect,
+    /// The region the cursor may roam without re-resolving: the characters
+    /// the top card actually matched, or the hovered glyph alone when they
+    /// could not be located.
+    ///
+    /// This is why scanning along one word does not flicker. `resolve` works
+    /// per *character*, so every glyph of 通ってる starts its own lookup and
+    /// answers with a different entry - hovering across it would otherwise
+    /// show 通る, then っ, then てる, then る. Holding across the matched span
+    /// means one lookup stands until the cursor leaves the word it described.
+    hold: PhysRect,
     presentation: Presentation,
     /// Vertical content offset in physical pixels; 0 is the top.
     scroll: i32,
@@ -887,7 +909,7 @@ fn handle_worker_outcome(
             }
             *shown = None;
         }
-        WorkerOutcome::Ready { presentation, anchor, scan } => {
+        WorkerOutcome::Ready { presentation, anchor, matched, scan } => {
             if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
                 return; // Already on screen, unchanged.
             }
@@ -915,6 +937,7 @@ fn handle_worker_outcome(
                     *shown = Some(Shown {
                         anchor,
                         popup: rect,
+                        hold: matched.unwrap_or(anchor),
                         presentation,
                         scroll: 0,
                         content_h,
@@ -1080,6 +1103,7 @@ mod tests {
         Shown {
             anchor,
             popup: PhysRect { x: anchor.x, y: anchor.y + anchor.h + POPUP_GAP, w: 420, h: 300 },
+            hold: anchor,
             presentation: presentation_of(written),
             scroll: 0,
             content_h: 300,
@@ -1113,6 +1137,36 @@ mod tests {
         let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
         let prev = shown_of("宿舎", a);
         assert!(!same_content(&prev, &presentation_of("駅長"), a));
+    }
+
+    /// Scanning along one word must not flicker. `resolve` works per
+    /// *character*, so every glyph of a conjugated verb starts its own lookup
+    /// and answers with a different entry - measured live on 振り向けた, five
+    /// characters gave five different popups. Holding across the characters
+    /// the top card actually matched is what collapses that to one.
+    #[test]
+    fn the_hold_region_covers_the_whole_matched_word() {
+        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        // 通ってる matched 4 characters, so the span reaches past the anchor.
+        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        let popup = PhysRect { x: 3007, y: 300, w: 420, h: 300 };
+
+        // The second and third characters of the same word.
+        assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, popup));
+        assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, popup));
+        // Past the match, a genuinely different word - must re-resolve.
+        assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, popup));
+        // The anchor alone would have released at the very next glyph.
+        assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, popup));
+    }
+
+    /// No geometry (the tiled path) means no matched span, and the hold falls
+    /// back to the hovered glyph rather than to nothing.
+    #[test]
+    fn the_hold_falls_back_to_the_anchor_without_a_matched_span() {
+        let anchor = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let matched: Option<PhysRect> = None;
+        assert_eq!(anchor, matched.unwrap_or(anchor));
     }
 
     /// Exactly at the tolerance must still count as unchanged; one past it
