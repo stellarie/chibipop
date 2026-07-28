@@ -325,11 +325,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         capture_guard_active.store(true, Ordering::SeqCst);
     }
 
+    // The overlay is a debug aid (spec §5): a creation failure must never
+    // take the app down with it, unlike every other `.context(..)?` in this
+    // function - log once and keep going with no overlay.
     let overlay = if cfg.debug.show_scan_region {
-        Some(
-            Overlay::create(cfg.popup.exclude_from_capture)
-                .context("creating the scan overlay window")?,
-        )
+        match Overlay::create(cfg.popup.exclude_from_capture) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                eprintln!(
+                    "chibipop: the scan overlay could not be created, continuing without it: {e:#}"
+                );
+                None
+            }
+        }
     } else {
         None
     };
