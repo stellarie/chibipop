@@ -90,3 +90,32 @@ the drawn tile shows the counter falling inside the captured band.
 - **Vertical text.** The overlay draws whatever rectangles it is given; whether the *rectangles* are
   right for vertical text is the open question this instrument was built to answer, and is a separate
   round of work.
+
+---
+
+## Addendum — the final review found an overpaint defect §1 could not see
+
+The whole-branch review found that each rectangle's **full bounds** was filled with its colour, with
+the window region clipping that to a frame. Because rectangles overlap — `band_of` floors the band at
+`REGION_H`, so a forward tile always overlaps pass 1's box — a later fill covered an earlier
+rectangle's frame throughout the overlap. Roughly 250px of pass 1's 500px bottom edge and 85px of its
+100px right edge were rendering in the **tile's** colour.
+
+**§1 above passed anyway, and it is worth recording why**: it checked the left edge and the overall
+span, which are exactly the parts no overlap touches. A visual check that confirms what it expects to
+see can miss what it did not think to look at.
+
+Fixed by filling only each rectangle's four edge strips instead of its bounds.
+
+**Re-verified by pixel sampling rather than by eye**, because the two screenshots are nearly
+indistinguishable at this alpha. Pass 1's bottom edge (screen y=648), sampled outside and inside the
+tile's overlap:
+
+```
+outside overlap   x=2895 (39,68,96)   x=2955 (43,77,113)  x=3015 (42,68,98)
+inside overlap    x=3235 (43,83,121)  x=3285 (42,87,124)  x=3335 (47,77,107)
+```
+
+All six blue-dominant (B > G > R). The tile's colour is orange (R > G > B), so had it still been
+overpainting, the inside-overlap samples would have inverted. They do not. The spread in the blue
+channel is background bleeding through at alpha 90, not a change of hue.
