@@ -25,7 +25,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **245** total across 5 targets |
+| Rust tests | **all green**, **248** total across 5 targets |
 | Clippy | **exactly 5** accepted errors |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -46,7 +46,7 @@ cargo clippy --all-targets --all-features -- -D warnings \
 Python dictionary builder, if `tools/build-dict` changed:
 
 ```bash
-cd tools/build-dict && python -m unittest discover -s tests    # 48 tests
+cd tools/build-dict && python -m unittest discover -s tests    # 58 tests
 ```
 
 **Run the suite 3× if anything touched a `static`.** Cargo runs tests in parallel threads of one
