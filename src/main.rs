@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;
+use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
 use clap::{Parser, Subcommand};
@@ -130,6 +131,7 @@ fn main() -> Result<()> {
                 }
             }
 
+            let mut highlight: Option<chibipop::geom::PhysRect> = None;
             match &resolved {
                 // Distinguish "OCR itself found nothing" from "OCR found
                 // text, but none of it was close enough to the cursor" -
@@ -155,6 +157,24 @@ fn main() -> Result<()> {
                     let hits = engine.run(&dictionary, &r.span.text[r.span.cursor_byte_offset..])?;
                     println!();
                     print_hits(&hits);
+
+                    // What the app would highlight, from the same function
+                    // it uses - an instrument that computes its own answer
+                    // separately is one that can quietly disagree.
+                    let presentation = chibipop::present::build(
+                        &hits,
+                        &dictionary.dicts()?,
+                        &chibipop::config::Config::default().present_config(),
+                    );
+                    match chibipop::present::match_highlight(&r.span, presentation.top.as_ref()) {
+                        Some(m) => {
+                            println!("\nmatch:   x={} y={} w={} h={}  ({} chars)",
+                                     m.x, m.y, m.w, m.h,
+                                     presentation.top.as_ref().map_or(0, |c| c.match_len));
+                            highlight = Some(m);
+                        }
+                        None => println!("\nmatch:   none (no hit, or no geometry on this path)"),
+                    }
                 }
             }
 
@@ -169,7 +189,7 @@ fn main() -> Result<()> {
             }
 
             if let Some(seconds) = show_region {
-                let scan = tiled_scan.unwrap_or_else(|| {
+                let mut scan = tiled_scan.unwrap_or_else(|| {
                     let mut scan = vec![chibipop::geom::ScanRect {
                         rect: region,
                         kind: chibipop::geom::ScanKind::Pass1,
@@ -182,6 +202,16 @@ fn main() -> Result<()> {
                     }
                     scan
                 });
+
+                // Drawn last so it reads on top of the capture boxes it
+                // overlaps. probe always shows both; the app shows the
+                // capture kinds only under [debug] show_scan_region.
+                if let Some(rect) = highlight {
+                    scan.push(chibipop::geom::ScanRect {
+                        rect,
+                        kind: chibipop::geom::ScanKind::Match,
+                    });
+                }
 
                 if scan.is_empty() {
                     println!("\nshow-region: nothing was captured");

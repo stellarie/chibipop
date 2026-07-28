@@ -12,7 +12,10 @@
 //! monolingual definition is the answer being read and English is the
 //! confirmation (M3-D2).
 
+use crate::geom::PhysRect;
 use crate::lookup::model::Hit;
+use crate::text::layout::union_chars;
+use crate::text::TextSpan;
 
 /// What the popup draws for one hover: the best match in full, everything
 /// else collapsed to a single line.
@@ -122,6 +125,38 @@ pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentat
     let collapsed = groups.map(|g| collapsed_from_group(g, dicts, cfg)).collect();
 
     Presentation { top, collapsed }
+}
+
+/// Padding between the matched glyphs' ink and the highlight outline, in
+/// physical pixels (spec D6).
+pub const HIGHLIGHT_PAD: i32 = 3;
+
+/// The box around the characters the popup is defining, in virtual-desktop
+/// coordinates.
+///
+/// **The index origin is the hovered character, not the string's start.**
+/// Lookup runs on `span.text[cursor_byte_offset..]` and [`Card::match_len`]
+/// counts characters of *that slice*; on the shipped single-pass path
+/// `text::layout::resolve` builds text for the whole line and the offset is
+/// not zero, so treating `match_len` as an index from the beginning would box
+/// the start of the line. `lookup::engine::clean_input` also trims before
+/// matching, so the run begins at the first non-whitespace character at or
+/// after the cursor.
+///
+/// `None` whenever the box cannot be placed honestly: no top card, a
+/// zero-length match, or a span carrying no geometry (the forward-tiling
+/// path). An absent box is the designed outcome there; a misplaced one is
+/// not.
+///
+/// Shared by the popup application and `probe --show-region` deliberately:
+/// an instrument that computes its own answer separately from the thing it
+/// measures is an instrument that can quietly disagree with it.
+pub fn match_highlight(span: &TextSpan, top: Option<&Card>) -> Option<PhysRect> {
+    let top = top?;
+    let after_cursor = span.text.get(span.cursor_byte_offset..)?;
+    let skipped = after_cursor.len() - after_cursor.trim_start().len();
+    let from = span.text[..span.cursor_byte_offset + skipped].chars().count();
+    union_chars(&span.geom, from, top.match_len, HIGHLIGHT_PAD)
 }
 
 fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Card {
@@ -327,6 +362,75 @@ mod tests {
         let hits = vec![hit("猫", "ねこ", 99, "cat")];
         let p = build(&hits, &dicts(), &cfg());
         assert_eq!(1, p.top.as_ref().unwrap().blocks.len());
+    }
+
+    fn bare_card(match_len: usize) -> Card {
+        Card {
+            written: None,
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len,
+        }
+    }
+
+    /// One 30px box per character of `text`, laid left to right from x=100.
+    fn span_of(text: &str, cursor_byte_offset: usize) -> TextSpan {
+        let geom = (0..text.chars().count())
+            .map(|i| crate::text::layout::TextGeom {
+                char_count: 1,
+                rect: PhysRect { x: 100 + 30 * i as i32, y: 200, w: 30, h: 40 },
+            })
+            .collect();
+        TextSpan {
+            text: text.to_string(),
+            cursor_byte_offset,
+            anchor: PhysRect { x: 100, y: 200, w: 30, h: 40 },
+            geom,
+        }
+    }
+
+    /// D3, the shipped default. `resolve` builds the whole line, so the
+    /// offset is non-zero and the highlight must start from the hovered
+    /// character. Boxing from index 0 would frame `その` instead.
+    #[test]
+    fn the_highlight_starts_at_the_hovered_character_not_the_line_start() {
+        let span = span_of("その可哀想", "その".len());
+        let r = match_highlight(&span, Some(&bare_card(3))).unwrap();
+        assert_eq!(PhysRect { x: 157, y: 197, w: 96, h: 46 }, r,
+                   "three 30px boxes from x=160, padded 3px");
+    }
+
+    /// `clean_input` trims before matching, so index 0 of the matched run is
+    /// the first non-whitespace character at or after the cursor.
+    #[test]
+    fn leading_whitespace_at_the_cursor_is_skipped_by_the_highlight() {
+        let span = span_of("あ 猫", "あ".len());
+        let r = match_highlight(&span, Some(&bare_card(1))).unwrap();
+        assert_eq!(160, r.x + HIGHLIGHT_PAD, "the box must start at 猫, not at the space");
+    }
+
+    /// The tiled path stitches from several captures and carries no geometry.
+    #[test]
+    fn a_span_without_geometry_draws_no_highlight() {
+        let mut span = span_of("可哀想", 0);
+        span.geom.clear();
+        assert_eq!(None, match_highlight(&span, Some(&bare_card(3))));
+    }
+
+    #[test]
+    fn no_top_card_draws_no_highlight() {
+        assert_eq!(None, match_highlight(&span_of("可哀想", 0), None));
+    }
+
+    /// `match_len` running past the geometry must clamp to what exists, never
+    /// index past it (spec section 7).
+    #[test]
+    fn a_match_longer_than_the_known_geometry_boxes_what_is_known() {
+        let span = span_of("猫", 0);
+        let r = match_highlight(&span, Some(&bare_card(9))).unwrap();
+        assert_eq!(PhysRect { x: 97, y: 197, w: 36, h: 46 }, r);
     }
 
     /// The overlay highlights the characters the card consumed, so the value
