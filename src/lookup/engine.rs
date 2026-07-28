@@ -151,10 +151,10 @@ impl LookupEngine {
         for prefix_len in (1..=chars.len()).rev() {
             let prefix: String = chars[..prefix_len].iter().collect();
 
-            let mut forms: Vec<Form> = self.deconjugator.deconjugate(&prefix)
+            // `deconjugate` already seeds the unconjugated form.
+            let forms: Vec<Form> = self.deconjugator.deconjugate(&prefix)
                 .into_iter()
                 .collect();
-            forms.push(Form::seed(&prefix));
 
             for form in &forms {
                 let required_pos =
