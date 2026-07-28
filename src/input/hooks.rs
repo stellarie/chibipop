@@ -152,7 +152,7 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     // wparam == WM_MOUSEMOVE - the WH_MOUSE_LL contract that guarantees
     // lparam is a valid, aligned pointer to an MSLLHOOKSTRUCT for the
     // duration of this call.
-    let data = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+    let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     let p = PhysPoint { x: data.pt.x, y: data.pt.y };
 
     if !mode_currently_eligible() {
@@ -187,7 +187,7 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
 /// which keys were pressed" means in code, not just in the module doc
 /// comment above.
 unsafe fn record_shift_state() {
-    let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+    let shift = (unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
     SHIFT_DOWN.store(shift, Ordering::SeqCst);
 }
 
@@ -241,7 +241,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
             _ => {}
         }
     }
-    CallNextHookEx(None, code, wparam, lparam)
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
 /// `WH_KEYBOARD_LL` callback. Same structure and the same guarantee as
@@ -250,7 +250,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     if code >= 0 {
         let _ = catch_unwind(|| unsafe { record_shift_state() });
     }
-    CallNextHookEx(None, code, wparam, lparam)
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
 /// Owns the two installed low-level hooks. `Drop` unhooks both - see

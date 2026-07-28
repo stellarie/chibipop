@@ -84,7 +84,7 @@ fn owner_class_name() -> PCWSTR {
 /// wrapper, not the `unsafe extern "system" fn` pointer shape `WNDPROC`
 /// requires.
 unsafe extern "system" fn owner_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    DefWindowProcW(hwnd, msg, wparam, lparam)
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 /// Registers the owner-window class exactly once per process - the same
@@ -99,16 +99,18 @@ unsafe fn register_owner_class(hinstance: HINSTANCE) -> Result<()> {
         return Ok(());
     }
 
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(owner_wndproc),
-        hInstance: hinstance,
-        lpszClassName: owner_class_name(),
-        ..Default::default()
-    };
-    let atom = RegisterClassExW(&wc);
-    if atom == 0 {
-        return Err(Error::from_thread()).context("RegisterClassExW for the tray owner window");
+    unsafe {
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(owner_wndproc),
+            hInstance: hinstance,
+            lpszClassName: owner_class_name(),
+            ..Default::default()
+        };
+        if RegisterClassExW(&wc) == 0 {
+            return Err(Error::from_thread())
+                .context("RegisterClassExW for the tray owner window");
+        }
     }
 
     REGISTERED.store(true, Ordering::SeqCst);
@@ -347,19 +349,23 @@ fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
 /// Destroys the partially-built `HMENU` on any
 /// failure so a construction error can never leak it.
 unsafe fn build_menu() -> Result<HMENU> {
-    let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
-    if let Err(e) = populate_menu(hmenu) {
-        let _ = DestroyMenu(hmenu);
-        return Err(e);
+    unsafe {
+        let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
+        if let Err(e) = populate_menu(hmenu) {
+            let _ = DestroyMenu(hmenu);
+            return Err(e);
+        }
+        Ok(hmenu)
     }
-    Ok(hmenu)
 }
 
 unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
-    AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
-        .context("AppendMenuW Settings")?;
-    AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator")?;
-    AppendMenuW(hmenu, MF_STRING, ID_QUIT as usize, w!("Quit")).context("AppendMenuW Quit")?;
+    unsafe {
+        AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
+            .context("AppendMenuW Settings")?;
+        AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator")?;
+        AppendMenuW(hmenu, MF_STRING, ID_QUIT as usize, w!("Quit")).context("AppendMenuW Quit")?;
+    }
     Ok(())
 }
 
@@ -372,11 +378,12 @@ unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
 /// owned handle, which `Drop` must destroy), `false` from `LoadIconW`
 /// (a shared handle, which `Drop` must never destroy).
 unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
-    if let Some(hicon) = load_embedded_icon() {
+    if let Some(hicon) = unsafe { load_embedded_icon() } {
         return Ok((hicon, true));
     }
     eprintln!("chibipop: could not load the tray's own icon, using the default");
-    let hicon = LoadIconW(None, IDI_APPLICATION).context("LoadIconW(IDI_APPLICATION)")?;
+    let hicon =
+        unsafe { LoadIconW(None, IDI_APPLICATION) }.context("LoadIconW(IDI_APPLICATION)")?;
     Ok((hicon, false))
 }
 
@@ -385,7 +392,7 @@ unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
 /// malformed directory, out-of-range offsets, or `CreateIconFromResourceEx`
 /// itself rejecting the bytes - so the caller can fall back cleanly.
 unsafe fn load_embedded_icon() -> Option<HICON> {
-    let desired = GetSystemMetrics(SM_CXSMICON) as u32;
+    let desired = unsafe { GetSystemMetrics(SM_CXSMICON) } as u32;
     let bytes = ico_frame_bytes(ICON_BYTES, desired)?;
     // SAFETY: `bytes` is a sub-slice of `ICON_BYTES`, a `'static`
     // buffer embedded in this binary, so the pointer and length
@@ -393,7 +400,8 @@ unsafe fn load_embedded_icon() -> Option<HICON> {
     // call - the only precondition its docs place on `presbits` /
     // `dwResSize`. `0x0003_0000` is `dwVer`'s documented "generally
     // set to" value (MS Learn, CreateIconFromResourceEx).
-    let icon = CreateIconFromResourceEx(bytes, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR);
+    let icon =
+        unsafe { CreateIconFromResourceEx(bytes, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR) };
     icon.ok()
 }
 

@@ -1,3 +1,8 @@
+// Allow-by-default, so silent until asked for.
+#![warn(missing_unsafe_on_extern)]
+#![warn(unsafe_attr_outside_unsafe)]
+#![warn(unsafe_op_in_unsafe_fn)]
+
 pub mod app;
 pub mod config;
 pub mod geom;

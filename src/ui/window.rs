@@ -52,8 +52,10 @@ fn class_name() -> PCWSTR {
 /// `record_mouse_move`/`mouse_hook_proc` split (W).
 unsafe fn validate_paint_region(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    let _ = BeginPaint(hwnd, &mut ps);
-    let _ = EndPaint(hwnd, &ps);
+    unsafe {
+        let _ = BeginPaint(hwnd, &mut ps);
+        let _ = EndPaint(hwnd, &ps);
+    }
 }
 
 /// Validates the update region on `WM_PAINT` and draws nothing itself -
@@ -68,7 +70,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let _ = catch_unwind(|| unsafe { validate_paint_region(hwnd) });
         return LRESULT(0);
     }
-    DefWindowProcW(hwnd, msg, wparam, lparam)
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 /// Registers the window class exactly once per process. Safe to call from
@@ -81,18 +83,19 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
         return Ok(());
     }
 
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        style: CS_HREDRAW | CS_VREDRAW,
-        lpfnWndProc: Some(wndproc),
-        hInstance: hinstance,
-        lpszClassName: class_name(),
-        hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW(IDC_ARROW)")?,
-        ..Default::default()
-    };
-    let atom = RegisterClassExW(&wc);
-    if atom == 0 {
-        return Err(Error::from_thread()).context("RegisterClassExW");
+    unsafe {
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinstance,
+            lpszClassName: class_name(),
+            hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW(IDC_ARROW)")?,
+            ..Default::default()
+        };
+        if RegisterClassExW(&wc) == 0 {
+            return Err(Error::from_thread()).context("RegisterClassExW");
+        }
     }
 
     // Only latch success *after* `RegisterClassExW` has actually returned
