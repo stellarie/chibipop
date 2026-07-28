@@ -488,7 +488,28 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let mut overlay_prev_visible = false;
     // What is on screen, and therefore what holds the cursor - see `Shown`.
     let mut shown: Option<Shown> = None;
-    let mut settings: Option<SettingsWindow> = None;
+    // Opened at startup, not only from the tray. The tray menu does not open
+    // on a real right-click (docs/BACKLOG.md), and until that is fixed this
+    // is the only path to settings that is reachable without knowing about
+    // the `chibipop settings` subcommand. Cancel or the X dismisses it and
+    // hovering works normally underneath - it is modeless for exactly the
+    // reason this module's header gives.
+    //
+    // Note it reappears after Apply, because Apply restarts the process.
+    // That is the honest consequence of both behaviours, not a loop: it
+    // takes a click each time, and it shows the values that were just saved.
+    let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
+        &settings::from_config(&cfg, &dicts),
+        &settings::stale_order_entries(&cfg, &dicts),
+        true,
+    ) {
+        // Never fatal, the same rule the tray path follows.
+        Err(e) => {
+            eprintln!("chibipop: opening settings at startup failed: {e:#}");
+            None
+        }
+        Ok(w) => Some(w),
+    };
     // Consecutive ticks the wheel has been captured - see ARM_WARN_TICKS.
     let mut armed_ticks: u32 = 0;
 

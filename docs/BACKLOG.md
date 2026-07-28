@@ -154,3 +154,69 @@ OCR variability, not of ranking, and it needs no separate entry.
 **Lesson worth keeping:** two numbers plus a coherent explanation is not a finding. The sort order
 was one `grep` away.
 
+
+---
+
+## 7. The tray menu does not open on a real right-click
+
+**Reported by oniichan twice, on 2026-07-28 and again on 2026-07-29 after a "fixed" claim from me
+that was not.** Right-clicking chibipop's notification-area icon shows no menu at all.
+
+### The distinction that cost a round
+
+The menu **does** open when `WM_TRAYICON` with `WM_RBUTTONUP` is *posted to the window by hand*.
+I took that as proof the tray worked and recorded it as verified. It is not: it proves the
+**handler** is correct and says nothing about whether Windows **delivers** the callback from a real
+click. Delivery and handling are separate failures and the test only exercised one.
+
+### Established
+
+- Not a pile-up of orphaned instances — exactly **one** process was running when it failed.
+- The icon is **not** in the visible notification area. It sits behind the `^` chevron, in the
+  overflow. Confirmed by dumping `Shell_TrayWnd` (this is Windows 10 LTSC, so the Win10 tray:
+  `TrayNotifyWnd` → unnamed `Button` chevron at x=2293 → `SysPager` → `User Promoted Notification
+  Area`, which holds no chibipop icon).
+- `Shell_NotifyIconW(NIM_ADD)` must be succeeding, because `Tray::create` hard-fails otherwise and
+  the app starts.
+
+### The suspect, explicitly UNPROVEN
+
+`src/ui/tray.rs` creates a dedicated `menu_owner` window (its own class, its own wndproc) and then
+registers the icon against a *different* window:
+
+```rust
+let menu_owner = CreateWindowExW(WS_EX_TOOLWINDOW, owner_class_name(), ...)?;
+let mut nid = NOTIFYICONDATAW { hWnd: hwnd, uID: TRAY_UID, ... };  // <- the POPUP, not menu_owner
+```
+
+`hwnd` is the popup: `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`, and
+hidden most of the time. That inconsistency is real and worth fixing regardless. **It is not
+established as the cause** — do not "fix" it and declare victory without the log below.
+
+Second candidate, independent of the first: the icon is registered with **version 0** semantics and
+never calls `NIM_SETVERSION`. The modern contract is `NOTIFYICON_VERSION_4`, under which right-click
+arrives as **`WM_CONTEXTMENU`**, not `WM_RBUTTONUP`, and the click coordinates come in `wParam`
+rather than needing `GetCursorPos`.
+
+### Why it was not simply tested
+
+No agent-side path to a real right-click on that icon exists here, and each was checked rather than
+assumed: `SendInput` from a tool shell returns **0**; `SetCursorPos` moves the pointer but fires no
+`WH_MOUSE_LL`; the chevron rejects UI Automation's `Invoke` pattern with
+`InvalidOperationException`; and the harness stringifies array-typed MCP parameters, so the
+coordinate-taking click tools reject their own input. This is the tier-1/tier-2 boundary in
+`docs/REGRESSION.md`, hit from a new direction.
+
+### Next step — instrument, do not theorise
+
+The mitigation is shipped, so this is not urgent: **settings now open automatically at startup**,
+and `chibipop settings` reaches the same window with no tray at all.
+
+To actually fix it, log every message arriving in `app::run`'s loop with its `hwnd`, `message`,
+`wParam` and `lParam`, run it, have oniichan right-click once, and read the log. That distinguishes
+all three possibilities in a single click — nothing arrives (delivery), something arrives at an
+unexpected hwnd (the `menu_owner` mismatch), or `WM_CONTEXTMENU` arrives and is dropped by the
+`match` (the version-4 case). Only then change the code.
+
+**Lesson worth keeping:** "I made the feature happen" is not "the user's action makes the feature
+happen". Posting the message bypassed precisely the layer that was broken.
