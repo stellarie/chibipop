@@ -8,6 +8,13 @@
 //! get converted to `D2D1_COLOR_F` - at the point they are actually used to
 //! paint, not here.
 
+/// Width of the scrollbar track and thumb, in physical pixels.
+pub const SCROLLBAR_W: i32 = 4;
+
+/// Shortest the thumb may get, so a very long entry still shows a thumb rather
+/// than a one-pixel sliver.
+pub const SCROLLBAR_MIN_THUMB: i32 = 16;
+
 /// Everything the renderer needs to know about how the popup looks, for one
 /// colour scheme. `dark()` and `light()` each populate every field - Rust's
 /// struct-literal rules make an incomplete variant a compile error rather

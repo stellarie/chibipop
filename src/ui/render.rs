@@ -41,7 +41,7 @@
 //! `measure` reported is exactly the height `paint` fills.
 
 use crate::present::Presentation;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
 use anyhow::{Context, Result};
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -92,6 +92,38 @@ enum Elem {
     /// a long headword wraps instead of running underneath it.
     Corner(Line),
     Separator { top_gap: f32 },
+}
+
+/// How far the content can scroll: the overflow past the visible height, or
+/// zero when it fits.
+pub fn max_scroll(content_h: i32, view_h: i32) -> i32 {
+    (content_h - view_h).max(0)
+}
+
+/// The scrollbar thumb as `(top, height)` within a `track_h`-tall track, or
+/// `None` when the content fits and no scrollbar should be drawn.
+///
+/// The thumb's height is the visible fraction of the content, floored at
+/// [`SCROLLBAR_MIN_THUMB`] — but never taller than the track itself, so a track
+/// shorter than the floor still gets a thumb that fits. The floor is applied
+/// *before* positioning, so a floored thumb ends flush with the track at full
+/// scroll rather than overhanging it.
+pub fn scrollbar_thumb(
+    track_h: i32,
+    content_h: i32,
+    view_h: i32,
+    scroll: i32,
+) -> Option<(i32, i32)> {
+    let span = max_scroll(content_h, view_h);
+    if span == 0 || track_h <= 0 || content_h <= 0 {
+        return None;
+    }
+    let ideal = (i64::from(track_h) * i64::from(view_h) / i64::from(content_h)) as i32;
+    let thumb_h = ideal.clamp(SCROLLBAR_MIN_THUMB.min(track_h), track_h);
+    let travel = track_h - thumb_h;
+    let at = scroll.clamp(0, span);
+    let top = (i64::from(travel) * i64::from(at) / i64::from(span)) as i32;
+    Some((top, thumb_h))
 }
 
 /// D2D device resources and the DirectWrite factory for one popup `HWND`.
@@ -629,5 +661,69 @@ mod tests {
         assert!(!elems
             .iter()
             .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
+    }
+
+    #[test]
+    fn content_that_fits_cannot_scroll() {
+        assert_eq!(0, max_scroll(200, 300));
+        assert_eq!(0, max_scroll(300, 300));
+    }
+
+    #[test]
+    fn max_scroll_is_the_overflow() {
+        assert_eq!(200, max_scroll(500, 300));
+    }
+
+    #[test]
+    fn content_that_fits_has_no_thumb() {
+        assert_eq!(None, scrollbar_thumb(300, 200, 300, 0));
+        assert_eq!(None, scrollbar_thumb(300, 300, 300, 0));
+    }
+
+    #[test]
+    fn the_thumb_is_proportional_and_starts_at_the_top() {
+        let (top, h) = scrollbar_thumb(300, 600, 300, 0).unwrap();
+        assert_eq!(0, top);
+        assert_eq!(150, h, "half the content is visible, so half the track");
+    }
+
+    /// At the bottom the thumb must be flush with the track's end, or the popup
+    /// looks unscrolled when it is fully scrolled.
+    #[test]
+    fn the_thumb_ends_flush_with_the_track_at_max_scroll() {
+        let (top, h) = scrollbar_thumb(300, 600, 300, max_scroll(600, 300)).unwrap();
+        assert_eq!(300, top + h);
+    }
+
+    /// A very long entry would otherwise produce a 1px sliver.
+    #[test]
+    fn the_thumb_has_a_floor() {
+        let (_, h) = scrollbar_thumb(300, 100_000, 300, 0).unwrap();
+        assert_eq!(SCROLLBAR_MIN_THUMB, h);
+    }
+
+    /// The floor must not push the thumb past the track's end.
+    #[test]
+    fn a_floored_thumb_still_ends_inside_the_track() {
+        let m = max_scroll(100_000, 300);
+        let (top, h) = scrollbar_thumb(300, 100_000, 300, m).unwrap();
+        assert!(top + h <= 300, "thumb {top}+{h} escaped a 300px track");
+        assert_eq!(300, top + h);
+    }
+
+    #[test]
+    fn a_scroll_beyond_the_end_is_treated_as_the_end() {
+        let a = scrollbar_thumb(300, 600, 300, 999_999).unwrap();
+        let b = scrollbar_thumb(300, 600, 300, max_scroll(600, 300)).unwrap();
+        assert_eq!(b, a);
+    }
+
+    /// A track shorter than the floor must still produce a thumb that fits,
+    /// not one taller than the track it lives in.
+    #[test]
+    fn a_track_shorter_than_the_floor_still_fits() {
+        let (top, h) = scrollbar_thumb(10, 600, 300, 0).unwrap();
+        assert!(h <= 10, "thumb {h} in a 10px track");
+        assert!(top + h <= 10);
     }
 }
