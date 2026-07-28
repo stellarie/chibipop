@@ -220,7 +220,7 @@ automated gate, then what can be verified against real pixels with `probe`, then
 the dozen things only a human at the keyboard can check. It also lists the traps
 that have bitten more than once.
 
-239 tests. Plus the dictionary builder, from `tools/build-dict`:
+241 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
