@@ -334,9 +334,11 @@ impl Drop for Tray {
 /// 128-`u16` array and a silent overrun is not an acceptable way to find
 /// that out).
 fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let n = wide.len().min(nid.szTip.len());
-    nid.szTip[..n].copy_from_slice(&wide[..n]);
+    // Truncating must not eat the NUL Shell32 reads to.
+    let cap = nid.szTip.len();
+    let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
+    wide.push(0);
+    nid.szTip[..wide.len()].copy_from_slice(&wide);
 }
 
 /// Builds the right-click menu fresh: Settings, a separator, and Quit.
@@ -434,4 +436,29 @@ fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
         }
     }
     best.map(|(_, bytes)| bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shell32 reads szTip up to a NUL.
+    #[test]
+    fn a_tip_too_long_to_fit_is_still_terminated() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_tip(&mut nid, &"あ".repeat(500));
+        assert_eq!(
+            0,
+            nid.szTip[nid.szTip.len() - 1],
+            "a truncated tip must not cost the terminator"
+        );
+    }
+
+    #[test]
+    fn a_short_tip_round_trips() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_tip(&mut nid, "chibipop");
+        let n = nid.szTip.iter().position(|&c| c == 0).expect("terminated");
+        assert_eq!("chibipop", String::from_utf16_lossy(&nid.szTip[..n]));
+    }
 }
