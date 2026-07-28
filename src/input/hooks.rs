@@ -411,10 +411,20 @@ impl Drop for Hooks {
 mod tests {
     use super::*;
 
-    /// `PENDING_SCROLL` is process-global, so these run as one test rather
-    /// than racing each other for it.
+    /// `PENDING_SCROLL` and `SCROLL_ARMED` are process-global and cargo runs
+    /// tests in parallel **threads of one process**, so every test that
+    /// touches them takes this first. Poisoning is ignored deliberately: a
+    /// panic in one test must fail that test, not cascade into unrelated
+    /// ones.
+    static WHEEL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn wheel_guard() -> std::sync::MutexGuard<'static, ()> {
+        WHEEL_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn wheel_notches_bank_their_sub_notch_remainder() {
+        let _g = wheel_guard();
         Hooks::discard_scroll();
 
         // A plain mechanical wheel: exact multiples, nothing banked.
@@ -459,6 +469,7 @@ mod tests {
     /// `docs/superpowers/findings/2026-07-28-popup-interaction-acceptance.md`.
     #[test]
     fn an_armed_wheel_event_is_swallowed_and_banked() {
+        let _g = wheel_guard();
         Hooks::discard_scroll();
         Hooks::set_scroll_armed(true);
 
@@ -492,6 +503,7 @@ mod tests {
     /// saturates rather than overflowing.
     #[test]
     fn a_saturated_accumulator_yields_a_bounded_notch_count() {
+        let _g = wheel_guard();
         Hooks::discard_scroll();
         accumulate_wheel(i32::MAX);
         accumulate_wheel(i32::MAX);

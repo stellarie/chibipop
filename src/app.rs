@@ -1160,15 +1160,6 @@ mod tests {
         assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, popup));
     }
 
-    /// No geometry (the tiled path) means no matched span, and the hold falls
-    /// back to the hovered glyph rather than to nothing.
-    #[test]
-    fn the_hold_falls_back_to_the_anchor_without_a_matched_span() {
-        let anchor = PhysRect { x: 100, y: 200, w: 26, h: 27 };
-        let matched: Option<PhysRect> = None;
-        assert_eq!(anchor, matched.unwrap_or(anchor));
-    }
-
     /// Exactly at the tolerance must still count as unchanged; one past it
     /// must not.
     #[test]
