@@ -154,6 +154,12 @@ doubts it.
 11a. **Right-click the tray icon → still shows NOTHING.** Known broken, BACKLOG 7. *If a menu ever
     appears here, something changed — find out what before celebrating.* Note the icon lives behind
     the `^` chevron, not in the visible tray.
+11c. **Press "Quit chibipop" in the settings window** → chibipop exits. **NOT agent-verifiable, and
+    for a newly-measured reason:** the settings window's Win32 layer is unreachable from a tool
+    shell. UIA sees the button (name "Quit chibipop") but it exposes **no patterns**, so `Invoke`
+    throws `InvalidOperationException`; `FindWindowW('ChibipopSettingsClass', null)` returns **0**;
+    and `FindWindowExW(hwnd, .., 'BUTTON', null)` enumerates **no children** on the same hwnd UIA
+    reports. Three mechanisms, none reaching it. The button is verified to *render* only.
 11b. **`chibipop settings`** → the same window, captioned **"Apply"** and "Restart chibipop to use
     them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
 12. **Reorder dictionaries → Apply** → order changes, and **`chibipop.toml` still holds the

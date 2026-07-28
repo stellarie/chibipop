@@ -298,7 +298,10 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
         }
 
         match window.take_outcome() {
-            Some(SettingsOutcome::Cancel) => return Ok(()),
+            // Quit cannot arrive here - `open(.., false)` does not create the
+            // button - but closing the window is the only honest reading if
+            // it ever did, since there is no instance to quit.
+            Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
                 let updated = settings::apply_to(&window.read(&form), &cfg);
                 updated.save(config_path).with_context(|| {
@@ -616,6 +619,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             if let Some(w) = &settings {
                 match w.take_outcome() {
                     Some(SettingsOutcome::Cancel) => settings = None,
+                    // Same PostQuitMessage the tray's Quit uses, and for the
+                    // same reason: this runs ON the main thread, inside this
+                    // very loop. BACKLOG 7 left the tray's Quit unreachable,
+                    // so for now this is the only one that can be pressed.
+                    Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
                     Some(SettingsOutcome::Apply) => {
                         let updated = settings::apply_to(&w.read(&settings::from_config(&cfg, &dicts)), &cfg);
                         // Both failures leave the running instance alive and
