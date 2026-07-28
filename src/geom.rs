@@ -42,6 +42,20 @@ impl PhysRect {
         PhysRect { x: self.x + dx, y: self.y + dy, w: self.w, h: self.h }
     }
 
+    /// Grown by `dx` on each side horizontally and `dy` vertically.
+    ///
+    /// Negative amounts shrink, and may produce a non-positive extent; callers
+    /// that treat such a rect as containing nothing (see [`in_sticky`]) are
+    /// already correct without a clamp here.
+    pub fn inflated(&self, dx: i32, dy: i32) -> PhysRect {
+        PhysRect {
+            x: self.x - dx,
+            y: self.y - dy,
+            w: self.w + 2 * dx,
+            h: self.h + 2 * dy,
+        }
+    }
+
     /// Integer division of every field — used to map coordinates back out of
     /// upscaled-image space.
     ///

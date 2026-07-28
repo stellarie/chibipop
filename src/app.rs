@@ -48,6 +48,7 @@ use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
+use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{max_scroll, Renderer};
@@ -169,6 +170,9 @@ enum WorkerOutcome {
     Ready {
         presentation: Presentation,
         anchor: PhysRect,
+        /// Which way the resolved line runs — decides which axis the hold
+        /// region may safely grow along.
+        orientation: Orientation,
         /// The characters the top card matched, when they could be located.
         ///
         /// Computed **regardless of `[popup] highlight_match`**, because it
@@ -841,7 +845,13 @@ fn resolve_trigger(
             scan.push(ScanRect { rect, kind: ScanKind::Match });
         }
     }
-    WorkerOutcome::Ready { presentation, anchor: resolved.span.anchor, matched, scan }
+    WorkerOutcome::Ready {
+        presentation,
+        anchor: resolved.span.anchor,
+        orientation: resolved.orientation,
+        matched,
+        scan,
+    }
 }
 
 
@@ -909,7 +919,7 @@ fn handle_worker_outcome(
             }
             *shown = None;
         }
-        WorkerOutcome::Ready { presentation, anchor, matched, scan } => {
+        WorkerOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
             if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
                 return; // Already on screen, unchanged.
             }
@@ -937,7 +947,7 @@ fn handle_worker_outcome(
                     *shown = Some(Shown {
                         anchor,
                         popup: rect,
-                        hold: matched.unwrap_or(anchor),
+                        hold: hold_region(anchor, matched, orientation),
                         presentation,
                         scroll: 0,
                         content_h,
@@ -1000,6 +1010,45 @@ fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
     prev.presentation == *new
         && (prev.anchor.x - anchor.x).abs() <= ANCHOR_JITTER_PX
         && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
+}
+
+/// The region the cursor may roam without re-resolving.
+///
+/// Two different rules on the two axes, and both are measured rather than
+/// guessed:
+///
+/// **Along the reading axis** it is the characters the top card matched, so
+/// scanning one word does not restart the lookup on every glyph.
+///
+/// **Perpendicular to it** the matched span is far too tight. `hit_scan`
+/// accepts a cursor within half a word's own height of that word, so the
+/// region resolving a given character is taller than the character's box —
+/// measured on a 22px は, resolving over 34 vertical pixels against a 28px
+/// padded span. Drifting those few pixels used to leave the hold, dispatch a
+/// trigger, and make the capture guard blink the popup off and on *before* the
+/// lookup ran, so no amount of de-duplicating the result could suppress it.
+/// Growing this axis by half the anchor's own extent reproduces `hit_scan`'s
+/// rule, which is the honest definition of "the answer cannot change here".
+///
+/// It must **not** grow along the reading axis: neighbouring characters sit
+/// only a few pixels away there (measured: 8px past は's box resolves 宿), so
+/// widening would hold a stale popup over the next word.
+fn hold_region(anchor: PhysRect, matched: Option<PhysRect>, orientation: Orientation) -> PhysRect {
+    let span = matched.unwrap_or(anchor);
+    match orientation {
+        Orientation::Horizontal => PhysRect {
+            x: span.x,
+            y: anchor.y - anchor.h / 2,
+            w: span.w,
+            h: anchor.h * 2,
+        },
+        Orientation::Vertical => PhysRect {
+            x: anchor.x - anchor.w / 2,
+            y: span.y,
+            w: anchor.w * 2,
+            h: span.h,
+        },
+    }
 }
 
 /// The pointer's position right now.
@@ -1158,6 +1207,59 @@ mod tests {
         assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, popup));
         // The anchor alone would have released at the very next glyph.
         assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, popup));
+    }
+
+    /// Measured on screen: a 22px は at x=2704..2728, y=260..282 resolves as
+    /// は over y=254..288 — taller than its own box, because `hit_scan`
+    /// accepts a cursor within half a word's height. The padded match span is
+    /// only y=257..285, so drifting a few pixels used to leave the hold and
+    /// make the capture guard blink the popup before any lookup ran.
+    #[test]
+    fn the_hold_covers_the_vertical_slack_hit_scan_allows() {
+        let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
+        let matched = Some(PhysRect { x: 2701, y: 257, w: 30, h: 28 });
+        let hold = hold_region(anchor, matched, Orientation::Horizontal);
+
+        assert!(hold.y <= 254, "must reach the measured top of the region, got {}", hold.y);
+        assert!(hold.y + hold.h >= 288, "must reach the measured bottom");
+        // But it must NOT reach the line above, which starts resolving at 248.
+        assert!(hold.y > 248, "reaching the line above would hold a stale popup");
+    }
+
+    /// The reading axis must stay exactly as wide as the match: measured, the
+    /// neighbouring character resolves only 8px past は's box, so widening
+    /// here would hold a stale popup over the next word.
+    #[test]
+    fn the_hold_never_widens_along_the_reading_axis() {
+        let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
+        let matched = PhysRect { x: 2701, y: 257, w: 30, h: 28 };
+        let hold = hold_region(anchor, Some(matched), Orientation::Horizontal);
+        assert_eq!(matched.x, hold.x);
+        assert_eq!(matched.w, hold.w);
+        assert!(!hold.contains(PhysPoint { x: 2736, y: 271 }), "2736 resolves 宿");
+    }
+
+    /// Vertical text mirrors it: the slack goes on x, the match span holds y.
+    #[test]
+    fn the_hold_mirrors_for_vertical_text() {
+        let anchor = PhysRect { x: 2860, y: 1650, w: 28, h: 25 };
+        let matched = PhysRect { x: 2857, y: 1647, w: 34, h: 90 };
+        let hold = hold_region(anchor, Some(matched), Orientation::Vertical);
+        assert_eq!(matched.y, hold.y, "the reading axis keeps the match span");
+        assert_eq!(matched.h, hold.h);
+        assert_eq!(anchor.x - anchor.w / 2, hold.x, "slack goes across the column");
+        assert_eq!(anchor.w * 2, hold.w);
+    }
+
+    /// With no matched span the hold is still inflated - the flicker this
+    /// fixes has nothing to do with whether geometry was available.
+    #[test]
+    fn the_hold_without_a_match_still_carries_its_slack() {
+        let anchor = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let hold = hold_region(anchor, None, Orientation::Horizontal);
+        assert_eq!(anchor.x, hold.x);
+        assert_eq!(anchor.w, hold.w);
+        assert!(hold.h > anchor.h, "must still tolerate perpendicular drift");
     }
 
     /// Exactly at the tolerance must still count as unchanged; one past it
