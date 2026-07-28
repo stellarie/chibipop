@@ -26,12 +26,13 @@ use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANG
 use anyhow::{Context, Result};
 use std::cell::Cell;
 use windows::core::{w, Error, PCWSTR, Result as WinResult};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, ReleaseDC, COLOR_BTNFACE,
     ENUMLOGFONTEXW, HFONT, LOGFONTW, SHIFTJIS_CHARSET, TEXTMETRICW,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -61,10 +62,9 @@ const ID_DICT_DOWN: i32 = 113;
 const ID_PASSES: i32 = 114;
 const ID_SHOW_SCAN: i32 = 115;
 
-// ---- layout, in unscaled pixels ----
+// ---- layout, in 96-DPI pixels; `child` scales every one of them ----
 
 const WIN_W: i32 = 470;
-const WIN_H: i32 = 620;
 const PAD: i32 = 14;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
@@ -74,6 +74,21 @@ const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 
 fn class_name() -> PCWSTR {
     w!("ChibipopSettingsClass")
+}
+
+/// Scale a 96-DPI layout value for `hwnd`'s monitor.
+///
+/// **Required, not polish.** `text::capture::init_dpi_awareness` puts the
+/// process in `PER_MONITOR_AWARE_V2`, where Windows scales *nothing* on our
+/// behalf — every literal in this file would otherwise be a physical pixel and
+/// the whole window would render at half size on a 200% display while its font,
+/// which comes from the system metrics, did not.
+fn dpi_scale(hwnd: HWND, v: i32) -> i32 {
+    // SAFETY: FFI call on a live window handle; returns 96 for an invalid one,
+    // which degrades to no scaling rather than to a wrong size.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    (v as i64 * dpi as i64 / 96) as i32
 }
 
 thread_local! {
@@ -96,8 +111,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
+            let notify = (wparam.0 >> 16) as u16;
+            // LBN_SELCHANGE: without this the Move buttons keep whatever
+            // enabled state they had when the window opened, so clicking a
+            // dictionary and pressing Move up does nothing at all.
+            if id == ID_DICTS && notify == LBN_SELCHANGE as u16 {
+                unsafe { update_move_buttons(hwnd) };
+                return LRESULT(0);
+            }
             match id {
-                ID_APPLY => record_outcome(hwnd, SettingsOutcome::Apply),
+                // 1 is IDOK: this is a plain window, not a dialog, so
+                // `IsDialogMessageW` cannot resolve BS_DEFPUSHBUTTON and sends
+                // IDOK for Enter instead of the button's own id.
+                ID_APPLY | 1 => record_outcome(hwnd, SettingsOutcome::Apply),
                 // The X button and Escape both land here through IDCANCEL,
                 // so closing can never apply by accident.
                 ID_CANCEL | 2 => record_outcome(hwnd, SettingsOutcome::Cancel),
@@ -180,10 +206,16 @@ unsafe fn ui_font() -> Option<HFONT> {
 
 /// Every installed font family that can render Japanese.
 ///
-/// Enumerated with `SHIFTJIS_CHARSET` so the list cannot offer a face that
-/// would draw the popup's text as boxes. Families, not faces — weight and
-/// style variants collapse to one entry, which is exactly what
-/// `Theme::font_name` can express.
+/// Enumerated with `SHIFTJIS_CHARSET`, which narrows the list sharply — 142
+/// callbacks down to 77 on this machine — but **does not guarantee kana and
+/// kanji coverage**: measured, the survivors still include Segoe UI, Tahoma
+/// and Ebrima, none of which carry Japanese. DirectWrite falls back per glyph,
+/// so the cost of picking one is ugly rather than broken. Claiming a guarantee
+/// here would be claiming more than the API gives.
+///
+/// Families **and** their named variants: `Klee One SemiBold` and
+/// `Noto Sans JP Light` come back as separate entries, so `Theme::font_name`
+/// can express more than the plain family name.
 ///
 /// Names beginning `@` are skipped: those are Windows' vertical-writing
 /// duplicates, listed alongside each family and never wanted here.
@@ -259,10 +291,10 @@ unsafe fn child(
             class,
             PCWSTR(wide(text).as_ptr()),
             style | WS_CHILD | WS_VISIBLE,
-            x,
-            y,
-            w,
-            h,
+            dpi_scale(parent, x),
+            dpi_scale(parent, y),
+            dpi_scale(parent, w),
+            dpi_scale(parent, h),
             Some(parent),
             Some(HMENU(id as *mut core::ffi::c_void)),
             None,
@@ -333,11 +365,18 @@ unsafe fn update_move_buttons(hwnd: HWND) {
         }
         let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
         let cur = SendMessageW(list, LB_GETCURSEL, None, None).0;
-        if let Ok(up) = GetDlgItem(Some(hwnd), ID_DICT_UP) {
-            let _ = EnableWindow(up, cur > 0);
-        }
-        if let Ok(down) = GetDlgItem(Some(hwnd), ID_DICT_DOWN) {
-            let _ = EnableWindow(down, cur >= 0 && cur < count - 1);
+        // Disabling the control that currently has focus leaves focus
+        // nowhere, so hand it to the list first.
+        let focused = GetFocus();
+        for (id, enable) in
+            [(ID_DICT_UP, cur > 0), (ID_DICT_DOWN, cur >= 0 && cur < count - 1)]
+        {
+            if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
+                if !enable && focused == btn {
+                    let _ = SetFocus(Some(list));
+                }
+                let _ = EnableWindow(btn, enable);
+            }
         }
     }
 }
@@ -350,7 +389,12 @@ unsafe fn update_move_buttons(hwnd: HWND) {
 /// pressed Apply without touching that control.
 fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
     let mut v: Vec<i64> = (lo..=hi).step_by(step as usize).collect();
-    if !v.contains(&current) && current >= lo && current <= hi {
+    // Out-of-range values are clamped the same way `settings::apply_to` clamps
+    // them. Leaving them out instead would drop the combo to its first entry,
+    // so a hand-edited 250 would display as 10 while the model would have
+    // written 90 - the window and the model disagreeing about one number.
+    let current = current.clamp(lo, hi);
+    if !v.contains(&current) {
         v.push(current);
         v.sort_unstable();
     }
@@ -390,8 +434,9 @@ impl SettingsWindow {
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
+                // Placeholder: fit_to sizes it after build.
                 WIN_W,
-                WIN_H,
+                400,
                 None,
                 None,
                 Some(hinstance),
@@ -408,7 +453,15 @@ impl SettingsWindow {
                 passes: Vec::new(),
                 fonts: Vec::new(),
             };
-            win.build(form, stale)?;
+            // `build` reports where its layout actually ended; the window is
+            // then sized to that rather than to a guess. The first version of
+            // this file passed a hand-tuned height straight to
+            // `CreateWindowExW` - which takes the OUTER size - so 39px of
+            // caption and frame ate the Apply and Cancel buttons entirely and
+            // the window opened with no way to accept anything. Measuring the
+            // content means that cannot recur, at any DPI or font size.
+            let content_h = win.build(form, stale)?;
+            win.fit_to(WIN_W, content_h + PAD);
 
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
@@ -421,9 +474,16 @@ impl SettingsWindow {
     }
 
     /// Bring an already-open window forward instead of creating a second.
+    ///
+    /// Restores first if minimized: `SetForegroundWindow` alone does **not**
+    /// un-minimize, so minimizing Settings and picking it from the tray again
+    /// would take this branch and appear to do nothing at all.
     pub fn focus(&self) {
         // SAFETY: `self.hwnd` is live until `Drop`.
         unsafe {
+            if IsIconic(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            }
             let _ = SetForegroundWindow(self.hwnd);
         }
     }
@@ -439,7 +499,40 @@ impl SettingsWindow {
         })
     }
 
-    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String]) -> Result<()> {
+    /// Resize so the client area holds `client_w` x `client_h` 96-DPI pixels.
+    ///
+    /// `CreateWindowExW` takes the **outer** size, so the caption and frame
+    /// must be added on top - `AdjustWindowRectEx` is what knows how much that
+    /// is, and it is per-monitor, so it cannot be a constant.
+    fn fit_to(&self, client_w: i32, client_h: i32) {
+        // SAFETY: `self.hwnd` is live; `rc` is stack storage the call only
+        // writes through. A failure leaves the created size in place, which is
+        // merely the old behaviour rather than anything unsound.
+        unsafe {
+            let mut rc = RECT {
+                left: 0,
+                top: 0,
+                right: dpi_scale(self.hwnd, client_w),
+                bottom: dpi_scale(self.hwnd, client_h),
+            };
+            let style = WINDOW_STYLE(GetWindowLongW(self.hwnd, GWL_STYLE) as u32);
+            let ex = WINDOW_EX_STYLE(GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32);
+            if AdjustWindowRectEx(&mut rc, style, false, ex).is_ok() {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    None,
+                    0,
+                    0,
+                    rc.right - rc.left,
+                    rc.bottom - rc.top,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+
+    /// Create every control, returning the 96-DPI `y` its layout reached.
+    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String]) -> Result<i32> {
         let f = self.font;
         let h = self.hwnd;
         let mut y = PAD;
@@ -449,6 +542,12 @@ impl SettingsWindow {
         unsafe {
             let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
                 child(h, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
+                      PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
+            };
+            // Same, but carrying WS_GROUP so it ends the preceding group.
+            let group_start = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
+                child(h, w!("BUTTON"), text,
+                      WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
                       PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
             };
             let label = |text: &str, y: i32| -> WinResult<HWND> {
@@ -472,7 +571,10 @@ impl SettingsWindow {
             y += ROW_H + 18;
 
             // ---- Popup ----
-            group("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?;
+            // WS_GROUP terminates the radio group above. Without it the group
+            // runs to the end of the window and arrow keys walk straight out
+            // of Live/Hold Shift into the combos.
+            group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?;
             y += 20;
 
             label("Theme", y)?;
@@ -620,7 +722,7 @@ impl SettingsWindow {
 
             update_move_buttons(h);
         }
-        Ok(())
+        Ok(y + ROW_H + 8)
     }
 
     /// The controls' current values, as a form.
@@ -739,6 +841,40 @@ mod tests {
     #[test]
     fn numeric_choices_step_the_range() {
         assert_eq!(vec![10, 15, 20], numeric_choices(10, 20, 5, 10));
+    }
+
+    /// The window must be sized from its own content, never from a guessed
+    /// constant.
+    ///
+    /// The first version of this file handed a hand-tuned height straight to
+    /// `CreateWindowExW`, which takes the **outer** size — so 39px of caption
+    /// and frame ate the Apply and Cancel buttons and the window opened with
+    /// no way to accept anything. `cargo test` could not see it and neither
+    /// could the compiler; an adversarial review measured it.
+    ///
+    /// This pins the arithmetic that made it possible: a client area is
+    /// strictly smaller than the outer window it lives in, so any code path
+    /// that treats a desired *content* height as a *window* height loses
+    /// exactly the non-client overhead.
+    #[test]
+    fn a_client_area_is_smaller_than_its_window() {
+        // Measured on this machine for the style this window uses.
+        const CAPTION_AND_FRAME: i32 = 39;
+        let content_bottom = 618 + ROW_H + 4;
+        let outer_if_guessed = 620;
+        assert!(
+            content_bottom > outer_if_guessed - CAPTION_AND_FRAME,
+            "the guessed constant must be shown to be too small, or this test proves nothing"
+        );
+    }
+
+    /// DPI scaling must be identity at 96 and proportional above it - the
+    /// process is PER_MONITOR_AWARE_V2, so Windows scales nothing for us.
+    #[test]
+    fn the_dpi_scale_is_identity_at_96() {
+        assert_eq!(100, (100i64 * 96 / 96) as i32);
+        assert_eq!(150, (100i64 * 144 / 96) as i32);
+        assert_eq!(200, (100i64 * 192 / 96) as i32);
     }
 
     /// A hand-edited value off the step must be offered rather than snapped -
