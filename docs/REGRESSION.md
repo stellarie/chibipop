@@ -3,13 +3,17 @@
 Run this after any large change. It is ordered cheapest-first: **if a tier fails, stop and fix
 before running the next one.**
 
-Everything here was verified working on 2026-07-28. Numbers are what was actually measured on this
+Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed on 2026-07-29. Numbers are what was actually measured on this
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
 ---
 
 ## Tier 0 — the automated gate (~2 min, no screen)
+
+**This tier is the CI contract.** Every command below was re-run verbatim on 2026-07-29 and
+reproduces the stated numbers, so it can be lifted into a workflow as-is. Two of them are
+`grep -c` counts rather than exit codes, and that is deliberate — see the note under the table.
 
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
@@ -21,10 +25,15 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, ~239 total across 5 targets |
+| Rust tests | **all green**, **239** total across 5 targets |
 | Clippy | **exactly 5** accepted errors |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
+
+**Why counts, not exit status.** The repo carries exactly five accepted clippy errors; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **5** rather than
+that clippy passed. A 6th is a real regression — most often a field added by one commit and read by
+the next, which is why a task that adds a field must be the task that reads it.
 
 The bin target needs the five accepted lints suppressed or clippy aborts before `main.rs` compiles:
 
@@ -113,7 +122,7 @@ tool shell returns 0 and cannot.)*
 ### 1.8 Resources
 
 ```bash
-ls -l target/release/chibipop.exe          # ~3.3 MB, limit 100 MB
+ls -l target/release/chibipop.exe          # ~3.4 MB, limit 100 MB
 ```
 
 | Measurement | Value |
@@ -154,8 +163,8 @@ doubts it.
 11a. **Right-click the tray icon → still shows NOTHING.** Known broken, BACKLOG 7. *If a menu ever
     appears here, something changed — find out what before celebrating.* Note the icon lives behind
     the `^` chevron, not in the visible tray.
-11c. **Press "Quit chibipop" in the settings window** → chibipop exits. **NOT agent-verifiable, and
-    for a newly-measured reason:** the settings window's Win32 layer is unreachable from a tool
+11c. **Press "Quit chibipop" in the settings window** → chibipop exits. ✅ **Confirmed by oniichan
+    2026-07-29.** Still not agent-verifiable, for a newly-measured reason: the settings window's Win32 layer is unreachable from a tool
     shell. UIA sees the button (name "Quit chibipop") but it exposes **no patterns**, so `Invoke`
     throws `InvalidOperationException`; `FindWindowW('ChibipopSettingsClass', null)` returns **0**;
     and `FindWindowExW(hwnd, .., 'BUTTON', null)` enumerates **no children** on the same hwnd UIA

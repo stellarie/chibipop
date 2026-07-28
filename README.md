@@ -78,11 +78,22 @@ defaults to `chibipop.toml` **beside the executable**, so a shortcut-launched
 
 ## Configuration
 
-**Right-click the tray icon for `Settings…` and `Quit`.** The settings window
-covers every option below — trigger mode, theme, font, the popup's size caps,
-the three popup toggles, the dictionary order, and a Debug group for OCR passes
-and the scan overlay. **Apply saves and restarts chibipop**, which takes about
-0.18 s; the button says so, and so does the line beside it.
+**The settings window opens at startup**, and covers every option below —
+trigger mode, theme, font, the popup's size caps, the three popup toggles, the
+dictionary order, and a Debug group for OCR passes and the scan overlay. It is
+modeless, so hovering works normally underneath and Cancel or the X dismisses
+it. **Apply saves and restarts chibipop**, which takes about 0.18 s; the button
+says so, and so does the line beside it. It reappears after Apply, because
+Apply restarts the process — a click each time, showing what was just saved.
+
+**`Quit chibipop`** is in that window too, far left, away from the button you
+press by reflex. It exists because the tray's own Quit is unreachable — see
+below.
+
+`chibipop settings` opens the same window with no popup, no hooks and no OCR.
+There it reads **`Apply`** and "Restart chibipop to use them" rather than
+"Apply & Restart", and carries no Quit button: standalone, there is no running
+instance to restart or to quit, and a window must not offer what it cannot do.
 
 The window offers no free-text fields anywhere: every value is a choice from a
 list, so nothing you can select will fail to load later. Two deliberate
@@ -209,7 +220,7 @@ automated gate, then what can be verified against real pixels with `probe`, then
 the dozen things only a human at the keyboard can check. It also lists the traps
 that have bitten more than once.
 
-237 tests. Plus the dictionary builder, from `tools/build-dict`:
+239 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
@@ -220,7 +231,8 @@ python -m unittest discover -s tests
 ## Status
 
 M0–M3 are built and merged: OCR text acquisition, the lookup core
-(deconjugation, ranking, SQLite), and the popup with tray and configuration.
+(deconjugation, ranking, SQLite), the popup, and a native settings window
+covering every option plus dictionary order.
 M4 (UI Automation tier, for a cheaper path than OCR where the text is already
 selectable) and M5 (DPI and Magpie polish) are not started.
 
@@ -236,6 +248,13 @@ selectable) and M5 (DPI and Magpie polish) are not started.
   reviewed, not built — see [`docs/BACKLOG.md`](docs/BACKLOG.md).
 - **Text clipped by a window edge cannot be read** at any capture shape. The glyphs
   are physically incomplete on screen; this is a ceiling, not a bug.
+- **Right-clicking the tray icon does not open its menu.** A real bug with two
+  unproven suspects and a one-click diagnosis, written up in
+  [`docs/BACKLOG.md`](docs/BACKLOG.md) §7. Everything the menu offered is
+  reachable anyway — settings open at startup, `chibipop settings` opens them
+  without the popup, and Quit is a button in that window. The lesson it cost:
+  posting `WM_TRAYICON` by hand proves the *handler* works and says nothing
+  about whether Windows *delivers* a real click.
 - **The 50 MB memory target is not confirmed met.** The OCR→lookup path measures at
   37 MB working set / 15 MB private, flat over 417 hovers with no handle growth, and
   the app idles at 12 MB. But sustained real hovering also drives the Direct2D text
