@@ -319,9 +319,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
     }
 
-    // The overlay is a debug aid (spec §5): a creation failure must never
-    // take the app down with it, unlike every other `.context(..)?` in this
-    // function - log once and keep going with no overlay.
+    // Never fatal - spec §5.
     let overlay = if cfg.debug.show_scan_region {
         match Overlay::create(cfg.popup.exclude_from_capture) {
             Ok(o) => Some(o),
@@ -337,10 +335,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     };
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
 
-    // I3/spec D5: the overlay gets the same `exclude_from_capture` input as
-    // the popup, but the OS accepts or refuses each window's affinity call
-    // independently - a silent divergence here means the overlay's own
-    // outlines land inside every later capture with nothing to say so.
+    // Spec D5: can diverge.
     if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion) {
         eprintln!("chibipop: ============================================================");
         eprintln!("chibipop: WARNING: capture exclusion is NOT active for the scan overlay window.");
@@ -352,11 +347,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         eprintln!("chibipop: ============================================================");
     }
 
-    // The default, overwhelmingly common path (exclusion genuinely active
-    // for both windows) leaves this `false`: M3-D7 depends on the guard
-    // never running at all then, or "no flicker while reading" would be
-    // false too. Spec D5: the overlay follows the popup's guard as well as
-    // its setting, so the guard arms if EITHER window still needs it.
+    // Default stays false - D5.
     if popup.capture_exclusion().needs_capture_guard()
         || overlay.as_ref().is_some_and(|ov| ov.capture_exclusion().needs_capture_guard())
     {
@@ -546,10 +537,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             match req {
                 CaptureGuardMsg::Hide { ack } => {
                     let _ = popup.hide();
-                    // M4: mirrors the main drain above - the final
-                    // WorkerOutcome is never read once PostQuitMessage has
-                    // fired, so this is what actually keeps a capture
-                    // taken during shutdown from including the outlines.
+                    // Mirrors the main drain above.
                     if let Some(ov) = &overlay {
                         ov.hide();
                     }

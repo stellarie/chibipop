@@ -373,11 +373,6 @@ impl Overlay {
             SetLayeredWindowAttributes(hwnd, COLORREF(0), OVERLAY_ALPHA, LWA_ALPHA)
                 .context("SetLayeredWindowAttributes(LWA_ALPHA)")?;
 
-            // Deliberately not `?`, matching `Popup::create` exactly
-            // (see the module docs' `WDA_EXCLUDEFROMCAPTURE` measurement):
-            // whether the OS accepts this is not grounds to fail window
-            // creation, but it is never just discarded either - see this
-            // fn's own doc comment on `capture_exclusion()`'s caller.
             let capture_exclusion = if exclude_from_capture {
                 if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok() {
                     CaptureExclusion::Excluded
@@ -516,8 +511,6 @@ mod tests {
             "top, bottom, left, right, in that order"
         );
 
-        // Together: every corner and every outer-edge midpoint lands in at
-        // least one strip.
         let frame_points = [
             PhysPoint { x: rect.x, y: rect.y },
             PhysPoint { x: rect.x + rect.w - 1, y: rect.y },
@@ -532,8 +525,6 @@ mod tests {
             assert!(strips.iter().any(|s| s.contains(p)), "no strip covers frame point {p:?}");
         }
 
-        // Never: the centre is the sharpest interior point, and the one
-        // IMPORTANT-2's overpaint bug actually reached.
         let center = rect.center();
         for s in &strips {
             assert!(!s.contains(center), "strip {s:?} covers the interior centre {center:?}");
