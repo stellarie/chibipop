@@ -175,6 +175,37 @@ every user who touches it, and it would work perfectly until the next dictionary
 **Consequence, asserted by test:** reordering an existing config and applying it produces a
 `display_order` containing exactly the same strings, in a new order — never rewritten values.
 
+### D6a — say out loud that a rebuild can break the order
+
+D6 makes the order *survive* the ordinary case — a Jitendex refresh that only moves the date. It
+cannot survive every case, and the failure is silent from inside the window, so the window says so
+itself rather than leaving it to a README nobody opens while reordering.
+
+**Two tiers, because one of them is detectable and the other is not.**
+
+**Always — a quiet hint under the list:**
+
+> Order is matched by dictionary name. If you rebuild your dictionaries, check this list again.
+
+**When an entry matches nothing — a visible warning naming it.** Every `display_order` entry is
+tested against the live dictionary list with the same case-insensitive substring rule. An entry
+matching **no** current dictionary is exactly the symptom of a rebuild having changed a name, and
+it is worth reporting precisely rather than generically:
+
+> `"Jitendex"` no longer matches any dictionary — it may have been renamed or removed. Dictionaries
+> it used to order are now sorted last.
+
+That last clause matters: `present::dict_order_rank` returns `None` for an unmatched dictionary and
+the caller sorts it **last, by `dict_id`**. So the visible symptom of a broken entry is a dictionary
+silently dropping to the bottom, which reads as "chibipop reordered my dictionaries by itself"
+rather than as a stale config. Naming the cause is the whole point.
+
+The unmatched entry is still **kept** in the config (§5) — it may match a dictionary that simply is
+not built right now, and deleting a user's setting because it is currently inapplicable would be
+worse than carrying it. The warning is advice, not an action, and there is no button to "fix" it:
+reordering the list and pressing Apply replaces the stale entry naturally, because D6's rule only
+preserves entries that still match.
+
 ### D7 — the dictionary names come from the worker's existing read
 
 `SqliteDictionary` lives on the worker thread and `dicts()` is already called **once** at startup
@@ -227,7 +258,7 @@ mapping, the numeric clamps, and D6's write-back rule are all pure functions ove
 | `Config::save` fails | Message box naming the path; **no restart**; the window stays open with edits intact |
 | `CreateProcessW` fails | Message box; **do not quit** — a failed restart must leave the working instance running |
 | The configured font is not installed | Insert it into the combo and select it (D4); never silently substitute |
-| A `display_order` entry matches no dictionary | Keep it in the config untouched; it may match a dictionary that is not currently built |
+| A `display_order` entry matches no dictionary | Keep it in the config untouched (it may match a dictionary that is not currently built) **and warn in the window, naming the entry** — D6a |
 | Window creation fails | Log once and continue running; Settings is not worth killing the app for (matches the overlay's rule) |
 | `Settings…` clicked while open | `SetForegroundWindow` on the existing window |
 
@@ -238,6 +269,10 @@ mapping, the numeric clamps, and D6's write-back rule are all pure functions ove
 - **D6 write-back**: reorder-only produces the identical set of strings, in the new order; a
   never-before-seen dictionary derives a bracket-truncated key; a dictionary whose existing entry
   is a short substring (`Jitendex`) keeps that short substring rather than gaining the date.
+- **D6a stale-entry detection**: an entry matching no live dictionary is reported; an entry that
+  matches at least one is not. Uses the same substring rule as `present::dict_order_rank`, so a
+  test pins the two against each other — a warning that disagreed with the actual ordering would be
+  worse than none.
 - **Round-trip identity**: `Config → control values → Config` with nothing touched yields an equal
   `Config`. This is the assertion that catches a mis-wired control silently changing a setting.
 - **Numeric clamps**: each spin range rejects out-of-range values by clamping, and the clamp
@@ -259,8 +294,11 @@ manual script the implementation round must ship, covering at minimum:
 6. Reorder the dictionaries, Apply, hover a word both define — the order changed.
 7. **Open `chibipop.toml` after step 6 and confirm `display_order` still contains the original
    strings**, merely reordered. This is the D6 trap, and it is invisible from the UI.
-8. Open Settings, touch nothing, Apply — `chibipop.toml` is unchanged apart from formatting.
-9. The executable now has chibipop's icon in Explorer and on the taskbar.
+8. Edit `display_order` in the TOML to contain a nonsense entry, restart, open Settings. **The
+   window warns, naming that entry** (D6a). Reorder and Apply; the nonsense entry is gone and the
+   warning does not return.
+9. Open Settings, touch nothing, Apply — `chibipop.toml` is unchanged apart from formatting.
+10. The executable now has chibipop's icon in Explorer and on the taskbar.
 
 ## 7. Open risks
 
