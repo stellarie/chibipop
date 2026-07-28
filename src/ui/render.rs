@@ -312,6 +312,7 @@ impl Renderer {
             .expect("ensure_target must run before paint_once");
 
         unsafe { target.BeginDraw() };
+        let scope = DrawScope { target: Some(target) };
 
         // `BeginDraw`/`EndDraw` must always be paired, even when something
         // in between fails - an early `?` return from this span (e.g.
@@ -369,7 +370,7 @@ impl Renderer {
             Ok(())
         })();
 
-        let end_result = unsafe { target.EndDraw(None, None) };
+        let end_result = scope.end();
 
         // Prioritise the draw-phase error when both fail - it is usually
         // more specific (e.g. a font/format failure) than whatever EndDraw
@@ -377,6 +378,31 @@ impl Renderer {
         // must still surface whatever EndDraw returns, since that is where
         // device-lost is authoritatively signalled.
         draw_result.and(end_result)
+    }
+}
+
+/// Ends the draw on drop.
+struct DrawScope<'a> {
+    target: Option<&'a ID2D1HwndRenderTarget>,
+}
+
+impl DrawScope<'_> {
+    /// Ends it, returning its result.
+    fn end(mut self) -> windows::core::Result<()> {
+        match self.target.take() {
+            Some(t) => unsafe { t.EndDraw(None, None) },
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for DrawScope<'_> {
+    fn drop(&mut self) {
+        if let Some(t) = self.target {
+            unsafe {
+                let _ = t.EndDraw(None, None);
+            }
+        }
     }
 }
 

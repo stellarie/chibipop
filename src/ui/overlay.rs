@@ -136,12 +136,27 @@ fn edge_strips(rect: PhysRect, thickness: i32) -> Vec<PhysRect> {
 /// `render.rs`'s `BeginDraw`/`EndDraw` discipline): a bad `hdc` skips only
 /// the fill loop below, never the matching `EndPaint`, so the OS's
 /// paint/update-region bookkeeping for `hwnd` always gets closed out.
+/// Ends the paint on drop.
+struct PaintScope {
+    hwnd: HWND,
+    ps: PAINTSTRUCT,
+}
+
+impl Drop for PaintScope {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = EndPaint(self.hwnd, &self.ps);
+        }
+    }
+}
+
 unsafe fn paint_overlay(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     // SAFETY: `wndproc` calls this only for its own `hwnd` on `WM_PAINT`,
     // which the OS delivers with a live window handle - the same
     // precondition `ui::window::validate_paint_region` relies on.
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+    let _scope = PaintScope { hwnd, ps };
 
     if !hdc.is_invalid() {
         PAINT_STATE.with(|cell| {
@@ -180,10 +195,6 @@ unsafe fn paint_overlay(hwnd: HWND) {
             }
         });
     }
-
-    // SAFETY: pairs the `BeginPaint` above unconditionally - see the doc
-    // comment above this function for why that pairing must not branch.
-    let _ = unsafe { EndPaint(hwnd, &ps) };
 }
 
 /// Validates/paints on `WM_PAINT`; forwards everything else. A panic must
@@ -200,7 +211,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let _ = catch_unwind(|| unsafe { paint_overlay(hwnd) });
         return LRESULT(0);
     }
-    DefWindowProcW(hwnd, msg, wparam, lparam)
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 /// Registers the window class exactly once per process - see
