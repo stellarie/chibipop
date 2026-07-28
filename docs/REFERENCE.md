@@ -206,7 +206,7 @@ cargo test
 python -m unittest discover -s tests
 ```
 
-**48 tests.**
+**56 tests.**
 
 **After any large change, work through [`REGRESSION.md`](REGRESSION.md)** — a
 cheapest-first checklist: the automated gate, then what can be verified
