@@ -85,6 +85,7 @@ max_height_percent = 45 # cap, as a percentage of the monitor's height
 summary_chars = 40      # collapsed-row summary length
 font = "Yu Gothic UI"
 highlight_match = true  # box the characters the popup is defining
+scroll_popup = true     # let the wheel scroll a popup that overflows
 
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
@@ -130,6 +131,28 @@ It does not draw on a hover where the match cannot be located honestly: no
 dictionary hit, or `max_ocr_passes ≥ 2`, where text is stitched from several
 captures that do not carry their character boxes with them. An absent box is
 the designed behaviour there; a misplaced one would not be.
+
+**The popup stays put while you read it.** Move the cursor from the word into
+the popup and it holds still — the hovered character, the gap, and the popup
+itself count as one region, and while the cursor is anywhere in it chibipop
+does no new lookup at all. Move fully off and hovering resumes. A word whose
+answer has not changed is not redrawn either, so holding still does not flicker.
+
+One deliberate exception: moving *sideways* onto the next character shows that
+character, rather than holding the previous popup. That is the same behaviour
+you want when scanning along a line, and it is why the sticky area is the word
+plus the popup rather than the box enclosing both.
+
+**`scroll_popup`** lets the wheel scroll a popup whose content overflows the
+`max_height_percent` cap, and is **on by default**. A thin scrollbar appears at
+the right edge when there is more to read; the window itself never grows.
+
+While the cursor is inside such a popup, chibipop takes the wheel so the window
+underneath does not scroll at the same time. It takes it **only** then — cursor
+on the word rather than the popup, or content that fits, and the wheel behaves
+normally. Setting `scroll_popup = false` stops chibipop touching the wheel at
+all while still drawing the scrollbar, so you can see there is more even though
+you cannot reach it.
 
 **`show_scan_region`** is the separate *debug* view: a faint outline around
 every region a hover captured — pass 1's box, each forward tile, and the word

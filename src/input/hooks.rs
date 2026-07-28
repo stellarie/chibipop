@@ -7,10 +7,18 @@
 //! verified mechanics this module is built on. Three consequences follow,
 //! non-negotiably:
 //!
-//! - **`CallNextHookEx` runs on every path out of both callbacks**, error
-//!   paths included. A low-level hook that swallows an event makes the
+//! - **`CallNextHookEx` runs on every path out of both callbacks except one**,
+//!   error paths included. A low-level hook that swallows an event makes the
 //!   whole machine unusable - no clicks, no typing, in any application -
 //!   until this process dies.
+//!
+//!   The one exception is deliberate: a **wheel** event is consumed while
+//!   [`SCROLL_ARMED`], because otherwise the window under the popup would
+//!   scroll at the same time as the popup itself. That is the single most
+//!   dangerous line in this module - read `SCROLL_ARMED`'s own documentation
+//!   for what keeps it from latching, and for why any future nested message
+//!   pump on the main thread has to disarm it. Nothing else is ever swallowed:
+//!   not clicks, not keys, not horizontal wheel.
 //! - **`catch_unwind` wraps the working half of both callbacks.** A Rust
 //!   panic unwinding across this `extern "system"` boundary is undefined
 //!   behaviour, and it would unwind into whatever application the user
@@ -34,7 +42,7 @@ use crate::config::TriggerMode;
 use crate::geom::PhysPoint;
 use anyhow::{Context, Result};
 use std::panic::catch_unwind;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, Ordering};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
@@ -75,6 +83,28 @@ static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
 /// Whether Shift is currently held, per the keyboard hook's last
 /// observation of `GetAsyncKeyState`.
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the popup currently wants wheel events. Written by the main thread
+/// from the live cursor position on every dispatch tick; read by the mouse
+/// hook, which **swallows** the event when this is true.
+///
+/// A stuck `true` disables the scroll wheel for every application until
+/// chibipop exits. There is exactly **one** mechanism preventing that - the
+/// main thread recomputing it from scratch every tick - so anything that stops
+/// the main thread servicing its timer while still pumping messages must clear
+/// this explicitly. `ui::tray::show_menu`'s `before_blocking` is the known
+/// case: `TrackPopupMenuEx` runs its own pump and discards thread-targeted
+/// messages, so `WM_TIMER` never arrives while that menu is open even though
+/// the hook keeps being called.
+static SCROLL_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Wheel delta accumulated while armed, in raw `WHEEL_DELTA` units. Drained by
+/// [`Hooks::take_whole_notches`].
+static PENDING_SCROLL: AtomicI32 = AtomicI32::new(0);
+
+/// One wheel notch, per `WHEEL_DELTA` in winuser.h. Named here rather than
+/// imported because it is arithmetic on our own accumulator, not a Win32 call.
+const WHEEL_DELTA_UNITS: i32 = 120;
 
 /// Current trigger mode, with `TriggerMode` packed into a `u8` because
 /// `TriggerMode` has no atomic form of its own. 0 = `Live` (matches
@@ -161,18 +191,55 @@ unsafe fn record_shift_state() {
     SHIFT_DOWN.store(shift, Ordering::SeqCst);
 }
 
-/// `WH_MOUSE_LL` callback. Every path out of this function calls
-/// `CallNextHookEx` - the early-return-free structure below is deliberate,
-/// not incidental: there is exactly one `return`-shaped statement in this
-/// function, the implicit tail expression that calls `CallNextHookEx`.
+/// Accumulate one wheel event's delta.
+///
+/// `mouseData`'s high word carries a signed multiple of `WHEEL_DELTA`; the low
+/// word is unused for wheel events. `saturating_add` because this accumulates
+/// without bound between drains if the main thread ever stalls.
+unsafe fn record_wheel(lparam: LPARAM) {
+    // SAFETY: `mouse_hook_proc` only calls this when code >= 0 and
+    // wparam == WM_MOUSEWHEEL - the WH_MOUSE_LL contract that guarantees
+    // lparam is a valid, aligned pointer to an MSLLHOOKSTRUCT for the
+    // duration of this call, exactly as for `record_mouse_move`.
+    let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    accumulate_wheel((data.mouseData >> 16) as i16 as i32);
+}
+
+/// The arithmetic half of [`record_wheel`], split out so the notch accounting
+/// is testable without fabricating an `MSLLHOOKSTRUCT`.
+fn accumulate_wheel(delta: i32) {
+    let _ = PENDING_SCROLL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+        Some(v.saturating_add(delta))
+    });
+}
+
+/// `WH_MOUSE_LL` callback.
+///
+/// **Exactly one path out of this function does not call `CallNextHookEx`: a
+/// wheel event consumed while [`SCROLL_ARMED`].** That consumption is the
+/// point - without it the window underneath would scroll at the same time as
+/// the popup. Every other path, including both panic paths, still chains.
+///
+/// This function previously had no early return at all and said so here. The
+/// exception is stated rather than left quietly false.
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && wparam.0 as u32 == WM_MOUSEMOVE {
-        // A panic must never unwind across this callback boundary - see the
-        // module docs. Swallowing it here leaves the atomics exactly as
-        // they were before this call (see record_mouse_move's own comment
-        // on why nothing between its stores can plausibly panic), so there
-        // is no torn state introduced by the panic path either.
-        let _ = catch_unwind(|| unsafe { record_mouse_move(lparam) });
+    if code >= 0 {
+        match wparam.0 as u32 {
+            // A panic must never unwind across this callback boundary - see
+            // the module docs. Swallowing it here leaves the atomics exactly
+            // as they were before this call (see record_mouse_move's own
+            // comment on why nothing between its stores can plausibly
+            // panic), so there is no torn state introduced by the panic path
+            // either.
+            WM_MOUSEMOVE => {
+                let _ = catch_unwind(|| unsafe { record_mouse_move(lparam) });
+            }
+            WM_MOUSEWHEEL if SCROLL_ARMED.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe { record_wheel(lparam) });
+                return LRESULT(1);
+            }
+            _ => {}
+        }
     }
     CallNextHookEx(None, code, wparam, lparam)
 }
@@ -233,6 +300,53 @@ impl Hooks {
         }
     }
 
+    /// Arms or disarms wheel capture - see [`SCROLL_ARMED`], including why
+    /// every nested message pump on the main thread must disarm.
+    pub fn set_scroll_armed(armed: bool) {
+        SCROLL_ARMED.store(armed, Ordering::SeqCst);
+    }
+
+    /// Whether wheel capture is currently armed.
+    pub fn scroll_armed() -> bool {
+        SCROLL_ARMED.load(Ordering::SeqCst)
+    }
+
+    /// Takes the **whole** wheel notches accumulated so far, leaving any
+    /// sub-notch remainder banked for the next call.
+    ///
+    /// Banking the remainder is required, not tidy. Finer-resolution wheels and
+    /// Precision Touchpads send deltas *smaller* than `WHEEL_DELTA`, and Win32
+    /// requires the application to accumulate them. Draining the accumulator
+    /// whole and then dividing would throw those away every tick, so such a
+    /// device could **never** reach one notch however long the user scrolled -
+    /// and because the hook has already swallowed the event, the gesture would
+    /// move neither the popup nor the window underneath. A plain mechanical
+    /// wheel only ever sends exact multiples, so the bug would be invisible on
+    /// one and total on the other.
+    ///
+    /// Positive is a scroll up, away from the user - Win32's own convention.
+    /// Rust's `%` keeps the sign of the dividend, so downward scrolling banks a
+    /// negative remainder and accumulates the same way.
+    pub fn take_whole_notches() -> i32 {
+        let mut whole = 0;
+        // fetch_update may call this closure more than once under contention;
+        // only the iteration whose compare-exchange succeeds is the one that
+        // stores, and it is the same iteration that set `whole`.
+        let _ = PENDING_SCROLL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            let remainder = v % WHEEL_DELTA_UNITS;
+            whole = (v - remainder) / WHEEL_DELTA_UNITS;
+            Some(remainder)
+        });
+        whole
+    }
+
+    /// Drops everything accumulated so far, remainder included. Used when the
+    /// popup is replaced, so notches meant for the previous one cannot scroll
+    /// the new one to a position its user never asked for.
+    pub fn discard_scroll() {
+        PENDING_SCROLL.store(0, Ordering::SeqCst);
+    }
+
     /// Changes the trigger mode the mouse hook gates on. Takes effect on
     /// the very next mouse event - there is no separate "apply" step, since
     /// the mode lives in the same kind of static the hook already reads
@@ -280,9 +394,72 @@ impl Drop for Hooks {
     /// do with one; the alternative (panicking in a destructor, or making
     /// teardown fallible) is worse than a best-effort unhook.
     fn drop(&mut self) {
+        // Redundant, kept only as cheap defensiveness: the unhook below
+        // restores the wheel on its own, and any path where this `Drop` does
+        // not run is a path where the process is dying and taking the hook
+        // with it. NOT evidence that a stuck arm is recoverable - see
+        // `SCROLL_ARMED` for the one mechanism that is.
+        SCROLL_ARMED.store(false, Ordering::SeqCst);
         unsafe {
             let _ = UnhookWindowsHookEx(self.mouse);
             let _ = UnhookWindowsHookEx(self.keyboard);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `PENDING_SCROLL` is process-global, so these run as one test rather
+    /// than racing each other for it.
+    #[test]
+    fn wheel_notches_bank_their_sub_notch_remainder() {
+        Hooks::discard_scroll();
+
+        // A plain mechanical wheel: exact multiples, nothing banked.
+        accumulate_wheel(240);
+        assert_eq!(2, Hooks::take_whole_notches());
+        assert_eq!(0, Hooks::take_whole_notches(), "nothing should be left over");
+
+        // A high-resolution wheel: sub-notch deltas must accumulate rather
+        // than being discarded. Draining and dividing would leave this at
+        // zero forever and the gesture would never move anything - the hook
+        // has already swallowed the event by then.
+        accumulate_wheel(40);
+        assert_eq!(0, Hooks::take_whole_notches(), "40 is not yet a notch");
+        accumulate_wheel(40);
+        assert_eq!(0, Hooks::take_whole_notches(), "80 is not yet a notch");
+        accumulate_wheel(40);
+        assert_eq!(1, Hooks::take_whole_notches(), "40+40+40 is one whole notch");
+        assert_eq!(0, Hooks::take_whole_notches());
+
+        // Downward: Rust's % keeps the dividend's sign, so the remainder
+        // banks negative and accumulates the same way.
+        accumulate_wheel(-140);
+        assert_eq!(-1, Hooks::take_whole_notches());
+        accumulate_wheel(-100);
+        assert_eq!(-1, Hooks::take_whole_notches(), "-20 banked plus -100");
+        assert_eq!(0, Hooks::take_whole_notches());
+
+        // Replacing the popup drops the remainder too, so a new entry cannot
+        // open already scrolled.
+        accumulate_wheel(80);
+        Hooks::discard_scroll();
+        assert_eq!(0, Hooks::take_whole_notches());
+    }
+
+    /// A long stall pins the accumulator instead of wrapping; the notch count
+    /// derived from it must still be sane, and the caller's pixel conversion
+    /// saturates rather than overflowing.
+    #[test]
+    fn a_saturated_accumulator_yields_a_bounded_notch_count() {
+        Hooks::discard_scroll();
+        accumulate_wheel(i32::MAX);
+        accumulate_wheel(i32::MAX);
+        let notches = Hooks::take_whole_notches();
+        assert_eq!(i32::MAX / WHEEL_DELTA_UNITS, notches);
+        assert!(notches.saturating_mul(4096) > 0, "must not wrap negative");
+        Hooks::discard_scroll();
     }
 }

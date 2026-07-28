@@ -50,7 +50,7 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
-use crate::ui::render::Renderer;
+use crate::ui::render::{max_scroll, Renderer};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{CaptureExclusion, Popup};
@@ -68,7 +68,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, IsWindowVisible, KillTimer, PostQuitMessage,
+    DispatchMessageW, GetCursorPos, GetMessageW, IsWindowVisible, KillTimer, PostQuitMessage,
     PostThreadMessageW, SetTimer, ShowWindow, TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE,
     WM_APP, WM_TIMER,
 };
@@ -109,6 +109,21 @@ const POPUP_GAP: i32 = 12;
 /// differently-framed capture — ±1px per edge. An exact comparison would fail
 /// spuriously and re-render on every hover, defeating the check.
 const ANCHOR_JITTER_PX: i32 = 4;
+
+/// Pixels of content scrolled per wheel notch.
+///
+/// A feel constant, not a measured one — expect to tune it against a real
+/// overflowing entry, the way `REGION_W`/`REGION_H` were tuned.
+const SCROLL_STEP_PX: i32 = 48;
+
+/// How many consecutive ticks the wheel may stay armed before saying so once.
+///
+/// 250 ticks at `DISPATCH_TICK_MS` is about five seconds — far longer than any
+/// real read of one popup, and short enough to appear in a log the user still
+/// has open. This exists because a stuck arm swallows the wheel for *every*
+/// application, and without it the bug report is "chibipop broke my mouse"
+/// with nothing to search for.
+const ARM_WARN_TICKS: u32 = 250;
 
 /// The popup's width has no config knob (`config.rs`'s `PopupConfig` only
 /// exposes `max_height_percent`) - 420 matches the width Task 5 verified
@@ -369,6 +384,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
     let theme = theme_from_config(&cfg.popup);
     let max_height_percent = i32::from(cfg.popup.max_height_percent);
+    let scroll_popup = cfg.popup.scroll_popup;
 
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
@@ -405,6 +421,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut overlay_prev_visible = false;
     // What is on screen, and therefore what holds the cursor - see `Shown`.
     let mut shown: Option<Shown> = None;
+    // Consecutive ticks the wheel has been captured - see ARM_WARN_TICKS.
+    let mut armed_ticks: u32 = 0;
 
     // I4: kept in one place.
     let mut drain_capture_guard = || {
@@ -455,6 +473,45 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
+            // Spec D7: the popup's OWN rect, never the sticky region. The
+            // sticky region includes the hovered word, and the cursor is on
+            // the hovered word by construction whenever a popup appears - so
+            // arming on it would swallow the wheel while the user was merely
+            // reading, and scrolling the page would silently scroll the popup
+            // instead.
+            let live = cursor_now();
+            let armed = scroll_popup
+                && shown
+                    .as_ref()
+                    .is_some_and(|s| s.popup.contains(live) && s.content_h > s.view_h);
+            Hooks::set_scroll_armed(armed);
+
+            armed_ticks = if armed { armed_ticks + 1 } else { 0 };
+            if armed_ticks == ARM_WARN_TICKS {
+                eprintln!(
+                    "chibipop: the wheel has been captured for {}s (SCROLL_ARMED). If your \
+                     scroll wheel is not working elsewhere, this is why - move the cursor off \
+                     the popup, or set scroll_popup = false.",
+                    (ARM_WARN_TICKS * DISPATCH_TICK_MS) / 1000
+                );
+            }
+
+            let notches = Hooks::take_whole_notches();
+            if notches != 0 {
+                if let Some(s) = shown.as_mut() {
+                    let span = max_scroll(s.content_h, s.view_h);
+                    // Wheel-up is positive, and moves content toward the top.
+                    let step = notches.saturating_mul(SCROLL_STEP_PX);
+                    let next = s.scroll.saturating_sub(step).clamp(0, span);
+                    if next != s.scroll {
+                        s.scroll = next;
+                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll) {
+                            eprintln!("chibipop: repainting for scroll failed: {e:#}");
+                        }
+                    }
+                }
+            }
+
             if let Some(cursor) = Hooks::take_pending() {
                 // Spec D3: on the word or its popup, change nothing.
                 let frozen = shown
@@ -501,7 +558,15 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             // behind a slow main thread the way it could if this only ever
             // handled a single message per wakeup.
             drain_capture_guard();
-        } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam, &mut drain_capture_guard) {
+        } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam, || {
+            // Spec D9's one exception. `TrackPopupMenuEx` runs its own message
+            // pump and discards thread-targeted messages, so `WM_TIMER` stops
+            // arriving while the menu is open - while the hook keeps being
+            // called. That is the only way the arm can latch, and this is the
+            // callback that exists to service what the menu would swallow.
+            Hooks::set_scroll_armed(false);
+            drain_capture_guard();
+        }) {
             match cmd {
                 TrayCommand::SetMode(mode) => {
                     // AppState, hooks, and disk all updated together here -
@@ -511,6 +576,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     Hooks::set_mode(mode);
                     // No sticky region may survive a mode change.
                     shown = None;
+                    Hooks::set_scroll_armed(false);
                     if let Err(e) = cfg.save(config_path) {
                         eprintln!("chibipop: failed to save the mode change to {}: {e:#}",
                                   config_path.display());
@@ -781,6 +847,12 @@ struct Shown {
     /// Where `place_popup` put the window — stored, never re-derived.
     popup: PhysRect,
     presentation: Presentation,
+    /// Vertical content offset in physical pixels; 0 is the top.
+    scroll: i32,
+    /// Natural content height, unclamped — what `scroll` ranges against.
+    content_h: i32,
+    /// Visible height, which is the window's height.
+    view_h: i32,
 }
 
 /// Applies one `WorkerOutcome` to the popup and - when the debug toggle
@@ -826,6 +898,7 @@ fn handle_worker_outcome(
                 max_height_percent,
                 &presentation,
                 anchor,
+                0, // A new word always starts at the top.
             ) {
                 Err(e) => {
                     eprintln!("chibipop: showing the popup failed: {e:#}");
@@ -834,9 +907,19 @@ fn handle_worker_outcome(
                         ov.hide();
                     }
                     *shown = None;
+                    Hooks::set_scroll_armed(false);
                 }
-                Ok(rect) => {
-                    *shown = Some(Shown { anchor, popup: rect, presentation });
+                Ok((rect, content_h, view_h)) => {
+                    // Notches meant for the previous popup must not land here.
+                    Hooks::discard_scroll();
+                    *shown = Some(Shown {
+                        anchor,
+                        popup: rect,
+                        presentation,
+                        scroll: 0,
+                        content_h,
+                        view_h,
+                    });
                     if let Some(ov) = overlay {
                         if let Err(e) = ov.show_rects(&scan, theme) {
                             eprintln!("chibipop: showing the scan overlay failed: {e:#}");
@@ -857,28 +940,27 @@ fn show_presentation(
     max_height_percent: i32,
     presentation: &Presentation,
     anchor: PhysRect,
-) -> Result<PhysRect> {
+    scroll: i32,
+) -> Result<(PhysRect, i32, i32)> {
     let monitor = monitor_rect_for(anchor);
     let max_w = POPUP_MAX_WIDTH.min(monitor.w.max(1));
     let max_h = ((monitor.h * max_height_percent) / 100).max(1);
 
-    // measure's third element reports whether it clamped to max_h; the
-    // returned (w, h) is ALWAYS <= (max_w, max_h) by construction
-    // (render.rs's own guarantee). That exact clamped pair - not a
-    // recomputed or unclamped size - is what place_popup receives next:
-    // geom.rs's anchor-never-covered proof (Task 3's 12,201-case sweep)
-    // holds only when the height it is handed never exceeds the
-    // 45%-of-monitor cap. Passing an unclamped height here would silently
-    // break that guarantee for exactly the long entries where truncation
-    // kicks in.
-    let (w, h, _clamped) = renderer
+    // `view_h` is ALWAYS <= max_h by construction (render.rs's own
+    // guarantee), and that capped value - not the natural `content_h`, and
+    // not a recomputed size - is what place_popup receives next: geom.rs's
+    // anchor-never-covered proof (Task 3's 12,201-case sweep) holds only
+    // when the height it is handed never exceeds the 45%-of-monitor cap.
+    // Passing `content_h` here would silently break that guarantee for
+    // exactly the long entries scrolling exists to serve.
+    let (w, view_h, content_h) = renderer
         .measure(presentation, theme, max_w, max_h)
         .context("measuring popup content")?;
 
-    let rect = place_popup(anchor, (w, h), monitor, POPUP_GAP);
+    let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
-    renderer.paint(presentation, theme).context("painting the popup")?;
-    Ok(rect)
+    renderer.paint(presentation, theme, scroll).context("painting the popup")?;
+    Ok((rect, content_h, view_h))
 }
 
 /// Whether a new outcome would draw exactly what is already on screen.
@@ -895,6 +977,24 @@ fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
     prev.presentation == *new
         && (prev.anchor.x - anchor.x).abs() <= ANCHOR_JITTER_PX
         && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
+}
+
+/// The pointer's position right now.
+///
+/// Read live rather than from `Hooks::take_pending`, which is gated at
+/// `MOVEMENT_GATE_PX`: easing into the popup in small steps could otherwise
+/// leave the wheel arm stale. From the live position the arm is correct within
+/// one tick regardless of movement history, and it self-corrects from any wrong
+/// state instead of latching.
+fn cursor_now() -> PhysPoint {
+    let mut pt = POINT::default();
+    // SAFETY: FFI call taking a pointer to local stack storage that outlives
+    // the call. On failure `pt` stays zeroed, which merely disarms the wheel
+    // for one tick.
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    PhysPoint { x: pt.x, y: pt.y }
 }
 
 /// The monitor containing `anchor`'s centre - never the primary monitor
@@ -981,6 +1081,9 @@ mod tests {
             anchor,
             popup: PhysRect { x: anchor.x, y: anchor.y + anchor.h + POPUP_GAP, w: 420, h: 300 },
             presentation: presentation_of(written),
+            scroll: 0,
+            content_h: 300,
+            view_h: 300,
         }
     }
 

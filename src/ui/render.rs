@@ -34,14 +34,22 @@
 //! not to this task's three-function interface. Flagged here rather than
 //! silently built around.
 //!
-//! **Measuring and painting share one layout walk** (`layout_pass`) so they
-//! can never disagree about where content gets cut off: `measure` calls it
-//! with `target: None` (DirectWrite layout only, no device); `paint` calls it
-//! with `target: Some(&_)` against the *same* per-line heights, so the height
-//! `measure` reported is exactly the height `paint` fills.
+//! **Measuring and painting share one layout walk** (`layout_pass`) so they can
+//! never disagree about where a line lands: `measure` calls it with
+//! `target: None` (DirectWrite layout only, no device); `paint` calls it with
+//! `target: Some(&_)` against the *same* per-line heights.
+//!
+//! **The walk no longer cuts content off.** It used to stop at the first
+//! element that would not fit and draw a `…` marker. Now it visits every
+//! element and `paint` offsets the whole walk by a scroll amount, letting D2D
+//! clip to the window — so a long entry is scrolled rather than truncated, and
+//! `measure` reports the natural height the scroll range is computed from. The
+//! window's own height is still capped by the caller, because
+//! `geom::place_popup`'s proof that the popup never covers the character being
+//! read holds only within that cap.
 
 use crate::present::Presentation;
-use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
+use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB, SCROLLBAR_W};
 use anyhow::{Context, Result};
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -66,10 +74,6 @@ const CORNER_GAP: f32 = 8.0;
 /// rows.
 const SEPARATOR_MARGIN: f32 = 10.0;
 const SEPARATOR_THICKNESS: f32 = 1.0;
-/// The truncation marker `paint` draws when content was clamped to the
-/// popup's height cap (M3-D4) - drawn in `theme.dimmed_text` so a
-/// deliberately-ended entry never looks identical to one that was cut off.
-const CLAMP_MARKER: &str = "…";
 
 /// One line of text the layout walk lays out and, in paint mode, draws.
 /// Built fresh from a `Presentation`/`Theme` on every `measure`/`paint`
@@ -171,41 +175,54 @@ impl Renderer {
     /// would silently break that guarantee for exactly the long entries
     /// where truncation was supposed to kick in.
     ///
-    /// The third element of the tuple is `true` when content did not fit
-    /// and was cut off - `paint` independently re-derives the same fact
-    /// from the window's actual (by-then-clamped) client size, so the
-    /// truncation marker it draws always agrees with what `measure` decided
-    /// here; see the module docs.
+    /// Returns `(width, view_h, content_h)`: the width, the **visible** height
+    /// after the cap, and the content's **natural** height before it.
     ///
-    /// **Deliberate deviation from the task brief's literal
-    /// `Result<(i32, i32)>` signature.** The brief also requires `measure`
-    /// to "report that it clamped, so the caller can draw the truncation
-    /// marker" - a 2-tuple has nowhere to put that. Extended to a 3-tuple
-    /// rather than dropping either requirement; flagged here and in the
-    /// task report rather than silently picking one.
+    /// `view_h` is what the window is sized to and what `place_popup` must be
+    /// handed. `content_h` is what `scroll` ranges against — the caller gets
+    /// `max_scroll` from the difference, and a `content_h` greater than
+    /// `view_h` is exactly the condition for drawing a scrollbar. This
+    /// replaced an earlier `clamped: bool`, which was a lossy summary of the
+    /// same fact.
+    ///
+    /// The measure walk runs with an effectively infinite content box, since
+    /// nothing is drawn in measure mode and the point is to reach every
+    /// element rather than stop at the first that would not fit.
     pub fn measure(
         &self,
         p: &Presentation,
         theme: &Theme,
         max_w: i32,
         max_h: i32,
-    ) -> Result<(i32, i32, bool)> {
+    ) -> Result<(i32, i32, i32)> {
         let elems = build_elements(p, theme);
         let content_w = (max_w - 2 * theme.padding).max(0) as f32;
-        let content_h = (max_h - 2 * theme.padding).max(0) as f32;
-        let (used_h, clamped) =
-            layout_pass(&self.dwrite_factory, None, &elems, theme, 0.0, 0.0, content_w, content_h)
-                .context("measuring popup content")?;
-        let h = (used_h.ceil() as i32 + 2 * theme.padding).min(max_h);
-        Ok((max_w, h, clamped))
+        let used_h = layout_pass(
+            &self.dwrite_factory,
+            None,
+            &elems,
+            theme,
+            0.0,
+            0.0,
+            content_w,
+            f32::MAX,
+            0.0,
+        )
+        .context("measuring popup content")?;
+        let content_h = used_h.ceil() as i32 + 2 * theme.padding;
+        Ok((max_w, content_h.min(max_h), content_h))
     }
 
     /// Paints `p`/`theme` into the window's current client rect (already
     /// sized by `Popup::show_at` to what `measure` returned). Draws, in
     /// order: the panel background, the top card (frequency in the
     /// top-right corner, headword, reading, POS, then each `GlossBlock`),
-    /// a separator, each collapsed row,
-    /// and - only when content did not fit - a dimmed truncation marker.
+    /// a separator, each collapsed row, and - only when the content overflows
+    /// the window - a scrollbar on the right edge.
+    ///
+    /// `scroll` shifts the content up by that many physical pixels. D2D clips
+    /// to the render target, so a partially-visible line at the top edge falls
+    /// out for free; nothing needs to cull off-screen elements.
     ///
     /// Device-lost (`D2DERR_RECREATE_TARGET`, e.g. a display mode change, a
     /// driver reset, or an RDP session change) is handled here: the stale
@@ -215,16 +232,16 @@ impl Renderer {
     /// gives no guarantee its content reached the screen - but the retry
     /// means the caller still gets a correctly painted popup back, not an
     /// error and not a crash.
-    pub fn paint(&mut self, p: &Presentation, theme: &Theme) -> Result<()> {
+    pub fn paint(&mut self, p: &Presentation, theme: &Theme, scroll: i32) -> Result<()> {
         let (w, h) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(w, h).context("preparing the D2D render target")?;
 
-        if let Err(e) = self.paint_once(p, theme, w, h) {
+        if let Err(e) = self.paint_once(p, theme, w, h, scroll) {
             if e.code() == D2DERR_RECREATE_TARGET {
                 self.target = None;
                 self.ensure_target(w, h)
                     .context("recreating the D2D render target after device loss")?;
-                self.paint_once(p, theme, w, h)
+                self.paint_once(p, theme, w, h, scroll)
                     .context("repainting after device-lost recovery")?;
             } else {
                 return Err(e).context("D2D paint failed");
@@ -287,6 +304,7 @@ impl Renderer {
         theme: &Theme,
         w: i32,
         h: i32,
+        scroll: i32,
     ) -> windows::core::Result<()> {
         let target = self
             .target
@@ -322,7 +340,32 @@ impl Renderer {
             let content_w = (w - 2 * theme.padding).max(0) as f32;
             let content_h = (h - 2 * theme.padding).max(0) as f32;
             let origin = theme.padding as f32;
-            layout_pass(&self.dwrite_factory, Some(target), &elems, theme, origin, origin, content_w, content_h)?;
+            let used = layout_pass(
+                &self.dwrite_factory,
+                Some(target),
+                &elems,
+                theme,
+                origin,
+                origin,
+                content_w,
+                content_h,
+                scroll as f32,
+            )?;
+
+            let track_h = h - 2 * theme.padding;
+            let total = used.ceil() as i32 + 2 * theme.padding;
+            if let Some((top, thumb_h)) = scrollbar_thumb(track_h, total, h, scroll) {
+                let brush =
+                    unsafe { target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None) }?;
+                let x = (w - theme.padding / 2 - SCROLLBAR_W) as f32;
+                let rect = D2D_RECT_F {
+                    left: x,
+                    top: (theme.padding + top) as f32,
+                    right: x + SCROLLBAR_W as f32,
+                    bottom: (theme.padding + top + thumb_h) as f32,
+                };
+                unsafe { target.FillRectangle(&rect, &brush) };
+            }
             Ok(())
         })();
 
@@ -453,28 +496,24 @@ fn layout_pass(
     origin_y: f32,
     content_w: f32,
     content_h: f32,
-) -> windows::core::Result<(f32, bool)> {
+    scroll: f32,
+) -> windows::core::Result<f32> {
     let font_name = HSTRING::from(theme.font_name.as_str());
     let mut y = 0.0f32;
-    let mut clamped = false;
     let mut reserved_w = 0.0f32;
 
     for elem in elems {
         let drawn_height = match elem {
             Elem::Separator { top_gap } => {
                 let h = SEPARATOR_THICKNESS;
-                if y + top_gap + h > content_h {
-                    clamped = true;
-                    break;
-                }
                 y += top_gap;
                 if let Some(t) = target {
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(theme.separator), None) }?;
                     let rect = D2D_RECT_F {
                         left: origin_x,
-                        top: origin_y + y,
+                        top: origin_y + y - scroll,
                         right: origin_x + content_w,
-                        bottom: origin_y + y + h,
+                        bottom: origin_y + y + h - scroll,
                     };
                     unsafe { t.FillRectangle(&rect, &brush) };
                 }
@@ -482,8 +521,8 @@ fn layout_pass(
             }
             Elem::Corner(line) => {
                 let (layout, m) = build_text_layout(dwrite, &font_name, line, content_w)?;
-                // Decoration: skipped, never a truncation marker.
-                if m.height > content_h {
+                // Decoration: skipped when it cannot fit.
+                if m.height > content_h && scroll == 0.0 {
                     continue;
                 }
                 unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
@@ -491,7 +530,7 @@ fn layout_pass(
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
                         t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y },
+                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
                             &layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -506,16 +545,12 @@ fn layout_pass(
                 reserved_w = 0.0;
                 let (layout, m) = build_text_layout(dwrite, &font_name, line, avail_w)?;
                 let h = m.height;
-                if y + line.top_gap + h > content_h {
-                    clamped = true;
-                    break;
-                }
                 y += line.top_gap;
                 if let Some(t) = target {
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
                         t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y },
+                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
                             &layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -528,36 +563,7 @@ fn layout_pass(
         y += drawn_height;
     }
 
-    if clamped {
-        let marker = Line {
-            text: CLAMP_MARKER.to_string(),
-            color: theme.dimmed_text,
-            size: theme.body_size,
-            top_gap: SECTION_GAP,
-        };
-        let (layout, m) = build_text_layout(dwrite, &font_name, &marker, content_w)?;
-        let h = m.height;
-        if y + marker.top_gap + h <= content_h {
-            y += marker.top_gap;
-            if let Some(t) = target {
-                let brush = unsafe { t.CreateSolidColorBrush(&color_f(marker.color), None) }?;
-                unsafe {
-                    t.DrawTextLayout(
-                        Vector2 { X: origin_x, Y: origin_y + y },
-                        &layout,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    )
-                };
-            }
-            y += h;
-        }
-        // If even the marker does not fit, there is no narrower fallback -
-        // the walk simply stops with `clamped: true` and whatever `y` it
-        // had reached.
-    }
-
-    Ok((y, clamped))
+    Ok(y)
 }
 
 /// Builds one `IDWriteTextLayout` for `line`, word-wrapped to `max_w`, and
