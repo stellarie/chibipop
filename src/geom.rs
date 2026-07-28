@@ -117,6 +117,57 @@ impl ScanDisplay {
     }
 }
 
+/// The three rectangles that keep a popup on screen: the hovered character,
+/// the popup itself, and the **bridge** across the gap between them.
+///
+/// Returned in that order — `[anchor, popup, bridge]`.
+///
+/// **Three rectangles, deliberately not their bounding box.** The popup is
+/// flush with the anchor's left edge and up to `POPUP_MAX_WIDTH` (420px) wide,
+/// while the anchor is one glyph (~26px). A bounding box would therefore also
+/// cover ~400px of screen *beside* the hovered character, at that character's
+/// own height — so scanning sideways along a line of text would hold the popup
+/// on the previous word and the next word could never be read. The bridge is
+/// only the gap tall, so brushing it on the way to the line below holds
+/// nothing.
+///
+/// The bridge is derived from whichever rect is upper, because [`place_popup`]
+/// flips the popup above the anchor near a monitor's bottom edge.
+pub fn sticky_region(anchor: PhysRect, popup: PhysRect) -> [PhysRect; 3] {
+    [anchor, popup, bridge_between(anchor, popup)]
+}
+
+/// The gap band between two rects, spanning their combined x-extent.
+///
+/// Zero or negative height when they touch or overlap; [`in_sticky`] treats
+/// that as containing nothing, and the two rects are adjacent in that case so
+/// nothing is lost.
+fn bridge_between(a: PhysRect, b: PhysRect) -> PhysRect {
+    let (upper, lower) = if a.y <= b.y { (a, b) } else { (b, a) };
+    let top = upper.y + upper.h;
+    let left = a.x.min(b.x);
+    let right = (a.x + a.w).max(b.x + b.w);
+    PhysRect { x: left, y: top, w: right - left, h: lower.y - top }
+}
+
+/// Whether `p` is on the hovered word, on its popup, or in the gap between.
+///
+/// While this is true the application dispatches no trigger at all, so the
+/// popup stays exactly as it is (spec D3).
+///
+/// **What this guarantees, and what it does not** (spec D2a): the vertical path
+/// from the anchor's centre into the popup is entirely covered, as is any
+/// approach steeper than roughly 45°. A *shallower* diagonal leaves the region
+/// by the anchor's side edge before reaching the bridge — landing on the
+/// neighbouring character, which is then correctly resolved as the word the
+/// cursor actually moved to. Covering that strip instead is precisely what
+/// would break sideways scanning, so the two cannot both hold.
+pub fn in_sticky(p: PhysPoint, anchor: PhysRect, popup: PhysRect) -> bool {
+    sticky_region(anchor, popup)
+        .iter()
+        .any(|r| r.w > 0 && r.h > 0 && r.contains(p))
+}
+
 /// The overlay window's bounds, and every rectangle translated into that
 /// window's local coordinates.
 ///
@@ -463,5 +514,121 @@ mod tests {
         assert!(inset(PhysRect { x: 0, y: 0, w: 17, h: 3 }, 2).is_none());
         assert!(inset(PhysRect { x: 0, y: 0, w: 3, h: 17 }, 2).is_none());
         assert!(inset(PhysRect { x: 0, y: 0, w: 4, h: 4 }, 2).is_none());
+    }
+
+    /// The popup as `place_popup` produces it: flush with the anchor's left
+    /// edge, POPUP_GAP (12) below its bottom.
+    fn anchor_and_popup() -> (PhysRect, PhysRect) {
+        (r(100, 100, 26, 27), r(100, 139, 420, 300))
+    }
+
+    #[test]
+    fn the_anchor_and_the_popup_are_both_sticky() {
+        let (a, pop) = anchor_and_popup();
+        assert!(in_sticky(p(113, 113), a, pop), "anchor centre");
+        assert!(in_sticky(p(310, 289), a, pop), "popup centre");
+        assert!(in_sticky(p(100, 100), a, pop), "anchor top-left is inclusive");
+        assert!(in_sticky(p(519, 438), a, pop), "popup bottom-right interior");
+    }
+
+    #[test]
+    fn the_bridge_covers_the_gap_between_them() {
+        let (a, pop) = anchor_and_popup();
+        for y in 127..139 {
+            assert!(in_sticky(p(113, y), a, pop), "gap row {y} must be sticky");
+        }
+    }
+
+    /// `contains` is inclusive of the top-left and exclusive of the
+    /// bottom-right, so the three rects must tile with no missed row.
+    #[test]
+    fn the_three_rects_tile_without_a_seam() {
+        let (a, pop) = anchor_and_popup();
+        for y in 100..439 {
+            assert!(in_sticky(p(113, y), a, pop), "row {y} fell through a seam");
+        }
+    }
+
+    /// D2a's actual guarantee: straight down from the anchor's centre.
+    #[test]
+    fn the_vertical_path_into_the_popup_never_leaves_the_region() {
+        for ax in [-900, 0, 2560, 3400] {
+            for ay in [-40, 0, 500, 1800] {
+                for (pw, ph) in [(420, 300), (200, 60), (420, 800)] {
+                    let a = r(ax, ay, 26, 27);
+                    let pop = r(ax, ay + 27 + 12, pw, ph);
+                    let cx = ax + 13;
+                    for y in ay..(ay + 27 + 12 + ph) {
+                        assert!(
+                            in_sticky(p(cx, y), a, pop),
+                            "anchor ({ax},{ay}) popup {pw}x{ph}: row {y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `place_popup` flips the popup above the anchor near a monitor's bottom
+    /// edge, so the bridge must come from whichever rect is upper rather than
+    /// assuming the popup is below.
+    #[test]
+    fn the_bridge_works_with_the_popup_above_the_anchor() {
+        let a = r(100, 900, 26, 27);
+        let pop = r(100, 588, 420, 300);
+        for y in 888..900 {
+            assert!(in_sticky(p(113, y), a, pop), "gap row {y} above the anchor");
+        }
+        assert!(in_sticky(p(310, 700), a, pop), "popup centre");
+    }
+
+    /// THE assertion that fails if anyone replaces the three rects with their
+    /// bounding box. The next character along the line must stay hoverable, or
+    /// scanning a line freezes the popup on the previous word.
+    #[test]
+    fn the_next_character_along_the_line_is_not_sticky() {
+        let (a, pop) = anchor_and_popup();
+        assert!(!in_sticky(p(139, 113), a, pop), "one glyph right of the anchor");
+        assert!(!in_sticky(p(300, 113), a, pop), "far along the same line");
+    }
+
+    /// Pinned deliberately (spec D2a): a shallow diagonal DOES leave the
+    /// region, exiting onto the neighbouring character. That is correct
+    /// behaviour, and pinning it stops a future widening of the bridge from
+    /// silently breaking `the_next_character_along_the_line_is_not_sticky`.
+    #[test]
+    fn a_shallow_diagonal_leaves_the_region_on_purpose() {
+        let (a, pop) = anchor_and_popup();
+        assert!(
+            !in_sticky(p(127, 126), a, pop),
+            "exits the anchor's right edge one row before the bridge"
+        );
+    }
+
+    #[test]
+    fn a_point_well_away_from_both_is_not_sticky() {
+        let (a, pop) = anchor_and_popup();
+        assert!(!in_sticky(p(50, 50), a, pop));
+        assert!(!in_sticky(p(1000, 1000), a, pop));
+    }
+
+    /// A zero-height bridge must contribute nothing rather than being treated
+    /// as a containing rect - the same rule `inset` applies.
+    #[test]
+    fn a_zero_gap_needs_no_bridge_and_still_tiles() {
+        let a = r(100, 100, 26, 27);
+        let pop = r(100, 127, 420, 300);
+        for y in 100..427 {
+            assert!(in_sticky(p(113, y), a, pop), "row {y} with gap 0");
+        }
+    }
+
+    #[test]
+    fn sticky_region_returns_the_anchor_the_popup_and_the_bridge() {
+        let (a, pop) = anchor_and_popup();
+        let rects = sticky_region(a, pop);
+        assert_eq!(a, rects[0]);
+        assert_eq!(pop, rects[1]);
+        assert_eq!(r(100, 127, 420, 12), rects[2], "bridge spans the union's x-extent");
     }
 }
