@@ -123,28 +123,31 @@ Related smaller items from the same review, all accepted-not-fixed and recorded 
 
 ---
 
-## 6. Lookup ranking: a long match loses to a short common one
+## 6. ~~Lookup ranking~~ — RETRACTED, and what was actually going on
 
-**Measured 2026-07-28** while investigating popup flicker. Not a rendering problem — the popup
-faithfully shows what the engine ranked first, and the engine ranks the wrong thing.
+**Raised and withdrawn 2026-07-28, same session.** Recorded rather than deleted, because the way it
+was got wrong is more useful than the claim was.
 
-Hovering 振 in 振り向けた:
+**The claim:** hovering 振 in 振り向けた returned `振り` (match 2, freq 1 501, score 6.71) instead of
+`振り向ける` (match 5, freq 37 505, score 5.38), so `score()`'s frequency term must be outweighing
+`match_len`.
 
-| candidate | match | freq | score |
-|---|---|---|---|
-| 振り [ぶり] | 2 | 1 501 | **6.71** ← wins |
-| 振り向ける [ふりむける] | **5** | 37 505 | 5.38 |
+**Why it is false.** `lookup/engine.rs`'s final sort is `b.match_len.cmp(&a.match_len)` **first**,
+with the score only a tiebreak after it. A 5-character match therefore cannot lose to a
+2-character one, whatever their scores. The two numbers were real and the story around them was
+plausible, and I wrote it down without reading the twenty lines that decide the order.
 
-Both are found. `lookup 振り向けた` on clean text returns 振り向ける correctly, so this is neither a
-dictionary gap nor a deconjugation failure — `score()` in `lookup/engine.rs` adds `match_len` but
-then adds up to 10 for frequency and subtracts one per deconjugation step, so a 25×-commoner
-2-character match outweighs three extra matched characters plus two steps.
+**What is actually reproducible.** Six consecutive captures at the same coordinate now return
+`振り向ける` with `match=5` every time, and the hold span it produces (x=3007..3150, 143px) covers
+**all five characters** of 振り向けた, releasing only at the 。 — the sticky-hold does exactly what
+it should on that verb.
 
-Scanning 振り向けた one character at a time currently gives **five different popups, four of them
-wrong**: 振り / 理 / 向ける / 桁 / 多. The sticky-hold shipped alongside this note collapses runs
-whose *first* answer is right (通ってる → 通る holds across 通って), but it cannot help when the
-first answer is a short wrong one — the span it holds is only as long as the match.
+**The residue, which is real but is not new.** The one-off `振り` reading must have come from a
+capture whose OCR text differed — the same variability already recorded elsewhere in this file (a
+sweep across one glyph produced a hallucinated `冫` in the line tail). When OCR truncates a verb,
+the match is short, so the hold span is short, so scanning it flickers again. That is a symptom of
+OCR variability, not of ranking, and it needs no separate entry.
 
-Worth its own round because the score formula affects every lookup: weighting `match_len` more
-heavily fixes this but risks promoting long junk matches elsewhere. Needs a measured sweep over
-real text, not a guess — the same discipline `REGION_W`/`REGION_H` got.
+**Lesson worth keeping:** two numbers plus a coherent explanation is not a finding. The sort order
+was one `grep` away.
+
