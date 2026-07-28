@@ -14,7 +14,7 @@ use crate::text::layout::{
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
 use std::mem::size_of;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::core::HSTRING;
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
@@ -32,17 +32,24 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 /// is `pub` inside a private module that is only glob-imported at that crate's
 /// root — so it is unreachable from any downstream crate, not merely
 /// feature-gated. Polling `Status()` is the working pattern.
-fn wait_blocking<T>(op: windows_future::IAsyncOperation<T>) -> windows::core::Result<T>
+fn wait_blocking<T>(op: windows_future::IAsyncOperation<T>) -> Result<T>
 where
     T: windows::core::RuntimeType + 'static,
 {
+    let deadline = Instant::now() + OCR_TIMEOUT;
     loop {
         if op.Status()? != windows_future::AsyncStatus::Started {
-            return op.GetResults();
+            return Ok(op.GetResults()?);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("OCR did not finish within {OCR_TIMEOUT:?}");
         }
         std::thread::sleep(Duration::from_millis(2));
     }
 }
+
+/// Bound on one OCR call.
+const OCR_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Recognise Japanese in a tightly packed BGRA buffer, using an
 /// already-created `engine`.
