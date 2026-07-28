@@ -51,6 +51,13 @@ class TestFixtureArchive(unittest.TestCase):
             "WHERE surface='食べる'").fetchone()[0]
         self.assertEqual(["1-dan", "transitive"], json.loads(row)[0]["pos"])
 
+    def test_rules_field_lands_in_the_term_pos_column(self):
+        # term.pos is the deconjugation filter's input, and is the Yomitan
+        # `rules` field - not the human-readable labels in senses[0]["pos"].
+        pos = self.conn.execute(
+            "SELECT pos FROM term WHERE surface='食べる'").fetchone()[0]
+        self.assertEqual("v1", pos)
+
     def test_kana_only_headword_has_a_null_written_column(self):
         # 猫 also indexes under surface 'ねこ', so written IS NULL is what
         # distinguishes the kana-only entry rather than the row count.

@@ -51,7 +51,7 @@ every push to `main` and every pull request:
   the difference.
 - Clippy again with those five suppressed, asserting **zero** other findings.
 - `cargo build --release`.
-- The dictionary builder's 56 Python tests.
+- The dictionary builder's 57 Python tests.
 
 The release workflow additionally refuses to build if the tag disagrees with
 `Cargo.toml`.
