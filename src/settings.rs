@@ -110,7 +110,12 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
 /// entry would match *every* dictionary and silently pin the order.
 fn order_key(name: &str, existing: &[String]) -> String {
     let lower = name.to_lowercase();
-    if let Some(entry) = existing.iter().find(|e| lower.contains(&e.to_lowercase())) {
+    // A blank entry is a substring of everything.
+    if let Some(entry) = existing
+        .iter()
+        .filter(|e| !e.trim().is_empty())
+        .find(|e| lower.contains(&e.to_lowercase()))
+    {
         return entry.clone();
     }
     let cut = name.find(['[', '(']).unwrap_or(name.len());
@@ -208,6 +213,19 @@ mod tests {
         let form = from_config(&cfg, &odd);
         let out = apply_to(&form, &cfg);
         assert_eq!(vec!["[2026] Something".to_string()], out.dictionaries.display_order);
+    }
+
+    /// A blank entry matches every name.
+    #[test]
+    fn a_blank_order_entry_never_claims_a_dictionary() {
+        let cfg = cfg_with(&["", "大辞林"]);
+        let out = apply_to(&from_config(&cfg, &dicts()), &cfg);
+        assert!(
+            !out.dictionaries.display_order.iter().any(|e| e.trim().is_empty()),
+            "a blank entry silently pins every dictionary, got {:?}",
+            out.dictionaries.display_order
+        );
+        assert!(out.dictionaries.display_order.contains(&"Jitendex.org".to_string()));
     }
 
     /// D6a: an entry matching nothing is what a rename looks like from here.
