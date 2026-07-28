@@ -1,3 +1,5 @@
+// No console on double-click.
+#![windows_subsystem = "windows"]
 // Allow-by-default, so silent until asked for.
 #![warn(missing_unsafe_on_extern)]
 #![warn(unsafe_attr_outside_unsafe)]
@@ -96,7 +98,18 @@ enum Command {
     },
 }
 
+/// Reattach a parent console.
+fn attach_parent_console() {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: FFI call with no preconditions. It fails harmlessly when the
+    // parent has no console, which is every double-click.
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() -> Result<()> {
+    attach_parent_console();
     let cli = Cli::parse();
     match cli.command {
         Command::Lookup { text, dict, rules } => {
