@@ -40,7 +40,7 @@
 //! decision 5 names.
 
 use crate::config::Config;
-use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
+use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
@@ -101,6 +101,14 @@ const DISPATCH_TICK_MS: u32 = 20;
 
 /// Gap between the hovered character and the popup (spec section 4.2).
 const POPUP_GAP: i32 = 12;
+
+/// How far an anchor may move and still count as the same hover.
+///
+/// Not slop. `text::capture::UPSCALE` is 2, so every OCR word box is
+/// re-measured through `PhysRect::scaled_down`'s integer division from a
+/// differently-framed capture — ±1px per edge. An exact comparison would fail
+/// spuriously and re-render on every hover, defeating the check.
+const ANCHOR_JITTER_PX: i32 = 4;
 
 /// The popup's width has no config knob (`config.rs`'s `PopupConfig` only
 /// exposes `max_height_percent`) - 420 matches the width Task 5 verified
@@ -395,6 +403,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut capture_guard_prev_visible = false;
     // Overlay's own visibility.
     let mut overlay_prev_visible = false;
+    // What is on screen, and therefore what holds the cursor - see `Shown`.
+    let mut shown: Option<Shown> = None;
 
     // I4: kept in one place.
     let mut drain_capture_guard = || {
@@ -446,9 +456,15 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             if let Some(cursor) = Hooks::take_pending() {
-                next_id += 1;
-                latest_dispatched = RequestId(next_id);
-                let _ = trigger_tx.send(Trigger { cursor, id: latest_dispatched });
+                // Spec D3: on the word or its popup, change nothing.
+                let frozen = shown
+                    .as_ref()
+                    .is_some_and(|s| in_sticky(cursor, s.anchor, s.popup));
+                if !frozen {
+                    next_id += 1;
+                    latest_dispatched = RequestId(next_id);
+                    let _ = trigger_tx.send(Trigger { cursor, id: latest_dispatched });
+                }
             }
         } else if msg.message == WM_APP_RESULT {
             // Drain to the freshest result actually queued right now - a
@@ -471,6 +487,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         &theme,
                         max_height_percent,
                         overlay.as_ref(),
+                        &mut shown,
                         result.outcome,
                     );
                 }
@@ -492,6 +509,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     // toggle looks broken after a restart" bugs happen.
                     cfg.trigger.mode = mode;
                     Hooks::set_mode(mode);
+                    // No sticky region may survive a mode change.
+                    shown = None;
                     if let Err(e) = cfg.save(config_path) {
                         eprintln!("chibipop: failed to save the mode change to {}: {e:#}",
                                   config_path.display());
@@ -748,15 +767,36 @@ fn resolve_trigger(
 }
 
 
+/// What is on screen right now. `None` whenever the popup is hidden.
+///
+/// **Must never outlive the visible window.** While this is `Some`,
+/// [`crate::geom::in_sticky`] suppresses trigger dispatch for its region; a
+/// `Shown` left behind by a hidden popup would therefore turn a patch of the
+/// screen into a dead zone where hovering silently does nothing. It is set
+/// only after `show_presentation` has succeeded, and cleared on every path
+/// that hides the popup.
+struct Shown {
+    /// The hovered character's own box.
+    anchor: PhysRect,
+    /// Where `place_popup` put the window — stored, never re-derived.
+    popup: PhysRect,
+    presentation: Presentation,
+}
+
 /// Applies one `WorkerOutcome` to the popup and - when the debug toggle
 /// created one - the scan overlay, which moves in lock-step with the popup
 /// on every arm below (M3 task 4).
+///
+/// Maintains `shown` in step with what is actually visible - see [`Shown`] on
+/// why a stale one is the defect to avoid.
+#[allow(clippy::too_many_arguments)]
 fn handle_worker_outcome(
     popup: &Popup,
     renderer: &mut Renderer,
     theme: &Theme,
     max_height_percent: i32,
     overlay: Option<&Overlay>,
+    shown: &mut Option<Shown>,
     outcome: WorkerOutcome,
 ) {
     match outcome {
@@ -765,6 +805,7 @@ fn handle_worker_outcome(
             if let Some(ov) = overlay {
                 ov.hide();
             }
+            *shown = None;
         }
         WorkerOutcome::Failed(msg) => {
             eprintln!("chibipop: hover lookup failed: {msg}");
@@ -772,19 +813,35 @@ fn handle_worker_outcome(
             if let Some(ov) = overlay {
                 ov.hide();
             }
+            *shown = None;
         }
         WorkerOutcome::Ready { presentation, anchor, scan } => {
-            if let Err(e) =
-                show_presentation(popup, renderer, theme, max_height_percent, &presentation, anchor)
-            {
-                eprintln!("chibipop: showing the popup failed: {e:#}");
-                let _ = popup.hide();
-                if let Some(ov) = overlay {
-                    ov.hide();
+            if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
+                return; // Already on screen, unchanged.
+            }
+            match show_presentation(
+                popup,
+                renderer,
+                theme,
+                max_height_percent,
+                &presentation,
+                anchor,
+            ) {
+                Err(e) => {
+                    eprintln!("chibipop: showing the popup failed: {e:#}");
+                    let _ = popup.hide();
+                    if let Some(ov) = overlay {
+                        ov.hide();
+                    }
+                    *shown = None;
                 }
-            } else if let Some(ov) = overlay {
-                if let Err(e) = ov.show_rects(&scan, theme) {
-                    eprintln!("chibipop: showing the scan overlay failed: {e:#}");
+                Ok(rect) => {
+                    *shown = Some(Shown { anchor, popup: rect, presentation });
+                    if let Some(ov) = overlay {
+                        if let Err(e) = ov.show_rects(&scan, theme) {
+                            eprintln!("chibipop: showing the scan overlay failed: {e:#}");
+                        }
+                    }
                 }
             }
         }
@@ -800,7 +857,7 @@ fn show_presentation(
     max_height_percent: i32,
     presentation: &Presentation,
     anchor: PhysRect,
-) -> Result<()> {
+) -> Result<PhysRect> {
     let monitor = monitor_rect_for(anchor);
     let max_w = POPUP_MAX_WIDTH.min(monitor.w.max(1));
     let max_h = ((monitor.h * max_height_percent) / 100).max(1);
@@ -821,7 +878,23 @@ fn show_presentation(
     let rect = place_popup(anchor, (w, h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
     renderer.paint(presentation, theme).context("painting the popup")?;
-    Ok(())
+    Ok(rect)
+}
+
+/// Whether a new outcome would draw exactly what is already on screen.
+///
+/// Keyed on **content**, because the question is literally "would the rendered
+/// output be identical". That also covers the case `main.rs`'s `watch`
+/// documents: the recognised line gains or loses characters at either end as
+/// the capture region slides, changing `cursor_byte_offset` while the hovered
+/// glyph — and therefore the hits — stay the same.
+///
+/// The anchor is part of the key regardless, because two occurrences of one
+/// word on screen produce equal presentations and the popup must still move.
+fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
+    prev.presentation == *new
+        && (prev.anchor.x - anchor.x).abs() <= ANCHOR_JITTER_PX
+        && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
 }
 
 /// The monitor containing `anchor`'s centre - never the primary monitor
@@ -861,6 +934,7 @@ fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
 mod tests {
     use super::*;
     use crate::config::PopupConfig;
+    use crate::present::Card;
 
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
         PopupConfig {
@@ -885,5 +959,67 @@ mod tests {
     fn theme_selection_by_name_is_unaffected_by_the_font_field() {
         assert_eq!(Theme::light().background, theme_from_config(&popup_config("light", "X")).background);
         assert_eq!(Theme::dark().background, theme_from_config(&popup_config("anything-else", "X")).background);
+    }
+
+    fn presentation_of(written: &str) -> Presentation {
+        Presentation {
+            top: Some(Card {
+                written: Some(written.to_string()),
+                reading: None,
+                pos: vec![],
+                freq: None,
+                blocks: vec![],
+                match_len: 2,
+            }),
+            collapsed: vec![],
+        }
+    }
+
+    fn shown_of(written: &str, anchor: PhysRect) -> Shown {
+        Shown {
+            anchor,
+            popup: PhysRect { x: anchor.x, y: anchor.y + anchor.h + POPUP_GAP, w: 420, h: 300 },
+            presentation: presentation_of(written),
+        }
+    }
+
+    /// UPSCALE is 2, so every anchor is re-measured through integer division
+    /// from a differently-framed capture: ±1px per edge. An exact-match test
+    /// would fail spuriously and re-render anyway.
+    #[test]
+    fn an_equal_card_with_a_jittered_anchor_is_the_same_content() {
+        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let prev = shown_of("宿舎", a);
+        let jittered = PhysRect { x: 101, y: 199, w: 26, h: 27 };
+        assert!(same_content(&prev, &presentation_of("宿舎"), jittered));
+    }
+
+    /// Two occurrences of one word on screen produce identical presentations,
+    /// and the popup genuinely has to move.
+    #[test]
+    fn an_equal_card_that_moved_is_not_the_same_content() {
+        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let prev = shown_of("猫", a);
+        let elsewhere = PhysRect { x: 700, y: 900, w: 26, h: 27 };
+        assert!(!same_content(&prev, &presentation_of("猫"), elsewhere));
+    }
+
+    #[test]
+    fn a_different_card_at_the_same_anchor_is_not_the_same_content() {
+        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let prev = shown_of("宿舎", a);
+        assert!(!same_content(&prev, &presentation_of("駅長"), a));
+    }
+
+    /// Exactly at the tolerance must still count as unchanged; one past it
+    /// must not.
+    #[test]
+    fn the_jitter_tolerance_is_inclusive_and_bounded() {
+        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let prev = shown_of("宿舎", a);
+        let at = PhysRect { x: 100 + ANCHOR_JITTER_PX, y: 200, w: 26, h: 27 };
+        let past = PhysRect { x: 100 + ANCHOR_JITTER_PX + 1, y: 200, w: 26, h: 27 };
+        assert!(same_content(&prev, &presentation_of("宿舎"), at));
+        assert!(!same_content(&prev, &presentation_of("宿舎"), past));
     }
 }
