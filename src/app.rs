@@ -546,6 +546,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             match req {
                 CaptureGuardMsg::Hide { ack } => {
                     let _ = popup.hide();
+                    // M4: mirrors the main drain above - the final
+                    // WorkerOutcome is never read once PostQuitMessage has
+                    // fired, so this is what actually keeps a capture
+                    // taken during shutdown from including the outlines.
+                    if let Some(ov) = &overlay {
+                        ov.hide();
+                    }
                     let _ = ack.send(());
                 }
                 CaptureGuardMsg::Restore => {}
