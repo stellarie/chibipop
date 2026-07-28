@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tier0:
+    # docs/REGRESSION.md tier 0, lifted as-is. windows-latest is not a
+    # preference: the crate is Win32, WinRT OCR and Direct2D throughout and
+    # does not build anywhere else.
+    name: Tier 0 gate
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Runs three times on purpose. Cargo runs tests in parallel threads of
+      # one process, and the wheel accumulator's process-global statics
+      # produced an intermittent red once that a single run missed
+      # (docs/REGRESSION.md tier 0).
+      - name: Tests, three times
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            echo "--- run $i ---"
+            cargo test 2>&1 | tee "test-$i.log"
+          done
+          n=$(awk '/^test result: ok\./ {s+=$4} END {print s+0}' test-3.log)
+          echo "passing tests: $n"
+          # A floor, not equality: adding a test must not break CI, but a
+          # whole target silently not running must.
+          if [ "$n" -lt 245 ]; then
+            echo "::error::expected at least 245 passing tests, got $n"
+            exit 1
+          fi
+
+      # The repo carries exactly five accepted clippy errors, so `-D warnings`
+      # always exits non-zero here. CI must assert the COUNT is 5 - a sixth is
+      # a real regression. See docs/REGRESSION.md for why.
+      - name: Clippy - exactly five accepted errors
+        shell: bash
+        run: |
+          set +e
+          raw=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1)
+          set -e
+          n=$(printf '%s\n' "$raw" | grep -cE "^error: (doc list|explicit call|this function|this loop)" || true)
+          echo "accepted clippy errors: $n"
+          if [ "$n" -ne 5 ]; then
+            printf '%s\n' "$raw"
+            echo "::error::expected exactly 5 accepted clippy errors, got $n"
+            exit 1
+          fi
+
+      - name: Clippy - nothing else, with those five suppressed
+        shell: bash
+        run: |
+          set +e
+          raw=$(cargo clippy --all-targets --all-features -- -D warnings \
+            -A clippy::while_let_loop -A clippy::doc_lazy_continuation \
+            -A clippy::useless_conversion -A clippy::too_many_arguments \
+            -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1)
+          set -e
+          n=$(printf '%s\n' "$raw" | grep -cE "^(error|warning)" || true)
+          echo "other clippy findings: $n"
+          if [ "$n" -ne 0 ]; then
+            printf '%s\n' "$raw"
+            echo "::error::expected 0, got $n"
+            exit 1
+          fi
+
+      - name: Release build
+        run: cargo build --release
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Dictionary builder tests
+        shell: bash
+        working-directory: tools/build-dict
+        run: python -m unittest discover -s tests
+
+      # A build anyone can download without cutting a tag.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chibipop-dev-windows-x64
+          path: target/release/chibipop.exe
+          if-no-files-found: error
