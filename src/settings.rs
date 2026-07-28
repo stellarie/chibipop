@@ -9,12 +9,9 @@
 use crate::config::{Config, TriggerMode};
 use crate::present::{dict_order_rank, DictInfo};
 
-/// Popup height cap, as a percentage of the monitor's height.
-pub const MAX_HEIGHT_RANGE: (u8, u8) = (10, 90);
-/// Collapsed-row summary length, in characters.
-pub const SUMMARY_RANGE: (usize, usize) = (10, 200);
-/// OCR captures per hover. 1 disables forward tiling.
-pub const PASSES_RANGE: (u8, u8) = (1, 5);
+/// The bounds live beside the fields they bound, so `config::load_or_create`
+/// can apply the same ones to a hand-edited file that never reaches Apply.
+pub use crate::config::{MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 
 /// Every user-facing setting, as the window edits it.
 ///

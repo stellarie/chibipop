@@ -20,6 +20,13 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Height cap, % of monitor.
+pub const MAX_HEIGHT_RANGE: (u8, u8) = (10, 90);
+/// Summary length, in chars.
+pub const SUMMARY_RANGE: (usize, usize) = (10, 200);
+/// OCR captures per hover.
+pub const PASSES_RANGE: (u8, u8) = (1, 5);
+
 /// Root of the TOML file. Field names match the `[section]` headers in
 /// spec §4.3 exactly, so `#[derive(Serialize, Deserialize)]` needs no
 /// renaming at this level.
@@ -225,6 +232,31 @@ impl Config {
         Ok(())
     }
 
+    /// Clamps bounded numbers.
+    fn clamp_ranges(&mut self, path: &Path) {
+        self.popup.max_height_percent = clamped(
+            path,
+            "max_height_percent",
+            self.popup.max_height_percent,
+            MAX_HEIGHT_RANGE.0,
+            MAX_HEIGHT_RANGE.1,
+        );
+        self.popup.summary_chars = clamped(
+            path,
+            "summary_chars",
+            self.popup.summary_chars,
+            SUMMARY_RANGE.0,
+            SUMMARY_RANGE.1,
+        );
+        self.ocr.max_ocr_passes = clamped(
+            path,
+            "max_ocr_passes",
+            self.ocr.max_ocr_passes,
+            PASSES_RANGE.0,
+            PASSES_RANGE.1,
+        );
+    }
+
     /// The one place `config.rs` and `present.rs` meet: `present.rs`
     /// deliberately keeps its own small `PresentConfig` instead of
     /// depending on the whole `Config`, so it stays independently
@@ -237,13 +269,34 @@ impl Config {
     }
 }
 
+/// Clamps `value`, naming it if it moved.
+fn clamped<T>(path: &Path, field: &str, value: T, lo: T, hi: T) -> T
+where
+    T: Ord + Copy + std::fmt::Display,
+{
+    let out = value.clamp(lo, hi);
+    if out != value {
+        let p = path.display();
+        eprintln!("chibipop: {p}: {field} {value} is outside {lo}-{hi}, using {out}");
+    }
+    out
+}
+
 /// Loads `path`, creating it with [`Config::default`] if it does not exist
 /// yet. Malformed TOML is returned as an `Err` naming `path` - never
 /// silently swapped for defaults; see the module docs for why.
+///
+/// A value that parses but is out of range is clamped and named on stderr -
+/// the settings window already clamps on Apply, and a hand-edited file
+/// reaches the running app without ever passing through it.
 pub fn load_or_create(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text)
-            .with_context(|| format!("parsing config from {}", path.display())),
+        Ok(text) => {
+            let mut config: Config = toml::from_str(&text)
+                .with_context(|| format!("parsing config from {}", path.display()))?;
+            config.clamp_ranges(path);
+            Ok(config)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let config = Config::default();
             config.save(path)?;
@@ -493,6 +546,41 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-scroll_popup config must still load");
         assert!(c.popup.scroll_popup, "a missing field must take the field default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Apply clamps; loading must too.
+    #[test]
+    fn an_out_of_range_hand_edit_is_clamped_on_load() {
+        let p = tmp("out_of_range");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 0\nsummary_chars = 5000\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[ocr]\nmax_ocr_passes = 99\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("an out-of-range value must load, clamped");
+        assert_eq!(MAX_HEIGHT_RANGE.0, c.popup.max_height_percent);
+        assert_eq!(SUMMARY_RANGE.1, c.popup.summary_chars);
+        assert_eq!(PASSES_RANGE.1, c.ocr.max_ocr_passes);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// In-range values must not move.
+    #[test]
+    fn an_in_range_value_survives_loading_untouched() {
+        let p = tmp("in_range");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.popup.max_height_percent = 70;
+        c.popup.summary_chars = 25;
+        c.ocr.max_ocr_passes = 3;
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(70, back.popup.max_height_percent);
+        assert_eq!(25, back.popup.summary_chars);
+        assert_eq!(3, back.ocr.max_ocr_passes);
         let _ = std::fs::remove_file(&p);
     }
 
