@@ -277,7 +277,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let running = Arc::new(AtomicBool::new(true));
     let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
-    let (startup_tx, startup_rx) = mpsc::channel::<Result<()>>();
+    let (startup_tx, startup_rx) = mpsc::channel::<Result<Vec<DictInfo>>>();
     // Starts `false` regardless of `cfg.popup.exclude_from_capture`: this
     // thread cannot yet know whether the OS actually accepted
     // `WDA_EXCLUDEFROMCAPTURE` (or whether it was even asked to) until
@@ -325,7 +325,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // (Popup::create, Renderer::new, ...), until that has genuinely
     // completed. The ordering is enforced by the handshake itself, not by
     // hoping the worker thread happens to win a race.
-    startup_rx
+    // Spec D7: the worker reads these once at startup and the main thread
+    // needs them for the settings window's dictionary list. Sending them
+    // across the handshake it already performs avoids opening a second
+    // SQLite connection here purely to read two names.
+    let _dicts: Vec<DictInfo> = startup_rx
         .recv()
         .context("worker thread ended before completing startup")??;
 
@@ -672,7 +676,7 @@ fn worker_main(
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
     running: Arc<AtomicBool>,
-    startup_tx: mpsc::Sender<Result<()>>,
+    startup_tx: mpsc::Sender<Result<Vec<DictInfo>>>,
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
@@ -719,7 +723,10 @@ fn worker_main(
     // also no reason to rebuild it per hover.
     let capture_guard = CaptureGuard { main_tid, request_tx: capture_guard_tx };
 
-    if startup_tx.send(Ok(())).is_err() {
+    // `clone` because the worker keeps its own copy for every later
+    // `present::build`. Two dictionary identities are a handful of bytes;
+    // sharing them behind an Arc for that would be ceremony.
+    if startup_tx.send(Ok(dicts.clone())).is_err() {
         return; // main thread gave up waiting; nothing left to do.
     }
 
