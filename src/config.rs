@@ -227,8 +227,12 @@ impl Config {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        std::fs::write(path, text)
-            .with_context(|| format!("writing config to {}", path.display()))?;
+        // Apply rewrites the whole file, so a torn write loses every setting.
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text)
+            .with_context(|| format!("writing config to {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("replacing {}", path.display()))?;
         Ok(())
     }
 
@@ -433,7 +437,7 @@ mod tests {
     /// container-level `#[serde(default)]` on `Config::ocr` that the test
     /// above (whole section missing) exercises instead.
     #[test]
-    fn an_empty_ocr_section_still_defaults_max_ocr_passes_to_three() {
+    fn an_empty_ocr_section_still_defaults_max_ocr_passes_to_one() {
         let p = tmp("empty_ocr_section");
         std::fs::write(&p, concat!(
             "[trigger]\nmode = \"live\"\n\n",
