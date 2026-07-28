@@ -231,6 +231,24 @@ icon (the tray is created last in `run`, so its presence means startup finished)
 what makes restart-everything the right design rather than a compromise — a mixed hot-apply /
 restart split would be more code and more failure modes for no gain the user can perceive.
 
+### D8a — say that Apply restarts, before it is pressed
+
+The user must know a restart is coming. **Not via a message box**: `MessageBoxW` is modal and runs
+its own pump, which is the §7 hazard — it would stop `WM_TIMER` and latch the wheel arm, for a
+notice nobody needs to acknowledge.
+
+And not as a transient "Restarting…" either. At 0.18 s it would be gone before it could be read, so
+it would inform nobody while looking like diligence.
+
+So the notice is **permanent and pre-emptive**:
+
+- the button reads **`Apply & Restart`**, not `Apply`;
+- a static line sits beside the buttons: *"Applying saves your settings and restarts chibipop."*
+
+Telling the user before they commit is the useful moment; telling them during a 0.18 s window is
+theatre. This also keeps the whole round free of any modal pump, which is worth more than the
+message box would have been.
+
 **Apply does not need to close the window** — step 4 ends the process, which takes it with it. The
 window is not hidden first: leaving it on screen until the process actually exits is the honest
 signal that something is happening, and at 0.18 s the replacement's tray icon is back before a
