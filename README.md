@@ -53,7 +53,7 @@ chibipop run
 ```
 
 Starts the popup. Hover Japanese text; the definition appears beside it.
-Right-click the tray icon for **Live** / **Hold Shift** mode and **Quit**.
+Right-click the tray icon for **Settings…** and **Quit**.
 
 Three diagnostic subcommands, useful when something isn't working:
 
@@ -71,8 +71,22 @@ defaults to `chibipop.toml` **beside the executable**, so a shortcut-launched
 
 ## Configuration
 
-Hand-edited TOML, written with defaults on first run. There is no settings
-GUI. Malformed TOML is a hard error naming the file, never a silent fallback.
+**Right-click the tray icon for `Settings…` and `Quit`.** The settings window
+covers every option below — trigger mode, theme, font, the popup's size caps,
+the three popup toggles, the dictionary order, and a Debug group for OCR passes
+and the scan overlay. **Apply saves and restarts chibipop**, which takes about
+0.18 s; the button says so, and so does the line beside it.
+
+The window offers no free-text fields anywhere: every value is a choice from a
+list, so nothing you can select will fail to load later. Two deliberate
+consequences — a font that is configured but not installed is still offered and
+selected, and a hand-edited number that is off the list's step is offered as-is
+rather than snapped. Opening Settings and pressing Apply without touching
+anything never changes a setting.
+
+The TOML below remains the reference, and is still hand-editable — it is simply
+no longer the only way in. Malformed TOML is a hard error naming the file,
+never a silent fallback.
 
 ```toml
 [trigger]
@@ -116,9 +130,9 @@ worse than a short reading of the right one. Over nine hovers on one line,
 single-pass got the character right 9 times out of 9; three passes managed 4.
 Set it to `2` or more to turn tiling back on.
 
-The setting is read **once at startup** — edit the file with chibipop stopped,
-since switching mode from the tray rewrites the whole file from memory and
-would overwrite an edit made while it was running.
+Every setting is read **once at startup**. Edit the TOML with chibipop stopped,
+or use the settings window — pressing Apply there rewrites the whole file from
+memory, so it would overwrite a hand-edit made while it was running.
 
 **`highlight_match`** draws **one** faint box around the characters the popup
 is currently defining, and is **on by default**. Hover 可哀想 and the box
@@ -138,10 +152,16 @@ itself count as one region, and while the cursor is anywhere in it chibipop
 does no new lookup at all. Move fully off and hovering resumes. A word whose
 answer has not changed is not redrawn either, so holding still does not flicker.
 
-One deliberate exception: moving *sideways* onto the next character shows that
-character, rather than holding the previous popup. That is the same behaviour
-you want when scanning along a line, and it is why the sticky area is the word
-plus the popup rather than the box enclosing both.
+The held region is the characters the entry actually *matched*, not just the one
+glyph under the cursor, so scanning along a conjugated verb shows one popup
+rather than one per character. It also allows the few pixels of vertical slack
+that resolve the same character anyway, which is what stopped small kana from
+flickering.
+
+One deliberate exception: moving *sideways* past the end of the matched word
+shows the next word, rather than holding the previous popup. That is what you
+want when scanning a line, and it is why the held area is the word plus the
+popup rather than the box enclosing both.
 
 **`scroll_popup`** lets the wheel scroll a popup whose content overflows the
 `max_height_percent` cap, and is **on by default**. A thin scrollbar appears at
@@ -153,6 +173,14 @@ on the word rather than the popup, or content that fits, and the wheel behaves
 normally. Setting `scroll_popup = false` stops chibipop touching the wheel at
 all while still drawing the scrollbar, so you can see there is more even though
 you cannot reach it.
+
+**Dictionary order is matched by *name*, and the settings window says so.** The
+TOML stores case-insensitive substrings rather than full names, because a
+rebuilt Jitendex changes its own name (the release date is part of it). The
+window preserves whatever substring you already have, so reordering never
+rewrites your entries — and if one of them stops matching any installed
+dictionary, it tells you which, because the visible symptom otherwise is that
+dictionary quietly sorting last.
 
 **`show_scan_region`** is the separate *debug* view: a faint outline around
 every region a hover captured — pass 1's box, each forward tile, and the word
@@ -168,7 +196,7 @@ without running the app.
 cargo test
 ```
 
-216 tests. Plus the dictionary builder, from `tools/build-dict`:
+237 tests. Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
