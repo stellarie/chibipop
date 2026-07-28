@@ -78,6 +78,7 @@ struct PaintState {
     pass1: (u8, u8, u8),
     tile: (u8, u8, u8),
     anchor: (u8, u8, u8),
+    matched: (u8, u8, u8),
 }
 
 thread_local! {
@@ -92,6 +93,7 @@ fn set_paint_state(hwnd: HWND, rects: Vec<ScanRect>, theme: &Theme) {
             pass1: theme.scan_pass1,
             tile: theme.scan_tile,
             anchor: theme.scan_anchor,
+            matched: theme.scan_match,
         });
     });
 }
@@ -153,6 +155,7 @@ unsafe fn paint_overlay(hwnd: HWND) {
                     ScanKind::Pass1 => state.pass1,
                     ScanKind::Tile => state.tile,
                     ScanKind::Anchor => state.anchor,
+                    ScanKind::Match => state.matched,
                 };
                 // SAFETY: `hdc` was validated non-invalid above; each
                 // `strip` is plain stack data borrowed only for this call;

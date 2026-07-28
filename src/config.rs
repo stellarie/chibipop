@@ -85,6 +85,24 @@ pub struct PopupConfig {
     /// `Config::present_config` needs no cast.
     pub summary_chars: usize,
     pub font: String,
+    /// Draw a faint box around the characters the popup is defining.
+    ///
+    /// On by default: it is the visible answer to "is it defining the word I
+    /// am pointing at?". Turning it off also removes the overlay window
+    /// entirely when `[debug] show_scan_region` is off.
+    ///
+    /// The field-level default is deliberate and load-bearing. A bare
+    /// `#[serde(default)]` yields `bool`'s default - **`false`** - so every
+    /// config file written before this field existed would load with the
+    /// highlight silently off, and it would only work on a fresh install.
+    /// `PopupConfig` has no `Default` derive to fall back on.
+    #[serde(default = "default_highlight_match")]
+    pub highlight_match: bool,
+}
+
+/// On. See [`PopupConfig::highlight_match`].
+fn default_highlight_match() -> bool {
+    true
 }
 
 /// `[dictionaries]`.
@@ -163,6 +181,7 @@ impl Default for Config {
                 max_height_percent: 45,
                 summary_chars: 40,
                 font: "Yu Gothic UI".to_string(),
+                highlight_match: default_highlight_match(),
             },
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
@@ -386,6 +405,42 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-[debug] config must still load");
         assert!(!c.debug.show_scan_region);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn the_match_highlight_defaults_on() {
+        assert!(Config::default().popup.highlight_match,
+                "the highlight is the everyday answer to 'is this the word I am pointing at?'");
+    }
+
+    #[test]
+    fn a_disabled_highlight_round_trips() {
+        let p = tmp("highlight_off");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.popup.highlight_match = false;
+        c.save(&p).unwrap();
+        assert!(!load_or_create(&p).unwrap().popup.highlight_match);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The bare-`serde(default)` trap, as its own regression: a `[popup]`
+    /// section written before this field existed must load with the highlight
+    /// **on**. A bare default would yield `false` here and the feature would
+    /// work only on fresh installs - which is exactly how it would escape
+    /// notice.
+    #[test]
+    fn a_config_written_before_the_highlight_existed_loads_with_it_on() {
+        let p = tmp("no_highlight_field");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-highlight config must still load");
+        assert!(c.popup.highlight_match, "a missing field must take the field default, not bool's");
         let _ = std::fs::remove_file(&p);
     }
 

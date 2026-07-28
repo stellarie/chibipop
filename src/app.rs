@@ -40,15 +40,16 @@
 //! decision 5 names.
 
 use crate::config::Config;
-use crate::geom::{place_popup, PhysPoint, PhysRect, ScanRect};
+use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
-use crate::present::{self, DictInfo, Presentation, PresentConfig};
+use crate::present::{self, Card, DictInfo, Presentation, PresentConfig};
 use crate::text::ocr::OcrTextSource;
+use crate::text::{layout, TextSpan};
 use crate::ui::overlay::Overlay;
 use crate::ui::render::Renderer;
 use crate::ui::theme::Theme;
@@ -256,7 +257,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();
     let max_ocr_passes = cfg.ocr.max_ocr_passes;
-    let collect_scan = cfg.debug.show_scan_region;
+    let scan_display = ScanDisplay::new(cfg.debug.show_scan_region, cfg.popup.highlight_match);
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
@@ -266,7 +267,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             rules_path,
             present_cfg,
             max_ocr_passes,
-            collect_scan,
+            scan_display,
             main_tid,
             trigger_rx,
             result_tx,
@@ -320,7 +321,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     }
 
     // Never fatal - spec §5.
-    let overlay = if cfg.debug.show_scan_region {
+    let overlay = if scan_display.any() {
         match Overlay::create(cfg.popup.exclude_from_capture) {
             Ok(o) => Some(o),
             Err(e) => {
@@ -564,7 +565,7 @@ fn worker_main(
     rules_path: PathBuf,
     present_cfg: PresentConfig,
     max_ocr_passes: u8,
-    collect_scan: bool,
+    scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -668,7 +669,7 @@ fn worker_main(
                 &present_cfg,
                 trigger.cursor,
                 guard,
-                collect_scan,
+                scan_display,
             )
         }))
         .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
@@ -694,8 +695,12 @@ fn worker_main(
 /// hidden window than the minimum that correctness requires, traded
 /// deliberately for not touching M2 at all; see the task report.
 ///
-/// `collect_scan` is `cfg.debug.show_scan_region`, threaded down from `run`
-/// through `worker_main` - see `WorkerOutcome::Ready`'s own `scan` field.
+/// `scan_display` decides what the overlay is handed: its `captures` half is
+/// the old `cfg.debug.show_scan_region` and is the only thing the OCR layer
+/// ever collects, while its `highlight` half is computed here from the top
+/// card. That split is what keeps the default path to **one** rectangle
+/// instead of four - the capture kinds are never collected rather than
+/// collected and filtered (spec D2).
 #[allow(clippy::too_many_arguments)]
 fn resolve_trigger(
     ocr: &OcrTextSource,
@@ -705,18 +710,18 @@ fn resolve_trigger(
     present_cfg: &PresentConfig,
     cursor: PhysPoint,
     capture_guard: Option<&CaptureGuard>,
-    collect_scan: bool,
+    scan_display: ScanDisplay,
 ) -> WorkerOutcome {
     let raw = match capture_guard {
         Some(guard) => {
             guard.hide_for_capture();
-            let r = ocr.resolve_at_tiled_scanned(cursor, collect_scan);
+            let r = ocr.resolve_at_tiled_scanned(cursor, scan_display.captures);
             guard.restore_after_capture();
             r
         }
-        None => ocr.resolve_at_tiled_scanned(cursor, collect_scan),
+        None => ocr.resolve_at_tiled_scanned(cursor, scan_display.captures),
     };
-    let (resolved, scan) = match raw {
+    let (resolved, mut scan) = match raw {
         Ok((Some(r), scan)) => (r, scan),
         Ok((None, _)) => return WorkerOutcome::Hide,
         Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
@@ -732,7 +737,38 @@ fn resolve_trigger(
     }
 
     let presentation = present::build(&hits, dicts, present_cfg);
+    if scan_display.highlight {
+        if let Some(rect) = match_highlight(&resolved.span, presentation.top.as_ref()) {
+            scan.push(ScanRect { rect, kind: ScanKind::Match });
+        }
+    }
     WorkerOutcome::Ready { presentation, anchor: resolved.span.anchor, scan }
+}
+
+/// Padding between the matched glyphs' ink and the highlight outline, in
+/// physical pixels (spec D6).
+const HIGHLIGHT_PAD: i32 = 3;
+
+/// The box around the characters the popup is defining, in virtual-desktop
+/// coordinates.
+///
+/// **The index origin is the hovered character, not the string's start.**
+/// Lookup runs on `span.text[cursor_byte_offset..]` and `match_len` counts
+/// characters of *that slice*; on the shipped single-pass path `resolve`
+/// builds text for the whole line and the offset is not zero, so treating
+/// `match_len` as an index from the beginning would box the start of the line
+/// (spec D3). `clean_input` also trims before matching, so the run starts at
+/// the first non-whitespace character at or after the cursor.
+///
+/// `None` whenever the highlight cannot be placed honestly: no top card, a
+/// zero-length match, or a span carrying no geometry (the tiled path). An
+/// absent box is the designed failure; a misplaced one is not.
+fn match_highlight(span: &TextSpan, top: Option<&Card>) -> Option<PhysRect> {
+    let top = top?;
+    let after_cursor = span.text.get(span.cursor_byte_offset..)?;
+    let skipped = after_cursor.len() - after_cursor.trim_start().len();
+    let from = span.text[..span.cursor_byte_offset + skipped].chars().count();
+    layout::union_chars(&span.geom, from, top.match_len, HIGHLIGHT_PAD)
 }
 
 /// Applies one `WorkerOutcome` to the popup and - when the debug toggle
@@ -856,6 +892,7 @@ mod tests {
             max_height_percent: 45,
             summary_chars: 40,
             font: font.to_string(),
+            highlight_match: true,
         }
     }
 
@@ -871,5 +908,74 @@ mod tests {
     fn theme_selection_by_name_is_unaffected_by_the_font_field() {
         assert_eq!(Theme::light().background, theme_from_config(&popup_config("light", "X")).background);
         assert_eq!(Theme::dark().background, theme_from_config(&popup_config("anything-else", "X")).background);
+    }
+
+    fn card(match_len: usize) -> Card {
+        Card {
+            written: None,
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len,
+        }
+    }
+
+    /// One 30px box per character of `text`, laid left to right from x=100.
+    fn span_of(text: &str, cursor_byte_offset: usize) -> TextSpan {
+        let geom = (0..text.chars().count())
+            .map(|i| crate::text::layout::TextGeom {
+                char_count: 1,
+                rect: PhysRect { x: 100 + 30 * i as i32, y: 200, w: 30, h: 40 },
+            })
+            .collect();
+        TextSpan {
+            text: text.to_string(),
+            cursor_byte_offset,
+            anchor: PhysRect { x: 100, y: 200, w: 30, h: 40 },
+            geom,
+        }
+    }
+
+    /// D3, the shipped default. `resolve` builds the whole line, so the
+    /// offset is non-zero and the highlight must start from the hovered
+    /// character. Boxing from index 0 would frame `その` instead.
+    #[test]
+    fn the_highlight_starts_at_the_hovered_character_not_the_line_start() {
+        let span = span_of("その可哀想", "その".len());
+        let r = match_highlight(&span, Some(&card(3))).unwrap();
+        assert_eq!(PhysRect { x: 157, y: 197, w: 96, h: 46 }, r,
+                   "three 30px boxes from x=160, padded 3px");
+    }
+
+    /// `clean_input` trims before matching, so index 0 of the matched run is
+    /// the first non-whitespace character at or after the cursor.
+    #[test]
+    fn leading_whitespace_at_the_cursor_is_skipped_by_the_highlight() {
+        let span = span_of("あ 猫", "あ".len());
+        let r = match_highlight(&span, Some(&card(1))).unwrap();
+        assert_eq!(160, r.x + HIGHLIGHT_PAD, "the box must start at 猫, not at the space");
+    }
+
+    /// The tiled path stitches from several captures and carries no geometry.
+    #[test]
+    fn a_span_without_geometry_draws_no_highlight() {
+        let mut span = span_of("可哀想", 0);
+        span.geom.clear();
+        assert_eq!(None, match_highlight(&span, Some(&card(3))));
+    }
+
+    #[test]
+    fn no_top_card_draws_no_highlight() {
+        assert_eq!(None, match_highlight(&span_of("可哀想", 0), None));
+    }
+
+    /// `match_len` running past the geometry must clamp to what exists, never
+    /// index past it (spec section 7).
+    #[test]
+    fn a_match_longer_than_the_known_geometry_boxes_what_is_known() {
+        let span = span_of("猫", 0);
+        let r = match_highlight(&span, Some(&card(9))).unwrap();
+        assert_eq!(PhysRect { x: 97, y: 197, w: 36, h: 46 }, r);
     }
 }

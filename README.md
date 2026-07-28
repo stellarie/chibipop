@@ -84,6 +84,7 @@ exclude_from_capture = false
 max_height_percent = 45 # cap, as a percentage of the monitor's height
 summary_chars = 40      # collapsed-row summary length
 font = "Yu Gothic UI"
+highlight_match = true  # box the characters the popup is defining
 
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
@@ -118,11 +119,25 @@ The setting is read **once at startup** — edit the file with chibipop stopped,
 since switching mode from the tray rewrites the whole file from memory and
 would overwrite an edit made while it was running.
 
-**`show_scan_region`** draws a faint outline around every region a hover
-captured — pass 1's box, each forward tile, and the word it resolved. It is a
-debugging aid: turn it on when OCR is behaving oddly and you want to see what
-it actually looked at rather than infer it. `probe --show-region` shows the
-same outlines for a single coordinate without running the app.
+**`highlight_match`** draws **one** faint box around the characters the popup
+is currently defining, and is **on by default**. Hover 可哀想 and the box
+surrounds 可哀想 — the visible answer to "is it defining the word I am pointing
+at?", which otherwise means reading numbers out of `probe`. It follows the
+*match*, so a deconjugated verb is boxed across everything it consumed
+(食べさせられた, not just 食べ).
+
+It does not draw on a hover where the match cannot be located honestly: no
+dictionary hit, or `max_ocr_passes ≥ 2`, where text is stitched from several
+captures that do not carry their character boxes with them. An absent box is
+the designed behaviour there; a misplaced one would not be.
+
+**`show_scan_region`** is the separate *debug* view: a faint outline around
+every region a hover captured — pass 1's box, each forward tile, and the word
+it resolved. Turn it on when OCR is behaving oddly and you want to see what it
+actually looked at rather than infer it. It is **off by default**, and the two
+settings are independent: with only `highlight_match` on you get one box, not
+four. `probe --show-region` shows the capture outlines for a single coordinate
+without running the app.
 
 ## Tests
 

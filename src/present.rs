@@ -33,6 +33,13 @@ pub struct Card {
     pub freq: Option<i64>,
     /// One block per dictionary, already in display order.
     pub blocks: Vec<GlossBlock>,
+    /// Characters of the hovered text this card's best hit consumed - what
+    /// the overlay highlights.
+    ///
+    /// Counted in **characters** of the *cleaned* lookup input, not bytes and
+    /// not of `written`: a deconjugated match consumes more input than its
+    /// dictionary form is long (`食べさせられた` → 食べる).
+    pub match_len: usize,
 }
 
 /// One dictionary's contribution to a `Card`, with every sense's glosses
@@ -126,6 +133,7 @@ fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Car
         pos: best.entry.senses.first().map(|s| s.pos.clone()).unwrap_or_default(),
         freq: best.freq,
         blocks: ordered_blocks(&group.hits, dicts, cfg),
+        match_len: best.match_len,
     }
 }
 
@@ -319,5 +327,18 @@ mod tests {
         let hits = vec![hit("猫", "ねこ", 99, "cat")];
         let p = build(&hits, &dicts(), &cfg());
         assert_eq!(1, p.top.as_ref().unwrap().blocks.len());
+    }
+
+    /// The overlay highlights the characters the card consumed, so the value
+    /// must come from the group's own best hit and survive merging - a card
+    /// built from two dictionaries still describes one match.
+    #[test]
+    fn the_card_carries_its_best_hits_match_len() {
+        let mut long = hit("可哀想", "かわいそう", 1, "pitiable");
+        long.match_len = 3;
+        let mut short = hit("可哀想", "かわいそう", 2, "気の毒なさま。");
+        short.match_len = 3;
+        let p = build(&[long, short], &dicts(), &cfg());
+        assert_eq!(3, p.top.as_ref().unwrap().match_len);
     }
 }
