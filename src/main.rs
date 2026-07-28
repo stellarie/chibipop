@@ -24,10 +24,10 @@ enum Command {
     /// Look up Japanese text and print ranked results.
     Lookup {
         text: String,
-        #[arg(long, default_value = "data/chibipop.sqlite")]
-        dict: PathBuf,
-        #[arg(long, default_value = "data/deconjugator.json")]
-        rules: PathBuf,
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        #[arg(long)]
+        rules: Option<PathBuf>,
     },
     /// Resolve and look up the text at one screen point, showing every stage.
     Probe {
@@ -46,10 +46,10 @@ enum Command {
         /// definition.
         #[arg(long, default_value_t = 1)]
         tiles: u8,
-        #[arg(long, default_value = "data/chibipop.sqlite")]
-        dict: PathBuf,
-        #[arg(long, default_value = "data/deconjugator.json")]
-        rules: PathBuf,
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        #[arg(long)]
+        rules: Option<PathBuf>,
         /// Draw the captured regions, and the match box, for this many
         /// seconds after probing. Bare `--show-region` shows them for 3s.
         /// Omitted, nothing is drawn. Note probe always draws both, being
@@ -64,17 +64,17 @@ enum Command {
     /// The way in when the tray icon will not open its menu. Applying saves
     /// `chibipop.toml`; restart chibipop for it to take effect.
     Settings {
-        #[arg(long, default_value = "data/chibipop.sqlite")]
-        dict: PathBuf,
+        #[arg(long)]
+        dict: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
     },
     /// Follow the cursor and print a lookup whenever the hovered word changes.
     Watch {
-        #[arg(long, default_value = "data/chibipop.sqlite")]
-        dict: PathBuf,
-        #[arg(long, default_value = "data/deconjugator.json")]
-        rules: PathBuf,
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        #[arg(long)]
+        rules: Option<PathBuf>,
         /// Total OCR passes, as [ocr] max_ocr_passes would set. The memory
         /// figures in docs/REGRESSION.md were taken at 3.
         #[arg(long, default_value_t = 1)]
@@ -84,10 +84,10 @@ enum Command {
     /// see its definition beside it. Right-click the tray icon to change
     /// mode or quit.
     Run {
-        #[arg(long, default_value = "data/chibipop.sqlite")]
-        dict: PathBuf,
-        #[arg(long, default_value = "data/deconjugator.json")]
-        rules: PathBuf,
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        #[arg(long)]
+        rules: Option<PathBuf>,
         /// Defaults to chibipop.toml beside the running executable (spec
         /// section 4.3), not this crate's data/-relative CWD convention -
         /// so a shortcut-launched chibipop.exe still finds its settings.
@@ -100,6 +100,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Lookup { text, dict, rules } => {
+            let dict = dict_path(dict);
+            let rules = rules_path(rules);
             let dictionary = SqliteDictionary::open(&dict).with_context(|| {
                 format!("opening {} - build it with tools/build-dict/build.py",
                         dict.display())
@@ -116,6 +118,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Probe { at, region, tiles, dict, rules, show_region } => {
+            let dict = dict_path(dict);
+            let rules = rules_path(rules);
             let (xs, ys) = at
                 .split_once(',')
                 .context("--at must be X,Y (e.g. --at 1200,400)")?;
@@ -253,6 +257,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Watch { dict, rules, tiles } => {
+            let dict = dict_path(dict);
+            let rules = rules_path(rules);
             let source = chibipop::text::ocr::OcrTextSource::new(tiles)?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
@@ -308,6 +314,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Settings { dict, config } => {
+            let dict = dict_path(dict);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
@@ -321,6 +328,8 @@ fn main() -> Result<()> {
             chibipop::app::settings_only(cfg, &dicts, &config_path)
         }
         Command::Run { dict, rules, config } => {
+            let dict = dict_path(dict);
+            let rules = rules_path(rules);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
@@ -329,14 +338,21 @@ fn main() -> Result<()> {
     }
 }
 
+/// `--dict`, or the default beside the exe.
+fn dict_path(given: Option<PathBuf>) -> PathBuf {
+    given.unwrap_or_else(|| chibipop::paths::beside_exe("data/chibipop.sqlite"))
+}
+
+/// `--rules`, or the default beside the exe.
+fn rules_path(given: Option<PathBuf>) -> PathBuf {
+    given.unwrap_or_else(|| chibipop::paths::beside_exe("data/deconjugator.json"))
+}
+
 /// `chibipop.toml` beside the running executable (spec section 4.3). Falls
 /// back to the current directory if the executable's own path can't be
 /// determined, which should not happen in practice.
 fn default_config_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|dir| dir.join("chibipop.toml")))
-        .unwrap_or_else(|| PathBuf::from("chibipop.toml"))
+    chibipop::paths::beside_exe("chibipop.toml")
 }
 
 /// Pump this thread's messages for `dur`, so a window created by a one-shot

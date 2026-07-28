@@ -8,6 +8,7 @@ pub mod config;
 pub mod geom;
 pub mod input;
 pub mod lookup;
+pub mod paths;
 pub mod present;
 pub mod settings;
 pub mod text;
