@@ -269,6 +269,51 @@ impl CaptureGuard {
 /// (M3 task 4). It tracks the popup through both `handle_worker_outcome`'s
 /// ordinary show/hide and `drain_capture_guard`'s capture-time hide/reshow.
 ///
+/// Open the settings window alone - no tray, no hooks, no OCR, no dictionary
+/// lookups.
+///
+/// This exists because the tray is otherwise the *only* way into settings, so
+/// a tray that will not open its menu locks them away completely. Applying
+/// here saves the file and says so: it deliberately does not try to restart a
+/// `run` instance it is not part of, because a half-applied round trip - new
+/// file on disk, old settings still running - is the one outcome `run`'s own
+/// Apply refuses outright, and guessing at another process is worse.
+pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Result<()> {
+    let form = settings::from_config(&cfg, dicts);
+    let stale = settings::stale_order_entries(&cfg, dicts);
+    let window =
+        SettingsWindow::open(&form, &stale, false).context("opening the settings window")?;
+
+    let mut msg = MSG::default();
+    // SAFETY: `msg` is this loop's own stack storage, and `window` is alive
+    // for the whole loop - it is dropped only after this function returns.
+    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        // Same order as `run`'s loop: the dialog manager gets first refusal
+        // so Tab, arrows and Esc reach the controls rather than the app.
+        if !unsafe { IsDialogMessageW(window.hwnd(), &msg) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        match window.take_outcome() {
+            Some(SettingsOutcome::Cancel) => return Ok(()),
+            Some(SettingsOutcome::Apply) => {
+                let updated = settings::apply_to(&window.read(&form), &cfg);
+                updated.save(config_path).with_context(|| {
+                    format!("saving settings to {}", config_path.display())
+                })?;
+                println!("chibipop: settings saved to {}.", config_path.display());
+                println!("chibipop: restart chibipop for them to take effect.");
+                return Ok(());
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
 /// `config_path` is where `cfg` was loaded from (`main.rs`'s
 /// `default_config_path()` or `--config`) - needed here, not just at load
 /// time, because a tray mode change must persist back to the same file or
@@ -633,7 +678,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     } else {
                         let form = settings::from_config(&cfg, &dicts);
                         let stale = settings::stale_order_entries(&cfg, &dicts);
-                        match SettingsWindow::open(&form, &stale) {
+                        match SettingsWindow::open(&form, &stale, true) {
                             // Never fatal - the same rule the overlay
                             // follows. Settings is not worth killing the
                             // app for.

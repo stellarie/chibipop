@@ -52,6 +52,16 @@ enum Command {
         #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "3")]
         show_region: Option<u64>,
     },
+    /// Open the settings window on its own, without starting the popup.
+    ///
+    /// The way in when the tray icon will not open its menu. Applying saves
+    /// `chibipop.toml`; restart chibipop for it to take effect.
+    Settings {
+        #[arg(long, default_value = "data/chibipop.sqlite")]
+        dict: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Follow the cursor and print a lookup whenever the hovered word changes.
     Watch {
         #[arg(long, default_value = "data/chibipop.sqlite")]
@@ -285,6 +295,19 @@ fn main() -> Result<()> {
                 }
                 println!();
             }
+        }
+        Command::Settings { dict, config } => {
+            let config_path = config.unwrap_or_else(default_config_path);
+            let cfg = chibipop::config::load_or_create(&config_path)
+                .with_context(|| format!("loading config from {}", config_path.display()))?;
+            // Opened only for the dictionary identities the reorder list
+            // shows - no engine, no rules, no OCR.
+            let dictionary = SqliteDictionary::open(&dict).with_context(|| {
+                format!("opening {} - build it with tools/build-dict/build.py",
+                        dict.display())
+            })?;
+            let dicts = dictionary.dicts().context("reading dictionary identities")?;
+            chibipop::app::settings_only(cfg, &dicts, &config_path)
         }
         Command::Run { dict, rules, config } => {
             let config_path = config.unwrap_or_else(default_config_path);

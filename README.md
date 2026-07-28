@@ -53,7 +53,8 @@ chibipop run
 ```
 
 Starts the popup. Hover Japanese text; the definition appears beside it.
-Right-click the tray icon for **Settings…** and **Quit**.
+Right-click the tray icon for **Settings…** and **Quit**. If the tray menu does
+not open, `chibipop settings` reaches the same window directly.
 
 Three diagnostic subcommands, useful when something isn't working:
 
@@ -61,6 +62,7 @@ Three diagnostic subcommands, useful when something isn't working:
 |---|---|
 | `chibipop lookup 食べた` | Dictionary lookup only. No screen, no OCR. |
 | `chibipop probe --at 1200,400` | One point, every stage printed: capture region → OCR lines and word boxes → resolved span → hits. Tells apart "OCR saw nothing" from "OCR saw text but nothing near the cursor". |
+| `chibipop settings` | Opens the settings window on its own, no popup and no tray. The way in when the tray icon will not open its menu. Applying saves `chibipop.toml`; restart chibipop to use it. |
 | `chibipop watch` | Follows the cursor and prints a lookup whenever the hovered word changes. Ctrl-C to stop. |
 
 **Paths.** `--dict` and `--rules` default to `data/chibipop.sqlite` and
