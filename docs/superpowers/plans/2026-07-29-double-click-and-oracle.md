@@ -346,10 +346,7 @@ Expected: FAIL — `cannot find function 'beside_exe'`.
 Add above the test module in `src/paths.rs`:
 
 ```rust
-/// `relative`, resolved beside the running executable.
-///
-/// Falls back to the working directory when the executable's own path cannot
-/// be determined, which should not happen in practice.
+/// Resolved beside the exe.
 pub fn beside_exe(relative: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -495,20 +492,14 @@ keeping one feature per line.
 At the very top of `src/main.rs`, **above** the existing `#![warn(...)]` lines:
 
 ```rust
-// No console on double-click; see attach_parent_console.
+// No console on double-click.
 #![windows_subsystem = "windows"]
 ```
 
 Then add this function to `src/main.rs`:
 
 ```rust
-/// Reattaches to a launching terminal's console, if there is one.
-///
-/// The windows subsystem gives the process no console at all, which is what
-/// makes a double-click clean. A run from a terminal still needs its output,
-/// and ATTACH_PARENT_PROCESS is how a subsystem-windows binary gets it back.
-/// Failure is the ordinary case - a double-clicked process has no parent
-/// console - so the result is discarded.
+/// Reattach a parent console.
 fn attach_parent_console() {
     use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     // SAFETY: FFI call with no preconditions. It fails harmlessly when the
@@ -597,7 +588,7 @@ struct Cli {
 In `main`, replace `match cli.command {` with:
 
 ```rust
-    // A double-click passes no arguments and means "start hovering".
+    // A double-click passes none.
     let command = cli.command.unwrap_or(Command::Run {
         dict: None,
         rules: None,
@@ -640,8 +631,7 @@ nobody can read. First run is exactly when there is no dictionary.
 In `src/app.rs`, at the top of `run`, before the worker thread is spawned:
 
 ```rust
-    // First run has no dictionary. Under the windows subsystem a hard failure
-    // here is an error message nobody can see.
+    // No dictionary on first run.
     if !dict_path.exists() {
         return settings_only(cfg, &[], config_path);
     }
@@ -701,7 +691,7 @@ answers *"why isn't it reading this?"* without a command line.
 Create `src/ui/console.rs`:
 
 ```rust
-//! An optional console window carrying the live lookup log.
+//! The live lookup log console.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::BOOL;
@@ -712,17 +702,13 @@ use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
 
 static ALLOCATED: AtomicBool = AtomicBool::new(false);
 
-/// Closing an allocated console kills the process by default.
-///
-/// Windows delivers CTRL_CLOSE_EVENT when the user closes the console window,
-/// and the default handler terminates. Returning TRUE claims the event, so the
-/// window hides and chibipop keeps running.
+/// Close must hide, not exit.
 unsafe extern "system" fn ctrl_handler(_event: u32) -> BOOL {
     hide();
     BOOL(1)
 }
 
-/// Shows the log console, allocating it once.
+/// Shows it, allocating once.
 pub fn show() {
     // SAFETY: all four calls are console FFI with no preconditions beyond
     // being called from a process that may allocate a console, which any
@@ -742,7 +728,7 @@ pub fn show() {
     }
 }
 
-/// Hides it without freeing it.
+/// Hides without freeing.
 pub fn hide() {
     // SAFETY: GetConsoleWindow returns null when no console exists, which the
     // invalid check covers.
@@ -754,7 +740,7 @@ pub fn hide() {
     }
 }
 
-/// Releases the console at shutdown.
+/// Frees it at shutdown.
 pub fn release() {
     // SAFETY: harmless when no console was ever allocated.
     unsafe {
@@ -774,7 +760,7 @@ In `src/ui/mod.rs`, add `pub mod console;` keeping the list alphabetical.
 In `src/config.rs`, add to `DebugConfig`:
 
 ```rust
-    /// Show a console carrying each resolved hover.
+    /// A console of each hover.
     #[serde(default)]
     pub show_lookup_log: bool,
 ```
@@ -839,7 +825,7 @@ tick while the cursor holds still on one word — which is the case the
             if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
                 return; // Already on screen, unchanged.
             }
-            // Only changed popups; see same_content.
+            // Only changed popups.
             if let Some(card) = &presentation.top {
                 let head = card.written.clone()
                     .or_else(|| card.reading.clone())
