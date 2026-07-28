@@ -14,10 +14,11 @@ you're reading.
 ## What you'll need
 
 - **Windows 10 or 11**, with Japanese language support added.
-- **About ten minutes**, once. chibipop isn't a download-and-run installer
-  yet — you build it yourself, following the three steps below.
+- **Python 3.9 or newer** — used once, to build your dictionary.
 - **Your own dictionary files.** chibipop doesn't include any. See
   [Dictionaries](#dictionaries).
+
+Setup takes about five minutes, and you only do it once.
 
 **Check your Japanese support first.** Paste this into PowerShell:
 
@@ -33,44 +34,52 @@ check again.
 
 ## Setting it up
 
-### 1. Install two tools
+### 1. Download chibipop
 
-- **Rust** — from [rustup.rs](https://rustup.rs). Accept the default option
-  when it asks.
-- **Python** 3.9 or newer — from [python.org](https://www.python.org/downloads/).
-  Tick *"Add Python to PATH"* during install.
+Get the latest **`chibipop-vX.Y.Z-windows-x64.zip`** from the
+[Releases page](../../releases), and unzip it anywhere you like — your
+Documents folder is fine.
 
-### 2. Build chibipop
+There's no installer. Everything chibipop needs lives in that one folder, and
+it doesn't write anything outside it.
 
-In this folder, run:
+### 2. Install Python
 
-```bash
-cargo build --release
-```
+From [python.org](https://www.python.org/downloads/). Tick
+**"Add Python to PATH"** during the install.
 
-This produces `target\release\chibipop.exe`.
+You need it for the next step only — chibipop itself doesn't use Python.
 
 ### 3. Build your dictionary
 
-Put your Yomitan dictionary `.zip` files together in one folder, then point
-chibipop's builder at it:
+Put your Yomitan dictionary `.zip` files together in one folder. Then open a
+terminal **in the chibipop folder** and run:
 
 ```bash
-python tools/build-dict/build.py --dicts-dir "C:\Users\You\Documents\dicts" --out data/chibipop.sqlite
+python tools\build-dict\build.py --dicts-dir "C:\Users\You\Documents\dicts" --out data\chibipop.sqlite
 ```
 
-It takes about 70 seconds. You only need to do this again when you add or
-update a dictionary.
+It takes about 70 seconds, and you only do it again when you add or update a
+dictionary.
+
+*(This step can't be skipped or shipped for you — the dictionaries are 232 MB
+and aren't ours to hand out. See [Dictionaries](#dictionaries).)*
 
 ---
 
 ## Using it
 
-Run this **from this folder**, so chibipop can find the dictionary you built:
+From a terminal opened **in the chibipop folder**, so it can find the
+dictionary you built:
 
 ```bash
-target\release\chibipop.exe run
+chibipop.exe run
 ```
+
+*(To start it with a double-click instead: right-click `chibipop.exe` → **Send
+to → Desktop (create shortcut)**, then right-click the new shortcut →
+**Properties**, and add a space and the word `run` to the end of the Target
+box.)*
 
 Then just **hover over Japanese text**. The definition appears beside it.
 
@@ -89,12 +98,8 @@ A few things worth knowing:
 To open settings again later without starting the popup:
 
 ```bash
-target\release\chibipop.exe settings
+chibipop.exe settings
 ```
-
-*(If you'd rather not type the path every time, make a desktop shortcut to
-`chibipop.exe` — it looks for its settings file next to itself, so that
-works.)*
 
 ---
 
@@ -154,9 +159,14 @@ automatically.
 
 ## For developers
 
+**Building from source** needs [Rust](https://rustup.rs) (stable, MSVC) and
+nothing else — `cargo build --release`. The executable's icon is a committed
+resource, so no Windows SDK is required.
+
 The configuration file reference, the diagnostic subcommands, how to run the
 tests, and the measured limits all live in
-[`docs/REFERENCE.md`](docs/REFERENCE.md).
+[`docs/REFERENCE.md`](docs/REFERENCE.md). How releases are cut is in
+[`docs/RELEASING.md`](docs/RELEASING.md).
 
 Design specs, plans and verification findings are in `docs/superpowers/`;
 work that is deliberately not built yet, with its evidence, is in
