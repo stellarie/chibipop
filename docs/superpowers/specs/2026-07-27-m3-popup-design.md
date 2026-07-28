@@ -203,7 +203,7 @@ font = "Yu Gothic UI"
 display_order = ["大辞林", "Jitendex"]
 
 [ocr]
-max_ocr_passes = 3      # 1 disables forward tiling - see the two-pass spec
+max_ocr_passes = 1      # 1 = no forward tiling (the default); 2+ enables it
 ```
 
 ## 5. Capture exclusion — measured, not assumed

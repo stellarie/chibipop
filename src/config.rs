@@ -104,19 +104,32 @@ pub struct OcrConfig {
     /// Total OCR captures per hover: one to locate the hovered word, the
     /// rest to read forward from it.
     ///
-    /// **`1` disables tiling entirely** and restores the single-capture
-    /// behaviour that shipped before two-pass. That is the point of the
-    /// setting: `TILE_LEN` was derived from one game at one text size, so if
-    /// tiling misbehaves elsewhere this reverts to known-good with one line
-    /// and no rebuild. Capping the work is the secondary benefit - the
-    /// tiling loop already stops at 25 characters on its own, so this rarely
-    /// binds.
+    /// **Defaults to `1`, which means no forward tiling.** Tiling buys
+    /// reading distance - roughly 10 characters ahead of the cursor instead
+    /// of 7 - but as measured on 2026-07-28 it pays for that by sometimes
+    /// resolving a *different character than the one under the cursor*, and
+    /// a longer reading of the wrong word is worse than a short reading of
+    /// the right one.
+    ///
+    /// Set to `2` or more to turn tiling back on. It is not removed, because
+    /// the reading-distance problem it solves is real and the accuracy
+    /// problem it introduces is understood well enough to be fixable; see
+    /// the two-pass spec's revision for the measurement and the two failure
+    /// modes.
     #[serde(default = "default_max_ocr_passes")]
     pub max_ocr_passes: u8,
 }
 
+/// **1 as of 2026-07-28: tiling is off by default.** Measured against a
+/// browser reader at ~25px text, hovering nine characters and comparing the
+/// character actually handed to lookup: single-pass scored **9/9**, three
+/// passes **4/9**. Tiling failed two distinct ways - it re-read a character
+/// the centred pass-1 capture had got right (`明` as `月`, `振` as `一`), and
+/// it lost its position entirely, returning text starting most of a line
+/// before the hovered character. Reading distance is worth nothing if the
+/// word it starts from is the wrong one. See the two-pass spec's revision.
 fn default_max_ocr_passes() -> u8 {
-    3
+    1
 }
 
 impl Default for OcrConfig {
@@ -272,13 +285,27 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    /// Tiling is off by default. It was measured resolving the wrong
+    /// character 5 times in 9 where single-pass got 9 of 9, so reading
+    /// distance is not worth its cost until that is fixed.
     #[test]
-    fn ocr_passes_defaults_to_three() {
-        assert_eq!(3, Config::default().ocr.max_ocr_passes);
+    fn ocr_passes_defaults_to_one() {
+        assert_eq!(1, Config::default().ocr.max_ocr_passes);
     }
 
-    /// The kill switch (spec D6): one pass is today's known-good single
-    /// capture, reachable by editing one line with no rebuild.
+    /// Tiling stays reachable by editing one line, with no rebuild - the
+    /// inverse of the kill switch it was introduced as.
+    #[test]
+    fn a_multi_pass_round_trips() {
+        let p = tmp("multipass");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.ocr.max_ocr_passes = 3;
+        c.save(&p).unwrap();
+        assert_eq!(3, load_or_create(&p).unwrap().ocr.max_ocr_passes);
+        let _ = std::fs::remove_file(&p);
+    }
+
     #[test]
     fn a_single_pass_round_trips() {
         let p = tmp("onepass");
@@ -303,7 +330,7 @@ mod tests {
             "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n",
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-[ocr] config must still load");
-        assert_eq!(3, c.ocr.max_ocr_passes, "missing section takes the default");
+        assert_eq!(1, c.ocr.max_ocr_passes, "missing section takes the default");
         let _ = std::fs::remove_file(&p);
     }
 
@@ -324,7 +351,7 @@ mod tests {
             "[ocr]\n",
         )).unwrap();
         let c = load_or_create(&p).expect("an empty [ocr] section must still load");
-        assert_eq!(3, c.ocr.max_ocr_passes, "missing key takes the field default");
+        assert_eq!(1, c.ocr.max_ocr_passes, "missing key takes the field default");
         let _ = std::fs::remove_file(&p);
     }
 

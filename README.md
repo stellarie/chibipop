@@ -89,7 +89,7 @@ font = "Yu Gothic UI"
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
 
 [ocr]
-max_ocr_passes = 3      # 1 disables forward tiling - see the two-pass spec
+max_ocr_passes = 1      # 1 = no forward tiling (the default); 2+ enables it
 
 [debug]
 show_scan_region = false   # outline what each hover captured - see the scan-overlay spec
@@ -104,10 +104,15 @@ next lookup. Exclusion was the original default; measured in real use the
 hide/reshow guard costs no noticeable lookup latency, so being recordable won.
 
 **`max_ocr_passes`** is how many screen captures each hover costs: one to find
-the word under the cursor, the rest to read forward from it. Set it to `1` to
-turn forward tiling off entirely and get the older, shorter-reaching behaviour
-back — useful if OCR misbehaves on content very different from what the tile
-width was tuned against.
+the word under the cursor, the rest to read forward from it. **It defaults to
+`1`, meaning no forward tiling.**
+
+Tiling reads further ahead — roughly 10 characters past the cursor rather than
+7 — but measured on 2026-07-28 it sometimes resolves *a different character
+than the one you are pointing at*, and a longer reading of the wrong word is
+worse than a short reading of the right one. Over nine hovers on one line,
+single-pass got the character right 9 times out of 9; three passes managed 4.
+Set it to `2` or more to turn tiling back on.
 
 The setting is read **once at startup** — edit the file with chibipop stopped,
 since switching mode from the tray rewrites the whole file from memory and

@@ -288,3 +288,58 @@ disables the feature meanwhile.
 **Accuracy at tile seams is the untested case.** Every measurement so far is of a single capture. D3
 is designed to prevent seam mangling but has never been exercised against real screen text; the
 integration fixture and live acceptance are what will settle it.
+
+---
+
+## 9. Revision, 2026-07-28 — tiling is off by default
+
+**`max_ocr_passes` now defaults to `1`.** Tiling is not removed; it is disabled pending a fix.
+
+### What was measured
+
+A browser-based reader at ~25px text, one horizontal line
+(`、手の明りを振り向けた。`). Nine characters hovered individually, comparing the character actually
+handed to lookup:
+
+| hover | truth | `--tiles 1` | `--tiles 3`, first character of the stitched text |
+|---|---|---|---|
+| 2883 | 手 | 手 ✓ | 手 ✓ |
+| 2911 | の | の ✓ | の ✓ |
+| 2939 | 明 | 明 ✓ | **月** |
+| 2967 | り | り ✓ | **を** |
+| 2995 | を | を ✓ | を ✓ |
+| 3023 | 振 | 振 ✓ | **一** |
+| 3079 | 向 | 向 ✓ | **アへ手の明りを…** |
+| 3108 | け | け ✓ | け ✓ |
+| 3135 | た | た ✓ | **三の明りを…** |
+
+**Single-pass 9/9. Three passes 4/9.**
+
+### Two distinct failure modes
+
+**1. Re-reading makes a good character worse.** `明` and `振` were read correctly by pass 1 and
+misread by the tile. This is a consequence of **D1** — "pass 1 is used for geometry only; its text is
+discarded" — which is wrong in one specific way the original reasoning missed. D1's premise is that
+pass 1's text is edge-clipped by construction. True at pass 1's *edges*; but the hovered character sits
+at pass 1's **centre**, which is the best-framed read of it anywhere. The tile then re-reads that same
+character with it near a *tile* boundary instead. D1 threw away the one read it should have kept.
+
+**2. The stitched text loses its position entirely.** `向` returned text beginning most of a line
+earlier. The mechanism: `tile_forward` starts tile 1 at the hovered word's leading edge and then
+concatenates **every** word the tile recognises. `split_at_clipped` filters only the *trailing* edge —
+nothing filters the leading edge, and OCR readily reports words to the left of a tile's nominal start,
+because the tile's left boundary cuts mid-glyph and the band is tall. So the text can begin at a word
+that is not the hovered one, and `cursor_byte_offset: 0` then asserts it is.
+
+### Why this is a revision and not a deletion
+
+The problem tiling solves — 7 characters of reading distance against a 25-character lookup budget — is
+real, and both failure modes have identifiable fixes: keep pass 1's reading of the hovered character
+rather than discarding it, and anchor the stitched text at the hovered word by discarding leading
+words that begin before it. Neither is a one-line patch, and mode 1 in particular re-opens D1, so this
+needs its own diagnose→design→build round rather than a hotfix.
+
+**The instrument for that round now exists.** `[debug] show_scan_region` and `probe --show-region`
+draw the captured regions, and the planned next step — highlighting the *matched characters* rather
+than the capture boxes — would make this exact defect visible rather than requiring a nine-point
+character sweep to detect.
