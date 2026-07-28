@@ -62,6 +62,68 @@ impl PhysRect {
     }
 }
 
+/// Which stage of text acquisition a drawn rectangle came from. Drives the
+/// overlay's colour; the drawing layer needs no other knowledge of the OCR
+/// pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanKind {
+    /// The cursor-centred box pass 1 captures to find the hovered word.
+    Pass1,
+    /// One forward tile.
+    Tile,
+    /// The resolved word's own box.
+    Anchor,
+}
+
+/// One rectangle the overlay draws, tagged with where it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanRect {
+    pub rect: PhysRect,
+    pub kind: ScanKind,
+}
+
+/// The overlay window's bounds, and every rectangle translated into that
+/// window's local coordinates.
+///
+/// `None` for empty input - the caller must then show no window at all rather
+/// than an empty one.
+pub fn overlay_layout(rects: &[ScanRect]) -> Option<(PhysRect, Vec<ScanRect>)> {
+    let first = rects.first()?;
+    let mut left = first.rect.x;
+    let mut top = first.rect.y;
+    let mut right = first.rect.x + first.rect.w;
+    let mut bottom = first.rect.y + first.rect.h;
+
+    for r in rects.iter().skip(1) {
+        left = left.min(r.rect.x);
+        top = top.min(r.rect.y);
+        right = right.max(r.rect.x + r.rect.w);
+        bottom = bottom.max(r.rect.y + r.rect.h);
+    }
+
+    let bounds = PhysRect { x: left, y: top, w: right - left, h: bottom - top };
+    let local = rects
+        .iter()
+        .map(|r| ScanRect { rect: r.rect.translated(-left, -top), kind: r.kind })
+        .collect();
+    Some((bounds, local))
+}
+
+/// A rectangle's interior once a border `thickness` wide is removed.
+///
+/// `None` when nothing is left - a rectangle no thicker than two borders is
+/// all border. OCR word boxes really do get this small (a measured box on the
+/// user's screen is 17x3), so this case is reached in practice, and computing
+/// it by subtraction alone would produce a negative extent.
+pub fn inset(rect: PhysRect, thickness: i32) -> Option<PhysRect> {
+    let w = rect.w - 2 * thickness;
+    let h = rect.h - 2 * thickness;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    Some(PhysRect { x: rect.x + thickness, y: rect.y + thickness, w, h })
+}
+
 /// Places a `size`-shaped popup relative to `anchor`, so it never covers
 /// `anchor` and never crosses `monitor`'s edges.
 ///
@@ -128,6 +190,9 @@ mod tests {
 
     fn r(x: i32, y: i32, w: i32, h: i32) -> PhysRect { PhysRect { x, y, w, h } }
     fn p(x: i32, y: i32) -> PhysPoint { PhysPoint { x, y } }
+    fn sr(x: i32, y: i32, w: i32, h: i32, kind: ScanKind) -> ScanRect {
+        ScanRect { rect: PhysRect { x, y, w, h }, kind }
+    }
 
     #[test]
     fn contains_is_inclusive_of_the_top_left_edge() {
@@ -276,5 +341,59 @@ mod tests {
                 assert!(!overlaps, "popup covered the anchor at ({ax},{ay})");
             }
         }
+    }
+
+    #[test]
+    fn layout_of_nothing_is_none() {
+        assert!(overlay_layout(&[]).is_none());
+    }
+
+    #[test]
+    fn a_single_rect_bounds_itself_and_sits_at_the_origin() {
+        let (bounds, local) = overlay_layout(&[sr(100, 200, 50, 20, ScanKind::Pass1)]).unwrap();
+        assert_eq!(PhysRect { x: 100, y: 200, w: 50, h: 20 }, bounds);
+        assert_eq!(PhysRect { x: 0, y: 0, w: 50, h: 20 }, local[0].rect);
+        assert_eq!(ScanKind::Pass1, local[0].kind);
+    }
+
+    #[test]
+    fn bounds_span_every_rect_and_locals_are_relative_to_it() {
+        let (bounds, local) = overlay_layout(&[
+            sr(100, 200, 50, 20, ScanKind::Pass1),
+            sr(400, 180, 50, 60, ScanKind::Tile),
+        ])
+        .unwrap();
+        assert_eq!(PhysRect { x: 100, y: 180, w: 350, h: 60 }, bounds);
+        assert_eq!(PhysRect { x: 0, y: 20, w: 50, h: 20 }, local[0].rect);
+        assert_eq!(ScanKind::Pass1, local[0].kind);
+        assert_eq!(PhysRect { x: 300, y: 0, w: 50, h: 60 }, local[1].rect);
+        assert_eq!(ScanKind::Tile, local[1].kind);
+    }
+
+    /// Tiles routinely overlap the pass-1 box they were derived from, so the
+    /// union must not assume they are disjoint.
+    #[test]
+    fn overlapping_rects_still_produce_one_covering_bounds() {
+        let (bounds, _) = overlay_layout(&[
+            sr(0, 0, 100, 100, ScanKind::Pass1),
+            sr(50, 50, 100, 100, ScanKind::Tile),
+        ])
+        .unwrap();
+        assert_eq!(PhysRect { x: 0, y: 0, w: 150, h: 150 }, bounds);
+    }
+
+    #[test]
+    fn inset_leaves_an_interior_for_an_ordinary_rect() {
+        let inner = inset(PhysRect { x: 10, y: 10, w: 100, h: 40 }, 2).unwrap();
+        assert_eq!(PhysRect { x: 12, y: 12, w: 96, h: 36 }, inner);
+    }
+
+    /// A real OCR word box from the user's screen measures w=17 h=3. Subtracting
+    /// two 2px edges from a 3px height must yield no interior, not a negative one.
+    #[test]
+    fn inset_of_a_rect_thinner_than_its_border_has_no_interior() {
+        assert!(inset(PhysRect { x: 0, y: 0, w: 17, h: 3 }, 2).is_none());
+        assert!(inset(PhysRect { x: 0, y: 0, w: 3, h: 17 }, 2).is_none());
+        assert!(inset(PhysRect { x: 0, y: 0, w: 4, h: 4 }, 2).is_none());
     }
 }

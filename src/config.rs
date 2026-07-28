@@ -30,6 +30,8 @@ pub struct Config {
     pub dictionaries: DictionariesConfig,
     #[serde(default)]
     pub ocr: OcrConfig,
+    #[serde(default)]
+    pub debug: DebugConfig,
 }
 
 /// `[trigger]`.
@@ -123,6 +125,20 @@ impl Default for OcrConfig {
     }
 }
 
+/// `[debug]`. Carries `#[serde(default)]` at the `Config` level so a file
+/// written before this section existed still loads - `load_or_create` treats
+/// malformed TOML as a hard error rather than falling back.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DebugConfig {
+    /// Draw a faint outline around every region a hover captured: pass 1's
+    /// box, each forward tile, and the resolved word's anchor.
+    ///
+    /// Off by default. When off nothing is collected and no window is
+    /// created - the feature is inert, not merely hidden.
+    #[serde(default)]
+    pub show_scan_region: bool,
+}
+
 impl Default for Config {
     /// Spec §4.3's shipped defaults, verbatim.
     fn default() -> Config {
@@ -139,6 +155,7 @@ impl Default for Config {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
             },
             ocr: OcrConfig::default(),
+            debug: DebugConfig::default(),
         }
     }
 }
@@ -308,6 +325,55 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("an empty [ocr] section must still load");
         assert_eq!(3, c.ocr.max_ocr_passes, "missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn the_scan_overlay_defaults_off() {
+        assert!(!Config::default().debug.show_scan_region,
+                "the overlay is a debug aid and must be opt-in");
+    }
+
+    #[test]
+    fn an_enabled_overlay_round_trips() {
+        let p = tmp("overlay_on");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.debug.show_scan_region = true;
+        c.save(&p).unwrap();
+        assert!(load_or_create(&p).unwrap().debug.show_scan_region);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Every config written before this section existed lacks [debug]. Without
+    /// serde(default) they stop loading and chibipop refuses to start.
+    #[test]
+    fn a_config_written_before_the_debug_section_existed_still_loads() {
+        let p = tmp("no_debug_section");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n\n",
+            "[ocr]\nmax_ocr_passes = 3\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-[debug] config must still load");
+        assert!(!c.debug.show_scan_region);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_empty_debug_section_still_defaults_the_toggle_off() {
+        let p = tmp("empty_debug");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n\n",
+            "[ocr]\nmax_ocr_passes = 3\n\n",
+            "[debug]\n",
+        )).unwrap();
+        assert!(!load_or_create(&p).unwrap().debug.show_scan_region);
         let _ = std::fs::remove_file(&p);
     }
 }

@@ -4,7 +4,7 @@
 //! virtual-desktop coordinates and hand them to `layout`, which does all the
 //! actual reasoning.
 
-use crate::geom::{PhysPoint, PhysRect};
+use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::capture::{capture_upscaled, cursor_position, init_dpi_awareness, UPSCALE};
 use crate::text::layout::{
@@ -198,7 +198,14 @@ impl OcrTextSource {
         Ok(self.resolve_at_verbose(cursor)?.1)
     }
 
-    /// Resolve a hover, reading forward in tiles (the two-pass spec).
+    /// [`resolve_at_tiled_scanned`](Self::resolve_at_tiled_scanned) with
+    /// collection off, and the scan rectangles discarded.
+    pub fn resolve_at_tiled(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
+        self.resolve_at_tiled_scanned(cursor, false).map(|(r, _)| r)
+    }
+
+    /// Resolve a hover, reading forward in tiles (the two-pass spec), and -
+    /// when `collect` is true - every region actually captured along the way.
     ///
     /// Pass 1 is [`resolve_at_verbose`](Self::resolve_at_verbose)'s capture,
     /// used for geometry only - its text is edge-clipped at its own boundary
@@ -215,11 +222,29 @@ impl OcrTextSource {
     /// borrow a neighbouring line an empty tile has no line of its own near
     /// (I3). `bounds` is the monitor containing the hover, so a tile is
     /// clamped rather than reading a neighbouring monitor's pixels (I2).
-    pub fn resolve_at_tiled(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
+    ///
+    /// `collect` gates the scan overlay (M3 task 4). `false` is the hot path
+    /// and returns an empty, never-allocated `Vec` with no `ScanRect` ever
+    /// constructed - "off" means inert, not "collect and discard". `true`
+    /// records pass 1's own box, every tile actually read - pushed from
+    /// inside `tile_forward`'s reader closure, the only place a tile's real
+    /// rectangle is known - and the resolved word's own anchor.
+    pub fn resolve_at_tiled_scanned(
+        &self,
+        cursor: PhysPoint,
+        collect: bool,
+    ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
         let (_, resolved) = self.resolve_at_verbose(cursor)?;
-        let Some(first) = resolved else { return Ok(None) };
+        let mut scan = Vec::new();
+        let Some(first) = resolved else { return Ok((None, scan)) };
+        if collect {
+            scan.push(ScanRect { rect: region_around(cursor), kind: ScanKind::Pass1 });
+        }
         if self.max_passes <= 1 {
-            return Ok(Some(first));
+            if collect {
+                scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
+            }
+            return Ok((Some(first), scan));
         }
 
         let band = band_of(first.span.anchor, first.orientation);
@@ -245,25 +270,37 @@ impl OcrTextSource {
             usize::from(self.max_passes - 1),
             MAX_LOOKUP_CHARS,
             bounds,
-            |tile| match self.words_in(tile, perpendicular_centre, first.orientation, line_tolerance) {
-                Ok(words) => words,
-                Err(e) => {
-                    if !failed {
-                        eprintln!("chibipop: tile capture failed, using what was read: {e:#}");
-                        failed = true;
+            |tile| {
+                if collect {
+                    scan.push(ScanRect { rect: tile, kind: ScanKind::Tile });
+                }
+                match self.words_in(tile, perpendicular_centre, first.orientation, line_tolerance) {
+                    Ok(words) => words,
+                    Err(e) => {
+                        if !failed {
+                            eprintln!("chibipop: tile capture failed, using what was read: {e:#}");
+                            failed = true;
+                        }
+                        Vec::new()
                     }
-                    Vec::new()
                 }
             },
         );
 
-        if text.is_empty() {
-            return Ok(Some(first));
+        if collect {
+            scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
         }
-        Ok(Some(Resolved {
-            span: TextSpan { text, cursor_byte_offset: 0, anchor: first.span.anchor },
-            orientation: first.orientation,
-        }))
+
+        if text.is_empty() {
+            return Ok((Some(first), scan));
+        }
+        Ok((
+            Some(Resolved {
+                span: TextSpan { text, cursor_byte_offset: 0, anchor: first.span.anchor },
+                orientation: first.orientation,
+            }),
+            scan,
+        ))
     }
 
     /// One capture-and-recognise, keeping only the line under the hover.

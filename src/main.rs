@@ -42,6 +42,10 @@ enum Command {
         dict: PathBuf,
         #[arg(long, default_value = "data/deconjugator.json")]
         rules: PathBuf,
+        /// Draw the captured regions for this many seconds after probing.
+        /// Bare `--show-region` shows them for 3s. Omitted, nothing is drawn.
+        #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "3")]
+        show_region: Option<u64>,
     },
     /// Follow the cursor and print a lookup whenever the hovered word changes.
     Watch {
@@ -85,7 +89,7 @@ fn main() -> Result<()> {
             print_hits(&hits);
             Ok(())
         }
-        Command::Probe { at, region, tiles, dict, rules } => {
+        Command::Probe { at, region, tiles, dict, rules, show_region } => {
             let (xs, ys) = at
                 .split_once(',')
                 .context("--at must be X,Y (e.g. --at 1200,400)")?;
@@ -126,7 +130,7 @@ fn main() -> Result<()> {
                 }
             }
 
-            match resolved {
+            match &resolved {
                 // Distinguish "OCR itself found nothing" from "OCR found
                 // text, but none of it was close enough to the cursor" -
                 // probe exists to tell these two failure stages apart.
@@ -154,10 +158,45 @@ fn main() -> Result<()> {
                 }
             }
 
+            let mut tiled_scan: Option<Vec<chibipop::geom::ScanRect>> = None;
             if region_was_default && tiles > 1 {
-                match source.resolve_at_tiled(cursor)? {
+                let (tiled, scan) = source.resolve_at_tiled_scanned(cursor, show_region.is_some())?;
+                match tiled {
                     None => println!("\ntiled:   nothing resolved"),
                     Some(r) => println!("\ntiled:   {:?}  ({} chars)", r.span.text, r.span.text.chars().count()),
+                }
+                tiled_scan = Some(scan);
+            }
+
+            if let Some(seconds) = show_region {
+                let scan = tiled_scan.unwrap_or_else(|| {
+                    let mut scan = vec![chibipop::geom::ScanRect {
+                        rect: region,
+                        kind: chibipop::geom::ScanKind::Pass1,
+                    }];
+                    if let Some(r) = &resolved {
+                        scan.push(chibipop::geom::ScanRect {
+                            rect: r.span.anchor,
+                            kind: chibipop::geom::ScanKind::Anchor,
+                        });
+                    }
+                    scan
+                });
+
+                if scan.is_empty() {
+                    println!("\nshow-region: nothing was captured");
+                } else {
+                    match chibipop::ui::overlay::Overlay::create(false) {
+                        Err(e) => eprintln!("chibipop: creating the scan overlay failed: {e:#}"),
+                        Ok(overlay) => {
+                            if let Err(e) = overlay.show_rects(&scan, &chibipop::ui::theme::Theme::dark()) {
+                                eprintln!("chibipop: showing the scan overlay failed: {e:#}");
+                            } else {
+                                println!("\nshow-region: {} rect(s) for {seconds}s", scan.len());
+                                pump_messages_for(std::time::Duration::from_secs(seconds));
+                            }
+                        }
+                    }
                 }
             }
             Ok(())
@@ -234,6 +273,29 @@ fn default_config_path() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(|dir| dir.join("chibipop.toml")))
         .unwrap_or_else(|| PathBuf::from("chibipop.toml"))
+}
+
+/// Pump this thread's messages for `dur`, so a window created by a one-shot
+/// command stays painted instead of appearing frozen. `probe` has no message
+/// loop of its own; this exists only for `--show-region`.
+fn pump_messages_for(dur: std::time::Duration) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+    let deadline = std::time::Instant::now() + dur;
+    let mut msg = MSG::default();
+    while std::time::Instant::now() < deadline {
+        // SAFETY: `msg` is a valid, thread-local MSG; PeekMessageW with a null
+        // HWND retrieves messages for any window this thread owns, and both
+        // TranslateMessage and DispatchMessageW take it by const pointer.
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 fn print_hits(hits: &[chibipop::lookup::model::Hit]) {
