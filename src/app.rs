@@ -944,6 +944,7 @@ mod tests {
             summary_chars: 40,
             font: font.to_string(),
             highlight_match: true,
+            scroll_popup: true,
         }
     }
 

@@ -98,10 +98,29 @@ pub struct PopupConfig {
     /// `PopupConfig` has no `Default` derive to fall back on.
     #[serde(default = "default_highlight_match")]
     pub highlight_match: bool,
+    /// Let the wheel scroll a popup whose content overflows the height cap.
+    ///
+    /// On by default. Turning it off disables **only** the wheel handling —
+    /// the scrollbar is still drawn, so overflowing content stays visibly
+    /// marked as overflowing rather than silently cut.
+    ///
+    /// That narrow scope is the point. This is the escape hatch for the one
+    /// part of the feature that can affect input *outside* chibipop: while
+    /// armed, the low-level mouse hook swallows wheel events so the window
+    /// underneath does not scroll at the same time. Disabling the scrollbar
+    /// too would leave a truncated entry with no indication at all, which is
+    /// worse than the behaviour this replaced.
+    #[serde(default = "default_scroll_popup")]
+    pub scroll_popup: bool,
 }
 
 /// On. See [`PopupConfig::highlight_match`].
 fn default_highlight_match() -> bool {
+    true
+}
+
+/// On. See [`PopupConfig::scroll_popup`].
+fn default_scroll_popup() -> bool {
     true
 }
 
@@ -182,6 +201,7 @@ impl Default for Config {
                 summary_chars: 40,
                 font: "Yu Gothic UI".to_string(),
                 highlight_match: default_highlight_match(),
+                scroll_popup: default_scroll_popup(),
             },
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
@@ -441,6 +461,38 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-highlight config must still load");
         assert!(c.popup.highlight_match, "a missing field must take the field default, not bool's");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn popup_scrolling_defaults_on() {
+        assert!(Config::default().popup.scroll_popup);
+    }
+
+    #[test]
+    fn disabled_scrolling_round_trips() {
+        let p = tmp("scroll_off");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.popup.scroll_popup = false;
+        c.save(&p).unwrap();
+        assert!(!load_or_create(&p).unwrap().popup.scroll_popup);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The bare-`serde(default)` trap again: a `[popup]` section written before
+    /// this field existed must load with scrolling ON.
+    #[test]
+    fn a_config_written_before_scroll_popup_loads_with_it_on() {
+        let p = tmp("no_scroll_field");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-scroll_popup config must still load");
+        assert!(c.popup.scroll_popup, "a missing field must take the field default");
         let _ = std::fs::remove_file(&p);
     }
 
