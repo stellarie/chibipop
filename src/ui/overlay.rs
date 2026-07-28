@@ -11,16 +11,18 @@
 //! (`SetLayeredWindowAttributes`) cannot single out an interior - it applies
 //! uniformly to the whole window. So this window is shaped instead:
 //! `SetWindowRgn` is set to the union of every rect's *frame* region (its
-//! outer rectangle minus its inset interior), and `WM_PAINT` fills each
-//! rect's full bounds in its kind's colour - only the frame survives the
-//! clip.
+//! outer rectangle minus its inset interior), so the interior is genuinely
+//! transparent rather than merely unpainted, and `WM_PAINT` separately fills
+//! each rect's own four border strips - not its full bounds - in its kind's
+//! colour, so one rect's fill can never repaint a neighbour's frame where
+//! the two overlap (`edge_strips`).
 //!
 //! Structure otherwise mirrors `ui::window` throughout: the one-shot class
 //! registration guard, the same extended-style set, constant alpha via
 //! `SetLayeredWindowAttributes`, the same opt-in `SetWindowDisplayAffinity`,
 //! and the same `SetWindowRgn` ownership/leak discipline on every path.
 
-use crate::geom::{inset, overlay_layout, ScanKind, ScanRect};
+use crate::geom::{inset, overlay_layout, PhysRect, ScanKind, ScanRect};
 use crate::ui::theme::Theme;
 use anyhow::{Context, Result};
 use std::cell::RefCell;
@@ -97,6 +99,32 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
+/// The four border strips `paint_overlay` fills for one rect, `thickness`
+/// px wide on each side - not its full bounds, so that when two rects
+/// overlap (routine - see `geom::overlay_layout`'s own doc comment),
+/// filling the later one can never repaint pixels of the earlier one's
+/// frame that fall outside its own strips (IMPORTANT-2).
+///
+/// Mirrors `build_region`'s use of `geom::inset` exactly: when `inset`
+/// returns `None` the rect has no interior at all (too thin - see its doc
+/// comment), so the four strips would just be the rect sliced apart for no
+/// benefit, and the whole rect is returned instead, unchanged from filling
+/// its bounds directly.
+///
+/// Pure geometry, no window needed - see the tests below.
+fn edge_strips(rect: PhysRect, thickness: i32) -> Vec<PhysRect> {
+    if inset(rect, thickness).is_none() {
+        return vec![rect];
+    }
+    let t = thickness;
+    vec![
+        PhysRect { x: rect.x, y: rect.y, w: rect.w, h: t },
+        PhysRect { x: rect.x, y: rect.y + rect.h - t, w: rect.w, h: t },
+        PhysRect { x: rect.x, y: rect.y + t, w: t, h: rect.h - 2 * t },
+        PhysRect { x: rect.x + rect.w - t, y: rect.y + t, w: t, h: rect.h - 2 * t },
+    ]
+}
+
 /// The actual `WM_PAINT` work, split out so it can run inside
 /// `catch_unwind` from `wndproc` - same shape as `ui::window`'s
 /// `validate_paint_region`/`wndproc` split.
@@ -125,20 +153,23 @@ unsafe fn paint_overlay(hwnd: HWND) {
                     ScanKind::Tile => state.tile,
                     ScanKind::Anchor => state.anchor,
                 };
-                // SAFETY: `hdc` was validated non-invalid above; `rc` is
-                // plain stack data borrowed only for this call; the brush
-                // is created and deleted within this same iteration, so
-                // no handle here outlives the scope that owns it.
+                // SAFETY: `hdc` was validated non-invalid above; each
+                // `strip` is plain stack data borrowed only for this call;
+                // the brush is created and deleted within this same
+                // iteration, so no handle here outlives the scope that
+                // owns it.
                 unsafe {
                     let brush = CreateSolidBrush(colorref(color));
                     if !brush.is_invalid() {
-                        let rc = RECT {
-                            left: r.rect.x,
-                            top: r.rect.y,
-                            right: r.rect.x + r.rect.w,
-                            bottom: r.rect.y + r.rect.h,
-                        };
-                        FillRect(hdc, &rc, brush);
+                        for strip in edge_strips(r.rect, FRAME_THICKNESS) {
+                            let rc = RECT {
+                                left: strip.x,
+                                top: strip.y,
+                                right: strip.x + strip.w,
+                                bottom: strip.y + strip.h,
+                            };
+                            FillRect(hdc, &rc, brush);
+                        }
                         let _ = DeleteObject(brush.into());
                     }
                 }
@@ -439,6 +470,62 @@ impl Drop for Overlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::PhysPoint;
+
+    /// IMPORTANT-2: the four strips must together cover the frame and must
+    /// never reach the interior. Same rect `geom.rs`'s own
+    /// `inset_leaves_an_interior_for_an_ordinary_rect` uses, so it is
+    /// pinned to have an interior at `FRAME_THICKNESS`.
+    #[test]
+    fn edge_strips_cover_the_frame_but_never_the_interior() {
+        let rect = PhysRect { x: 10, y: 10, w: 100, h: 40 };
+        let t = FRAME_THICKNESS;
+        let strips = edge_strips(rect, t);
+
+        assert_eq!(
+            vec![
+                PhysRect { x: 10, y: 10, w: 100, h: t },
+                PhysRect { x: 10, y: 10 + 40 - t, w: 100, h: t },
+                PhysRect { x: 10, y: 10 + t, w: t, h: 40 - 2 * t },
+                PhysRect { x: 10 + 100 - t, y: 10 + t, w: t, h: 40 - 2 * t },
+            ],
+            strips,
+            "top, bottom, left, right, in that order"
+        );
+
+        // Together: every corner and every outer-edge midpoint lands in at
+        // least one strip.
+        let frame_points = [
+            PhysPoint { x: rect.x, y: rect.y },
+            PhysPoint { x: rect.x + rect.w - 1, y: rect.y },
+            PhysPoint { x: rect.x, y: rect.y + rect.h - 1 },
+            PhysPoint { x: rect.x + rect.w - 1, y: rect.y + rect.h - 1 },
+            PhysPoint { x: rect.x + rect.w / 2, y: rect.y },
+            PhysPoint { x: rect.x + rect.w / 2, y: rect.y + rect.h - 1 },
+            PhysPoint { x: rect.x, y: rect.y + rect.h / 2 },
+            PhysPoint { x: rect.x + rect.w - 1, y: rect.y + rect.h / 2 },
+        ];
+        for p in frame_points {
+            assert!(strips.iter().any(|s| s.contains(p)), "no strip covers frame point {p:?}");
+        }
+
+        // Never: the centre is the sharpest interior point, and the one
+        // IMPORTANT-2's overpaint bug actually reached.
+        let center = rect.center();
+        for s in &strips {
+            assert!(!s.contains(center), "strip {s:?} covers the interior centre {center:?}");
+        }
+    }
+
+    /// A rect no thicker than two borders has no interior (`geom::inset`),
+    /// so there is nothing to slice into strips - same 17x3 word box
+    /// `geom.rs`'s own `inset_of_a_rect_thinner_than_its_border_has_no_interior`
+    /// pins.
+    #[test]
+    fn edge_strips_of_a_too_thin_rect_is_the_whole_rect() {
+        let rect = PhysRect { x: 0, y: 0, w: 17, h: 3 };
+        assert_eq!(vec![rect], edge_strips(rect, FRAME_THICKNESS));
+    }
 
     /// Needs a real desktop session - `CreateWindowExW` fails headless
     /// (no interactive window station), so this only runs explicitly
