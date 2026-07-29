@@ -109,7 +109,7 @@ beyond a byte slice — which is what makes the risky part cheap to verify.
 | `dict/frequency.rs` | Parse rank rows in both nesting shapes | `freq.py` (53) | ✓ |
 | `dict/build.rs` | Create schema, write entries and terms, `ANALYZE` | `schema.py`, `build.py` (205) | |
 | `library.rs` | The archive folder and its manifest | new | |
-| `ui/console.rs` | `AllocConsole`, control handler, the live lookup log | new | |
+| `ui/console.rs` | Console ownership, hide and show, the live lookup log | new | |
 
 `glossary.rs` is the one to be careful with: 141 lines of irregular nested
 structures, and the likeliest place for an answer that is subtly wrong and
@@ -145,13 +145,15 @@ The child writes to a temporary file and the parent renames it into place, so
 an interrupted rebuild never leaves a half-written database — the same
 write-then-rename discipline `Config::save` now uses.
 
-**On stdout under the windows subsystem.** A windows-subsystem process has no
-console, so `println!` writes nowhere *unless the parent supplies a handle*.
-The parent spawns the child with piped stdio, which does exactly that: the
-child's progress lines are valid writes to a pipe the parent reads, and no
-console appears for either process. This only works because the handles are
-inherited — a `build-dict` run by hand from a terminal relies on the same
-`AttachConsole` path as every other subcommand.
+**On the child's stdout and its console.** chibipop is a console-subsystem
+binary, so the child has a usable stdout regardless. The parent still spawns
+it with piped stdio, which is what lets it *read* the progress rather than
+letting it scroll past.
+
+No second console window appears. A child inherits its parent's console, so
+`own_console()` sees two processes attached and declines to touch it — which
+is the same guard that stops chibipop hiding a user's terminal. If the parent
+was double-clicked, the console it inherits is the already-hidden one.
 
 **Sequence:** stage changes → Apply → write `library/` → spawn builder →
 progress → swap → restart. Apply already restarts chibipop, so this extends
@@ -248,7 +250,7 @@ CI green.
 
 ### Phase 1 — double-click
 
-Exe-relative paths → windows subsystem and `AttachConsole` → no-args means
+Exe-relative paths → hide the console when we own it → no-args means
 `run` → graceful first run → the live log panel.
 
 First because Phase 3's `library/` lives beside the executable, so the path
