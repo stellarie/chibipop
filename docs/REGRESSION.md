@@ -208,11 +208,35 @@ doubts it.
     appears here, something changed — find out what before celebrating.* Note the icon lives behind
     the `^` chevron, not in the visible tray.
 11c. **Press "Quit chibipop" in the settings window** → chibipop exits. ✅ **Confirmed by oniichan
-    2026-07-29.** Still not agent-verifiable, for a newly-measured reason: the settings window's Win32 layer is unreachable from a tool
-    shell. UIA sees the button (name "Quit chibipop") but it exposes **no patterns**, so `Invoke`
-    throws `InvalidOperationException`; `FindWindowW('ChibipopSettingsClass', null)` returns **0**;
-    and `FindWindowExW(hwnd, .., 'BUTTON', null)` enumerates **no children** on the same hwnd UIA
-    reports. Three mechanisms, none reaching it. The button is verified to *render* only.
+    2026-07-29.**
+
+> [!important] Corrected 2026-07-29 — this window **is** agent-verifiable
+> This entry previously said the settings window's Win32 layer was unreachable from a tool
+> shell, citing three failed mechanisms. That conclusion was **wrong**, and it cost real
+> coverage — several rounds were reported as "unverifiable" when they were not.
+>
+> `FindWindowW` does fail, and now we know why: **window classes registered with
+> `RegisterClassW` are process-local**, so another process cannot resolve the class *name* to
+> an atom. `GetClassName` reads the string back perfectly well, which is why the class looked
+> present and unfindable at the same time.
+>
+> What works, measured:
+> ```
+> FindWindowW('ChibipopSettingsClass', null)  ->  0           (the dead end)
+> EnumWindows + GetWindowThreadProcessId==pid ->  hwnd, class 'ChibipopSettingsClass'
+> EnumChildWindows(hwnd)                      ->  34 controls
+> GetDlgCtrlID / GetWindowText                ->  id=117 'Add…', 118 'Remove', 119 ListBox, …
+> PostMessageW(WM_COMMAND, id) / SendMessageW(LB_GETCOUNT)  ->  work cross-process
+> ```
+> So button presses, list contents and enable state can all be driven and asserted from a
+> tool shell. **Only the visual result — wrapping, spacing, whether it looks right — still
+> needs eyes.** Filter `EnumWindows` by PID; do not use `FindWindowW` on this class.
+
+11d. **The console is hidden on a double-click.** Agent-verifiable by the same route, and
+    confirmed 2026-07-29: launched without inheriting a console, `ConsoleWindowClass` exists
+    with **`IsWindowVisible` = False** while `ChibipopSettingsClass` is True. That is
+    `own_console()` hiding a console it owns alone. A visible black box here means
+    `GetConsoleProcessList` returned something other than 1.
 11b. **`chibipop settings`** → the same window, captioned **"Apply"** and "Restart chibipop to use
     them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
 12. **Reorder dictionaries → Apply** → order changes, and **`chibipop.toml` still holds the
