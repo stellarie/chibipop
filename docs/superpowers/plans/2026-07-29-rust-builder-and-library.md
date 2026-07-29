@@ -975,6 +975,19 @@ New sequence, inserted **before** the config save:
 3. `rebuild::spawn` and pump `Progress` **on the main thread's existing message
    loop** — do not block it, or the window stops repainting and Windows paints
    the ghost-white "not responding" overlay over a build that is fine.
+
+   **Do not render `Progress::Line` verbatim.** Task 7 forwards the child's
+   stdout unchanged, as its plan said to, and the child is building into a
+   temporary — so the final line reads, literally:
+
+   ```
+   wrote C:\Users\…\data\chibipop.sqlite.tmp: 3 entries, 5 term rows
+   ```
+
+   A temp path and a raw row count is not what a non-technical user should be
+   shown. Render the `term dict [i] <name>` lines as the dictionary being read,
+   and take the completion message from **`Progress::Done(out)`**, which
+   carries the real destination path rather than the temporary.
 4. On `Done`: save the config, then `restart_self`.
 5. On `Failed`: **leave the previous database in place**, keep the window open,
    report the failure. Do not save the config and do not restart — restarting
