@@ -16,7 +16,7 @@ use std::path::PathBuf;
 #[command(name = "chibipop", about = "Japanese lookup engine")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -121,7 +121,13 @@ fn hide_own_console() {
 fn main() -> Result<()> {
     hide_own_console();
     let cli = Cli::parse();
-    match cli.command {
+    // A double-click passes none.
+    let command = cli.command.unwrap_or(Command::Run {
+        dict: None,
+        rules: None,
+        config: None,
+    });
+    match command {
         Command::Lookup { text, dict, rules } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
