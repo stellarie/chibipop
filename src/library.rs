@@ -31,15 +31,47 @@ pub struct Library {
 }
 
 impl Library {
-    /// Reads library.json, or empty.
+    /// Manifest, reconciled to disk.
     pub fn load(dir: &Path) -> Result<Library> {
         let path = dir.join(MANIFEST);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Library::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut lib: Library = if text.trim().is_empty() {
+            Library::default()
+        } else {
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+        };
+        lib.reconcile(dir);
+        Ok(lib)
+    }
+
+    /// Makes the list match disk.
+    fn reconcile(&mut self, dir: &Path) {
+        self.entries.retain(|e| dir.join(&e.file).exists());
+        let mut strays: Vec<String> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(std::result::Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| Path::new(n).extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
+                .filter(|n| !self.entries.iter().any(|e| &e.file == n))
+                .collect(),
+            Err(_) => return,
+        };
+        // read_dir order is not defined.
+        strays.sort();
+        for file in strays {
+            let path = dir.join(&file);
+            let kind = if crate::dict::archive::is_frequency_archive(&path) {
+                Kind::Frequency
+            } else {
+                Kind::Term
+            };
+            let index = crate::dict::archive::read_index(&path).unwrap_or(Value::Null);
+            self.entries.push(Entry { name: title_of(&index, &file), file, kind });
+        }
     }
 
     /// Atomic manifest write.
@@ -303,5 +335,45 @@ mod tests {
         };
         assert_eq!(vec![dir.join("b.zip"), dir.join("a.zip")], lib.term_paths(dir));
         assert_eq!(vec![dir.join("f.zip")], lib.freq_paths(dir));
+    }
+
+    #[test]
+    fn a_zip_the_manifest_never_listed_is_adopted_on_load() {
+        let (dir, _guard) = scratch("adopt");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Built regardless of manifest.
+        std::fs::copy(fixture("terms.zip"), dir.join("zz_dropped_in.zip")).unwrap();
+        std::fs::copy(fixture("freq.zip"), dir.join("aa_dropped_in.zip")).unwrap();
+        Library::default().save(&dir).unwrap();
+
+        let lib = Library::load(&dir).unwrap();
+
+        assert_eq!(2, lib.entries.len(), "both strays adopted");
+        assert_eq!("aa_dropped_in.zip", lib.entries[0].file, "sorted, not read_dir order");
+        assert_eq!(Kind::Frequency, lib.entries[0].kind, "classified on adoption");
+        assert_eq!("FixtureTerms", lib.entries[1].name, "title read, not the stem");
+    }
+
+    #[test]
+    fn an_entry_whose_file_vanished_is_dropped_on_load() {
+        let (dir, _guard) = scratch("vanished");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        lib.save(&dir).unwrap();
+        std::fs::remove_file(dir.join("terms.zip")).unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+
+        assert!(loaded.is_empty(), "a listed file that is gone is not offered");
+    }
+
+    #[test]
+    fn a_non_zip_in_the_folder_is_not_adopted() {
+        let (dir, _guard) = scratch("non_zip");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"not an archive").unwrap();
+        Library::default().save(&dir).unwrap();
+
+        assert!(Library::load(&dir).unwrap().is_empty());
     }
 }
