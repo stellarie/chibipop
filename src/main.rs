@@ -97,11 +97,6 @@ enum Command {
 }
 
 /// Hides a console only we hold.
-///
-/// A double-click gets a console with this process alone attached. Launched
-/// from a shell, the shell is attached too and the window is not ours to
-/// touch. Hidden rather than freed: freeing invalidates stdout, and
-/// `println!` aborts the process when a write fails.
 fn hide_own_console() {
     use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
