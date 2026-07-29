@@ -800,6 +800,16 @@ answers *"why isn't it reading this?"* without a command line.
 **Interfaces:**
 - Produces: `chibipop::ui::console::show()` and `hide()`.
 
+> **Revised for Task 3's replacement approach.** An earlier version of this
+> task used `AllocConsole`, because it assumed the windows subsystem left the
+> process with no console. That approach was reverted. chibipop stays on the
+> console subsystem, so **a console already exists** — hidden when we own it.
+> The log is therefore just showing the window we already have. No
+> `AllocConsole`, no `FreeConsole`, and no invalid-handle problem.
+>
+> `SetConsoleCtrlHandler` is still required: closing a console you own
+> terminates the process regardless of how it was obtained.
+
 - [ ] **Step 1: Write the module**
 
 Create `src/ui/console.rs`:
@@ -807,14 +817,34 @@ Create `src/ui/console.rs`:
 ```rust
 //! The live lookup log console.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use windows::Win32::Foundation::BOOL;
+use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::System::Console::{
-    AllocConsole, FreeConsole, GetConsoleWindow, SetConsoleCtrlHandler,
+    GetConsoleProcessList, GetConsoleWindow, SetConsoleCtrlHandler,
 };
 use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
 
-static ALLOCATED: AtomicBool = AtomicBool::new(false);
+/// The console, if it is ours alone.
+///
+/// A shell shares its console with us; that window belongs to the user's
+/// terminal and must never be shown, hidden, or claimed.
+fn own_console() -> Option<HWND> {
+    // SAFETY: GetConsoleProcessList writes at most `pids.len()` entries and
+    // returns the true count, which may exceed it - only the comparison with
+    // 1 matters, so a truncated write cannot mislead. GetConsoleWindow
+    // returns null when there is no console, covered by is_invalid.
+    unsafe {
+        let mut pids = [0u32; 4];
+        if GetConsoleProcessList(&mut pids) != 1 {
+            return None;
+        }
+        let hwnd = GetConsoleWindow();
+        if hwnd.is_invalid() {
+            None
+        } else {
+            Some(hwnd)
+        }
+    }
+}
 
 /// Close must hide, not exit.
 unsafe extern "system" fn ctrl_handler(_event: u32) -> BOOL {
@@ -822,45 +852,26 @@ unsafe extern "system" fn ctrl_handler(_event: u32) -> BOOL {
     BOOL(1)
 }
 
-/// Shows it, allocating once.
+/// Shows the log window.
 pub fn show() {
-    // SAFETY: all four calls are console FFI with no preconditions beyond
-    // being called from a process that may allocate a console, which any
-    // windows-subsystem process may.
+    let Some(hwnd) = own_console() else { return };
+    // SAFETY: `hwnd` came from GetConsoleWindow and was checked valid.
+    // Registering the handler more than once is harmless - Windows keeps a
+    // list and ours is idempotent.
     unsafe {
-        if !ALLOCATED.swap(true, Ordering::SeqCst) {
-            if AllocConsole().is_err() {
-                ALLOCATED.store(false, Ordering::SeqCst);
-                return;
-            }
-            let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
-        }
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_invalid() {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-        }
+        let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
+        let _ = ShowWindow(hwnd, SW_SHOW);
     }
 }
 
-/// Hides without freeing.
+/// Hides it. Never frees it.
 pub fn hide() {
-    // SAFETY: GetConsoleWindow returns null when no console exists, which the
-    // invalid check covers.
+    let Some(hwnd) = own_console() else { return };
+    // SAFETY: `hwnd` came from GetConsoleWindow and was checked valid.
+    // Freeing instead would invalidate stdout, and println! aborts on a
+    // failed write.
     unsafe {
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_invalid() {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-    }
-}
-
-/// Frees it at shutdown.
-pub fn release() {
-    // SAFETY: harmless when no console was ever allocated.
-    unsafe {
-        if ALLOCATED.swap(false, Ordering::SeqCst) {
-            let _ = FreeConsole();
-        }
+        let _ = ShowWindow(hwnd, SW_HIDE);
     }
 }
 ```
@@ -923,11 +934,17 @@ In `src/app.rs`'s `run`, after the theme is built:
     }
 ```
 
-And in the shutdown sequence, after `drop(tray);`:
+There is nothing to release at shutdown — the console was never allocated by
+us, only shown or hidden, and the process exiting takes it with it.
+
+Also move the console ownership check out of `src/main.rs`: delete
+`hide_own_console` there and replace its call in `main` with
 
 ```rust
-    crate::ui::console::release();
+    chibipop::ui::console::hide();
 ```
+
+so one module owns the "is this console ours" question rather than two.
 
 In `handle_worker_outcome`'s `WorkerOutcome::Ready` arm, print the resolved
 hover. **Placement matters:** it goes immediately *after* the `same_content`
