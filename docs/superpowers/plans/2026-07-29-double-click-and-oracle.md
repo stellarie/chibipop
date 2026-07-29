@@ -463,7 +463,121 @@ C:\\Windows\\System32."
 
 ---
 
-## Task 3: Windows subsystem, with the console re-attached
+## Task 3: Hide the console when we own it alone
+
+> **This task replaces an earlier version that was tried and reverted.**
+> That version set `#![windows_subsystem = "windows"]` and called
+> `AttachConsole(ATTACH_PARENT_PROCESS)`. Attaching a console does **not**
+> rebind the standard handles, so a process launched without redirection had
+> an unusable stdout. Measured on this machine: console subsystem gave a
+> correct 647-byte redirect; GUI + `AttachConsole` gave 0 bytes; GUI +
+> conditional `SetStdHandle` gave 0 bytes **and a panic**, in PowerShell and
+> cmd alike, because `println!` aborts the process when a write fails.
+> Commits `79b9c61` and `9948b0d`, reverted by `9d5a582`.
+
+Stay on the console subsystem — everything that works today keeps working —
+and hide the console window when it belongs to us alone.
+
+**Hide, never free.** `FreeConsole` would invalidate stdout, and `app::run`
+prints on startup, so freeing reintroduces exactly the panic the reverted
+approach died of. A hidden console keeps every handle valid: output goes into
+a window nobody sees, and redirection is untouched.
+
+**Files:**
+- Modify: `Cargo.toml` (one feature)
+- Modify: `src/main.rs`
+
+**Interfaces:**
+- Produces: `hide_own_console()`, called first in `main`.
+
+- [ ] **Step 1: Add the console feature**
+
+In `Cargo.toml`, add `"Win32_System_Console",` to the `windows` feature list,
+one feature per line as the rest of the list already is.
+
+- [ ] **Step 2: Write the function**
+
+Add to `src/main.rs`:
+
+```rust
+/// Hides a console only we hold.
+///
+/// A double-click gets a console with this process alone attached. Launched
+/// from a shell, the shell is attached too and the window is not ours to
+/// touch. Hidden rather than freed: freeing invalidates stdout, and
+/// `println!` aborts the process when a write fails.
+fn hide_own_console() {
+    use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    // SAFETY: GetConsoleProcessList writes at most `pids.len()` entries into
+    // the buffer and returns the true count, which may exceed it - we only
+    // compare against 1, so a truncated write cannot mislead us.
+    // GetConsoleWindow returns null when no console exists, which the
+    // is_invalid check covers.
+    unsafe {
+        let mut pids = [0u32; 4];
+        if GetConsoleProcessList(&mut pids) != 1 {
+            return;
+        }
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_invalid() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+```
+
+- [ ] **Step 3: Call it first**
+
+```rust
+fn main() -> Result<()> {
+    hide_own_console();
+    let cli = Cli::parse();
+```
+
+- [ ] **Step 4: Verify redirection is untouched in every shell**
+
+All four must produce real output. This is the regression the reverted
+approach caused, so it is the point of the task.
+
+```bash
+./target/release/chibipop.exe lookup 食べた | head -3
+./target/release/chibipop.exe lookup 食べた > b.txt && wc -c < b.txt && rm b.txt
+powershell -NoProfile -Command "& '.\target\release\chibipop.exe' lookup 食べた"
+cmd //c "target\release\chibipop.exe lookup 食べた > c.txt" && wc -c < c.txt && rm c.txt
+```
+
+- [ ] **Step 5: Gate**
+
+```bash
+cargo test 2>&1 | grep -E "^test result" | awk '/ok\./ {s+=$4} END {print "TOTAL: " s+0}'
+cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -cE "^error: (doc list|explicit call|this function|this loop)"
+```
+Expect TOTAL 248 and exactly 5.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add Cargo.toml src/main.rs
+git commit -m "feat(cli): hide the console when it is ours alone
+
+A console-subsystem binary flashes a console on double-click. Switching to
+the windows subsystem removes it and takes stdout with it - tried, measured,
+reverted.
+
+This keeps the subsystem and hides the window instead, only when
+GetConsoleProcessList reports this process as the sole attachment. A shell
+launch has the shell attached too and is left alone, so redirection and every
+diagnostic behave exactly as before.
+
+Hidden rather than freed on purpose: FreeConsole invalidates stdout, app::run
+prints on startup, and println! aborts the process when a write fails."
+```
+
+---
+
+## Task 3 (SUPERSEDED): Windows subsystem, with the console re-attached
 
 **Files:**
 - Modify: `Cargo.toml` (add one feature)
