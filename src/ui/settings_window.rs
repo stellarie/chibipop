@@ -22,14 +22,19 @@
 //! This module holds no opinion about what any setting means: it is handed a
 //! [`SettingsForm`] and hands one back.
 
-use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+use crate::settings::{shown_name, SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use anyhow::{Context, Result};
-use std::cell::Cell;
-use windows::core::{w, Error, PCWSTR, Result as WinResult};
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
+use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, ReleaseDC, COLOR_BTNFACE,
     ENUMLOGFONTEXW, HFONT, LOGFONTW, SHIFTJIS_CHARSET, TEXTMETRICW,
+};
+use windows::Win32::UI::Controls::Dialogs::{
+    GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
+    OFN_NOCHANGEDIR, OPENFILENAMEW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
@@ -65,6 +70,11 @@ const ID_DICT_DOWN: i32 = 113;
 const ID_PASSES: i32 = 114;
 const ID_SHOW_SCAN: i32 = 115;
 const ID_QUIT: i32 = 116;
+const ID_DICT_ADD: i32 = 117;
+const ID_DICT_REMOVE: i32 = 118;
+const ID_FREQS: i32 = 119;
+const ID_FREQ_ADD: i32 = 120;
+const ID_FREQ_REMOVE: i32 = 121;
 
 // ---- layout, in 96-DPI pixels; `child` scales every one of them ----
 
@@ -72,9 +82,39 @@ const WIN_W: i32 = 470;
 const PAD: i32 = 14;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
+const GROUP_GAP: i32 = 10;
+const BTN_W: i32 = 92;
+const BTN_PITCH: i32 = ROW_H + 4;
 const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
+
+/// Which list a button acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Dicts,
+    Freqs,
+}
+
+impl Target {
+    fn list_id(self) -> i32 {
+        match self {
+            Target::Dicts => ID_DICTS,
+            Target::Freqs => ID_FREQS,
+        }
+    }
+
+    fn is_freq(self) -> bool {
+        self == Target::Freqs
+    }
+}
+
+/// A click to service.
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    Add(Target),
+    Remove(Target),
+}
 
 fn class_name() -> PCWSTR {
     w!("ChibipopSettingsClass")
@@ -105,10 +145,24 @@ thread_local! {
     // pointer across create/`Drop`. Keyed by `HWND` so a stale outcome from a
     // previous window can never be read by a new one.
     static OUTCOME: Cell<Option<(isize, SettingsOutcome)>> = const { Cell::new(None) };
+
+    // The pending Add or Remove.
+    static ACTION: Cell<Option<(isize, Action)>> = const { Cell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
     OUTCOME.with(|c| c.set(Some((hwnd.0 as isize, outcome))));
+}
+
+fn record_action(hwnd: HWND, action: Action) {
+    ACTION.with(|c| c.set(Some((hwnd.0 as isize, action))));
+    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
+    // live for the duration of this call. WM_NULL carries no payload and is
+    // discarded by `DefWindowProcW`; posting it only ends the caller's
+    // `GetMessageW` block so `pump` runs without waiting for other input.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -119,8 +173,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // LBN_SELCHANGE: without this the Move buttons keep whatever
             // enabled state they had when the window opened, so clicking a
             // dictionary and pressing Move up does nothing at all.
-            if id == ID_DICTS && notify == LBN_SELCHANGE as u16 {
-                unsafe { update_move_buttons(hwnd) };
+            if (id == ID_DICTS || id == ID_FREQS) && notify == LBN_SELCHANGE as u16 {
+                unsafe { update_list_buttons(hwnd) };
                 return LRESULT(0);
             }
             match id {
@@ -134,6 +188,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
                 ID_DICT_UP => unsafe { move_selected(hwnd, -1) },
                 ID_DICT_DOWN => unsafe { move_selected(hwnd, 1) },
+                ID_DICT_ADD => record_action(hwnd, Action::Add(Target::Dicts)),
+                ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
+                ID_FREQ_ADD => record_action(hwnd, Action::Add(Target::Freqs)),
+                ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
                 _ => {}
             }
             LRESULT(0)
@@ -360,27 +418,31 @@ unsafe fn move_selected(hwnd: HWND, delta: i32) {
             Some(LPARAM(buf.as_ptr() as isize)),
         );
         SendMessageW(list, LB_SETCURSEL, Some(WPARAM(target as usize)), None);
-        update_move_buttons(hwnd);
+        update_list_buttons(hwnd);
     }
 }
 
-/// Move up is disabled on the first item and Move down on the last, rather
-/// than silently doing nothing.
-unsafe fn update_move_buttons(hwnd: HWND) {
-    // SAFETY: both ids are live children of `hwnd`, created in `open`.
+/// Disable what cannot act.
+unsafe fn update_list_buttons(hwnd: HWND) {
+    // SAFETY: every id below is a live child of `hwnd`, created in `build`,
+    // and each `GetDlgItem` result is checked before it is used.
     unsafe {
-        let list = GetDlgItem(Some(hwnd), ID_DICTS).unwrap_or_default();
-        if list.is_invalid() {
+        let dicts = GetDlgItem(Some(hwnd), ID_DICTS).unwrap_or_default();
+        let freqs = GetDlgItem(Some(hwnd), ID_FREQS).unwrap_or_default();
+        if dicts.is_invalid() || freqs.is_invalid() {
             return;
         }
-        let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
-        let cur = SendMessageW(list, LB_GETCURSEL, None, None).0;
-        // Disabling the control that currently has focus leaves focus
-        // nowhere, so hand it to the list first.
+        let count = SendMessageW(dicts, LB_GETCOUNT, None, None).0;
+        let cur = SendMessageW(dicts, LB_GETCURSEL, None, None).0;
+        let freq_cur = SendMessageW(freqs, LB_GETCURSEL, None, None).0;
+        // Focus must not be orphaned.
         let focused = GetFocus();
-        for (id, enable) in
-            [(ID_DICT_UP, cur > 0), (ID_DICT_DOWN, cur >= 0 && cur < count - 1)]
-        {
+        for (id, list, enable) in [
+            (ID_DICT_UP, dicts, cur > 0),
+            (ID_DICT_DOWN, dicts, cur >= 0 && cur < count - 1),
+            (ID_DICT_REMOVE, dicts, cur >= 0),
+            (ID_FREQ_REMOVE, freqs, freq_cur >= 0),
+        ] {
             if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
                 if !enable && focused == btn {
                     let _ = SetFocus(Some(list));
@@ -389,6 +451,91 @@ unsafe fn update_move_buttons(hwnd: HWND) {
             }
         }
     }
+}
+
+/// One row's text.
+unsafe fn list_row(list: HWND, index: isize) -> Option<String> {
+    // SAFETY: `list` is a live listbox owned by the caller; the buffer is
+    // sized to the length LB_GETTEXTLEN itself reported for this row, which
+    // is the contract LB_GETTEXT writes against.
+    unsafe {
+        let len = SendMessageW(list, LB_GETTEXTLEN, Some(WPARAM(index as usize)), None).0;
+        if len <= 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        SendMessageW(
+            list,
+            LB_GETTEXT,
+            Some(WPARAM(index as usize)),
+            Some(LPARAM(buf.as_mut_ptr() as isize)),
+        );
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Every row, or None if gone.
+unsafe fn list_rows(hwnd: HWND, id: i32) -> Option<Vec<String>> {
+    // SAFETY: `id` names a child of `hwnd`; a missing one yields `Err` here
+    // rather than a dangling handle, and `list_row` states its own contract.
+    unsafe {
+        let list = GetDlgItem(Some(hwnd), id).ok()?;
+        let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
+        Some((0..count.max(0)).filter_map(|i| list_row(list, i)).collect())
+    }
+}
+
+/// Pick .zip archives.
+///
+/// Empty when cancelled.
+unsafe fn pick_archives(owner: HWND) -> Vec<PathBuf> {
+    let mut buf = vec![0u16; 32 * 1024];
+    // Win32 wants a NUL-run.
+    let filter: Vec<u16> = "Yomitan archives (*.zip)\0*.zip\0\0".encode_utf16().collect();
+    let title = wide("Add a dictionary archive");
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        nFilterIndex: 1,
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_EXPLORER
+            | OFN_ALLOWMULTISELECT
+            | OFN_FILEMUSTEXIST
+            | OFN_HIDEREADONLY
+            | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    // SAFETY: `buf`, `filter` and `title` outlive the call and are borrowed
+    // by `ofn` for exactly its duration; `nMaxFile` is `buf`'s own length, so
+    // the dialog cannot write past it. `lStructSize` declares the size the
+    // call validates against. The owner window is live on this thread.
+    let picked = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool();
+    if !picked {
+        return Vec::new();
+    }
+    split_picked(&buf)
+}
+
+/// Split the picker's buffer.
+///
+/// Two shapes; see the tests.
+fn split_picked(buf: &[u16]) -> Vec<PathBuf> {
+    let mut parts = buf
+        .split(|&c| c == 0)
+        .take_while(|part| !part.is_empty())
+        .map(String::from_utf16_lossy);
+    let Some(first) = parts.next() else {
+        return Vec::new();
+    };
+    let rest: Vec<String> = parts.collect();
+    if rest.is_empty() {
+        return vec![PathBuf::from(first)];
+    }
+    let dir = Path::new(&first);
+    rest.iter().map(|name| dir.join(name)).collect()
 }
 
 /// The permitted values for a numeric combo, with `current` inserted if it is
@@ -420,6 +567,8 @@ pub struct SettingsWindow {
     summaries: Vec<i64>,
     passes: Vec<i64>,
     fonts: Vec<String>,
+    /// What Apply has yet to do.
+    staged: RefCell<SettingsForm>,
 }
 
 impl SettingsWindow {
@@ -470,6 +619,7 @@ impl SettingsWindow {
                 summaries: Vec::new(),
                 passes: Vec::new(),
                 fonts: Vec::new(),
+                staged: RefCell::new(form.clone()),
             };
             // `build` reports where its layout actually ended; the window is
             // then sized to that rather than to a guess. The first version of
@@ -515,6 +665,87 @@ impl SettingsWindow {
             }
             _ => None,
         })
+    }
+
+    /// Run a pending button.
+    ///
+    /// Callback precedes a picker.
+    pub fn pump(&self, before_blocking: impl FnOnce()) {
+        let action = ACTION.with(|c| match c.get() {
+            Some((h, a)) if h == self.hwnd.0 as isize => {
+                c.set(None);
+                Some(a)
+            }
+            _ => None,
+        });
+        let Some(action) = action else {
+            return;
+        };
+        // SAFETY: both helpers act only on live children of `self.hwnd`,
+        // which outlives this call, and each states its own contract.
+        unsafe {
+            match action {
+                Action::Remove(target) => self.remove_selected(target),
+                Action::Add(target) => {
+                    // D9: the picker pumps too.
+                    before_blocking();
+                    self.add_picked(target);
+                }
+            }
+        }
+    }
+
+    /// Drop the selected row.
+    unsafe fn remove_selected(&self, target: Target) {
+        // SAFETY: `target.list_id()` names a live child of `self.hwnd`;
+        // `list_row` and `update_list_buttons` state their own contracts.
+        unsafe {
+            let Ok(list) = GetDlgItem(Some(self.hwnd), target.list_id()) else {
+                return;
+            };
+            let cur = SendMessageW(list, LB_GETCURSEL, None, None).0;
+            if cur < 0 {
+                return;
+            }
+            let Some(name) = list_row(list, cur) else {
+                return;
+            };
+            SendMessageW(list, LB_DELETESTRING, Some(WPARAM(cur as usize)), None);
+            let left = SendMessageW(list, LB_GETCOUNT, None, None).0;
+            if left > 0 {
+                let next = cur.min(left - 1);
+                SendMessageW(list, LB_SETCURSEL, Some(WPARAM(next as usize)), None);
+            }
+            self.staged.borrow_mut().stage_remove(&name);
+            update_list_buttons(self.hwnd);
+        }
+    }
+
+    /// Stage whatever was picked.
+    unsafe fn add_picked(&self, target: Target) {
+        // SAFETY: `pick_archives` owns every buffer it hands the dialog;
+        // `target.list_id()` names a live child of `self.hwnd`, and the
+        // string each `LB_ADDSTRING` copies outlives that call.
+        unsafe {
+            let picked = pick_archives(self.hwnd);
+            let Ok(list) = GetDlgItem(Some(self.hwnd), target.list_id()) else {
+                return;
+            };
+            for path in picked {
+                if !self.staged.borrow_mut().stage_add(&path, target.is_freq()) {
+                    eprintln!("chibipop: {} is already in the list.", path.display());
+                    continue;
+                }
+                let Some(name) = shown_name(&path) else {
+                    continue;
+                };
+                SendMessageW(list, LB_ADDSTRING, None, Some(LPARAM(wide(&name).as_ptr() as isize)));
+            }
+            if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            update_list_buttons(self.hwnd);
+        }
     }
 
     /// Resize so the client area holds `client_w` x `client_h` 96-DPI pixels,
@@ -679,28 +910,50 @@ impl SettingsWindow {
             y += ROW_H + 18;
 
             // ---- Dictionaries ----
-            let dict_h = 5 * ROW_H + 34;
+            let bx = WIN_W - PAD - 100;
+            let list_w = WIN_W - 2 * PAD - 110;
+            let hint_h = 28;
+            // Four buttons set the height.
+            let dict_span = 3 * BTN_PITCH + ROW_H;
+            let dict_h = 20 + dict_span + ROW_GAP + hint_h + 8;
             group("Dictionaries — topmost is shown first", y, dict_h)?;
             y += 20;
             let list = child(h, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
-                PAD, y, WIN_W - 2 * PAD - 110, 4 * ROW_H, ID_DICTS, f)?;
+                PAD, y, list_w, dict_span, ID_DICTS, f)?;
             for name in &form.dict_names {
                 SendMessageW(list, LB_ADDSTRING, None,
                     Some(LPARAM(wide(name).as_ptr() as isize)));
             }
             SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
-            let bx = WIN_W - PAD - 100;
-            child(h, w!("BUTTON"), "Move up", WS_TABSTOP,
-                  bx, y, 92, ROW_H, ID_DICT_UP, f)?;
-            child(h, w!("BUTTON"), "Move down", WS_TABSTOP,
-                  bx, y + ROW_H + 4, 92, ROW_H, ID_DICT_DOWN, f)?;
-            y += 4 * ROW_H + 2;
+            for (i, (text, id)) in [
+                ("Move up", ID_DICT_UP),
+                ("Move down", ID_DICT_DOWN),
+                ("Add…", ID_DICT_ADD),
+                ("Remove", ID_DICT_REMOVE),
+            ]
+            .iter()
+            .enumerate()
+            {
+                child(h, w!("BUTTON"), text, WS_TABSTOP,
+                      bx, y + i as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?;
+            }
+            y += dict_span + ROW_GAP;
             child(h, w!("STATIC"),
                 "Order is matched by dictionary name. If you rebuild your \
                  dictionaries, check this list again.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?;
-            y += dict_h - 4 * ROW_H - 18;
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, hint_h, 0, f)?;
+            y += hint_h + 8;
+
+            // A rebuild is library-only.
+            if form.library_empty && !form.dict_names.is_empty() {
+                child(h, w!("STATIC"),
+                    "chibipop is using a dictionary built outside the app. Adding or \
+                     removing here rebuilds from this list only — import your original \
+                     .zip files first.",
+                    WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 44, 0, f)?;
+                y += 48;
+            }
 
             // Spec D6a: name the entry, because the visible symptom of a
             // stale one is a dictionary silently sorting last.
@@ -712,8 +965,29 @@ impl SettingsWindow {
                 );
                 child(h, w!("STATIC"), &msg, WINDOW_STYLE(0),
                       PAD, y, WIN_W - 2 * PAD - 20, 32, 0, f)?;
+                y += 36;
             }
-            y += 36;
+            y += GROUP_GAP;
+
+            // ---- Frequency data ----
+            // WS_GROUP ends the last one.
+            let freq_span = BTN_PITCH + ROW_H;
+            let freq_h = 20 + freq_span + 8;
+            group_start("Frequency data — how common each word is", y, freq_h)?;
+            y += 20;
+            let freqs = child(h, w!("LISTBOX"), "",
+                WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
+                PAD, y, list_w, freq_span, ID_FREQS, f)?;
+            for name in &form.freq_names {
+                SendMessageW(freqs, LB_ADDSTRING, None,
+                    Some(LPARAM(wide(name).as_ptr() as isize)));
+            }
+            SendMessageW(freqs, LB_SETCURSEL, Some(WPARAM(0)), None);
+            child(h, w!("BUTTON"), "Add…", WS_TABSTOP,
+                  bx, y, BTN_W, ROW_H, ID_FREQ_ADD, f)?;
+            child(h, w!("BUTTON"), "Remove", WS_TABSTOP,
+                  bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?;
+            y += freq_span + 8 + GROUP_GAP;
 
             // ---- Debug ----
             group("Debug", y, 3 * ROW_H + 34)?;
@@ -762,7 +1036,7 @@ impl SettingsWindow {
                       PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
             }
 
-            update_move_buttons(h);
+            update_list_buttons(h);
         }
         Ok(y + ROW_H + 8)
     }
@@ -788,23 +1062,12 @@ impl SettingsWindow {
                 if i < 0 { fallback } else { *values.get(i as usize).unwrap_or(&fallback) }
             };
 
-            let mut dict_names = Vec::new();
-            if let Ok(list) = GetDlgItem(Some(h), ID_DICTS) {
-                let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
-                for i in 0..count.max(0) {
-                    let len = SendMessageW(list, LB_GETTEXTLEN, Some(WPARAM(i as usize)), None).0;
-                    if len <= 0 {
-                        continue;
-                    }
-                    let mut buf = vec![0u16; len as usize + 1];
-                    SendMessageW(list, LB_GETTEXT, Some(WPARAM(i as usize)),
-                                 Some(LPARAM(buf.as_mut_ptr() as isize)));
-                    dict_names.push(String::from_utf16_lossy(&buf[..len as usize]));
-                }
-            }
-            if dict_names.is_empty() {
-                dict_names = template.dict_names.clone();
-            }
+            // Empty is not missing.
+            let dict_names =
+                list_rows(h, ID_DICTS).unwrap_or_else(|| template.dict_names.clone());
+            let freq_names =
+                list_rows(h, ID_FREQS).unwrap_or_else(|| template.freq_names.clone());
+            let staged = self.staged.borrow();
 
             let theme = if combo_index(ID_THEME) == 1 { "light" } else { "dark" };
             let font = {
@@ -835,6 +1098,10 @@ impl SettingsWindow {
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
                                      template.max_ocr_passes as i64) as u8,
                 show_scan_region: checked(ID_SHOW_SCAN),
+                freq_names,
+                staged_adds: staged.staged_adds.clone(),
+                staged_removes: staged.staged_removes.clone(),
+                library_empty: staged.library_empty,
             }
         }
     }
@@ -860,6 +1127,11 @@ unsafe fn fill_numeric(combo: HWND, values: &[i64], current: i64) {
 impl Drop for SettingsWindow {
     fn drop(&mut self) {
         OUTCOME.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        ACTION.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
@@ -930,6 +1202,58 @@ mod tests {
     #[test]
     fn a_value_outside_the_range_is_not_inserted() {
         assert_eq!(vec![10, 15, 20], numeric_choices(10, 20, 5, 999));
+    }
+
+    fn nul_run(parts: &[&str]) -> Vec<u16> {
+        let mut buf: Vec<u16> = Vec::new();
+        for part in parts {
+            buf.extend(part.encode_utf16());
+            buf.push(0);
+        }
+        buf.push(0);
+        buf.resize(128, 0);
+        buf
+    }
+
+    /// One file is a whole path.
+    #[test]
+    fn a_single_pick_is_not_treated_as_a_directory() {
+        assert_eq!(
+            vec![PathBuf::from(r"C:\dicts\terms.zip")],
+            split_picked(&nul_run(&[r"C:\dicts\terms.zip"]))
+        );
+    }
+
+    /// A directory, then names.
+    #[test]
+    fn a_multi_pick_joins_each_name_onto_the_directory() {
+        assert_eq!(
+            vec![PathBuf::from(r"C:\dicts\a.zip"), PathBuf::from(r"C:\dicts\b.zip")],
+            split_picked(&nul_run(&[r"C:\dicts", "a.zip", "b.zip"]))
+        );
+    }
+
+    #[test]
+    fn a_root_directory_does_not_double_its_separator() {
+        assert_eq!(
+            vec![PathBuf::from(r"C:\a.zip")],
+            split_picked(&nul_run(&[r"C:\", "a.zip"]))
+        );
+    }
+
+    #[test]
+    fn a_cancelled_pick_yields_nothing() {
+        assert!(split_picked(&[0u16; 64]).is_empty());
+        assert!(split_picked(&[]).is_empty());
+    }
+
+    /// UTF-16 keeps non-ASCII.
+    #[test]
+    fn a_japanese_filename_round_trips() {
+        assert_eq!(
+            vec![PathBuf::from(r"C:\辞書\大辞林　第四版.zip")],
+            split_picked(&nul_run(&[r"C:\辞書", "大辞林　第四版.zip"]))
+        );
     }
 
     /// The vertical-writing duplicates Windows lists beside each family are

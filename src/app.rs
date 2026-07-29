@@ -288,6 +288,9 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
     // SAFETY: `msg` is this loop's own stack storage, and `window` is alive
     // for the whole loop - it is dropped only after this function returns.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        // No hooks, nothing to disarm.
+        window.pump(|| {});
+
         // Same order as `run`'s loop: the dialog manager gets first refusal
         // so Tab, arrows and Esc reach the controls rather than the app.
         if !unsafe { IsDialogMessageW(window.hwnd(), &msg) }.as_bool() {
@@ -577,6 +580,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         // without `DialogBoxParamW`'s nested pump, which would stop WM_TIMER
         // arriving and latch the wheel arm (spec D2).
         if let Some(w) = &settings {
+            // Spec D9: the picker pumps.
+            w.pump(|| {
+                Hooks::set_scroll_armed(false);
+                drain_capture_guard();
+            });
+
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
             if unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool() {
