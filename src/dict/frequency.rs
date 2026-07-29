@@ -9,24 +9,29 @@ pub type FreqTable = HashMap<(String, Option<String>), i64>;
 pub fn parse_freq_rows(rows: &[serde_json::Value]) -> FreqTable {
     let mut table = FreqTable::new();
     for row in rows {
-        let Some(row) = row.as_array() else { continue };
-        if row.len() < 3 || row[1].as_str() != Some("freq") {
-            continue;
-        }
-        let Some(term) = row[0].as_str() else { continue };
-        let (reading, rank) = extract_reading_and_rank(&row[2]);
-        let Some(rank) = rank else { continue };
-
-        let key = (term.to_string(), reading);
-        let should_insert = match table.get(&key) {
-            Some(&prev) => rank < prev,
-            None => true,
-        };
-        if should_insert {
-            table.insert(key, rank);
-        }
+        merge_freq_row(&mut table, row);
     }
     table
+}
+
+/// One row into a table.
+pub fn merge_freq_row(table: &mut FreqTable, row: &serde_json::Value) {
+    let Some(row) = row.as_array() else { return };
+    if row.len() < 3 || row[1].as_str() != Some("freq") {
+        return;
+    }
+    let Some(term) = row[0].as_str() else { return };
+    let (reading, rank) = extract_reading_and_rank(&row[2]);
+    let Some(rank) = rank else { return };
+
+    let key = (term.to_string(), reading);
+    let should_insert = match table.get(&key) {
+        Some(&prev) => rank < prev,
+        None => true,
+    };
+    if should_insert {
+        table.insert(key, rank);
+    }
 }
 
 /// Rank for a term/reading.
