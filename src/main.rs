@@ -96,30 +96,8 @@ enum Command {
     },
 }
 
-/// Hides a console only we hold.
-fn hide_own_console() {
-    use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
-
-    // SAFETY: GetConsoleProcessList writes at most `pids.len()` entries into
-    // the buffer and returns the true count, which may exceed it - we only
-    // compare against 1, so a truncated write cannot mislead us.
-    // GetConsoleWindow returns null when no console exists, which the
-    // is_invalid check covers.
-    unsafe {
-        let mut pids = [0u32; 4];
-        if GetConsoleProcessList(&mut pids) != 1 {
-            return;
-        }
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_invalid() {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-    }
-}
-
 fn main() -> Result<()> {
-    hide_own_console();
+    chibipop::ui::console::hide();
     let cli = Cli::parse();
     // A double-click passes none.
     let command = cli.command.unwrap_or(Command::Run {

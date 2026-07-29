@@ -458,6 +458,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
     let theme = theme_from_config(&cfg.popup);
+    if cfg.debug.show_lookup_log {
+        crate::ui::console::show();
+    }
     let max_height_percent = i32::from(cfg.popup.max_height_percent);
     let scroll_popup = cfg.popup.scroll_popup;
 
@@ -1049,6 +1052,13 @@ fn handle_worker_outcome(
         WorkerOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
             if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
                 return; // Already on screen, unchanged.
+            }
+            // Only changed popups.
+            if let Some(card) = &presentation.top {
+                let head = card.written.clone()
+                    .or_else(|| card.reading.clone())
+                    .unwrap_or_default();
+                println!("{head}  match={}", card.match_len);
             }
             match show_presentation(
                 popup,

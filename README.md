@@ -120,6 +120,7 @@ Everything is in the settings window — you shouldn't need to edit any files.
 | **Dictionaries** | Drag the order around. The one at the top is shown first. |
 | **OCR passes per hover** | Leave at 1. Higher reads further ahead but can pick the wrong character. |
 | **Outline what each hover captured** | A diagnostic view showing where chibipop looked. Off by default. |
+| **Show the lookup log** | Opens a small text window listing each word chibipop reads, so you can see what it's doing. |
 
 Pressing **Apply** saves your settings and restarts chibipop, which takes
 about a fifth of a second. Your settings live in `chibipop.toml` beside

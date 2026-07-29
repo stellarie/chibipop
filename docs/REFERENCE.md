@@ -90,6 +90,7 @@ max_ocr_passes = 1      # 1-5; 1 = no forward tiling (the default)
 
 [debug]
 show_scan_region = false   # outline what each hover captured
+show_lookup_log = false    # a console printing each resolved hover
 ```
 
 **Every setting is read once at startup.** Edit the file with chibipop
@@ -201,7 +202,7 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**245 tests.** Plus the dictionary builder, from `tools/build-dict`:
+**249 tests.** Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests
