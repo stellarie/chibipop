@@ -335,12 +335,16 @@ fn main() -> Result<()> {
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
             // Opened only for the dictionary identities the reorder list
             // shows - no engine, no rules, no OCR.
-            let dictionary = SqliteDictionary::open(&dict).with_context(|| {
-                format!("opening {} - build it with tools/build-dict/build.py",
-                        dict.display())
-            })?;
-            let dicts = dictionary.dicts().context("reading dictionary identities")?;
-            chibipop::app::settings_only(cfg, &dicts, &config_path)
+            //
+            // A rebuild renames onto it.
+            let dicts = {
+                let dictionary = SqliteDictionary::open(&dict).with_context(|| {
+                    format!("opening {} - rebuild it in the settings window",
+                            dict.display())
+                })?;
+                dictionary.dicts().context("reading dictionary identities")?
+            };
+            chibipop::app::settings_only(cfg, &dicts, &config_path, &dict)
         }
         Command::Run { dict, rules, config } => {
             let dict = dict_path(dict);

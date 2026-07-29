@@ -25,7 +25,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **347** total across **6** targets |
+| Rust tests | **all green**, **384** total across **6** targets |
 | Clippy | **exactly 5** accepted errors |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -241,7 +241,33 @@ doubts it.
     them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
 12. **Reorder dictionaries → Apply** → order changes, and **`chibipop.toml` still holds the
     original substrings**, merely reordered. Invisible from the UI; check the file.
-13. **Open Settings, touch nothing, Apply** → the TOML is unchanged apart from formatting.
+13. **Open Settings, touch nothing, Apply** → the TOML is unchanged apart from formatting, and it
+    returns in well under a second. *(A settings-only Apply must never trigger a rebuild. Measured
+    2026-07-29: 128 ms for `chibipop settings`.)*
+14. **Add… → pick a `.zip` → Apply.** **HUMAN ONLY, and this is the one part of the settings window
+    an agent genuinely cannot drive** — `GetOpenFileNameW`'s dialog ignores `PostMessage` of
+    `WM_COMMAND IDOK`, `BM_CLICK` on its Open button, and a synthesized `VK_RETURN` in its filename
+    edit; all three were measured on 2026-07-29 and the dialog stayed open. Everything *around* it
+    is agent-verifiable (14a).
+    The acceptance run: import two term archives and one frequency archive into a clean `library/`,
+    Apply, confirm the rebuild completes and lookups reflect all three; then remove one, Apply,
+    confirm it is gone and the others still rank correctly.
+14a. **Remove → Apply, with no picker involved.** ✅ **Agent-verified 2026-07-29** on
+    `chibipop settings` against a fixture library, driven by `EnumWindows` + `PostMessage`:
+    the row leaves the listbox and **`library/` is untouched until Apply**; Apply then deletes that
+    one archive, writes `library.json`, rebuilds, and the database's `dict` table loses exactly that
+    dictionary. During the build, `id=100` and `id=117` read `en=False` and the status line
+    (`id=122`) shows `Rebuilding your dictionary…` then `Reading <name>…` — **never the child's own
+    `wrote …chibipop.sqlite.tmp: 3 entries, 5 term rows`**.
+14b. **Remove *everything* → Apply** → refused, in the window: `Not applied: that would leave
+    chibipop with no dictionary`. ✅ **Agent-verified 2026-07-29** — the window stays open, the
+    database's hash is unchanged and **no archive is deleted**, because the refusal comes before the
+    first `remove`.
+14c. **A corrupt `.zip` in `library/` → Apply** → `The rebuild failed. Your dictionary is
+    unchanged.` ✅ **Agent-verified 2026-07-29** — window stays open, Apply re-enables, database
+    hash unchanged, and stderr carries the innermost cause (`invalid Zip archive: Could not find
+    EOCD`). Note the *library* has already been updated at that point; that is the documented
+    ordering, and pressing Apply again after fixing the archive completes the job.
 
 ---
 
@@ -258,6 +284,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **`display_order` holds substrings, not names** | Order works today, silently stops after the next dictionary rebuild. Never write live names back. |
 | **A task that adds a field must be the task that reads it** | `field never read` = a 6th clippy error against a 5-error gate. |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
+| **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so `chibipop run` cannot have the new database renamed over the one its worker is holding. It builds to `<out>.new` and swaps it in **after** the worker is joined, on the way to the restart. Measured, and pinned by `tests/rebuild.rs`. |
 | **`cargo fmt` is not run here** | The repo has never been rustfmt-clean. Do not "fix" it. |
 | **Stray files land in a broad `git add`** | Never `git add -u`/`-A`. Stage by name. |
 | **A copy of `data/` beside the exe shadows the repo's** | `--dict` prefers beside-exe and only falls back to the working directory. A stray `target/release/data/` therefore wins silently, and keeps winning after the real data changes. Delete it rather than refreshing it. |

@@ -75,6 +75,22 @@ const ID_DICT_REMOVE: i32 = 118;
 const ID_FREQS: i32 = 119;
 const ID_FREQ_ADD: i32 = 120;
 const ID_FREQ_REMOVE: i32 = 121;
+const ID_STATUS: i32 = 122;
+
+/// What a rebuild disables.
+const WHILE_BUSY: [i32; 11] = [
+    ID_APPLY,
+    ID_CANCEL,
+    ID_QUIT,
+    ID_DICTS,
+    ID_DICT_UP,
+    ID_DICT_DOWN,
+    ID_DICT_ADD,
+    ID_DICT_REMOVE,
+    ID_FREQS,
+    ID_FREQ_ADD,
+    ID_FREQ_REMOVE,
+];
 
 // ---- layout, in 96-DPI pixels; `child` scales every one of them ----
 
@@ -695,6 +711,38 @@ impl SettingsWindow {
         }
     }
 
+    /// Say what Apply is doing.
+    pub fn set_status(&self, text: &str) {
+        // SAFETY: `ID_STATUS` is a live child of `self.hwnd`, created in
+        // `build`; `SetWindowTextW` copies the string during the call.
+        unsafe {
+            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
+                let _ = SetWindowTextW(c, PCWSTR(wide(text).as_ptr()));
+            }
+        }
+    }
+
+    /// Lock it while it rebuilds.
+    pub fn set_busy(&self, busy: bool) {
+        // SAFETY: every id in `WHILE_BUSY` is a live child of `self.hwnd`,
+        // created in `build`, and each `GetDlgItem` result is checked. Focus
+        // is moved off the controls first, since a disabled window keeping
+        // focus leaves the keyboard talking to nothing.
+        unsafe {
+            if busy {
+                let _ = SetFocus(Some(self.hwnd));
+            }
+            for id in WHILE_BUSY {
+                if let Ok(c) = GetDlgItem(Some(self.hwnd), id) {
+                    let _ = EnableWindow(c, !busy);
+                }
+            }
+            if !busy {
+                update_list_buttons(self.hwnd);
+            }
+        }
+    }
+
     /// Drop the selected row.
     unsafe fn remove_selected(&self, target: Target) {
         // SAFETY: `target.list_id()` names a live child of `self.hwnd`;
@@ -1013,13 +1061,14 @@ impl SettingsWindow {
             y += ROW_H + 18;
 
             // ---- Apply / Cancel ----
+            // Also the progress line.
             child(h, w!("STATIC"),
                 if in_app {
                     "Applying saves your settings and restarts chibipop."
                 } else {
                     "Applying saves your settings. Restart chibipop to use them."
                 },
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 16, ROW_H, 0, f)?;
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 16, ROW_H, ID_STATUS, f)?;
             y += ROW_H + 2;
             child(h, w!("BUTTON"), if in_app { "Apply && Restart" } else { "Apply" },
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,

@@ -7,6 +7,7 @@
 //! about what any of them mean.
 
 use crate::config::{Config, TriggerMode};
+use crate::library::{Kind, Library};
 use crate::present::{dict_order_rank, DictInfo};
 use std::path::{Path, PathBuf};
 
@@ -85,6 +86,43 @@ impl SettingsForm {
 /// How an archive is listed.
 pub fn shown_name(source: &Path) -> Option<String> {
     source.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
+/// Show the library's lists.
+pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
+    form.freq_names = lib
+        .entries
+        .iter()
+        .filter(|e| e.kind == Kind::Frequency)
+        .map(|e| e.name.clone())
+        .collect();
+    form.library_empty = lib.is_empty();
+    form
+}
+
+/// Files a removal names.
+pub fn removed_files(form: &SettingsForm, lib: &Library) -> Vec<String> {
+    form.staged_removes
+        .iter()
+        .filter_map(|name| lib.entries.iter().find(|e| &e.name == name || &e.file == name))
+        .map(|e| e.file.clone())
+        .collect()
+}
+
+/// Term archives Apply leaves.
+pub fn terms_after_apply(form: &SettingsForm, lib: &Library) -> usize {
+    let gone = removed_files(form, lib);
+    let kept = lib
+        .entries
+        .iter()
+        .filter(|e| e.kind == Kind::Term && !gone.contains(&e.file))
+        .count();
+    kept + form.staged_adds.iter().filter(|p| staged_as_term(form, p)).count()
+}
+
+/// Was this add a dictionary?
+fn staged_as_term(form: &SettingsForm, source: &Path) -> bool {
+    shown_name(source).is_some_and(|n| form.dict_names.contains(&n))
 }
 
 /// Flatten `cfg` for editing, listing `dicts` in the order the popup would
@@ -462,6 +500,82 @@ mod tests {
         let out = apply_to(&form, &cfg);
         assert!(!out.dictionaries.display_order.iter().any(|e| e.contains(".zip")));
         assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()], out.dictionaries.display_order);
+    }
+
+    fn library() -> Library {
+        Library {
+            entries: vec![
+                crate::library::Entry {
+                    file: "jitendex.zip".into(),
+                    name: "Jitendex.org [2026-07-09]".into(),
+                    kind: Kind::Term,
+                },
+                crate::library::Entry {
+                    file: "daijirin.zip".into(),
+                    name: "大辞林　第四版".into(),
+                    kind: Kind::Term,
+                },
+                crate::library::Entry {
+                    file: "freq.zip".into(),
+                    name: "jiten_freq_global".into(),
+                    kind: Kind::Frequency,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_frequency_list_comes_from_the_library_not_the_database() {
+        let form = with_library(staged_form(), &library());
+        assert_eq!(vec!["jiten_freq_global".to_string()], form.freq_names);
+        assert!(!form.library_empty);
+        assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], form.dict_names);
+    }
+
+    #[test]
+    fn an_empty_library_says_so() {
+        assert!(with_library(staged_form(), &Library::default()).library_empty);
+    }
+
+    /// A name, not a file.
+    #[test]
+    fn a_removed_row_resolves_to_the_file_that_produced_it() {
+        let mut form = with_library(staged_form(), &library());
+        form.stage_remove("大辞林　第四版");
+        form.stage_remove("jiten_freq_global");
+        assert_eq!(
+            vec!["daijirin.zip".to_string(), "freq.zip".to_string()],
+            removed_files(&form, &library())
+        );
+    }
+
+    /// The existing-user case.
+    #[test]
+    fn a_row_the_library_never_held_names_no_file() {
+        let mut form = staged_form();
+        form.stage_remove("大辞林　第四版");
+        assert!(removed_files(&form, &Library::default()).is_empty());
+    }
+
+    #[test]
+    fn removing_every_dictionary_would_leave_nothing_to_build_from() {
+        let mut form = with_library(staged_form(), &library());
+        assert_eq!(2, terms_after_apply(&form, &library()));
+        form.stage_remove("大辞林　第四版");
+        assert_eq!(1, terms_after_apply(&form, &library()));
+        form.stage_remove("Jitendex.org [2026-07-09]");
+        assert_eq!(0, terms_after_apply(&form, &library()));
+    }
+
+    /// Frequency alone is nothing.
+    #[test]
+    fn a_frequency_only_library_leaves_no_term_archives() {
+        let mut form = with_library(staged_form(), &Library::default());
+        form.dict_names.clear();
+        assert!(form.stage_add(Path::new(r"C:\d\jiten_freq.zip"), true));
+        assert_eq!(0, terms_after_apply(&form, &Library::default()));
+        assert!(form.stage_add(Path::new(r"C:\d\jmdict.zip"), false));
+        assert_eq!(1, terms_after_apply(&form, &Library::default()));
     }
 
     /// An entry that no longer matches is KEPT, not deleted - it may match a

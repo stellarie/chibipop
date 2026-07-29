@@ -42,13 +42,15 @@
 use crate::config::Config;
 use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
+use crate::library::Library;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
-use crate::settings::{self};
+use crate::rebuild::{self, Progress};
+use crate::settings::{self, SettingsForm};
 use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
@@ -128,6 +130,9 @@ const SCROLL_STEP_PX: i32 = 48;
 /// application, and without it the bug report is "chibipop broke my mouse"
 /// with nothing to search for.
 const ARM_WARN_TICKS: u32 = 250;
+
+/// Rebuild progress poll, ms.
+const REBUILD_TICK_MS: u32 = 100;
 
 /// The popup's width has no config knob (`config.rs`'s `PopupConfig` only
 /// exposes `max_height_percent`) - 420 matches the width Task 5 verified
@@ -278,11 +283,22 @@ impl CaptureGuard {
 /// `run` instance it is not part of, because a half-applied round trip - new
 /// file on disk, old settings still running - is the one outcome `run`'s own
 /// Apply refuses outright, and guessing at another process is worse.
-pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Result<()> {
-    let form = settings::from_config(&cfg, dicts);
+pub fn settings_only(
+    cfg: Config,
+    dicts: &[DictInfo],
+    config_path: &Path,
+    dict_path: &Path,
+) -> Result<()> {
+    let library = library_dir();
+    let form = form_with_library(&cfg, dicts, &library);
     let stale = settings::stale_order_entries(&cfg, dicts);
     let window =
         SettingsWindow::open(&form, &stale, false).context("opening the settings window")?;
+
+    // Nothing holds it open here.
+    let mut rebuild: Option<mpsc::Receiver<Progress>> = None;
+    let mut pending: Option<Config> = None;
+    let mut tick = 0usize;
 
     let mut msg = MSG::default();
     // SAFETY: `msg` is this loop's own stack storage, and `window` is alive
@@ -300,24 +316,151 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
             }
         }
 
+        if let Some(rx) = rebuild.as_ref() {
+            // Not while the child writes.
+            let _ = window.take_outcome();
+            let Some(built) = pump_rebuild(rx, &window) else { continue };
+            rebuild = None;
+            // SAFETY: `tick` is this loop's own timer, set below.
+            unsafe {
+                let _ = KillTimer(None, tick);
+            }
+            window.set_busy(false);
+            match built {
+                Ok(()) => {
+                    let updated = pending.take().unwrap_or_else(|| cfg.clone());
+                    updated.save(config_path).with_context(|| {
+                        format!("saving settings to {}", config_path.display())
+                    })?;
+                    println!("chibipop: rebuilt {}.", dict_path.display());
+                    println!("chibipop: settings saved to {}.", config_path.display());
+                    println!("chibipop: restart chibipop for them to take effect.");
+                    return Ok(());
+                }
+                Err(e) => report_failed_rebuild(&window, &e),
+            }
+            continue;
+        }
+
         match window.take_outcome() {
             // Quit cannot arrive here - `open(.., false)` does not create the
             // button - but closing the window is the only honest reading if
             // it ever did, since there is no instance to quit.
             Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
-                let updated = settings::apply_to(&window.read(&form), &cfg);
-                updated.save(config_path).with_context(|| {
-                    format!("saving settings to {}", config_path.display())
-                })?;
-                println!("chibipop: settings saved to {}.", config_path.display());
-                println!("chibipop: restart chibipop for them to take effect.");
-                return Ok(());
+                let edited = window.read(&form);
+                let updated = settings::apply_to(&edited, &cfg);
+                // A font is not a rebuild.
+                if !edited.has_staged() {
+                    updated.save(config_path).with_context(|| {
+                        format!("saving settings to {}", config_path.display())
+                    })?;
+                    println!("chibipop: settings saved to {}.", config_path.display());
+                    println!("chibipop: restart chibipop for them to take effect.");
+                    return Ok(());
+                }
+                match start_rebuild(&edited, &library, dict_path) {
+                    Err(e) => refuse_apply(&window, &e),
+                    Ok(rx) => {
+                        begin_rebuild(&window);
+                        // SAFETY: a thread timer, killed above on every exit
+                        // from the rebuild - the same shape `run` uses.
+                        tick = unsafe { SetTimer(None, 0, REBUILD_TICK_MS, None) };
+                        pending = Some(updated);
+                        rebuild = Some(rx);
+                    }
+                }
             }
             None => {}
         }
     }
     Ok(())
+}
+
+/// The archive folder.
+fn library_dir() -> PathBuf {
+    crate::paths::beside_exe("library")
+}
+
+/// The form and the library.
+fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
+    let form = settings::from_config(cfg, dicts);
+    match Library::load(dir) {
+        Ok(lib) => settings::with_library(form, &lib),
+        Err(e) => {
+            eprintln!("chibipop: reading {} failed: {e:#}", dir.display());
+            form
+        }
+    }
+}
+
+/// Update the library, build.
+fn start_rebuild(form: &SettingsForm, dir: &Path, out: &Path) -> Result<mpsc::Receiver<Progress>> {
+    stage_into_library(form, dir)?;
+    rebuild::spawn(dir, out)
+}
+
+/// Do what Apply staged.
+///
+/// Refuses before the wait.
+fn stage_into_library(form: &SettingsForm, dir: &Path) -> Result<()> {
+    let mut lib =
+        Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    if settings::terms_after_apply(form, &lib) == 0 {
+        anyhow::bail!("that would leave chibipop with no dictionary");
+    }
+    // A source may live in `dir`.
+    let gone = settings::removed_files(form, &lib);
+    for source in &form.staged_adds {
+        lib.import(dir, source)
+            .with_context(|| format!("importing {}", source.display()))?;
+    }
+    for file in gone {
+        lib.remove(dir, &file).with_context(|| format!("removing {file}"))?;
+    }
+    lib.save(dir)
+}
+
+/// Progress, never blocking.
+///
+/// None while it runs.
+fn pump_rebuild(rx: &mpsc::Receiver<Progress>, w: &SettingsWindow) -> Option<Result<()>> {
+    loop {
+        match rx.try_recv() {
+            Ok(Progress::Line(line)) => {
+                println!("chibipop: {line}");
+                // Never the raw .tmp line.
+                if let Some(text) = rebuild::friendly(&line) {
+                    w.set_status(&text);
+                }
+            }
+            Ok(Progress::Done(_)) => return Some(Ok(())),
+            Ok(Progress::Failed(why)) => return Some(Err(anyhow::anyhow!(why))),
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Some(Err(anyhow::anyhow!("the rebuild ended without reporting")));
+            }
+        }
+    }
+}
+
+/// Lock it and say so.
+fn begin_rebuild(w: &SettingsWindow) {
+    w.set_busy(true);
+    w.set_status("Rebuilding your dictionary. This can take a few minutes.");
+}
+
+/// Say why Apply did nothing.
+fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
+    w.set_status(&format!("Not applied: {e}"));
+    eprintln!("chibipop: not applied: {e:#}");
+}
+
+/// Say nothing was changed.
+fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
+    w.set_status("The rebuild failed. Your dictionary is unchanged.");
+    eprintln!("chibipop: the rebuild failed: {e:#}");
+    eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
 /// `config_path` is where `cfg` was loaded from (`main.rs`'s
@@ -327,9 +470,13 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
 pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
     // No dictionary or rules on first run.
     if !dict_path.exists() || !rules_path.exists() {
-        return settings_only(cfg, &[], config_path);
+        return settings_only(cfg, &[], config_path, dict_path);
     }
 
+    let library = library_dir();
+    // The worker holds it open.
+    let staged_db = rebuild::staging_path(dict_path);
+    let db_path = dict_path.to_path_buf();
     let dict_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
@@ -513,7 +660,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     // That is the honest consequence of both behaviours, not a loop: it
     // takes a click each time, and it shows the values that were just saved.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
-        &settings::from_config(&cfg, &dicts),
+        &form_with_library(&cfg, &dicts, &library),
         &settings::stale_order_entries(&cfg, &dicts),
         true,
     ) {
@@ -526,6 +673,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     };
     // Consecutive ticks the wheel has been captured - see ARM_WARN_TICKS.
     let mut armed_ticks: u32 = 0;
+    // A rebuild in flight.
+    let mut rebuild: Option<mpsc::Receiver<Progress>> = None;
+    let mut pending_cfg: Option<Config> = None;
+    let mut promote: Option<PathBuf> = None;
+    let mut restart_at_exit = false;
 
     // I4: kept in one place.
     let mut drain_capture_guard = || {
@@ -634,31 +786,70 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             }
 
             if let Some(w) = &settings {
-                match w.take_outcome() {
-                    Some(SettingsOutcome::Cancel) => settings = None,
-                    // Same PostQuitMessage the tray's Quit uses, and for the
-                    // same reason: this runs ON the main thread, inside this
-                    // very loop. BACKLOG 7 left the tray's Quit unreachable,
-                    // so for now this is the only one that can be pressed.
-                    Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
-                    Some(SettingsOutcome::Apply) => {
-                        let updated = settings::apply_to(&w.read(&settings::from_config(&cfg, &dicts)), &cfg);
-                        // Both failures leave the running instance alive and
-                        // the window open. A settings round-trip that half
-                        // applies - new file on disk with old settings
-                        // running, or nothing running at all - is the one
-                        // outcome worth refusing outright.
-                        if let Err(e) = updated.save(config_path) {
-                            eprintln!("chibipop: could not save settings to {}: {e:#}",
-                                      config_path.display());
-                        } else if let Err(e) = restart_self() {
-                            eprintln!("chibipop: settings saved, but the restart failed: {e:#}");
-                            eprintln!("chibipop: they will apply next time you start chibipop.");
-                        } else {
-                            unsafe { PostQuitMessage(0) };
+                if let Some(rx) = rebuild.as_ref() {
+                    // Not while the child writes.
+                    let _ = w.take_outcome();
+                    if let Some(built) = pump_rebuild(rx, w) {
+                        rebuild = None;
+                        w.set_busy(false);
+                        match built {
+                            Ok(()) => {
+                                let updated =
+                                    pending_cfg.take().unwrap_or_else(|| cfg.clone());
+                                if let Err(e) = updated.save(config_path) {
+                                    eprintln!("chibipop: could not save settings to {}: {e:#}",
+                                              config_path.display());
+                                    eprintln!("chibipop: the rebuilt dictionary was left at {}.",
+                                              staged_db.display());
+                                    w.set_status("Settings could not be saved. Nothing changed.");
+                                } else {
+                                    // The swap needs it closed.
+                                    w.set_status("Dictionary rebuilt. Restarting chibipop.");
+                                    promote = Some(staged_db.clone());
+                                    restart_at_exit = true;
+                                    unsafe { PostQuitMessage(0) };
+                                }
+                            }
+                            Err(e) => report_failed_rebuild(w, &e),
                         }
                     }
-                    None => {}
+                } else {
+                    match w.take_outcome() {
+                        Some(SettingsOutcome::Cancel) => settings = None,
+                        // Same PostQuitMessage the tray's Quit uses, and for the
+                        // same reason: this runs ON the main thread, inside this
+                        // very loop. BACKLOG 7 left the tray's Quit unreachable,
+                        // so for now this is the only one that can be pressed.
+                        Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
+                        Some(SettingsOutcome::Apply) => {
+                            let edited = w.read(&form_with_library(&cfg, &dicts, &library));
+                            let updated = settings::apply_to(&edited, &cfg);
+                            // Both failures leave the running instance alive and
+                            // the window open. A settings round-trip that half
+                            // applies - new file on disk with old settings
+                            // running, or nothing running at all - is the one
+                            // outcome worth refusing outright.
+                            if edited.has_staged() {
+                                match start_rebuild(&edited, &library, &staged_db) {
+                                    Err(e) => refuse_apply(w, &e),
+                                    Ok(rx) => {
+                                        begin_rebuild(w);
+                                        pending_cfg = Some(updated);
+                                        rebuild = Some(rx);
+                                    }
+                                }
+                            } else if let Err(e) = updated.save(config_path) {
+                                eprintln!("chibipop: could not save settings to {}: {e:#}",
+                                          config_path.display());
+                            } else if let Err(e) = restart_self() {
+                                eprintln!("chibipop: settings saved, but the restart failed: {e:#}");
+                                eprintln!("chibipop: they will apply next time you start chibipop.");
+                            } else {
+                                unsafe { PostQuitMessage(0) };
+                            }
+                        }
+                        None => {}
+                    }
                 }
             }
 
@@ -723,7 +914,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if let Some(w) = &settings {
                         w.focus();
                     } else {
-                        let form = settings::from_config(&cfg, &dicts);
+                        let form = form_with_library(&cfg, &dicts, &library);
                         let stale = settings::stale_order_entries(&cfg, &dicts);
                         match SettingsWindow::open(&form, &stale, true) {
                             // Never fatal - the same rule the overlay
@@ -791,6 +982,23 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let _ = worker_handle.join(); // now instant: the worker has already finished.
 
     drop(tray); // 4. drop Tray - removes the notification-area icon and its owner window
+
+    // 5. the database is closed.
+    if let Some(staged) = promote {
+        if let Err(e) = rebuild::promote(&staged, &db_path) {
+            eprintln!("chibipop: the rebuilt dictionary could not be put in place: {e:#}");
+            eprintln!("chibipop: the old one is still there, and the new one is at {}.",
+                      staged.display());
+        } else {
+            println!("chibipop: rebuilt {}.", db_path.display());
+        }
+    }
+    if restart_at_exit {
+        if let Err(e) = restart_self() {
+            eprintln!("chibipop: the restart failed: {e:#}");
+            eprintln!("chibipop: your settings are saved; start chibipop again.");
+        }
+    }
 
     Ok(())
 }
@@ -1446,5 +1654,129 @@ mod tests {
         let past = PhysRect { x: 100 + ANCHOR_JITTER_PX + 1, y: 200, w: 26, h: 27 };
         assert!(same_content(&prev, &presentation_of("宿舎"), at));
         assert!(!same_content(&prev, &presentation_of("宿舎"), past));
+    }
+
+    struct TempDirGuard(PathBuf);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan").join(name)
+    }
+
+    fn stocked(test_name: &str) -> (PathBuf, TempDirGuard) {
+        let dir = std::env::temp_dir()
+            .join("chibipop_apply_test")
+            .join(format!("t_{}_{test_name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(fixture("terms.zip"), dir.join("terms.zip")).unwrap();
+        std::fs::copy(fixture("freq.zip"), dir.join("freq.zip")).unwrap();
+        (dir.clone(), TempDirGuard(dir))
+    }
+
+    fn files_in(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn form_for(dir: &Path) -> SettingsForm {
+        form_with_library(&Config::default(), &[], dir)
+    }
+
+    #[test]
+    fn an_add_lands_a_copy_in_the_library_and_in_the_manifest() {
+        let (dir, _guard) = stocked("add");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&fixture("terms.zip"), false));
+
+        stage_into_library(&form, &dir).unwrap();
+
+        assert_eq!(
+            vec!["freq.zip", "library.json", "terms (2).zip", "terms.zip"],
+            files_in(&dir)
+        );
+        let lib = Library::load(&dir).unwrap();
+        assert_eq!(3, lib.entries.len());
+        assert_eq!(2, lib.term_paths(&dir).len(), "the copy is a term archive");
+    }
+
+    #[test]
+    fn a_remove_deletes_the_archive_it_names() {
+        let (dir, _guard) = stocked("remove");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&fixture("terms.zip"), false));
+        form.stage_remove("FixtureFreq");
+
+        stage_into_library(&form, &dir).unwrap();
+
+        assert_eq!(vec!["library.json", "terms (2).zip", "terms.zip"], files_in(&dir));
+        assert!(Library::load(&dir).unwrap().freq_paths(&dir).is_empty());
+    }
+
+    /// A source can live in `dir`.
+    #[test]
+    fn adding_a_file_that_is_also_being_removed_still_copies_it() {
+        let (dir, _guard) = stocked("overlap");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&dir.join("terms.zip"), false));
+        form.stage_remove("FixtureTerms");
+
+        stage_into_library(&form, &dir).unwrap();
+
+        assert_eq!(vec!["freq.zip", "library.json", "terms (2).zip"], files_in(&dir));
+        assert_eq!(1, Library::load(&dir).unwrap().term_paths(&dir).len());
+    }
+
+    /// Refused before deleting.
+    #[test]
+    fn removing_every_dictionary_is_refused_and_changes_nothing() {
+        let (dir, _guard) = stocked("refuse");
+        let before = files_in(&dir);
+        let mut form = form_for(&dir);
+        form.stage_remove("FixtureTerms");
+        form.stage_remove("FixtureFreq");
+
+        let refused = stage_into_library(&form, &dir).unwrap_err();
+
+        assert!(format!("{refused:#}").contains("no dictionary"), "{refused:#}");
+        assert_eq!(before, files_in(&dir), "nothing was deleted");
+    }
+
+    /// Frequency is not a dict.
+    #[test]
+    fn a_frequency_only_library_is_refused_too() {
+        let (dir, _guard) = stocked("freq_only");
+        let mut form = form_for(&dir);
+        form.stage_remove("FixtureTerms");
+        assert!(form.stage_add(&fixture("freq.zip"), true));
+
+        assert!(stage_into_library(&form, &dir).is_err());
+        assert!(dir.join("terms.zip").exists());
+    }
+
+    #[test]
+    fn the_frequency_list_a_window_opens_with_comes_from_the_library() {
+        let (dir, _guard) = stocked("form");
+        let form = form_for(&dir);
+        assert_eq!(vec!["FixtureFreq".to_string()], form.freq_names);
+        assert!(!form.library_empty);
+        assert!(!form.has_staged());
+    }
+
+    #[test]
+    fn a_library_that_is_not_there_yet_reads_as_empty() {
+        let dir = std::env::temp_dir().join("chibipop_apply_test").join("never_created");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(form_for(&dir).library_empty);
     }
 }

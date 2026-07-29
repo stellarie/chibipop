@@ -2,7 +2,7 @@
 
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
-use chibipop::rebuild::{spawn_with, Progress};
+use chibipop::rebuild::{friendly, promote, spawn_with, staging_path, Progress};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
@@ -92,6 +92,55 @@ fn progress_lines_arrive_before_done() {
     assert!(lines.iter().any(|l| l.contains("terms.zip")), "{lines:?}");
     assert!(lines.iter().any(|l| l.contains("freq.zip")), "{lines:?}");
     assert!(lines.iter().any(|l| l.starts_with("wrote ")), "{lines:?}");
+}
+
+/// From real child output.
+#[test]
+fn every_archive_line_renders_as_a_name_and_the_last_line_does_not() {
+    let (dir, _guard) = scratch("friendly");
+    let library = stock_library(&dir);
+    let out = dir.join("chibipop.sqlite");
+
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &out).unwrap());
+
+    let lines: Vec<&String> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            Progress::Line(l) => Some(l),
+            _ => None,
+        })
+        .collect();
+    let shown: Vec<String> = lines.iter().filter_map(|l| friendly(l)).collect();
+    assert_eq!(
+        vec!["Reading terms.zip…".to_string(), "Reading freq.zip…".to_string()],
+        shown
+    );
+    assert_eq!(lines.len(), shown.len() + 1, "the wrote line is swallowed: {lines:?}");
+    assert!(!shown.iter().any(|s| s.contains(".tmp")), "{shown:?}");
+}
+
+/// An open file blocks it.
+#[test]
+fn a_staged_build_is_promoted_only_once_the_database_is_closed() {
+    let (dir, _guard) = scratch("promote");
+    let library = stock_library(&dir);
+    let db = dir.join("chibipop.sqlite");
+    drain(spawn_with(Path::new(BUILDER), &library, &db).unwrap());
+    let held = SqliteDictionary::open(&db).unwrap();
+
+    let staged = staging_path(&db);
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &staged).unwrap());
+    assert!(
+        matches!(msgs.last(), Some(Progress::Done(_))),
+        "a staged build lands beside an open database: {msgs:?}"
+    );
+
+    assert!(promote(&staged, &db).is_err(), "the open handle blocks the swap");
+    drop(held);
+
+    promote(&staged, &db).unwrap();
+    assert!(!staged.exists(), "the staged file is moved, not copied");
+    assert_eq!("FixtureTerms", SqliteDictionary::open(&db).unwrap().dicts().unwrap()[0].name);
 }
 
 #[test]
