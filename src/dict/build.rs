@@ -92,10 +92,33 @@ fn to_py_json<T: Serialize>(value: &T) -> Result<String> {
 
 /// Builds chibipop.sqlite.
 pub fn build(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCounts> {
-    if out.exists() {
-        std::fs::remove_file(out).with_context(|| format!("removing {}", out.display()))?;
+    if terms.is_empty() {
+        anyhow::bail!("no term archives to build from");
     }
 
+    // Never destroy out on failure.
+    let tmp = building_path(out);
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
+    }
+
+    let counts = build_into(terms, freqs, &tmp).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+
+    std::fs::rename(&tmp, out)
+        .with_context(|| format!("replacing {} with {}", out.display(), tmp.display()))?;
+    Ok(counts)
+}
+
+/// `out` with a .building suffix.
+fn building_path(out: &Path) -> PathBuf {
+    let mut name = out.as_os_str().to_owned();
+    name.push(".building");
+    PathBuf::from(name)
+}
+
+fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCounts> {
     let mut freq_table = FreqTable::new();
     for fa in freqs {
         freq_table.extend(parse_freq_rows(&iter_freq_rows(fa)?));
@@ -574,5 +597,35 @@ mod tests {
     #[test]
     fn an_independently_computed_epoch_formats_correctly() {
         assert_eq!("2026-07-29T09:15:42+00:00", format_iso_utc(1_785_316_542));
+    }
+
+    #[test]
+    fn an_empty_term_list_is_refused_rather_than_built_empty() {
+        let out = out_path("empty_terms");
+        let _guard = TempDbGuard(out.clone());
+        std::fs::write(&out, b"PRECIOUS").unwrap();
+
+        assert!(build(&[], &[], &out).is_err(), "an empty build must not be attempted");
+        assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
+    }
+
+    #[test]
+    fn a_failed_build_leaves_the_previous_database_intact() {
+        let out = out_path("failed_build");
+        let _guard = TempDbGuard(out.clone());
+        std::fs::write(&out, b"PRECIOUS").unwrap();
+        let bad = out_path("failed_build_src");
+        let _bad_guard = TempDbGuard(bad.clone());
+        std::fs::write(&bad, b"not a zip at all").unwrap();
+
+        assert!(build(&[bad.clone()], &[], &out).is_err());
+        assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
+        assert!(!building_path(&out).exists(), "no .building left behind");
+    }
+
+    #[test]
+    fn a_successful_build_leaves_no_building_file() {
+        let (_conn, guard) = build_fixture_db("no_building_left");
+        assert!(!building_path(&guard.0).exists());
     }
 }

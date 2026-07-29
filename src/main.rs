@@ -379,6 +379,11 @@ fn main() -> Result<()> {
                 println!("freq dict      {}", file_name(f));
             }
 
+            // A typo is not a rebuild.
+            if term_archives.is_empty() {
+                anyhow::bail!("no term archives in {}", library.display());
+            }
+
             let counts = chibipop::dict::build::build(&term_archives, &freq_archives, &out)?;
             println!(
                 "wrote {}: {} entries, {} term rows",
