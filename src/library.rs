@@ -8,12 +8,31 @@ use std::path::{Path, PathBuf};
 /// The manifest file name.
 const MANIFEST: &str = "library.json";
 
+/// Where removals wait.
+///
+/// Not a top-level `*.zip`.
+const QUARANTINE: &str = ".removed";
+
 /// What an archive supplies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
     Term,
     Frequency,
+    /// Listed, so it can be removed.
+    Unreadable,
+}
+
+/// What the builder calls it.
+pub fn kind_of(archive: &Path) -> Kind {
+    if crate::dict::archive::read_index(archive).is_err() {
+        return Kind::Unreadable;
+    }
+    if crate::dict::archive::is_frequency_archive(archive) {
+        Kind::Frequency
+    } else {
+        Kind::Term
+    }
 }
 
 /// One archive in the library.
@@ -50,7 +69,12 @@ impl Library {
 
     /// Makes the list match disk.
     fn reconcile(&mut self, dir: &Path) {
+        restore_quarantined(dir);
         self.entries.retain(|e| dir.join(&e.file).exists());
+        // The file decides the kind.
+        for e in &mut self.entries {
+            e.kind = kind_of(&dir.join(&e.file));
+        }
         let mut strays: Vec<String> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
                 .filter_map(std::result::Result::ok)
@@ -64,11 +88,7 @@ impl Library {
         strays.sort();
         for file in strays {
             let path = dir.join(&file);
-            let kind = if crate::dict::archive::is_frequency_archive(&path) {
-                Kind::Frequency
-            } else {
-                Kind::Term
-            };
+            let kind = kind_of(&path);
             let index = crate::dict::archive::read_index(&path).unwrap_or(Value::Null);
             self.entries.push(Entry { name: title_of(&index, &file), file, kind });
         }
@@ -98,25 +118,26 @@ impl Library {
         let dest = dir.join(&file);
         std::fs::copy(source, &dest)
             .with_context(|| format!("copying {} to {}", source.display(), dest.display()))?;
-        let kind = if crate::dict::archive::is_frequency_archive(&dest) {
-            Kind::Frequency
-        } else {
-            Kind::Term
-        };
-        let entry = Entry { name: title_of(&index, &file), file, kind };
+        let entry = Entry { name: title_of(&index, &file), file, kind: kind_of(&dest) };
         self.entries.push(entry.clone());
         Ok(entry)
     }
 
-    /// Drops an entry and its file.
-    pub fn remove(&mut self, dir: &Path, file: &str) -> Result<()> {
+    /// Drops it, keeping the file.
+    ///
+    /// Deleted only on commit.
+    pub fn quarantine(&mut self, dir: &Path, file: &str) -> Result<()> {
         self.entries.retain(|e| e.file != file);
-        let path = dir.join(file);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("deleting {}", path.display())),
+        let from = dir.join(file);
+        if !from.exists() {
+            return Ok(());
         }
+        let held = dir.join(QUARANTINE);
+        std::fs::create_dir_all(&held)
+            .with_context(|| format!("creating {}", held.display()))?;
+        let to = held.join(file);
+        std::fs::rename(&from, &to)
+            .with_context(|| format!("moving {} to {}", from.display(), to.display()))
     }
 
     /// Term archives, in order.
@@ -169,6 +190,103 @@ impl Library {
     fn taken(&self, dir: &Path, file: &str) -> bool {
         dir.join(file).exists() || self.entries.iter().any(|e| e.file == file)
     }
+}
+
+/// A change awaiting its build.
+#[derive(Debug)]
+pub struct Pending {
+    dir: PathBuf,
+    before: Library,
+    added: Vec<String>,
+    held: Vec<String>,
+}
+
+impl Pending {
+    /// Nothing has moved yet.
+    pub fn new(dir: &Path, before: &Library) -> Pending {
+        Pending {
+            dir: dir.to_path_buf(),
+            before: before.clone(),
+            added: Vec::new(),
+            held: Vec::new(),
+        }
+    }
+
+    /// Record a copied-in archive.
+    pub fn added(&mut self, file: String) {
+        self.added.push(file);
+    }
+
+    /// Record a moved-aside archive.
+    pub fn held(&mut self, file: String) {
+        self.held.push(file);
+    }
+
+    /// Keep it. The removals go.
+    pub fn commit(&self) -> Result<()> {
+        let held = self.dir.join(QUARANTINE);
+        for file in &self.held {
+            let path = held.join(file);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("deleting {}", path.display())),
+            }
+        }
+        let _ = std::fs::remove_dir(&held);
+        Ok(())
+    }
+
+    /// Undo it. Archives return.
+    ///
+    /// Reports the first failure.
+    pub fn rollback(&self) -> Result<()> {
+        let held = self.dir.join(QUARANTINE);
+        let mut first: Option<anyhow::Error> = None;
+        for file in &self.held {
+            let from = held.join(file);
+            if !from.exists() {
+                continue;
+            }
+            let to = self.dir.join(file);
+            if let Err(e) = std::fs::rename(&from, &to) {
+                let e = anyhow::Error::new(e).context(format!("restoring {}", to.display()));
+                first.get_or_insert(e);
+            }
+        }
+        for file in &self.added {
+            let path = self.dir.join(file);
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    let e = anyhow::Error::new(e).context(format!("undoing {}", path.display()));
+                    first.get_or_insert(e);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir(&held);
+        if let Err(e) = self.before.save(&self.dir) {
+            first.get_or_insert(e);
+        }
+        match first {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Undo a killed Apply.
+fn restore_quarantined(dir: &Path) {
+    let held = dir.join(QUARANTINE);
+    let Ok(listing) = std::fs::read_dir(&held) else {
+        return;
+    };
+    for entry in listing.filter_map(std::result::Result::ok) {
+        let back = dir.join(entry.file_name());
+        if !back.exists() {
+            let _ = std::fs::rename(entry.path(), &back);
+        }
+    }
+    let _ = std::fs::remove_dir(&held);
 }
 
 /// The index title, or the stem.
@@ -288,24 +406,130 @@ mod tests {
         assert_eq!(names_in(&dir), ["terms.zip"]);
     }
 
+    /// The archive is the user's.
     #[test]
-    fn remove_deletes_the_file_and_the_entry() {
-        let (dir, _guard) = scratch("remove");
+    fn quarantine_drops_the_entry_without_deleting_the_file() {
+        let (dir, _guard) = scratch("quarantine");
         let mut lib = Library::default();
         lib.import(&dir, &fixture("terms.zip")).unwrap();
-        lib.remove(&dir, "terms.zip").unwrap();
+        lib.quarantine(&dir, "terms.zip").unwrap();
         assert!(lib.is_empty());
         assert!(!dir.join("terms.zip").exists());
+        assert!(dir.join(QUARANTINE).join("terms.zip").is_file());
     }
 
     #[test]
-    fn remove_of_an_entry_whose_file_is_gone_still_removes_it() {
-        let (dir, _guard) = scratch("remove_gone");
+    fn quarantine_of_an_entry_whose_file_is_gone_still_removes_it() {
+        let (dir, _guard) = scratch("quarantine_gone");
         let mut lib = Library::default();
         lib.import(&dir, &fixture("terms.zip")).unwrap();
         std::fs::remove_file(dir.join("terms.zip")).unwrap();
-        lib.remove(&dir, "terms.zip").unwrap();
+        lib.quarantine(&dir, "terms.zip").unwrap();
         assert!(lib.is_empty());
+    }
+
+    /// Not a top-level `*.zip`.
+    #[test]
+    fn a_quarantined_archive_is_not_a_top_level_zip() {
+        let (dir, _guard) = scratch("not_top_level");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        lib.quarantine(&dir, "terms.zip").unwrap();
+        let tops: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(tops.is_empty(), "got {tops:?}");
+    }
+
+    #[test]
+    fn commit_deletes_the_quarantine_and_rollback_restores_it() {
+        let (dir, _guard) = scratch("commit");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        let mut pending = Pending::new(&dir, &lib);
+        lib.quarantine(&dir, "terms.zip").unwrap();
+        pending.held("terms.zip".to_string());
+
+        pending.rollback().unwrap();
+        assert!(dir.join("terms.zip").is_file(), "a failed rebuild loses nothing");
+        assert!(!dir.join(QUARANTINE).exists());
+        assert_eq!(1, Library::load(&dir).unwrap().entries.len());
+
+        let mut again = Pending::new(&dir, &lib);
+        lib.quarantine(&dir, "terms.zip").unwrap();
+        again.held("terms.zip".to_string());
+        again.commit().unwrap();
+        assert!(!dir.join("terms.zip").exists());
+        assert!(!dir.join(QUARANTINE).exists());
+    }
+
+    /// No second copy on retry.
+    #[test]
+    fn rollback_undoes_an_import() {
+        let (dir, _guard) = scratch("rollback_add");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("freq.zip")).unwrap();
+        let before = lib.clone();
+        let mut pending = Pending::new(&dir, &before);
+        let added = lib.import(&dir, &fixture("terms.zip")).unwrap();
+        pending.added(added.file);
+
+        pending.rollback().unwrap();
+
+        assert_eq!(names_in(&dir), ["freq.zip", "library.json"]);
+        assert_eq!(before.entries, Library::load(&dir).unwrap().entries);
+    }
+
+    /// A killed Apply hides none.
+    #[test]
+    fn a_quarantine_left_by_a_dead_process_is_restored_on_load() {
+        let (dir, _guard) = scratch("orphan");
+        std::fs::create_dir_all(dir.join(QUARANTINE)).unwrap();
+        std::fs::copy(fixture("terms.zip"), dir.join(QUARANTINE).join("terms.zip")).unwrap();
+
+        let lib = Library::load(&dir).unwrap();
+
+        assert_eq!(1, lib.entries.len(), "the archive is back in the library");
+        assert!(dir.join("terms.zip").is_file());
+        assert!(!dir.join(QUARANTINE).exists());
+    }
+
+    #[test]
+    fn an_unreadable_archive_is_listed_but_is_not_a_dictionary() {
+        let (dir, _guard) = scratch("unreadable");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.zip"), b"not a zip at all").unwrap();
+        std::fs::copy(fixture("terms.zip"), dir.join("terms.zip")).unwrap();
+
+        let lib = Library::load(&dir).unwrap();
+
+        assert_eq!(2, lib.entries.len(), "it stays visible");
+        assert_eq!(Kind::Unreadable, lib.entries[0].kind, "got {:?}", lib.entries);
+        assert_eq!(vec![dir.join("terms.zip")], lib.term_paths(&dir));
+    }
+
+    /// The file outranks the JSON.
+    #[test]
+    fn an_entry_that_became_unreadable_is_reclassified_on_load() {
+        let (dir, _guard) = scratch("became_bad");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        lib.save(&dir).unwrap();
+        std::fs::write(dir.join("terms.zip"), b"corrupted since").unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+
+        assert_eq!(Kind::Unreadable, loaded.entries[0].kind);
+    }
+
+    #[test]
+    fn the_builders_own_question_is_the_one_kind_of_asks() {
+        assert_eq!(Kind::Term, kind_of(&fixture("terms.zip")));
+        assert_eq!(Kind::Frequency, kind_of(&fixture("freq.zip")));
+        assert_eq!(Kind::Unreadable, kind_of(Path::new("nope.zip")));
     }
 
     #[test]

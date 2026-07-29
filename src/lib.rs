@@ -9,6 +9,7 @@ pub mod dict;
 pub mod geom;
 pub mod input;
 pub mod library;
+pub mod lock;
 pub mod lookup;
 pub mod paths;
 pub mod present;

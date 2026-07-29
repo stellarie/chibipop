@@ -197,3 +197,46 @@ fn a_missing_library_directory_is_a_failure() {
     assert!(matches!(msgs.last(), Some(Progress::Failed(_))), "{msgs:?}");
     assert!(!out.exists(), "nothing is created from nothing");
 }
+
+/// Held files are not built.
+#[test]
+fn a_quarantined_archive_is_invisible_to_the_real_builder() {
+    let (dir, _guard) = scratch("quarantined");
+    let library = stock_library(&dir);
+    let held = library.join(".removed");
+    std::fs::create_dir_all(&held).unwrap();
+    std::fs::rename(library.join("terms.zip"), held.join("terms.zip")).unwrap();
+    std::fs::copy(fixture("terms.zip"), library.join("other.zip")).unwrap();
+    let out = dir.join("chibipop.sqlite");
+
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &out).unwrap());
+
+    assert!(matches!(msgs.last(), Some(Progress::Done(_))), "{msgs:?}");
+    assert!(
+        !msgs.iter().any(|m| matches!(m, Progress::Line(l) if l.contains("terms.zip"))),
+        "the held archive was read anyway: {msgs:?}"
+    );
+    assert!(held.join("terms.zip").is_file(), "and it is still there");
+    assert_eq!(1, SqliteDictionary::open(&out).unwrap().dicts().unwrap().len());
+}
+
+/// All held is still empty.
+#[test]
+fn a_library_whose_archives_are_all_quarantined_refuses() {
+    let (dir, _guard) = scratch("all_held");
+    let library = stock_library(&dir);
+    let held = library.join(".removed");
+    std::fs::create_dir_all(&held).unwrap();
+    for name in ["terms.zip", "freq.zip"] {
+        std::fs::rename(library.join(name), held.join(name)).unwrap();
+    }
+    let out = dir.join("chibipop.sqlite");
+
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &out).unwrap());
+
+    let Some(Progress::Failed(why)) = msgs.last() else {
+        panic!("expected Failed last, got {msgs:?}");
+    };
+    assert!(why.contains("no dictionary archives"), "{why}");
+    assert!(!out.exists());
+}

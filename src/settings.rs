@@ -7,8 +7,9 @@
 //! about what any of them mean.
 
 use crate::config::{Config, TriggerMode};
-use crate::library::{Kind, Library};
+use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// The bounds live beside the fields they bound, so `config::load_or_create`
@@ -38,6 +39,10 @@ pub struct SettingsForm {
     pub staged_adds: Vec<PathBuf>,
     pub staged_removes: Vec<String>,
     pub library_empty: bool,
+    /// Files nothing can read.
+    ///
+    /// Listed, never ordered.
+    pub unreadable: Vec<String>,
 }
 
 impl SettingsForm {
@@ -77,6 +82,12 @@ impl SettingsForm {
         !self.staged_adds.is_empty() || !self.staged_removes.is_empty()
     }
 
+    /// Forget what Apply did.
+    pub fn clear_staged(&mut self) {
+        self.staged_adds.clear();
+        self.staged_removes.clear();
+    }
+
     /// Is this row a pending import?
     pub fn is_staged_add(&self, name: &str) -> bool {
         self.staged_adds.iter().any(|p| shown_name(p).as_deref() == Some(name))
@@ -89,15 +100,24 @@ pub fn shown_name(source: &Path) -> Option<String> {
 }
 
 /// Show the library's lists.
+///
+/// Unreadable files are listed.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
-    form.freq_names = lib
-        .entries
-        .iter()
-        .filter(|e| e.kind == Kind::Frequency)
-        .map(|e| e.name.clone())
-        .collect();
+    form.freq_names = named(lib, Kind::Frequency);
+    form.unreadable =
+        lib.entries.iter().filter(|e| e.kind == Kind::Unreadable).map(|e| e.file.clone()).collect();
+    for file in &form.unreadable {
+        if !form.dict_names.contains(file) {
+            form.dict_names.push(file.clone());
+        }
+    }
     form.library_empty = lib.is_empty();
     form
+}
+
+/// One kind's names.
+fn named(lib: &Library, kind: Kind) -> Vec<String> {
+    lib.entries.iter().filter(|e| e.kind == kind).map(|e| e.name.clone()).collect()
 }
 
 /// Files a removal names.
@@ -110,6 +130,8 @@ pub fn removed_files(form: &SettingsForm, lib: &Library) -> Vec<String> {
 }
 
 /// Term archives Apply leaves.
+///
+/// Read, never asked of a list.
 pub fn terms_after_apply(form: &SettingsForm, lib: &Library) -> usize {
     let gone = removed_files(form, lib);
     let kept = lib
@@ -117,12 +139,50 @@ pub fn terms_after_apply(form: &SettingsForm, lib: &Library) -> usize {
         .iter()
         .filter(|e| e.kind == Kind::Term && !gone.contains(&e.file))
         .count();
-    kept + form.staged_adds.iter().filter(|p| staged_as_term(form, p)).count()
+    kept + form.staged_adds.iter().filter(|p| kind_of(p) == Kind::Term).count()
 }
 
-/// Was this add a dictionary?
-fn staged_as_term(form: &SettingsForm, source: &Path) -> bool {
-    shown_name(source).is_some_and(|n| form.dict_names.contains(&n))
+/// Do what Apply staged.
+///
+/// Refuses before it moves.
+/// Reversible until commit.
+pub fn stage_into_library(form: &SettingsForm, dir: &Path) -> Result<Pending> {
+    let mut lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    if terms_after_apply(form, &lib) == 0 {
+        anyhow::bail!("that would leave chibipop with no dictionary");
+    }
+    let gone = removed_files(form, &lib);
+    let mut pending = Pending::new(dir, &lib);
+    match mutate(&mut lib, &mut pending, dir, form, &gone) {
+        Ok(()) => Ok(pending),
+        Err(e) => {
+            if let Err(back) = pending.rollback() {
+                eprintln!("chibipop: putting the library back failed: {back:#}");
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Import, quarantine, save.
+fn mutate(
+    lib: &mut Library,
+    pending: &mut Pending,
+    dir: &Path,
+    form: &SettingsForm,
+    gone: &[String],
+) -> Result<()> {
+    // A source may live in `dir`.
+    for source in &form.staged_adds {
+        let entry =
+            lib.import(dir, source).with_context(|| format!("importing {}", source.display()))?;
+        pending.added(entry.file);
+    }
+    for file in gone {
+        lib.quarantine(dir, file).with_context(|| format!("removing {file}"))?;
+        pending.held(file.clone());
+    }
+    lib.save(dir)
 }
 
 /// Flatten `cfg` for editing, listing `dicts` in the order the popup would
@@ -156,6 +216,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         staged_adds: Vec::new(),
         staged_removes: Vec::new(),
         library_empty: false,
+        unreadable: Vec::new(),
     }
 }
 
@@ -191,6 +252,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
         .iter()
         // A filename is not a name.
         .filter(|name| !form.is_staged_add(name))
+        .filter(|name| !form.unreadable.iter().any(|u| u == *name))
         .map(|name| order_key(name, &cfg.dictionaries.display_order))
         .collect();
     out
@@ -572,10 +634,19 @@ mod tests {
     fn a_frequency_only_library_leaves_no_term_archives() {
         let mut form = with_library(staged_form(), &Library::default());
         form.dict_names.clear();
-        assert!(form.stage_add(Path::new(r"C:\d\jiten_freq.zip"), true));
+        assert!(form.stage_add(&fixture("freq.zip"), true));
         assert_eq!(0, terms_after_apply(&form, &Library::default()));
-        assert!(form.stage_add(Path::new(r"C:\d\jmdict.zip"), false));
+        assert!(form.stage_add(&fixture("terms.zip"), false));
         assert_eq!(1, terms_after_apply(&form, &Library::default()));
+    }
+
+    /// A path naming nothing.
+    #[test]
+    fn an_add_that_no_longer_exists_is_not_a_dictionary() {
+        let mut form = with_library(staged_form(), &Library::default());
+        form.dict_names.clear();
+        assert!(form.stage_add(Path::new(r"C:\gone\jmdict.zip"), false));
+        assert_eq!(0, terms_after_apply(&form, &Library::default()));
     }
 
     /// An entry that no longer matches is KEPT, not deleted - it may match a
@@ -589,5 +660,257 @@ mod tests {
         let out = apply_to(&from_config(&cfg, &dicts()), &cfg);
         assert!(!out.dictionaries.display_order.contains(&"Kenkyusha".to_string()));
         assert!(stale_order_entries(&out, &dicts()).is_empty());
+    }
+
+    // ---- library changes ----
+
+    struct TempDirGuard(PathBuf);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan").join(name)
+    }
+
+    fn stocked(test_name: &str) -> (PathBuf, TempDirGuard) {
+        let dir = std::env::temp_dir()
+            .join("chibipop_stage_test")
+            .join(format!("t_{}_{test_name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(fixture("terms.zip"), dir.join("terms.zip")).unwrap();
+        std::fs::copy(fixture("freq.zip"), dir.join("freq.zip")).unwrap();
+        (dir.clone(), TempDirGuard(dir))
+    }
+
+    fn files_in(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn archives_in(dir: &Path) -> Vec<String> {
+        files_in(dir).into_iter().filter(|n| n.ends_with(".zip")).collect()
+    }
+
+    fn form_for(dir: &Path) -> SettingsForm {
+        let form = from_config(&Config::default(), &[]);
+        match Library::load(dir) {
+            Ok(lib) => with_library(form, &lib),
+            Err(_) => form,
+        }
+    }
+
+    #[test]
+    fn an_add_lands_a_copy_in_the_library_and_in_the_manifest() {
+        let (dir, _guard) = stocked("add");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&fixture("terms.zip"), false));
+
+        stage_into_library(&form, &dir).unwrap().commit().unwrap();
+
+        assert_eq!(
+            vec!["freq.zip", "library.json", "terms (2).zip", "terms.zip"],
+            files_in(&dir)
+        );
+        let lib = Library::load(&dir).unwrap();
+        assert_eq!(3, lib.entries.len());
+        assert_eq!(2, lib.term_paths(&dir).len(), "the copy is a term archive");
+    }
+
+    /// Not before the rebuild.
+    #[test]
+    fn a_remove_deletes_the_archive_it_names_only_once_committed() {
+        let (dir, _guard) = stocked("remove");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&fixture("terms.zip"), false));
+        form.stage_remove("FixtureFreq");
+
+        let pending = stage_into_library(&form, &dir).unwrap();
+        assert!(dir.join(".removed").join("freq.zip").is_file(), "held, not deleted");
+        pending.commit().unwrap();
+
+        assert_eq!(vec!["library.json", "terms (2).zip", "terms.zip"], files_in(&dir));
+        assert!(Library::load(&dir).unwrap().freq_paths(&dir).is_empty());
+    }
+
+    /// A source can live in `dir`.
+    #[test]
+    fn adding_a_file_that_is_also_being_removed_still_copies_it() {
+        let (dir, _guard) = stocked("overlap");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&dir.join("terms.zip"), false));
+        form.stage_remove("FixtureTerms");
+
+        stage_into_library(&form, &dir).unwrap().commit().unwrap();
+
+        assert_eq!(vec!["freq.zip", "library.json", "terms (2).zip"], files_in(&dir));
+        assert_eq!(1, Library::load(&dir).unwrap().term_paths(&dir).len());
+    }
+
+    /// Refused before deleting.
+    #[test]
+    fn removing_every_dictionary_is_refused_and_changes_nothing() {
+        let (dir, _guard) = stocked("refuse");
+        let before = files_in(&dir);
+        let mut form = form_for(&dir);
+        form.stage_remove("FixtureTerms");
+        form.stage_remove("FixtureFreq");
+
+        let refused = stage_into_library(&form, &dir).unwrap_err();
+
+        assert!(format!("{refused:#}").contains("no dictionary"), "{refused:#}");
+        assert_eq!(before, files_in(&dir), "nothing was deleted");
+    }
+
+    /// Frequency is not a dict.
+    #[test]
+    fn a_frequency_only_library_is_refused_too() {
+        let (dir, _guard) = stocked("freq_only");
+        let mut form = form_for(&dir);
+        form.stage_remove("FixtureTerms");
+        assert!(form.stage_add(&fixture("freq.zip"), true));
+
+        assert!(stage_into_library(&form, &dir).is_err());
+        assert!(dir.join("terms.zip").exists());
+    }
+
+    /// Ask the file, not the list.
+    #[test]
+    fn a_frequency_archive_added_under_dictionaries_is_still_not_a_dictionary() {
+        let (dir, _guard) = stocked("misfiled");
+        let before = files_in(&dir);
+        let mut form = form_for(&dir);
+        form.stage_remove("FixtureTerms");
+        assert!(form.stage_add(&fixture("freq.zip"), false), "added to the WRONG list");
+        assert!(form.dict_names.contains(&"freq.zip".to_string()));
+
+        assert_eq!(0, terms_after_apply(&form, &Library::load(&dir).unwrap()));
+        let refused = stage_into_library(&form, &dir).unwrap_err();
+
+        assert!(format!("{refused:#}").contains("no dictionary"), "{refused:#}");
+        assert_eq!(before, files_in(&dir));
+    }
+
+    /// Unreadable is not usable.
+    #[test]
+    fn a_corrupt_archive_does_not_satisfy_the_guard() {
+        let (dir, _guard) = stocked("corrupt_guard");
+        std::fs::remove_file(dir.join("freq.zip")).unwrap();
+        std::fs::write(dir.join("broken.zip"), b"not a zip at all").unwrap();
+        let before = files_in(&dir);
+        let mut form = form_for(&dir);
+        assert!(
+            form.dict_names.contains(&"broken.zip".to_string()),
+            "it must stay visible so it can be removed: {:?}",
+            form.dict_names
+        );
+        form.stage_remove("FixtureTerms");
+
+        let refused = stage_into_library(&form, &dir).unwrap_err();
+
+        assert!(format!("{refused:#}").contains("no dictionary"), "{refused:#}");
+        assert_eq!(before, files_in(&dir), "terms.zip survives");
+    }
+
+    #[test]
+    fn an_unreadable_row_contributes_no_display_order_entry() {
+        let (dir, _guard) = stocked("unreadable_order");
+        std::fs::write(dir.join("broken.zip"), b"not a zip at all").unwrap();
+        let cfg = cfg_with(&[]);
+        let form = with_library(from_config(&cfg, &dicts()), &Library::load(&dir).unwrap());
+
+        let out = apply_to(&form, &cfg);
+
+        assert!(!out.dictionaries.display_order.iter().any(|e| e.contains("broken")), "{out:?}");
+    }
+
+    /// It must be removable.
+    #[test]
+    fn removing_an_unreadable_row_quarantines_the_file_it_names() {
+        let (dir, _guard) = stocked("unreadable_remove");
+        std::fs::write(dir.join("broken.zip"), b"not a zip at all").unwrap();
+        let mut form = form_for(&dir);
+        form.stage_remove("broken.zip");
+
+        stage_into_library(&form, &dir).unwrap().commit().unwrap();
+
+        assert_eq!(vec!["freq.zip", "library.json", "terms.zip"], files_in(&dir));
+    }
+
+    /// A failed Apply costs none.
+    #[test]
+    fn a_rolled_back_apply_leaves_the_library_exactly_as_it_was() {
+        let (dir, _guard) = stocked("rollback");
+        let before = archives_in(&dir);
+        let manifest = Library::load(&dir).unwrap();
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&fixture("terms.zip"), false));
+        form.stage_remove("FixtureFreq");
+
+        let pending = stage_into_library(&form, &dir).unwrap();
+        pending.rollback().unwrap();
+
+        assert_eq!(before, archives_in(&dir));
+        assert!(!dir.join(".removed").exists());
+        assert_eq!(manifest.entries, Library::load(&dir).unwrap().entries);
+    }
+
+    /// No copies pile up on retry.
+    #[test]
+    fn retrying_a_failed_apply_never_imports_a_second_copy() {
+        let (dir, _guard) = stocked("retry");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&fixture("terms.zip"), false));
+
+        for _ in 0..3 {
+            stage_into_library(&form, &dir).unwrap().rollback().unwrap();
+        }
+        stage_into_library(&form, &dir).unwrap().commit().unwrap();
+
+        assert_eq!(
+            vec!["freq.zip", "library.json", "terms (2).zip", "terms.zip"],
+            files_in(&dir)
+        );
+    }
+
+    /// Nothing left to replay.
+    #[test]
+    fn clearing_the_staged_list_leaves_nothing_for_apply_to_do() {
+        let (dir, _guard) = stocked("clear");
+        let mut form = form_for(&dir);
+        assert!(form.stage_add(&fixture("terms.zip"), false));
+        form.stage_remove("FixtureFreq");
+        assert!(form.has_staged());
+
+        form.clear_staged();
+
+        assert!(!form.has_staged());
+        assert!(form.staged_adds.is_empty());
+        assert!(form.staged_removes.is_empty());
+    }
+
+    #[test]
+    fn the_frequency_list_a_window_opens_with_comes_from_the_library() {
+        let (dir, _guard) = stocked("form");
+        let form = form_for(&dir);
+        assert_eq!(vec!["FixtureFreq".to_string()], form.freq_names);
+        assert!(!form.library_empty);
+        assert!(!form.has_staged());
+    }
+
+    #[test]
+    fn a_library_that_is_not_there_yet_reads_as_empty() {
+        let dir = std::env::temp_dir().join("chibipop_stage_test").join("never_created");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(form_for(&dir).library_empty);
     }
 }

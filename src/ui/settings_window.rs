@@ -711,6 +711,11 @@ impl SettingsWindow {
         }
     }
 
+    /// Forget what Apply just did.
+    pub fn clear_staged(&self) {
+        self.staged.borrow_mut().clear_staged();
+    }
+
     /// Say what Apply is doing.
     pub fn set_status(&self, text: &str) {
         // SAFETY: `ID_STATUS` is a live child of `self.hwnd`, created in
@@ -1151,6 +1156,7 @@ impl SettingsWindow {
                 staged_adds: staged.staged_adds.clone(),
                 staged_removes: staged.staged_removes.clone(),
                 library_empty: staged.library_empty,
+                unreadable: staged.unreadable.clone(),
             }
         }
     }
