@@ -322,6 +322,11 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
 /// time, because a tray mode change must persist back to the same file or
 /// the setting silently reverts on the next restart.
 pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
+    // No dictionary on first run.
+    if !dict_path.exists() {
+        return settings_only(cfg, &[], config_path);
+    }
+
     let dict_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
