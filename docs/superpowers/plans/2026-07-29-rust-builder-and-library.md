@@ -638,12 +638,33 @@ timestamp — so compare only `schema_version` there.
 If `sqlite3` is unavailable, use `python -c` with the `sqlite3` module to dump
 instead; do not skip the comparison.
 
-- [ ] **Step 3: The real archives**
+- [ ] **Step 3: The real archives — they are on disk, so this is not optional**
 
-Repeat against the user's actual dictionary sources if they are available, and
-report row counts from both. If they are not on disk, say so plainly rather
-than claiming the port is verified at scale — the fixture is three entries and
-the real set is over a million term rows.
+`C:\Users\Stella\Documents\dicts\` holds the three archives the shipped
+database was built from:
+
+```
+01 [JA-EN] jitendex-yomitan (2026-07-09).zip
+[JA Freq] jiten_freq_global (2026-06-14).zip
+[JA-JA] 大辞林　第四版.zip
+```
+
+The fixture is three entries; this is over a million term rows and it is where
+a subtly wrong flattener or a mis-sorted bank actually shows. Build both and
+compare the same three tables:
+
+```bash
+./target/release/chibipop.exe build-dict --library "/c/Users/Stella/Documents/dicts" --out /tmp/rust_full.sqlite
+(cd tools/build-dict && python build.py --dicts-dir "C:\Users\Stella\Documents\dicts" --out /tmp/py_full.sqlite)
+```
+
+Report row counts from both, and diff `dict`, `entry` and `term`. On a set this
+size, dump sorted and compare hashes rather than whole files.
+
+**There is no `sqlite3` CLI on this machine.** Dump with Python's `sqlite3`
+module instead, and set `PYTHONIOENCODING=utf-8` — the archive names contain
+Japanese and a stock Windows console is cp1252, which raises
+`UnicodeEncodeError` before anything useful prints.
 
 - [ ] **Step 4: The golden corpus against a Rust-built database**
 
