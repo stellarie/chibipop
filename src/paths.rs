@@ -44,4 +44,13 @@ mod tests {
         let name = "definitely-not-a-real-chibipop-file.sqlite";
         assert_eq!(PathBuf::from(name), data_file(name));
     }
+
+    #[test]
+    fn a_data_file_beside_the_exe_wins_over_the_cwd() {
+        let name = "chibipop-paths-marker.tmp";
+        let beside = beside_exe(name);
+        std::fs::write(&beside, b"x").expect("writable next to the test binary");
+        assert_eq!(beside, data_file(name));
+        let _ = std::fs::remove_file(&beside);
+    }
 }

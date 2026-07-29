@@ -161,26 +161,43 @@ an existing flow rather than inventing one.
 
 ## 6. Double-click
 
-- **Windows subsystem** rather than console, with
-  `AttachConsole(ATTACH_PARENT_PROCESS)` at startup. Double-clicking shows no
-  console; running `lookup`/`probe`/`watch` from a terminal still prints.
-  Known wrinkle: the shell returns its prompt before the output arrives, so
-  output appears after the prompt.
+- **Console subsystem is kept.** The subsystem approach below was tried and
+  reverted; this is the design of record.
+- **The console window is hidden** when `GetConsoleProcessList` reports this
+  process as its sole attachment — that is what distinguishes a double-click
+  (a fresh console, ours alone) from a shell launch (the shell's own console,
+  shared). `own_console()` in `src/ui/console.rs` is the one place that
+  question is answered.
+- **Hidden, never freed.** `FreeConsole` would invalidate stdout, and
+  `println!` aborts the process on a failed write — so the console stays
+  allocated and merely off-screen.
 - **No arguments means `run`.**
-- **First run with no dictionary opens the settings window** on the import
-  panel, with hovering inactive and a plain explanation — rather than the
-  current hard failure, which under the windows subsystem would be an error
-  message nobody can see.
+- **First run with no dictionary (or no rules) opens the settings window**
+  on the import panel, with hovering inactive and a plain explanation —
+  rather than a hard failure whose message nobody can see with the console
+  hidden.
+
+**Rejected: windows subsystem + `AttachConsole`.** Measured on this machine:
+console subsystem gave a correct 647-byte PowerShell redirect; GUI subsystem
+plus `AttachConsole(ATTACH_PARENT_PROCESS)` gave 0 bytes; GUI subsystem plus
+a conditional `SetStdHandle` also gave 0 bytes, and additionally panicked on
+redirection in both PowerShell and cmd. `AttachConsole` does not rebind the
+standard handles, and a GUI-subsystem process starts with them invalid, so a
+redirected `chibipop lookup X > out.txt` broke outright. Reverted rather than
+iterated further.
 
 ### Live lookup log
 
-A setting that calls `AllocConsole` and prints each resolved hover: what OCR
-read, which character resolved, which entry won. It answers *"why isn't it
-reading this?"* without a command line.
+A setting that shows that same hidden console and prints each resolved
+hover: what OCR read, which character resolved, which entry won. It answers
+*"why isn't it reading this?"* without a command line.
 
-**Trap:** closing an allocated console terminates the process by default.
-`SetConsoleCtrlHandler` must intercept `CTRL_CLOSE_EVENT` so closing the log
-window hides it instead of killing chibipop.
+**Trap:** closing a console terminates the process by default, and a
+`CTRL_CLOSE_EVENT` handler returning TRUE does not prevent that —
+`HandlerRoutine`'s own docs say the system terminates the process regardless,
+with no other handler called. So the log window's close item is removed
+from its system menu instead (`GetSystemMenu` + `DeleteMenu(SC_CLOSE)`): the
+X is greyed out and there is no close event to ever have to answer.
 
 ---
 

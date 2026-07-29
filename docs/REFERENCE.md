@@ -202,7 +202,7 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**249 tests.** Plus the dictionary builder, from `tools/build-dict`:
+**250 tests.** Plus the dictionary builder, from `tools/build-dict`:
 
 ```bash
 python -m unittest discover -s tests

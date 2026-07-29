@@ -322,8 +322,8 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
 /// time, because a tray mode change must persist back to the same file or
 /// the setting silently reverts on the next restart.
 pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
-    // No dictionary on first run.
-    if !dict_path.exists() {
+    // No dictionary or rules on first run.
+    if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path);
     }
 
@@ -687,6 +687,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         overlay.as_ref(),
                         &mut shown,
                         result.outcome,
+                        cfg.debug.show_lookup_log,
                     );
                 }
             }
@@ -1032,6 +1033,7 @@ fn handle_worker_outcome(
     overlay: Option<&Overlay>,
     shown: &mut Option<Shown>,
     outcome: WorkerOutcome,
+    log: bool,
 ) {
     match outcome {
         WorkerOutcome::Hide => {
@@ -1054,11 +1056,13 @@ fn handle_worker_outcome(
                 return; // Already on screen, unchanged.
             }
             // Only changed popups.
-            if let Some(card) = &presentation.top {
-                let head = card.written.clone()
-                    .or_else(|| card.reading.clone())
-                    .unwrap_or_default();
-                println!("{head}  match={}", card.match_len);
+            if log {
+                if let Some(card) = &presentation.top {
+                    let head = card.written.clone()
+                        .or_else(|| card.reading.clone())
+                        .unwrap_or_default();
+                    println!("{head}  match={}", card.match_len);
+                }
             }
             match show_presentation(
                 popup,

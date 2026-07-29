@@ -1,11 +1,10 @@
 //! The live lookup log console.
 
-use windows::core::BOOL;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Console::{
-    GetConsoleProcessList, GetConsoleWindow, SetConsoleCtrlHandler,
+use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DeleteMenu, GetSystemMenu, ShowWindow, MF_BYCOMMAND, SC_CLOSE, SW_HIDE, SW_SHOW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
 
 /// The console, if it is ours alone.
 ///
@@ -30,21 +29,21 @@ fn own_console() -> Option<HWND> {
     }
 }
 
-/// Close must hide, not exit.
-unsafe extern "system" fn ctrl_handler(_event: u32) -> BOOL {
-    hide();
-    BOOL(1)
-}
-
 /// Shows the log window.
 pub fn show() {
     let Some(hwnd) = own_console() else { return };
     // SAFETY: `hwnd` came from GetConsoleWindow and was checked valid.
-    // Registering the handler more than once is harmless - Windows keeps a
-    // list and ours is idempotent.
+    // A CTRL_CLOSE_EVENT handler returning TRUE does not save the
+    // process - HandlerRoutine's own docs say the system terminates it
+    // regardless, no other handler called. So the close item is removed
+    // instead of handled: with SC_CLOSE gone from the system menu, the X
+    // is greyed out and there is no close event to ever answer.
     unsafe {
-        let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let menu = GetSystemMenu(hwnd, false);
+        if !menu.is_invalid() {
+            let _ = DeleteMenu(menu, SC_CLOSE, MF_BYCOMMAND);
+        }
     }
 }
 
