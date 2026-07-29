@@ -12,6 +12,7 @@ pub mod library;
 pub mod lookup;
 pub mod paths;
 pub mod present;
+pub mod rebuild;
 pub mod settings;
 pub mod text;
 pub mod ui;
