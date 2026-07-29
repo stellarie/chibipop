@@ -360,7 +360,8 @@ fn main() -> Result<()> {
                     archives.push(path);
                 }
             }
-            archives.sort();
+            // Python compares paths case-folded.
+            archives.sort_by_key(|p| (p.to_string_lossy().to_lowercase(), p.clone()));
 
             let mut term_archives = Vec::new();
             let mut freq_archives = Vec::new();
