@@ -65,6 +65,34 @@ Python dictionary builder, if `tools/build-dict` changed:
 cd tools/build-dict && python -m unittest discover -s tests    # 58 tests
 ```
 
+**If anything under `src/dict/` changed, measure the rebuild's peak memory.** No test
+catches this — it regressed to **19× the oracle's** and every test stayed green, because a
+32 GB machine simply absorbs it. Needs the real archives, so it is not a CI check.
+
+```powershell
+$out = Join-Path $env:TEMP "mem_check.sqlite"
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = "C:\Users\Stella\chibipop\target\release\chibipop.exe"
+$psi.Arguments = 'build-dict --library "C:\Users\Stella\Documents\dicts" --out "' + $out + '"'
+$psi.RedirectStandardOutput = $true; $psi.UseShellExecute = $false
+$p = [System.Diagnostics.Process]::Start($psi)
+$peak = 0
+while (-not $p.HasExited) { try { $p.Refresh(); $w = $p.WorkingSet64; if ($w -gt $peak) { $peak = $w } } catch {}; Start-Sleep -Milliseconds 100 }
+$p.WaitForExit(); $p.StandardOutput.ReadToEnd() | Out-Null
+Write-Output ("peak {0:N0} MB" -f ($peak/1MB))
+```
+
+| Measured 2026-07-29 | peak | elapsed |
+|---|---|---|
+| Rust, streaming (current) | **148 MB** | 33.7 s |
+| Rust, materialised (the regression) | 9,641 MB | 83.3 s |
+| Python oracle | 498 MB | 83.9 s |
+
+Anything over ~300 MB means the streaming was undone. **`PeakWorkingSet64` reads 0 once the
+process has exited** — the peak must be sampled while it runs, which is why the loop above
+exists. And `python` on this box is a **mise shim**: measuring it returns the launcher's 4 MB,
+not the interpreter's. Use `AppData\Local\mise\installs\python\3.13.14\python.exe` directly.
+
 **Run the suite 3× if anything touched a `static`.** Cargo runs tests in parallel threads of one
 process, and a shared static produces an intermittent red that a single run will miss — this
 happened once, with the wheel accumulator.
