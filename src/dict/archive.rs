@@ -180,4 +180,90 @@ mod tests {
             names
         );
     }
+
+    #[test]
+    fn ragged_row_with_only_term_reads_defaults() {
+        let row = vec![Value::String("word".to_string())];
+        assert_eq!("", str_at(&row, 1));
+        assert_eq!("", str_at(&row, 3));
+        assert_eq!(
+            Value::Array(Vec::new()),
+            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn ragged_row_with_term_and_reading_only() {
+        let row = serde_json::json!([
+            "食べる",
+            "たべる"
+        ]).as_array().unwrap().clone();
+        assert_eq!("食べる", str_at(&row, 0));
+        assert_eq!("たべる", str_at(&row, 1));
+        assert_eq!("", str_at(&row, 3));
+        assert_eq!(
+            Value::Array(Vec::new()),
+            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn ragged_row_has_rules_but_no_glossary() {
+        let row = serde_json::json!([
+            "飲む",
+            "のむ",
+            "",
+            "v5"
+        ]).as_array().unwrap().clone();
+        assert_eq!("飲む", str_at(&row, 0));
+        assert_eq!("のむ", str_at(&row, 1));
+        assert_eq!("v5", str_at(&row, 3));
+        assert_eq!(
+            Value::Array(Vec::new()),
+            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn field_with_wrong_type_falls_back_to_default() {
+        let row = serde_json::json!([
+            "走る",
+            123,
+            "",
+            999
+        ]).as_array().unwrap().clone();
+        assert_eq!("走る", str_at(&row, 0));
+        assert_eq!("", str_at(&row, 1));
+        assert_eq!("", str_at(&row, 3));
+        assert_eq!(
+            Value::Array(Vec::new()),
+            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn glossary_with_wrong_type_falls_back_to_empty() {
+        let row = serde_json::json!([
+            "読む",
+            "よむ",
+            "",
+            "v5",
+            0,
+            "not an array"
+        ]).as_array().unwrap().clone();
+        let glossary = row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        assert_eq!(Value::String("not an array".to_string()), glossary);
+    }
+
+    #[test]
+    fn glossary_missing_falls_back_to_empty_array() {
+        let row = serde_json::json!([
+            "書く",
+            "かく",
+            "",
+            "v5"
+        ]).as_array().unwrap().clone();
+        let glossary = row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        assert_eq!(Value::Array(Vec::new()), glossary);
+    }
 }
