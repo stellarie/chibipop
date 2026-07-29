@@ -53,6 +53,43 @@ pub struct BuildCounts {
     pub terms: i64,
 }
 
+/// json.dumps's separators.
+#[derive(Default)]
+struct PySpaced;
+
+impl serde_json::ser::Formatter for PySpaced {
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first { Ok(()) } else { writer.write_all(b", ") }
+    }
+
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first { Ok(()) } else { writer.write_all(b", ") }
+    }
+
+    fn begin_object_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        writer.write_all(b": ")
+    }
+}
+
+/// Matches json.dumps spacing.
+fn to_py_json<T: Serialize>(value: &T) -> Result<String> {
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, PySpaced);
+    value.serialize(&mut ser)?;
+    String::from_utf8(buf).context("json output was not utf-8")
+}
+
 /// Builds chibipop.sqlite.
 pub fn build(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCounts> {
     if out.exists() {
@@ -94,7 +131,7 @@ pub fn build(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCo
                 }
                 entry_id += 1;
                 let sense = Sense { glosses, pos: extract_pos(&t.glossary), misc: Vec::new() };
-                let senses_json = serde_json::to_string(&[sense])?;
+                let senses_json = to_py_json(&[sense])?;
                 insert_entry.execute(params![entry_id, dict_id, senses_json])?;
 
                 let written: &str = &t.term;
@@ -170,7 +207,7 @@ fn write_meta(conn: &Connection, terms: &[PathBuf], freqs: &[PathBuf]) -> Result
     }
     conn.execute(
         "INSERT OR REPLACE INTO meta (k, v) VALUES ('source_hashes', ?1)",
-        params![serde_json::to_string(&sources)?],
+        params![to_py_json(&sources)?],
     )?;
     Ok(())
 }
