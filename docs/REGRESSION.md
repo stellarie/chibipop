@@ -18,17 +18,33 @@ reproduces the stated numbers, so it can be lifted into a workflow as-is. Two of
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
 powershell -NoProfile -Command "Stop-Process -Name chibipop -Force -ErrorAction SilentlyContinue"
-cargo test 2>&1 | grep -E "^test result"
-cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -cE "^error: (doc list|explicit call|this function|this loop)"
+cargo test 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
+cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
 cargo build --release 2>&1 | grep -E "^error|Finished"
 ```
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **252** total across 5 targets |
+| Rust tests | **all green**, **347** total across **6** targets |
 | Clippy | **exactly 5** accepted errors |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
+
+> [!warning] The clippy line changed on 2026-07-29, because the old one could not fail
+> It used to be `grep -cE "^error: (doc list|explicit call|this function|this loop)"` —
+> a count of **four hardcoded lint texts**. Any error from a *fifth* lint was invisible to it.
+> That is not hypothetical: a test added that day introduced `cloned_ref_to_slice_refs` in the
+> lib-test target, clippy reported **6** errors, and the gate still printed **5**. A gate that
+> only counts the failures you already know about does not detect regressions.
+>
+> The replacement counts every `error` line and subtracts the two `could not compile … due to N
+> previous errors` summaries. Also note **`--all-targets` means lib and lib-test are counted
+> separately** — the summary lines said "5 previous errors" and "6 previous errors" for the same
+> run, and only the second one was the truth.
+>
+> **Do not run `cargo clippy` twice in a row and trust the second number.** Cargo replays cached
+> diagnostics inconsistently; back-to-back runs on an unchanged tree returned 0 then 5. `touch`
+> a source file first, or take the first run's output.
 
 **Why counts, not exit status.** The repo carries exactly five accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **5** rather than

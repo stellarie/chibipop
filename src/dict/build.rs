@@ -618,7 +618,7 @@ mod tests {
         let _bad_guard = TempDbGuard(bad.clone());
         std::fs::write(&bad, b"not a zip at all").unwrap();
 
-        assert!(build(&[bad.clone()], &[], &out).is_err());
+        assert!(build(std::slice::from_ref(&bad), &[], &out).is_err());
         assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
         assert!(!building_path(&out).exists(), "no .building left behind");
     }
