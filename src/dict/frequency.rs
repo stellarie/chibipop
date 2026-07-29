@@ -1,28 +1,11 @@
-//! Frequency-rank parsing, ported from `tools/build-dict/freq.py`. That
-//! module is the oracle; this must agree with it exactly.
-//!
-//! A frequency row has two shapes in the same file:
-//!
-//! - reading-agnostic: `["の", "freq", {"value": 1}]`
-//! - reading-scoped: `["乃", "freq", {"reading": "の", "frequency": {"value": 1}}]`
-//!
-//! The second nests `value` one level deeper, under `frequency`. Missing
-//! that makes a rare kanji spelling inherit its common homophone's rank.
+//! Frequency-rank parsing.
 
 use std::collections::HashMap;
 
-/// `(term, reading)` to rank; `None` reading means the row was
-/// reading-agnostic. Lower rank means more common.
+/// Term+reading key to rank.
 pub type FreqTable = HashMap<(String, Option<String>), i64>;
 
-/// Builds a [`FreqTable`] from raw Yomitan term-meta-bank rows.
-///
-/// A row is kept only if it has at least 3 elements, its tag (index 1) is
-/// exactly `"freq"`, and a rank can be extracted from its payload (index
-/// 2) — see `extract_reading_and_rank` for the shapes that yields one.
-///
-/// When the same `(term, reading)` key appears more than once, the lowest
-/// rank wins, matching `freq.py`'s `rank < prev` comparison.
+/// Rows to a rank table.
 pub fn parse_freq_rows(rows: &[serde_json::Value]) -> FreqTable {
     let mut table = FreqTable::new();
     for row in rows {
@@ -46,9 +29,7 @@ pub fn parse_freq_rows(rows: &[serde_json::Value]) -> FreqTable {
     table
 }
 
-/// Reading-specific rank if present, else the reading-agnostic one for
-/// `term`. An empty `reading` is treated as absent, matching `freq.py`'s
-/// `if reading:` truthiness check.
+/// Rank for a term/reading.
 pub fn lookup_freq(table: &FreqTable, term: &str, reading: Option<&str>) -> Option<i64> {
     if let Some(r) = reading.filter(|r| !r.is_empty()) {
         if let Some(&rank) = table.get(&(term.to_string(), Some(r.to_string()))) {
@@ -58,15 +39,7 @@ pub fn lookup_freq(table: &FreqTable, term: &str, reading: Option<&str>) -> Opti
     table.get(&(term.to_string(), None)).copied()
 }
 
-/// Returns `(reading, rank)` from one freq row's payload (`row[2]`).
-///
-/// Three payload shapes, checked in order:
-/// - a bare integer: the rank directly, no reading;
-/// - an object with an integer `"frequency"`: that is the rank;
-/// - an object with an object `"frequency"`: rank is `frequency.value`;
-/// - anything else: rank falls back to a top-level `"value"`.
-///
-/// `"reading"` is read independently of which branch supplies the rank.
+/// Reading and rank from a row.
 fn extract_reading_and_rank(payload: &serde_json::Value) -> (Option<String>, Option<i64>) {
     if let Some(n) = payload.as_i64() {
         return (None, Some(n));
@@ -123,6 +96,16 @@ mod tests {
         assert_eq!(Some(42), lookup_freq(&t, "猫", Some("ねこ")));
         assert_eq!(Some(9999), lookup_freq(&t, "猫", Some("びょう")));
         assert_eq!(None, lookup_freq(&t, "犬", None));
+    }
+
+    #[test]
+    fn an_empty_reading_falls_back_like_a_missing_one() {
+        let t = parse_freq_rows(&rows(json!([
+            ["猫", "freq", {"value": 9999}],
+            ["猫", "freq", {"reading": "ねこ", "frequency": {"value": 42}}]
+        ])));
+        assert_eq!(Some(9999), lookup_freq(&t, "猫", Some("")));
+        assert_eq!(Some(9999), lookup_freq(&t, "猫", None));
     }
 
     #[test]
