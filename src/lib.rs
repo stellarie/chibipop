@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod config;
+pub mod dict;
 pub mod geom;
 pub mod input;
 pub mod lookup;
