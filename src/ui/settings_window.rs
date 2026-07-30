@@ -3,7 +3,8 @@
 //! Modeless - see D9.
 //! Numbers are combos, not spins.
 
-use crate::settings::{shown_name, SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+use crate::library::Kind;
+use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -730,22 +731,30 @@ impl SettingsWindow {
         // string each `LB_ADDSTRING` copies outlives that call.
         unsafe {
             let picked = pick_archives(self.hwnd);
-            let Ok(list) = GetDlgItem(Some(self.hwnd), target.list_id()) else {
-                return;
-            };
             for path in picked {
-                if !self.staged.borrow_mut().stage_add(&path, target.is_freq()) {
-                    eprintln!("chibipop: {} is already in the list.", path.display());
+                // The file picks the list.
+                let Some(kind) = self.staged.borrow_mut().stage_add(&path) else {
+                    eprintln!(
+                        "chibipop: {} is already listed, or is not a dictionary chibipop can read.",
+                        path.display()
+                    );
                     continue;
-                }
-                let Some(name) = shown_name(&path) else {
+                };
+                let Some(name) =
+                    self.staged.borrow().staged_adds.last().map(|a| a.name.clone())
+                else {
+                    continue;
+                };
+                let id = if kind == Kind::Frequency { ID_FREQS } else { ID_DICTS };
+                let Ok(list) = GetDlgItem(Some(self.hwnd), id) else {
                     continue;
                 };
                 SendMessageW(list, LB_ADDSTRING, None, Some(LPARAM(wide(&name).as_ptr() as isize)));
+                if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
+                    SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+                }
             }
-            if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
-            }
+            let _ = target;
             update_list_buttons(self.hwnd);
         }
     }

@@ -96,6 +96,12 @@ pub fn build(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCo
         anyhow::bail!("no term archives to build from");
     }
 
+    // A fresh exe has no data/ yet.
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
     // Never destroy out on failure.
     let tmp = building_path(out);
     if tmp.exists() {
@@ -628,6 +634,23 @@ mod tests {
         assert!(build(std::slice::from_ref(&bad), &[], &out).is_err());
         assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
         assert!(!building_path(&out).exists(), "no .building left behind");
+    }
+
+    #[test]
+    fn a_missing_output_directory_is_created() {
+        let dir = std::env::temp_dir()
+            .join("chibipop_build_test")
+            .join(format!("fresh_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A fresh exe has no data/.
+        let out = dir.join("data").join("chibipop.sqlite");
+
+        let counts = build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out)
+            .expect("a fresh install must be able to build");
+
+        assert_eq!(3, counts.entries);
+        assert!(out.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
