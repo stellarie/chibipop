@@ -12,7 +12,7 @@ use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, Ordering};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LSHIFT, VK_RSHIFT, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Movement gate, physical px.
@@ -29,6 +29,12 @@ static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
 
 /// Whether Shift is held.
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Left and right, bits 0 and 1.
+static SHIFT_SIDES: AtomicU8 = AtomicU8::new(0);
+
+/// Shift went up: drop the popup.
+static HIDE_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Stuck true kills every wheel.
 ///
@@ -104,9 +110,41 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
 }
 
 /// Reads Shift, never the key.
-unsafe fn record_shift_state() {
-    let shift = (unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
-    SHIFT_DOWN.store(shift, Ordering::SeqCst);
+///
+/// From the event, not the state.
+unsafe fn record_shift_state(wparam: WPARAM, lparam: LPARAM) {
+    // SAFETY: keyboard_hook_proc only calls this with code >= 0, the
+    // WH_KEYBOARD_LL contract under which `lparam` is a live
+    // KBDLLHOOKSTRUCT owned by the OS for the duration of this call.
+    let vk = unsafe { (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode } as u16;
+    let bit: u8 = match vk {
+        v if v == VK_LSHIFT.0 => 1,
+        v if v == VK_RSHIFT.0 => 2,
+        v if v == VK_SHIFT.0 => 3,
+        _ => return,
+    };
+    let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+    let before = SHIFT_SIDES
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |s| Some(next_sides(s, bit, down)))
+        .unwrap_or(0);
+    let (now, released) = shift_transition(before, bit, down);
+    SHIFT_DOWN.store(now != 0, Ordering::SeqCst);
+    // Nothing else retracts it.
+    if released {
+        LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
+        HIDE_PENDING.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The mask after this event.
+fn next_sides(sides: u8, bit: u8, down: bool) -> u8 {
+    if down { sides | bit } else { sides & !bit }
+}
+
+/// Mask, and did the last leave.
+fn shift_transition(sides: u8, bit: u8, down: bool) -> (u8, bool) {
+    let now = next_sides(sides, bit, down);
+    (now, sides != 0 && now == 0)
 }
 
 /// Banks one event's delta.
@@ -149,7 +187,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
 /// `WH_KEYBOARD_LL` callback.
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
-        let _ = catch_unwind(|| unsafe { record_shift_state() });
+        let _ = catch_unwind(|| unsafe { record_shift_state(wparam, lparam) });
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
@@ -198,6 +236,14 @@ impl Hooks {
     /// Whether capture is armed.
     pub fn scroll_armed() -> bool {
         SCROLL_ARMED.load(Ordering::SeqCst)
+    }
+
+    /// Did Shift just come up?
+    ///
+    /// Hold mode gates moves off, so
+    /// no move can retract the popup.
+    pub fn take_hide() -> bool {
+        HIDE_PENDING.swap(false, Ordering::SeqCst)
     }
 
     /// Takes whole notches only.
@@ -337,5 +383,39 @@ mod tests {
         assert_eq!(i32::MAX / WHEEL_DELTA_UNITS, notches);
         assert!(notches.saturating_mul(4096) > 0, "must not wrap negative");
         Hooks::discard_scroll();
+    }
+
+    #[test]
+    fn releasing_the_last_shift_asks_for_a_hide() {
+        // Left down, then left up.
+        let (m, hide) = shift_transition(0, 1, true);
+        assert_eq!((1, false), (m, hide));
+        let (m, hide) = shift_transition(m, 1, false);
+        assert_eq!((0, true), (m, hide), "the popup must be retracted");
+    }
+
+    #[test]
+    fn one_shift_up_while_the_other_is_held_does_not_hide() {
+        let (m, _) = shift_transition(0, 1, true);
+        let (m, _) = shift_transition(m, 2, true);
+        assert_eq!(3, m);
+
+        let (m, hide) = shift_transition(m, 1, false);
+
+        assert_eq!(2, m, "the right one is still down");
+        assert!(!hide, "still held, so nothing is retracted");
+    }
+
+    #[test]
+    fn a_repeated_key_down_does_not_ask_for_a_hide() {
+        let (m, _) = shift_transition(0, 1, true);
+        let (m, hide) = shift_transition(m, 1, true);
+        assert_eq!(1, m);
+        assert!(!hide);
+    }
+
+    #[test]
+    fn an_up_with_nothing_held_asks_for_nothing() {
+        assert_eq!((0, false), shift_transition(0, 1, false));
     }
 }

@@ -699,6 +699,15 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 }
             }
 
+            // Shift up retracts it.
+            if Hooks::take_hide() && shown.is_some() {
+                let _ = popup.hide();
+                if let Some(ov) = overlay.as_ref() {
+                    ov.hide();
+                }
+                shown = None;
+            }
+
             if let Some(cursor) = Hooks::take_pending() {
                 // Spec D3: hold, do not resolve.
                 let frozen = shown
