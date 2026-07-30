@@ -1,44 +1,6 @@
-//! System tray icon: the app's only user-facing control surface (spec
-//! section 6) - a right-click menu to open Settings and to quit.
-//! Once this exists, `app.rs` removes its Task 7 interim `q`+Enter console
-//! quit - see that file's module docs.
+//! The tray icon and its menu.
 //!
-//! **Why `create()` failing is a hard startup failure.** Per spec section 6:
-//! "Tray icon creation fails -> Hard fail - it is the only way to change
-//! mode or quit." A running process with no tray is a process nobody can
-//! control short of Task Manager - worse than not starting at all.
-//!
-//! **Why the menu's owner is not the render popup's `HWND`.** `TrackPopupMenu`
-//! requires its owner to become the foreground window, or the menu will not
-//! dismiss when the user clicks elsewhere - the classic Win32 trap (MS
-//! KB135788): `SetForegroundWindow` before showing it, and a null message
-//! posted after, are both required, not optional (see `show_menu`).
-//! `ui::window::Popup`'s `HWND` is `WS_EX_NOACTIVATE`, click-through
-//! (`WS_EX_TRANSPARENT`), normally hidden, and that module's entire contract
-//! elsewhere in this codebase is "never take focus, ever." MSDN's own words
-//! on `WS_EX_NOACTIVATE` ("To activate the window, use ... SetForegroundWindow")
-//! say an explicit call still works on such a window, so reusing it would
-//! probably not even misbehave - but deliberately foregrounding the one
-//! window this codebase works hard to keep inert is a real coupling smell: a
-//! later change to `Popup`'s activation flags, made purely for rendering
-//! reasons, could silently break menu dismissal with no obvious link back to
-//! this file. `Tray` instead creates and owns a second, tiny, always-invisible
-//! window purely to be `TrackPopupMenu`/`SetForegroundWindow`'s target. The
-//! `hwnd` passed into `create()` (the popup's own window) is still used, for
-//! the one thing that genuinely is harmless to share: `NOTIFYICONDATAW.hWnd`,
-//! the window Shell32 posts the tray's callback message to. That message is
-//! intercepted by message ID in `app::run`'s loop before any dispatch - see
-//! `handle_message` - so which real window "receives" it has no functional
-//! effect.
-//!
-//! **Why `handle_message` needs no `wparam`.** The menu is shown and read
-//! synchronously with `TrackPopupMenuEx(..., TPM_RETURNCMD | TPM_NONOTIFY,
-//! ...)`: no `WM_COMMAND` is ever posted for a menu pick - that is what
-//! `TPM_RETURNCMD` buys - the chosen item's id comes back as this call's own
-//! return value instead. So the one thing `handle_message` needs from the
-//! event that triggered it is which mouse message fired, and that arrives in
-//! `lparam` for the tray's own callback message (Shell32's documented
-//! "version 0" callback shape) - no `wparam` needed at all.
+//! Failing to create is fatal.
 
 use anyhow::{Context, Result};
 use std::mem::size_of;
@@ -49,25 +11,19 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Shell32's tray callback message. `WM_APP + 1` is already
-/// `app.rs`'s `WM_APP_RESULT`; `+ 2` keeps this one distinct.
+/// Shell32's callback message.
 const WM_TRAYICON: u32 = WM_APP + 2;
 
 const ID_SETTINGS: u32 = 1001;
 const ID_QUIT: u32 = 1003;
 
-/// This process only ever shows one icon.
+/// One icon per process.
 const TRAY_UID: u32 = 1;
 
-/// chibipop's own tray icon (see `assets/chibipop.svg` for the source
-/// artwork) - the `.ico` container built from it, 16/32/48/256px
-/// PNG-format frames. `load_tray_icon` embeds this rather than using
-/// the OS's generic `IDI_APPLICATION`.
+/// chibipop's own tray icon.
 const ICON_BYTES: &[u8] = include_bytes!("../../assets/chibipop.ico");
 
-/// What the user picked from the tray menu. `app::run`'s loop matches on
-/// this and is the only thing that touches `AppState`/`Hooks`/the TOML -
-/// `Tray` itself never does.
+/// What the user picked.
 pub enum TrayCommand {
     OpenSettings,
     Quit,
@@ -77,22 +33,14 @@ fn owner_class_name() -> PCWSTR {
     w!("ChibipopTrayOwnerClass")
 }
 
-/// This window is never shown and never dispatches anything but its own
-/// creation/destruction and the foreground-window dance `show_menu` drives -
-/// `DefWindowProcW` handles all of that correctly on its own. A trampoline is
-/// needed only because `DefWindowProcW` itself is a plain `unsafe fn`
-/// wrapper, not the `unsafe extern "system" fn` pointer shape `WNDPROC`
-/// requires.
+/// A `DefWindowProcW` trampoline.
 unsafe extern "system" fn owner_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// Registers the owner-window class exactly once per process - the same
-/// success-latched-only-after-`RegisterClassExW`-succeeds pattern as
-/// `ui::window::register_class`, and for the same reason (Task 1's review
-/// caught a real bug from latching too early: a failed first attempt would
-/// otherwise stick every later `create()` with a class that was never
-/// actually registered).
+/// Once per process.
+///
+/// Latch only after success.
 unsafe fn register_owner_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.load(Ordering::SeqCst) {
@@ -117,45 +65,29 @@ unsafe fn register_owner_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// Owns the notification-area icon and a small hidden window used only to
-/// host its callback message and its right-click menu. See the module docs
-/// for why that window is not the render popup's own `HWND`.
+/// Owns the icon and its menu.
 pub struct Tray {
-    /// `NOTIFYICONDATAW.hWnd` - see the module docs on why this may safely
-    /// be (and in practice always is) the popup's own window.
+    /// `NOTIFYICONDATAW.hWnd`.
     notify_hwnd: HWND,
     uid: u32,
-    /// `TrackPopupMenu`/`SetForegroundWindow`'s target. Owned by this
-    /// `Tray`, destroyed in `Drop`.
+    /// `TrackPopupMenu`'s target.
     menu_owner: HWND,
-    /// The notification-area icon's handle - chibipop's own mascot when
-    /// `hicon_owned`, the OS's shared default otherwise. Destroyed in
-    /// `Drop`, but only when owned - see that impl for why.
+    /// The icon handle.
     hicon: HICON,
-    /// Whether `hicon` came from `CreateIconFromResourceEx` (an owned
-    /// handle, which must be destroyed) rather than `LoadIconW` (a
-    /// shared handle, which must not be - see `load_tray_icon`).
+    /// Owned handles need destroying.
     hicon_owned: bool,
 }
 
 impl Tray {
-    /// Adds the notification-area icon and creates the hidden menu-owner
-    /// window. `Err` here must be treated by the caller as a hard startup
-    /// failure (spec section 6) - see the module docs.
+    /// Adds the icon; hard-fails.
     ///
-    /// **Cleanup ordering is load-bearing on the error paths.** The icon is
-    /// loaded *first*, before the owner window exists, so a failure to load
-    /// has nothing else to clean up; swapping the two would leak the owner
-    /// window on that one path. In exchange, because `load_tray_icon` can
-    /// return an **owned** handle, every fallible step after it must destroy
-    /// that handle on its own error path - `create` returns `Err` before any
-    /// `Tray` exists, so `Drop` never runs to do it for them.
+    /// Error paths free the icon.
     pub fn create(hwnd: HWND) -> Result<Tray> {
         unsafe {
             let hinstance: HINSTANCE =
                 GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
 
-            // First: nothing to unwind yet.
+            // Nothing to unwind yet.
             let (hicon, hicon_owned) = load_tray_icon()?;
 
             if let Err(e) = register_owner_class(hinstance) {
@@ -222,14 +154,9 @@ impl Tray {
         }
     }
 
-    /// Called by `app::run`'s loop for every message it does not already
-    /// claim itself (`WM_TIMER`, `WM_APP_RESULT`). Returns `None` for
-    /// anything that is not this tray's own callback message, or that is,
-    /// but produced no selection (dismissed, or a left-click) - the caller
-    /// dispatches those normally either way.
+    /// The tray's callback message.
     ///
-    /// `before_blocking` runs immediately before `TrackPopupMenuEx`'s own
-    /// message pump takes over this thread - see `show_menu` for why.
+    /// Runs `before_blocking` first.
     pub fn handle_message(
         &self,
         msg: u32,
@@ -245,17 +172,9 @@ impl Tray {
         }
     }
 
-    /// Builds a fresh menu (so the radio state always matches the current
-    /// mode), shows it, and translates the user's pick into a `TrayCommand`.
-    /// Blocks until the menu closes - `TrackPopupMenuEx`'s own message pump.
+    /// Shows the menu; blocks.
     ///
-    /// That pump is `GetMessage`/`DispatchMessage` too, but it only ever
-    /// routes messages to a real `HWND` - a thread message (`hwnd` NULL,
-    /// same shape as `app.rs`'s `WM_APP_CAPTURE_GUARD` wake-up) is picked up
-    /// and discarded with nowhere to go, not left on the queue for `run`'s
-    /// own loop to find once this call returns. `before_blocking` is the
-    /// caller's chance to service anything that wake-up would otherwise
-    /// have triggered, *before* this call can swallow it - see I4.
+    /// Its pump eats thread messages.
     fn show_menu(&self, before_blocking: impl FnOnce()) -> Option<TrayCommand> {
         unsafe {
             let hmenu = match build_menu() {
@@ -269,12 +188,7 @@ impl Tray {
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
 
-            // The foreground-window trap (MS KB135788): TrackPopupMenu's
-            // owner must be the foreground window or the menu will not
-            // dismiss when the user clicks away from it. SetForegroundWindow
-            // before, a null message posted after - both required, neither
-            // optional. See the module docs for why `menu_owner` is a
-            // dedicated window rather than the render popup's `HWND`.
+            // MS KB135788: must foreground.
             let _ = SetForegroundWindow(self.menu_owner);
 
             before_blocking();
@@ -295,14 +209,9 @@ impl Tray {
 }
 
 impl Drop for Tray {
-    /// Removes the notification-area icon, destroys the owner window,
-    /// and - if owned - the icon resource itself. Deliberately
-    /// best-effort (errors swallowed): by the time `Drop` runs there is
-    /// nothing left to hand an `Err` to, matching `input::hooks`'s own
-    /// `Drop` (see that module's comment for the fuller argument). This
-    /// is the fix for the exact bug the brief calls out: without it, the
-    /// icon outlives the process and sits as a ghost in the notification
-    /// area until the user happens to hover it.
+    /// Removes the icon; best-effort.
+    ///
+    /// Or it ghosts the tray.
     fn drop(&mut self) {
         unsafe {
             let nid = NOTIFYICONDATAW {
@@ -329,27 +238,16 @@ impl Drop for Tray {
     }
 }
 
-/// Copies `text` into `nid.szTip`, UTF-16 + NUL-terminated, truncated to fit
-/// if ever necessary (it never is for `"chibipop"`, but `szTip` is a fixed
-/// 128-`u16` array and a silent overrun is not an acceptable way to find
-/// that out).
+/// UTF-16 into `szTip`, NUL-term.
 fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
-    // Truncating must not eat the NUL Shell32 reads to.
+    // Must keep the NUL.
     let cap = nid.szTip.len();
     let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
     wide.push(0);
     nid.szTip[..wide.len()].copy_from_slice(&wide);
 }
 
-/// Builds the right-click menu fresh: Settings, a separator, and Quit.
-///
-/// The trigger mode used to live here as two radio items, and moved into the
-/// settings window when that window gained the other ten settings - it was
-/// only ever on the menu because it happened to be the first setting that
-/// needed changing at runtime, not because it is the most important.
-///
-/// Destroys the partially-built `HMENU` on any
-/// failure so a construction error can never leak it.
+/// The right-click menu.
 unsafe fn build_menu() -> Result<HMENU> {
     unsafe {
         let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
@@ -371,14 +269,9 @@ unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
     Ok(())
 }
 
-/// Loads chibipop's own tray icon, falling back to the OS's shared
-/// default on any failure - only the fallback itself failing is a hard
-/// error here, matching the contract `create()` already had for this
-/// step before this icon existed (module docs: tray creation failing
-/// is the one hard startup failure). Returns whether *this* call owns
-/// the returned handle: `true` from `CreateIconFromResourceEx` (an
-/// owned handle, which `Drop` must destroy), `false` from `LoadIconW`
-/// (a shared handle, which `Drop` must never destroy).
+/// The icon, or the OS default.
+///
+/// `true` = owned, must destroy.
 unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
     if let Some(hicon) = unsafe { load_embedded_icon() } {
         return Ok((hicon, true));
@@ -389,10 +282,9 @@ unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
     Ok((hicon, false))
 }
 
-/// Picks the embedded `.ico`'s frame closest to the system's small-icon
-/// size and turns it into an owned `HICON`. `None` on any failure -
-/// malformed directory, out-of-range offsets, or `CreateIconFromResourceEx`
-/// itself rejecting the bytes - so the caller can fall back cleanly.
+/// The closest `.ico` frame.
+///
+/// `None` on any failure.
 unsafe fn load_embedded_icon() -> Option<HICON> {
     let desired = unsafe { GetSystemMetrics(SM_CXSMICON) } as u32;
     let bytes = ico_frame_bytes(ICON_BYTES, desired)?;
@@ -407,13 +299,10 @@ unsafe fn load_embedded_icon() -> Option<HICON> {
     icon.ok()
 }
 
-/// Finds the `.ico` frame closest in size to `desired` and returns its
-/// raw bytes. `.ico` files and `RT_ICON` resources share one directory
-/// format - a 6-byte header then one 16-byte entry per frame (MS Learn,
-/// "Resource File Formats") - read directly here rather than pulling in
-/// a crate for it. `None` on any malformed input rather than panicking,
-/// so a bad asset degrades to the caller's fallback icon instead of a
-/// crash.
+/// The frame nearest `desired`.
+///
+/// 6-byte head, 16-byte entries.
+/// `None` if malformed.
 fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
     let header = ico.get(0..6)?;
     if header[0..4] != [0, 0, 1, 0] {
@@ -442,7 +331,7 @@ fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
 mod tests {
     use super::*;
 
-    /// Shell32 reads szTip up to a NUL.
+    /// Shell32 reads up to the NUL.
     #[test]
     fn a_tip_too_long_to_fit_is_still_terminated() {
         let mut nid = NOTIFYICONDATAW::default();

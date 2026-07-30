@@ -1,43 +1,4 @@
-//! Application wiring: the two-thread architecture from spec section 4.
-//!
-//! Everything else in this crate is a piece; this file is what makes hovering
-//! Japanese text anywhere on screen show a popup. `run` owns the main thread
-//! (message loop, hooks, the popup window) and spawns exactly one worker
-//! thread (OCR resolve -> lookup -> present).
-//!
-//! **Thread ownership, and why it is split this way.** `SqliteDictionary`
-//! wraps a `rusqlite::Connection` opened `SQLITE_OPEN_NO_MUTEX`: `Send` but
-//! never `Sync` (Task 11's report, M1). `OcrTextSource` wraps a WinRT
-//! `OcrEngine` created under `RoInitialize(RO_INIT_MULTITHREADED)`, and COM
-//! apartment membership is established **per thread** - a thread that never
-//! calls `RoInitialize` itself has no guaranteed standing to call methods on
-//! a WinRT object, even one created by another thread in the same process.
-//! Both constraints point the same way: `OcrTextSource`, `SqliteDictionary`
-//! and `LookupEngine` are constructed **on the worker thread, inside its own
-//! closure**, used only there, and never shared. `Popup` and `Renderer` are
-//! the mirror case - HWND- and D2D-device-affine - so they are constructed
-//! and used only on the main thread.
-//!
-//! **Where `SetProcessDpiAwarenessContext` actually happens.**
-//! `OcrTextSource::new()` calls `text::capture::init_dpi_awareness()` as its
-//! own first action (see `text/ocr.rs`). Since that constructor now runs on
-//! the worker thread, and the main thread must not make any GDI/window call
-//! before that has completed (contract 3), the main thread blocks on a
-//! one-shot startup handshake (`startup_rx.recv()`) before touching
-//! `ui::window::Popup` at all - see `run` below. This also means the call
-//! happens exactly once: `SetProcessDpiAwarenessContext` is documented to
-//! fail once a process's DPI awareness is already established, so calling it
-//! a second time explicitly here (redundant with `OcrTextSource::new()`'s
-//! own call) was deliberately avoided rather than risking that failure path
-//! on every run.
-//!
-//! **The "single-slot channel" from spec section 4.** Implemented as a
-//! `std::sync::mpsc::channel` where the worker drains to the newest queued
-//! `Trigger` before processing (see the receive loop in `worker_main`),
-//! rather than a hand-rolled overwrite cell. Behaviourally equivalent - the
-//! worker never *acts* on a superseded position - and it comes with a real
-//! `Sender` to drop at shutdown, which is literally one of the four steps
-//! decision 5 names.
+//! Two threads: pump and worker.
 
 use crate::config::Config;
 use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
@@ -80,160 +41,85 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_APP, WM_TIMER,
 };
 
-/// `WM_APP` (32768) is the first value Windows guarantees free for private
-/// application messages (winuser.h). The worker posts this after pushing a
-/// result, so the main thread's message loop knows to check `result_rx`.
+/// Worker pushed a result.
 const WM_APP_RESULT: u32 = WM_APP + 1;
 
-/// `WM_APP + 2` is already `ui::tray`'s `WM_TRAYICON`. The worker posts this
-/// to wake the main thread's `GetMessageW` loop whenever it queues a
-/// `CaptureGuardMsg` - see `CaptureGuard`.
+/// Wake the pump. +2 is tray's.
 const WM_APP_CAPTURE_GUARD: u32 = WM_APP + 3;
 
-/// How long `CaptureGuard::hide_for_capture` waits for the main thread to
-/// confirm the popup is hidden before giving up and capturing anyway.
-/// Generous relative to the sub-millisecond cost of `ShowWindow` itself -
-/// this only matters if the main thread is unusually busy (or, at shutdown,
-/// briefly not pumping at all; `run`'s shutdown sequence pumps
-/// `capture_guard_rx` specifically to avoid ever needing this backstop, so
-/// it firing in practice would itself be worth investigating, not just
-/// silently tolerating).
+/// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// How often the main thread checks `Hooks::take_pending()`. `take_pending`
-/// is a single atomic swap - cheap even when nothing is pending - so polling
-/// this often costs nothing noticeable; 50 Hz keeps dispatch latency low
-/// without busy-waiting the thread.
+/// Pending-cursor poll, ms.
 const DISPATCH_TICK_MS: u32 = 20;
 
-/// Gap between the hovered character and the popup (spec section 4.2).
+/// Anchor-to-popup gap.
 const POPUP_GAP: i32 = 12;
 
-/// How far an anchor may move and still count as the same hover.
-///
-/// Not slop. `text::capture::UPSCALE` is 2, so every OCR word box is
-/// re-measured through `PhysRect::scaled_down`'s integer division from a
-/// differently-framed capture — ±1px per edge. An exact comparison would fail
-/// spuriously and re-render on every hover, defeating the check.
+/// Not slop: UPSCALE 2 rounds.
 const ANCHOR_JITTER_PX: i32 = 4;
 
-/// Pixels of content scrolled per wheel notch.
-///
-/// A feel constant, not a measured one — expect to tune it against a real
-/// overflowing entry, the way `REGION_W`/`REGION_H` were tuned.
+/// Pixels per wheel notch.
 const SCROLL_STEP_PX: i32 = 48;
 
-/// How many consecutive ticks the wheel may stay armed before saying so once.
-///
-/// 250 ticks at `DISPATCH_TICK_MS` is about five seconds — far longer than any
-/// real read of one popup, and short enough to appear in a log the user still
-/// has open. This exists because a stuck arm swallows the wheel for *every*
-/// application, and without it the bug report is "chibipop broke my mouse"
-/// with nothing to search for.
+/// Armed ticks before warning.
 const ARM_WARN_TICKS: u32 = 250;
 
 /// Rebuild progress poll, ms.
 const REBUILD_TICK_MS: u32 = 100;
 
-/// The popup's width has no config knob (`config.rs`'s `PopupConfig` only
-/// exposes `max_height_percent`) - 420 matches the width Task 5 verified
-/// content wraps sensibly at. Also clamped to the target monitor's own width
-/// below, so a hypothetical narrow monitor cannot be asked for a popup wider
-/// than itself.
+/// Task 5's verified wrap width.
 const POPUP_MAX_WIDTH: i32 = 420;
 
-/// A monotonically increasing id assigned to every dispatched trigger.
-/// Staleness is resolved purely by comparing ids - never by a sentinel value
-/// (decision 1) - so a slow worker's answer to an old position is discarded
-/// once a newer one has been dispatched, rather than racing it onto screen.
+/// Staleness by id, no sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct RequestId(u64);
 
-/// What the main thread dispatches to the worker for one gated cursor
-/// movement.
+/// One gated cursor movement.
 struct Trigger {
     cursor: PhysPoint,
     id: RequestId,
 }
 
-/// What the worker sends back. Carries the same id it was given so the main
-/// thread can apply the staleness rule without the worker knowing anything
-/// about dispatch order itself.
+/// One answer, carrying its id.
 struct WorkerResult {
     id: RequestId,
     outcome: WorkerOutcome,
 }
 
 enum WorkerOutcome {
-    /// Nothing to show: either `resolve_at_tiled_scanned` found no text
-    /// under the cursor, or it did but the dictionary had zero hits for it
-    /// (e.g. punctuation). Neither is an error - most hover positions are
-    /// not Japanese text, and logging that would be pure noise (decision 4).
+    /// No text, or no hits.
     Hide,
-    /// Capture, OCR or lookup failed. Logged once by the main thread; the
-    /// popup hides and the app keeps running (spec section 6 - a failed
-    /// hover is never fatal).
+    /// Logged; never fatal.
     Failed(String),
-    /// `scan` is always empty when the debug toggle is off - see
-    /// `resolve_at_tiled_scanned`'s own doc comment (M3 task 4).
+    /// `scan` empty without debug.
     Ready {
         presentation: Presentation,
         anchor: PhysRect,
-        /// Which way the resolved line runs — decides which axis the hold
-        /// region may safely grow along.
+        /// Which axis the hold may grow.
         orientation: Orientation,
-        /// The characters the top card matched, when they could be located.
-        ///
-        /// Computed **regardless of `[popup] highlight_match`**, because it
-        /// decides where the popup holds still as well as where the box is
-        /// drawn. Deriving it from the drawn rectangle instead would mean
-        /// turning off a *visual* setting silently changed *interaction*.
+        /// What the top card matched.
         matched: Option<PhysRect>,
         scan: Vec<ScanRect>,
     },
 }
 
-/// A request from the worker thread to the main thread, guarding one
-/// capture against the popup's own pixels landing in it (spec §5.1). Only
-/// ever sent when `Popup::capture_exclusion().needs_capture_guard()` is
-/// true - seeing `Excluded` from the OS means M3-D7 already keeps the
-/// popup out of every capture, and this whole dance is unnecessary
-/// overhead on the default, overwhelmingly common path.
-///
-/// The `Popup` these act on lives on the main thread (created in `run`,
-/// HWND-affine); the worker thread only ever reaches it through this
-/// channel plus a `PostThreadMessageW` wake-up, never directly - see
-/// `CaptureGuard` and the module docs' thread-ownership section.
+/// Popup out of one capture.
 enum CaptureGuardMsg {
-    /// Hide the popup now; reply on `ack` once done, so the worker can be
-    /// certain the popup is actually off-screen before it captures. Carries
-    /// no position or content - `Popup::hide()` needs none.
+    /// Hide now; ack when done.
     Hide { ack: mpsc::Sender<()> },
-    /// Undo the most recent `Hide` - re-show the popup, but only if it was
-    /// actually visible immediately beforehand (`run` remembers that in
-    /// `capture_guard_prev_visible`, since this message carries nothing to
-    /// decide it by). Fire-and-forget: nothing downstream waits for this to
-    /// complete, since the capture it was guarding has already finished by
-    /// the time it is sent.
+    /// Undo a Hide. Fire-and-forget.
     Restore,
 }
 
-/// The worker thread's handle onto the capture guard - `resolve_trigger`
-/// holds `Option<&CaptureGuard>`, `None` whenever exclusion is already
-/// active, so the default path sends no message, posts no thread message,
-/// and waits on nothing at all.
+/// The worker's guard handle.
 struct CaptureGuard {
     main_tid: u32,
     request_tx: mpsc::Sender<CaptureGuardMsg>,
 }
 
 impl CaptureGuard {
-    /// Blocks until the main thread confirms the popup is hidden, or until
-    /// `ACK_TIMEOUT` elapses. The timeout exists purely as a backstop against
-    /// the unforeseen - the ordinary case is a round trip through a main
-    /// thread that is almost always idle inside `GetMessageW` - and giving up
-    /// means capturing anyway rather than hanging the worker (and, by
-    /// extension, every future hover) forever.
+    /// Blocks until hidden.
     fn hide_for_capture(&self) {
         let (ack_tx, ack_rx) = mpsc::channel();
         if self.request_tx.send(CaptureGuardMsg::Hide { ack: ack_tx }).is_err() {
@@ -248,17 +134,13 @@ impl CaptureGuard {
         }
     }
 
-    /// Undoes `hide_for_capture`. Fire-and-forget - see `CaptureGuardMsg::Restore`.
+    /// Undoes `hide_for_capture`.
     fn restore_after_capture(&self) {
         let _ = self.request_tx.send(CaptureGuardMsg::Restore);
         self.wake_main_thread();
     }
 
-    /// `PostThreadMessageW`, not `PostMessageW`: this targets the main
-    /// thread's queue directly (hwnd = NULL in the posted message, exactly
-    /// like `WM_APP_RESULT` below), not any particular window. The main
-    /// loop's `GetMessageW(&mut msg, None, 0, 0)` picks up thread messages
-    /// and window messages alike.
+    /// Thread message, not window.
     fn wake_main_thread(&self) {
         unsafe {
             let _ = PostThreadMessageW(self.main_tid, WM_APP_CAPTURE_GUARD, WPARAM(0), LPARAM(0));
@@ -266,24 +148,7 @@ impl CaptureGuard {
     }
 }
 
-/// Runs the popup application until the user quits. Installs the hooks,
-/// creates the popup window and the tray icon, and pumps messages on this
-/// (the calling) thread; spawns one worker thread for OCR/lookup/present.
-///
-/// Also creates the scan overlay (`cfg.debug.show_scan_region`) alongside
-/// the popup - `None` when the toggle is off, so the feature stays inert
-/// (M3 task 4). It tracks the popup through both `handle_worker_outcome`'s
-/// ordinary show/hide and `drain_capture_guard`'s capture-time hide/reshow.
-///
-/// Open the settings window alone - no tray, no hooks, no OCR, no dictionary
-/// lookups.
-///
-/// This exists because the tray is otherwise the *only* way into settings, so
-/// a tray that will not open its menu locks them away completely. Applying
-/// here saves the file and says so: it deliberately does not try to restart a
-/// `run` instance it is not part of, because a half-applied round trip - new
-/// file on disk, old settings still running - is the one outcome `run`'s own
-/// Apply refuses outright, and guessing at another process is worse.
+/// Settings alone, no tray.
 pub fn settings_only(
     cfg: Config,
     dicts: &[DictInfo],
@@ -309,8 +174,7 @@ pub fn settings_only(
         // No hooks, nothing to disarm.
         window.pump(|| {});
 
-        // Same order as `run`'s loop: the dialog manager gets first refusal
-        // so Tab, arrows and Esc reach the controls rather than the app.
+        // Dialog keys first, as in run.
         if !unsafe { IsDialogMessageW(window.hwnd(), &msg) }.as_bool() {
             unsafe {
                 let _ = TranslateMessage(&msg);
@@ -362,9 +226,7 @@ pub fn settings_only(
         }
 
         match window.take_outcome() {
-            // Quit cannot arrive here - `open(.., false)` does not create the
-            // button - but closing the window is the only honest reading if
-            // it ever did, since there is no instance to quit.
+            // No Quit button in this mode.
             Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
                 let edited = window.read(&form);
@@ -500,12 +362,9 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
-/// `config_path` is where `cfg` was loaded from (`main.rs`'s
-/// `default_config_path()` or `--config`) - needed here, not just at load
-/// time, because a tray mode change must persist back to the same file or
-/// the setting silently reverts on the next restart.
+/// Run until the user quits.
 pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
-    // No dictionary or rules on first run.
+    // Nothing built yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
     }
@@ -521,14 +380,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     let (startup_tx, startup_rx) = mpsc::channel::<Result<Vec<DictInfo>>>();
-    // Starts `false` regardless of `cfg.popup.exclude_from_capture`: this
-    // thread cannot yet know whether the OS actually accepted
-    // `WDA_EXCLUDEFROMCAPTURE` (or whether it was even asked to) until
-    // `Popup::create` runs below, which - per contract 3 - cannot happen
-    // until *after* the worker thread has completed its own DPI-awareness
-    // setup. Read fresh by the worker on every trigger (never cached), so
-    // there is no ordering requirement between that later `.store()` and
-    // whichever trigger happens to be first - see `worker_main`.
+    // Unknown until Popup::create.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
     let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
 
@@ -561,29 +413,14 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         );
     });
 
-    // Contract 3: SetProcessDpiAwarenessContext must run before any GDI
-    // call. It happens inside OcrTextSource::new(), which worker_main
-    // constructs as its very first action - see the module docs above. This
-    // recv() blocks the main thread, which owns every later GDI/window call
-    // (Popup::create, Renderer::new, ...), until that has genuinely
-    // completed. The ordering is enforced by the handshake itself, not by
-    // hoping the worker thread happens to win a race.
-    // Spec D7: the worker reads these once at startup and the main thread
-    // needs them for the settings window's dictionary list. Sending them
-    // across the handshake it already performs avoids opening a second
-    // SQLite connection here purely to read two names.
+    // Contract 3: DPI before GDI.
     let dicts: Vec<DictInfo> = startup_rx
         .recv()
         .context("worker thread ended before completing startup")??;
 
     let popup = Popup::create(cfg.popup.exclude_from_capture).context("creating the popup window")?;
 
-    // Contract 2: anything other than clean exclusion must be loud - and the
-    // two ways to land there (asked-and-refused vs. deliberately-off) must
-    // stay distinguishable here, or a genuine OS-level failure gets read as
-    // an intentional setting (or vice versa). Both still need the capture
-    // guard below - `needs_capture_guard` does not distinguish them, only
-    // this report does.
+    // Contract 2: report all three.
     match popup.capture_exclusion() {
         CaptureExclusion::Excluded => {
             println!(
@@ -654,17 +491,10 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
 
-    // Hard failure per spec section 6: the tray is the only way to change
-    // mode or quit, so a running process without one cannot be controlled.
-    // Uses popup.hwnd() only as Shell_NotifyIconW's message target - see
-    // ui::tray's module docs for why the menu itself does not use popup as
-    // its owner.
+    // No tray means no control.
     let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
 
-    // hwnd = None: a thread timer, not bound to any window. WM_TIMER is
-    // delivered straight into this thread's message queue (msg.hwnd = NULL)
-    // and picked up by the same GetMessageW loop below that also dispatches
-    // the popup's own window messages.
+    // Thread timer, no window.
     let timer_id = unsafe { SetTimer(None, 0, DISPATCH_TICK_MS, None) };
     if timer_id == 0 {
         anyhow::bail!("SetTimer failed to install the dispatch tick");
@@ -675,40 +505,26 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
     let mut next_id: u64 = 0;
     let mut latest_dispatched = RequestId(0);
-    // Whether the popup was visible immediately before the most recent
-    // `CaptureGuardMsg::Hide` - the one piece of state that message cannot
-    // carry itself (see its doc comment), and the thing that keeps
-    // `Restore` from forcing the popup to appear when it was rightfully
-    // hidden already (e.g. the cursor is over non-text and nothing is
-    // showing).
+    // Visible just before the Hide.
     let mut capture_guard_prev_visible = false;
     // Overlay's own visibility.
     let mut overlay_prev_visible = false;
-    // What is on screen, and therefore what holds the cursor - see `Shown`.
+    // What is on screen now.
     let mut shown: Option<Shown> = None;
-    // Opened at startup, not only from the tray. The tray menu does not open
-    // on a real right-click (docs/BACKLOG.md), and until that is fixed this
-    // is the only path to settings that is reachable without knowing about
-    // the `chibipop settings` subcommand. Cancel or the X dismisses it and
-    // hovering works normally underneath - it is modeless for exactly the
-    // reason this module's header gives.
-    //
-    // Note it reappears after Apply, because Apply restarts the process.
-    // That is the honest consequence of both behaviours, not a loop: it
-    // takes a click each time, and it shows the values that were just saved.
+    // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
         &form_with_library(&cfg, &dicts, &library),
         &settings::stale_order_entries(&cfg, &dicts),
         true,
     ) {
-        // Never fatal, the same rule the tray path follows.
+        // Never fatal.
         Err(e) => {
             eprintln!("chibipop: opening settings at startup failed: {e:#}");
             None
         }
         Ok(w) => Some(w),
     };
-    // Consecutive ticks the wheel has been captured - see ARM_WARN_TICKS.
+    // Consecutive armed ticks.
     let mut armed_ticks: u32 = 0;
     // A rebuild in flight.
     let mut rebuild: Option<InFlight> = None;
@@ -758,18 +574,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let mut msg = MSG::default();
 
     loop {
-        // hwnd = None: messages for any window this thread owns, PLUS
-        // thread-targeted messages (WM_TIMER above, WM_APP_RESULT below,
-        // WM_QUIT from the tray's Quit item below) whose own hwnd is NULL.
+        // Window and thread messages.
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if got.0 <= 0 {
             break; // 0 = WM_QUIT, -1 = error. Either way, stop pumping.
         }
 
-        // Modeless dialog routing. This branch is what gives the settings
-        // window Tab, Shift-Tab, arrow keys between radios and Escape -
-        // without `DialogBoxParamW`'s nested pump, which would stop WM_TIMER
-        // arriving and latch the wheel arm (spec D2).
+        // Modeless routing - spec D2.
         if let Some(w) = &settings {
             // Spec D9: the picker pumps.
             w.pump(|| {
@@ -785,12 +596,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
-            // Spec D7: the popup's OWN rect, never the sticky region. The
-            // sticky region includes the hovered word, and the cursor is on
-            // the hovered word by construction whenever a popup appears - so
-            // arming on it would swallow the wheel while the user was merely
-            // reading, and scrolling the page would silently scroll the popup
-            // instead.
+            // Spec D7: the popup's own rect.
             let live = cursor_now();
             let armed = scroll_popup
                 && shown
@@ -812,7 +618,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             if notches != 0 {
                 if let Some(s) = shown.as_mut() {
                     let span = max_scroll(s.content_h, s.view_h);
-                    // Wheel-up is positive, and moves content toward the top.
+                    // Wheel-up is positive.
                     let step = notches.saturating_mul(SCROLL_STEP_PX);
                     let next = s.scroll.saturating_sub(step).clamp(0, span);
                     if next != s.scroll {
@@ -863,19 +669,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 } else {
                     match w.take_outcome() {
                         Some(SettingsOutcome::Cancel) => settings = None,
-                        // Same PostQuitMessage the tray's Quit uses, and for the
-                        // same reason: this runs ON the main thread, inside this
-                        // very loop. BACKLOG 7 left the tray's Quit unreachable,
-                        // so for now this is the only one that can be pressed.
+                        // Already on the main thread.
                         Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
                         Some(SettingsOutcome::Apply) => {
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
-                            // Both failures leave the running instance alive and
-                            // the window open. A settings round-trip that half
-                            // applies - new file on disk with old settings
-                            // running, or nothing running at all - is the one
-                            // outcome worth refusing outright.
+                            // Never half-apply.
                             if edited.has_staged() {
                                 match start_rebuild(&edited, &library, &staged_db) {
                                     Err(e) => refuse_apply(w, &e),
@@ -901,7 +700,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             }
 
             if let Some(cursor) = Hooks::take_pending() {
-                // Spec D3: on the word or its popup, change nothing.
+                // Spec D3: hold, do not resolve.
                 let frozen = shown
                     .as_ref()
                     .is_some_and(|s| in_sticky(cursor, s.hold, s.popup));
@@ -912,19 +711,14 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 }
             }
         } else if msg.message == WM_APP_RESULT {
-            // Drain to the freshest result actually queued right now - a
-            // burst of WM_APP_RESULT posts (unlikely but not impossible)
-            // collapses to one apply, matching the same "only the latest
-            // matters" spirit as the trigger side.
+            // Only the freshest queued.
             let mut freshest: Option<WorkerResult> = None;
             while let Ok(r) = result_rx.try_recv() {
                 freshest = Some(r);
             }
             if let Some(result) = freshest {
                 if result.id < latest_dispatched {
-                    // Stale: a newer trigger has been dispatched since this
-                    // one was sent. Drop silently (decision 1) - a
-                    // superseded answer is not an error.
+                    // Superseded, not an error.
                 } else {
                     handle_worker_outcome(
                         &popup,
@@ -939,20 +733,10 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
-            // Drain everything queued right now rather than one-per-wakeup:
-            // harmless even though the worker only ever has one request
-            // outstanding at a time (it blocks on `Hide`'s ack before doing
-            // anything else, and only ever processes one trigger at once -
-            // see `worker_main`), and it means a burst can never pile up
-            // behind a slow main thread the way it could if this only ever
-            // handled a single message per wakeup.
+            // Drain, never one per wakeup.
             drain_capture_guard();
         } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam, || {
-            // Spec D9's one exception. `TrackPopupMenuEx` runs its own message
-            // pump and discards thread-targeted messages, so `WM_TIMER` stops
-            // arriving while the menu is open - while the hook keeps being
-            // called. That is the only way the arm can latch, and this is the
-            // callback that exists to service what the menu would swallow.
+            // The menu swallows WM_TIMER.
             Hooks::set_scroll_armed(false);
             drain_capture_guard();
         }) {
@@ -964,19 +748,14 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         let form = form_with_library(&cfg, &dicts, &library);
                         let stale = settings::stale_order_entries(&cfg, &dicts);
                         match SettingsWindow::open(&form, &stale, true) {
-                            // Never fatal - the same rule the overlay
-                            // follows. Settings is not worth killing the
-                            // app for.
+                            // Never fatal.
                             Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
                             Ok(w) => settings = Some(w),
                         }
                     }
                 }
                 TrayCommand::Quit => unsafe {
-                    // Literal PostQuitMessage, not PostThreadMessageW: unlike
-                    // Task 7's interim console reader, this runs ON the main
-                    // thread (inside this same GetMessageW loop), so posting
-                    // to "whichever thread calls this" is already correct.
+                    // Already on the main thread.
                     PostQuitMessage(0);
                 },
             }
@@ -988,8 +767,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         }
     }
 
-    // Shutdown (decision 5), in order. PostQuitMessage has already fired -
-    // it is what ended the loop above - so the remaining steps happen here:
+    // Shutdown, decision 5's order.
     unsafe {
         let _ = KillTimer(None, timer_id);
     }
@@ -999,17 +777,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     // I5: unhook before draining.
     drop(hooks); // 3. drop Hooks - unhooks both WH_MOUSE_LL and WH_KEYBOARD_LL
 
-    // The worker may right now be blocked inside `CaptureGuard::hide_for_capture`,
-    // waiting for this thread to service a `Hide` - but this thread has
-    // already left the `GetMessageW` loop above (that is what ended it), so
-    // a bare `worker_handle.join()` here would deadlock: nothing would ever
-    // answer that `Hide`, and nothing would ever unblock this join. Keep
-    // draining `capture_guard_rx` - answering `Hide` so the worker can
-    // finish its current capture, discarding `Restore` since a popup about
-    // to be destroyed has nothing worth restoring to - until the worker
-    // actually finishes. `is_finished` is a non-blocking poll, not a wait,
-    // so this loop is what does the waiting; `hide_for_capture`'s own
-    // `ACK_TIMEOUT` is a second, independent backstop, not relied on here.
+    // A bare join() would deadlock.
     while !worker_handle.is_finished() {
         while let Ok(req) = capture_guard_rx.try_recv() {
             match req {
@@ -1061,9 +829,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     Ok(())
 }
 
-/// Constructs everything OCR/SQLite-related on this thread (see the module
-/// docs for why), reports startup success/failure once via `startup_tx`,
-/// then services triggers until the channel closes.
+/// Serves triggers, owns OCR.
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
     dict_path: PathBuf,
@@ -1107,8 +873,7 @@ fn worker_main(
     };
     let engine = LookupEngine::new(Deconjugator::new(rules));
 
-    // Decision 2: called once, here, and reused for every trigger below -
-    // never re-queried per lookup.
+    // Decision 2: read once.
     let dicts: Vec<DictInfo> = match dict.dicts().context("reading dictionary identities") {
         Ok(d) => d,
         Err(e) => {
@@ -1117,14 +882,9 @@ fn worker_main(
         }
     };
 
-    // Built once and reused for every trigger below, same as `engine`/`dicts`
-    // above - cheap regardless (a `u32` and a channel `Sender`), but there is
-    // also no reason to rebuild it per hover.
     let capture_guard = CaptureGuard { main_tid, request_tx: capture_guard_tx };
 
-    // `clone` because the worker keeps its own copy for every later
-    // `present::build`. Two dictionary identities are a handful of bytes;
-    // sharing them behind an Arc for that would be ceremony.
+    // An Arc would be ceremony.
     if startup_tx.send(Ok(dicts.clone())).is_err() {
         return; // main thread gave up waiting; nothing left to do.
     }
@@ -1134,9 +894,7 @@ fn worker_main(
             Ok(t) => t,
             Err(_) => break, // sender dropped: shutdown (decision 5, step 2).
         };
-        // Drain to the newest queued trigger before doing any work - see the
-        // module docs on why mpsc-plus-drain stands in for a literal
-        // single-slot cell.
+        // The newest queued wins.
         while let Ok(newer) = trigger_rx.try_recv() {
             trigger = newer;
         }
@@ -1144,30 +902,14 @@ fn worker_main(
             break;
         }
 
-        // Read fresh every trigger rather than once at the top of this
-        // function: cheap (one atomic load), and it removes any need to
-        // reason about exactly when `run` finishes setting this relative to
-        // when the first trigger could possibly arrive - see this flag's
-        // own doc comment in `run`.
+        // Fresh, so no ordering rule.
         let guard = if capture_guard_active.load(Ordering::SeqCst) {
             Some(&capture_guard)
         } else {
             None
         };
 
-        // One bad frame must not end the session - the same discipline
-        // main.rs's `watch` command already applies per-iteration, extended
-        // here to a real panic (not just a returned Err) so a single
-        // unexpected failure can't silently kill hovering for the rest of
-        // the run. AssertUnwindSafe: none of ocr/dict/engine/dicts/guard
-        // retain any externally-observable partial-mutation state across a
-        // panic inside resolve_trigger - each is only ever used through
-        // shared, read-style calls (resolve_at_tiled_scanned, run,
-        // hide_for_capture / restore_after_capture, both of which only ever
-        // send on an mpsc
-        // `Sender` - never poisoned by a panicking receiver the way a
-        // `Mutex` would be) - so there is nothing for a caught panic to
-        // leave torn.
+        // One bad frame is not fatal.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             resolve_trigger(
                 &ocr,
@@ -1191,24 +933,7 @@ fn worker_main(
     }
 }
 
-/// One hover's worth of work: `OcrTextSource::resolve_at_tiled_scanned` ->
-/// lookup -> `present::build`, exactly the pipeline the brief specifies.
-///
-/// `capture_guard`, when `Some`, wraps the capture inside
-/// `resolve_at_tiled_scanned` with a hide-before/reshow-after around it
-/// (spec §5.1) - `text::capture` stays exactly as M2 left it (spec section
-/// 4: "M3 adds no lookup logic"), so the guard wraps the call from here
-/// rather than reaching inside it. This does mean the popup stays hidden
-/// for the OCR recognition step too, not only the BitBlt itself - a longer
-/// hidden window than the minimum that correctness requires, traded
-/// deliberately for not touching M2 at all; see the task report.
-///
-/// `scan_display` decides what the overlay is handed: its `captures` half is
-/// the old `cfg.debug.show_scan_region` and is the only thing the OCR layer
-/// ever collects, while its `highlight` half is computed here from the top
-/// card. That split is what keeps the default path to **one** rectangle
-/// instead of four - the capture kinds are never collected rather than
-/// collected and filtered (spec D2).
+/// One hover: OCR to present.
 #[allow(clippy::too_many_arguments)]
 fn resolve_trigger(
     ocr: &OcrTextSource,
@@ -1261,44 +986,24 @@ fn resolve_trigger(
 }
 
 
-/// What is on screen right now. `None` whenever the popup is hidden.
-///
-/// **Must never outlive the visible window.** While this is `Some`,
-/// [`crate::geom::in_sticky`] suppresses trigger dispatch for its region; a
-/// `Shown` left behind by a hidden popup would therefore turn a patch of the
-/// screen into a dead zone where hovering silently does nothing. It is set
-/// only after `show_presentation` has succeeded, and cleared on every path
-/// that hides the popup.
+/// On screen. Never outlive it.
 struct Shown {
-    /// The hovered character's own box.
+    /// The hovered glyph's box.
     anchor: PhysRect,
-    /// Where `place_popup` put the window — stored, never re-derived.
+    /// Stored, never re-derived.
     popup: PhysRect,
-    /// The region the cursor may roam without re-resolving: the characters
-    /// the top card actually matched, or the hovered glyph alone when they
-    /// could not be located.
-    ///
-    /// This is why scanning along one word does not flicker. `resolve` works
-    /// per *character*, so every glyph of 通ってる starts its own lookup and
-    /// answers with a different entry - hovering across it would otherwise
-    /// show 通る, then っ, then てる, then る. Holding across the matched span
-    /// means one lookup stands until the cursor leaves the word it described.
+    /// Where the cursor may roam.
     hold: PhysRect,
     presentation: Presentation,
-    /// Vertical content offset in physical pixels; 0 is the top.
+    /// Content offset; 0 is the top.
     scroll: i32,
-    /// Natural content height, unclamped — what `scroll` ranges against.
+    /// Natural height, unclamped.
     content_h: i32,
-    /// Visible height, which is the window's height.
+    /// The window's own height.
     view_h: i32,
 }
 
-/// Applies one `WorkerOutcome` to the popup and - when the debug toggle
-/// created one - the scan overlay, which moves in lock-step with the popup
-/// on every arm below (M3 task 4).
-///
-/// Maintains `shown` in step with what is actually visible - see [`Shown`] on
-/// why a stale one is the defect to avoid.
+/// Applies one outcome.
 #[allow(clippy::too_many_arguments)]
 fn handle_worker_outcome(
     popup: &Popup,
@@ -1358,7 +1063,7 @@ fn handle_worker_outcome(
                     Hooks::set_scroll_armed(false);
                 }
                 Ok((rect, content_h, view_h)) => {
-                    // Notches meant for the previous popup must not land here.
+                    // Old notches must not land.
                     Hooks::discard_scroll();
                     *shown = Some(Shown {
                         anchor,
@@ -1380,8 +1085,7 @@ fn handle_worker_outcome(
     }
 }
 
-/// `measure`, `place_popup` against the monitor containing the anchor,
-/// `show_at`, `paint` - the exact sequence the brief specifies.
+/// Measure, place, show, paint.
 fn show_presentation(
     popup: &Popup,
     renderer: &mut Renderer,
@@ -1395,13 +1099,7 @@ fn show_presentation(
     let max_w = POPUP_MAX_WIDTH.min(monitor.w.max(1));
     let max_h = ((monitor.h * max_height_percent) / 100).max(1);
 
-    // `view_h` is ALWAYS <= max_h by construction (render.rs's own
-    // guarantee), and that capped value - not the natural `content_h`, and
-    // not a recomputed size - is what place_popup receives next: geom.rs's
-    // anchor-never-covered proof (Task 3's 12,201-case sweep) holds only
-    // when the height it is handed never exceeds the 45%-of-monitor cap.
-    // Passing `content_h` here would silently break that guarantee for
-    // exactly the long entries scrolling exists to serve.
+    // view_h, not content_h, below.
     let (w, view_h, content_h) = renderer
         .measure(presentation, theme, max_w, max_h)
         .context("measuring popup content")?;
@@ -1412,43 +1110,14 @@ fn show_presentation(
     Ok((rect, content_h, view_h))
 }
 
-/// Whether a new outcome would draw exactly what is already on screen.
-///
-/// Keyed on **content**, because the question is literally "would the rendered
-/// output be identical". That also covers the case `main.rs`'s `watch`
-/// documents: the recognised line gains or loses characters at either end as
-/// the capture region slides, changing `cursor_byte_offset` while the hovered
-/// glyph — and therefore the hits — stay the same.
-///
-/// The anchor is part of the key regardless, because two occurrences of one
-/// word on screen produce equal presentations and the popup must still move.
+/// Would it redraw the same?
 fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
     prev.presentation == *new
         && (prev.anchor.x - anchor.x).abs() <= ANCHOR_JITTER_PX
         && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
 }
 
-/// The region the cursor may roam without re-resolving.
-///
-/// Two different rules on the two axes, and both are measured rather than
-/// guessed:
-///
-/// **Along the reading axis** it is the characters the top card matched, so
-/// scanning one word does not restart the lookup on every glyph.
-///
-/// **Perpendicular to it** the matched span is far too tight. `hit_scan`
-/// accepts a cursor within half a word's own height of that word, so the
-/// region resolving a given character is taller than the character's box —
-/// measured on a 22px は, resolving over 34 vertical pixels against a 28px
-/// padded span. Drifting those few pixels used to leave the hold, dispatch a
-/// trigger, and make the capture guard blink the popup off and on *before* the
-/// lookup ran, so no amount of de-duplicating the result could suppress it.
-/// Growing this axis by half the anchor's own extent reproduces `hit_scan`'s
-/// rule, which is the honest definition of "the answer cannot change here".
-///
-/// It must **not** grow along the reading axis: neighbouring characters sit
-/// only a few pixels away there (measured: 8px past は's box resolves 宿), so
-/// widening would hold a stale popup over the next word.
+/// Match one axis, slack other.
 fn hold_region(anchor: PhysRect, matched: Option<PhysRect>, orientation: Orientation) -> PhysRect {
     let span = matched.unwrap_or(anchor);
     match orientation {
@@ -1467,20 +1136,7 @@ fn hold_region(anchor: PhysRect, matched: Option<PhysRect>, orientation: Orienta
     }
 }
 
-/// Launch a replacement chibipop with this process's own argv.
-///
-/// Passing the original arguments is what makes `--dict`, `--rules` and
-/// `--config` survive a settings change; a restart that silently reverted to
-/// the defaults would be worse than not restarting at all.
-///
-/// The caller posts a quit **only after this returns `Ok`**, so a failure to
-/// spawn leaves the working instance running rather than leaving the user with
-/// nothing. Startup measures 0.18s to a live tray icon, so the gap is
-/// imperceptible - see the settings spec's D8.
-///
-/// `std::process::Command` rather than `CreateProcessW`: it is in the standard
-/// library, it handles argument quoting, and nothing here needs to be
-/// Windows-specific.
+/// Relaunch with this argv.
 fn restart_self() -> Result<()> {
     let exe = std::env::current_exe().context("locating this executable")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1491,13 +1147,7 @@ fn restart_self() -> Result<()> {
     Ok(())
 }
 
-/// The pointer's position right now.
-///
-/// Read live rather than from `Hooks::take_pending`, which is gated at
-/// `MOVEMENT_GATE_PX`: easing into the popup in small steps could otherwise
-/// leave the wheel arm stale. From the live position the arm is correct within
-/// one tick regardless of movement history, and it self-corrects from any wrong
-/// state instead of latching.
+/// Live, not the gated point.
 fn cursor_now() -> PhysPoint {
     let mut pt = POINT::default();
     // SAFETY: FFI call taking a pointer to local stack storage that outlives
@@ -1509,15 +1159,12 @@ fn cursor_now() -> PhysPoint {
     PhysPoint { x: pt.x, y: pt.y }
 }
 
-/// The monitor containing `anchor`'s centre - never the primary monitor
-/// unconditionally (decision 3). This machine has two monitors of different
-/// orientations; hardcoding one would look correct only by accident.
+/// The monitor under the anchor.
 fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     let c = anchor.center();
     let pt = POINT { x: c.x, y: c.y };
     unsafe {
-        // MONITOR_DEFAULTTONEAREST never returns a null HMONITOR, even for
-        // an out-of-bounds point, so hmon itself needs no failure handling.
+        // Never null, so never checked.
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         if GetMonitorInfoW(hmon, &mut mi).as_bool() {
@@ -1530,9 +1177,7 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     }
 }
 
-/// Builds the runtime `Theme` from `[popup]`: the palette from `popup.theme`,
-/// then `popup.font` overlaid - the one place config crosses into theme.rs's
-/// deliberately config-free struct.
+/// Palette by name, font on top.
 fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
     let mut theme = match popup.theme.as_str() {
         "light" => Theme::light(),
@@ -1560,8 +1205,7 @@ mod tests {
         }
     }
 
-    /// I1: `[popup] font` must reach the built `Theme`, not just round-trip
-    /// through `config.rs` unused.
+    /// I1: font must reach Theme.
     #[test]
     fn a_non_default_font_reaches_the_theme() {
         let theme = theme_from_config(&popup_config("dark", "Noto Sans JP"));
@@ -1600,9 +1244,7 @@ mod tests {
         }
     }
 
-    /// UPSCALE is 2, so every anchor is re-measured through integer division
-    /// from a differently-framed capture: ±1px per edge. An exact-match test
-    /// would fail spuriously and re-render anyway.
+    /// UPSCALE 2 jitters each edge.
     #[test]
     fn an_equal_card_with_a_jittered_anchor_is_the_same_content() {
         let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
@@ -1611,8 +1253,7 @@ mod tests {
         assert!(same_content(&prev, &presentation_of("宿舎"), jittered));
     }
 
-    /// Two occurrences of one word on screen produce identical presentations,
-    /// and the popup genuinely has to move.
+    /// One word twice; it must move.
     #[test]
     fn an_equal_card_that_moved_is_not_the_same_content() {
         let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
@@ -1628,32 +1269,24 @@ mod tests {
         assert!(!same_content(&prev, &presentation_of("駅長"), a));
     }
 
-    /// Scanning along one word must not flicker. `resolve` works per
-    /// *character*, so every glyph of a conjugated verb starts its own lookup
-    /// and answers with a different entry - measured live on 振り向けた, five
-    /// characters gave five different popups. Holding across the characters
-    /// the top card actually matched is what collapses that to one.
+    /// One word, one popup.
     #[test]
     fn the_hold_region_covers_the_whole_matched_word() {
         let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
-        // 通ってる matched 4 characters, so the span reaches past the anchor.
+        // 通ってる matched 4 characters.
         let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
         let popup = PhysRect { x: 3007, y: 300, w: 420, h: 300 };
 
-        // The second and third characters of the same word.
+        // Same word, later glyphs.
         assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, popup));
         assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, popup));
-        // Past the match, a genuinely different word - must re-resolve.
+        // Past the match: re-resolve.
         assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, popup));
-        // The anchor alone would have released at the very next glyph.
+        // The anchor alone releases.
         assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, popup));
     }
 
-    /// Measured on screen: a 22px は at x=2704..2728, y=260..282 resolves as
-    /// は over y=254..288 — taller than its own box, because `hit_scan`
-    /// accepts a cursor within half a word's height. The padded match span is
-    /// only y=257..285, so drifting a few pixels used to leave the hold and
-    /// make the capture guard blink the popup before any lookup ran.
+    /// A 22px は resolves over 34px.
     #[test]
     fn the_hold_covers_the_vertical_slack_hit_scan_allows() {
         let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
@@ -1662,13 +1295,11 @@ mod tests {
 
         assert!(hold.y <= 254, "must reach the measured top of the region, got {}", hold.y);
         assert!(hold.y + hold.h >= 288, "must reach the measured bottom");
-        // But it must NOT reach the line above, which starts resolving at 248.
+        // The line above starts at 248.
         assert!(hold.y > 248, "reaching the line above would hold a stale popup");
     }
 
-    /// The reading axis must stay exactly as wide as the match: measured, the
-    /// neighbouring character resolves only 8px past は's box, so widening
-    /// here would hold a stale popup over the next word.
+    /// 宿 resolves 8px past は's box.
     #[test]
     fn the_hold_never_widens_along_the_reading_axis() {
         let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
@@ -1679,7 +1310,7 @@ mod tests {
         assert!(!hold.contains(PhysPoint { x: 2736, y: 271 }), "2736 resolves 宿");
     }
 
-    /// Vertical text mirrors it: the slack goes on x, the match span holds y.
+    /// Vertical: slack on x.
     #[test]
     fn the_hold_mirrors_for_vertical_text() {
         let anchor = PhysRect { x: 2860, y: 1650, w: 28, h: 25 };
@@ -1691,8 +1322,7 @@ mod tests {
         assert_eq!(anchor.w * 2, hold.w);
     }
 
-    /// With no matched span the hold is still inflated - the flicker this
-    /// fixes has nothing to do with whether geometry was available.
+    /// No match still gets slack.
     #[test]
     fn the_hold_without_a_match_still_carries_its_slack() {
         let anchor = PhysRect { x: 100, y: 200, w: 26, h: 27 };
@@ -1702,8 +1332,7 @@ mod tests {
         assert!(hold.h > anchor.h, "must still tolerate perpendicular drift");
     }
 
-    /// Exactly at the tolerance must still count as unchanged; one past it
-    /// must not.
+    /// At tolerance yes, past it no.
     #[test]
     fn the_jitter_tolerance_is_inclusive_and_bounded() {
         let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };

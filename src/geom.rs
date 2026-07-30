@@ -1,9 +1,4 @@
-//! Coordinate types for chibipop.
-//!
-//! Every coordinate in this project is a physical pixel in virtual-desktop
-//! space. These types carry arithmetic only — the OS queries that produce them
-//! live in the Windows-facing modules and pass plain data in, so this file
-//! compiles and tests on any platform.
+//! Physical pixel geometry.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysPoint {
@@ -20,14 +15,12 @@ pub struct PhysRect {
 }
 
 impl PhysRect {
-    /// Inclusive of the top-left edge, exclusive of the bottom-right — the
-    /// usual half-open pixel convention, so adjacent rects never both claim
-    /// the same pixel.
+    /// Half-open: top-left in.
     pub fn contains(&self, p: PhysPoint) -> bool {
         p.x >= self.x && p.x < self.x + self.w && p.y >= self.y && p.y < self.y + self.h
     }
 
-    /// Shortest distance from `p` to this rect's boundary; 0.0 when inside.
+    /// 0.0 when `p` is inside.
     pub fn edge_distance_to(&self, p: PhysPoint) -> f64 {
         let dx = (self.x - p.x).max(0).max(p.x - (self.x + self.w - 1));
         let dy = (self.y - p.y).max(0).max(p.y - (self.y + self.h - 1));
@@ -42,11 +35,7 @@ impl PhysRect {
         PhysRect { x: self.x + dx, y: self.y + dy, w: self.w, h: self.h }
     }
 
-    /// Grown by `dx` on each side horizontally and `dy` vertically.
-    ///
-    /// Negative amounts shrink, and may produce a non-positive extent; callers
-    /// that treat such a rect as containing nothing (see [`in_sticky`]) are
-    /// already correct without a clamp here.
+    /// Negative amounts shrink.
     pub fn inflated(&self, dx: i32, dy: i32) -> PhysRect {
         PhysRect {
             x: self.x - dx,
@@ -56,16 +45,7 @@ impl PhysRect {
         }
     }
 
-    /// Integer division of every field — used to map coordinates back out of
-    /// upscaled-image space.
-    ///
-    /// Calling convention: this divides image-local (non-negative)
-    /// coordinates and is applied *before* `translated` moves the rect into
-    /// (possibly negative) virtual-desktop space, so in the intended
-    /// composition it never sees a negative input. Division truncates toward
-    /// zero (Rust's `/`), not floor — e.g. `-11 / 2 == -5`. That only matters
-    /// if this convention is violated and a negative value is passed in
-    /// directly; see the tests below for the pinned behaviour.
+    /// Truncates toward zero.
     pub fn scaled_down(&self, factor: i32) -> PhysRect {
         PhysRect {
             x: self.x / factor,
@@ -76,86 +56,48 @@ impl PhysRect {
     }
 }
 
-/// Which stage of text acquisition a drawn rectangle came from. Drives the
-/// overlay's colour; the drawing layer needs no other knowledge of the OCR
-/// pipeline.
+/// Origin of a drawn rect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanKind {
-    /// The cursor-centred box pass 1 captures to find the hovered word.
+    /// Pass 1's capture box.
     Pass1,
     /// One forward tile.
     Tile,
-    /// The resolved word's own box.
+    /// The resolved word's box.
     Anchor,
-    /// The characters the popup is defining - not a capture at all, but the
-    /// decision the captures exist to reach. The everyday case, and the only
-    /// kind drawn when `[debug] show_scan_region` is off.
+    /// The characters defined.
     Match,
 }
 
-/// One rectangle the overlay draws, tagged with where it came from.
+/// A rect the overlay draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanRect {
     pub rect: PhysRect,
     pub kind: ScanKind,
 }
 
-/// What one hover's overlay is allowed to show, resolved from the two
-/// independent settings that feed it.
-///
-/// They are genuinely independent: `[popup] highlight_match` is the everyday
-/// answer to "is it defining the word I am pointing at?", while `[debug]
-/// show_scan_region` is the diagnostic view of where chibipop looked. Keeping
-/// them in one value is what makes "the capture boxes are **not** drawn when
-/// only the highlight is on" a checkable statement instead of a convention -
-/// four overlapping rectangles on every hover is precisely what the highlight
-/// exists to avoid.
+/// What one hover may show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanDisplay {
-    /// `Pass1`, `Tile` and `Anchor`. Never collected when false, so "off" is
-    /// inert rather than collected-and-filtered.
+    /// Captures; inert when off.
     pub captures: bool,
     /// `Match`.
     pub highlight: bool,
 }
 
 impl ScanDisplay {
-    /// Whether an overlay window is needed at all. Both off means no window is
-    /// ever created.
-    ///
-    /// Built by struct literal on purpose - there is no `new`, because two
-    /// adjacent `bool` parameters are a silent swap waiting to happen and the
-    /// field names are the only thing that tells the two settings apart.
+    /// Is any overlay needed?
     pub fn any(self) -> bool {
         self.captures || self.highlight
     }
 }
 
-/// The three rectangles that keep a popup on screen: the hovered character,
-/// the popup itself, and the **bridge** across the gap between them.
-///
-/// Returned in that order — `[anchor, popup, bridge]`.
-///
-/// **Three rectangles, deliberately not their bounding box.** The popup is
-/// flush with the anchor's left edge and up to `POPUP_MAX_WIDTH` (420px) wide,
-/// while the anchor is one glyph (~26px). A bounding box would therefore also
-/// cover ~400px of screen *beside* the hovered character, at that character's
-/// own height — so scanning sideways along a line of text would hold the popup
-/// on the previous word and the next word could never be read. The bridge is
-/// only the gap tall, so brushing it on the way to the line below holds
-/// nothing.
-///
-/// The bridge is derived from whichever rect is upper, because [`place_popup`]
-/// flips the popup above the anchor near a monitor's bottom edge.
+/// Anchor, popup, bridge.
 pub fn sticky_region(anchor: PhysRect, popup: PhysRect) -> [PhysRect; 3] {
     [anchor, popup, bridge_between(anchor, popup)]
 }
 
-/// The gap band between two rects, spanning their combined x-extent.
-///
-/// Zero or negative height when they touch or overlap; [`in_sticky`] treats
-/// that as containing nothing, and the two rects are adjacent in that case so
-/// nothing is lost.
+/// The gap band between two.
 fn bridge_between(a: PhysRect, b: PhysRect) -> PhysRect {
     let (upper, lower) = if a.y <= b.y { (a, b) } else { (b, a) };
     let top = upper.y + upper.h;
@@ -164,29 +106,14 @@ fn bridge_between(a: PhysRect, b: PhysRect) -> PhysRect {
     PhysRect { x: left, y: top, w: right - left, h: lower.y - top }
 }
 
-/// Whether `p` is on the hovered word, on its popup, or in the gap between.
-///
-/// While this is true the application dispatches no trigger at all, so the
-/// popup stays exactly as it is (spec D3).
-///
-/// **What this guarantees, and what it does not** (spec D2a): the vertical path
-/// from the anchor's centre into the popup is entirely covered, as is any
-/// approach steeper than roughly 45°. A *shallower* diagonal leaves the region
-/// by the anchor's side edge before reaching the bridge — landing on the
-/// neighbouring character, which is then correctly resolved as the word the
-/// cursor actually moved to. Covering that strip instead is precisely what
-/// would break sideways scanning, so the two cannot both hold.
+/// On anchor, popup, or gap.
 pub fn in_sticky(p: PhysPoint, anchor: PhysRect, popup: PhysRect) -> bool {
     sticky_region(anchor, popup)
         .iter()
         .any(|r| r.w > 0 && r.h > 0 && r.contains(p))
 }
 
-/// The overlay window's bounds, and every rectangle translated into that
-/// window's local coordinates.
-///
-/// `None` for empty input - the caller must then show no window at all rather
-/// than an empty one.
+/// Bounds plus local rects.
 pub fn overlay_layout(rects: &[ScanRect]) -> Option<(PhysRect, Vec<ScanRect>)> {
     let first = rects.first()?;
     let mut left = first.rect.x;
@@ -209,12 +136,7 @@ pub fn overlay_layout(rects: &[ScanRect]) -> Option<(PhysRect, Vec<ScanRect>)> {
     Some((bounds, local))
 }
 
-/// A rectangle's interior once a border `thickness` wide is removed.
-///
-/// `None` when nothing is left - a rectangle no thicker than two borders is
-/// all border. OCR word boxes really do get this small (a measured box on the
-/// user's screen is 17x3), so this case is reached in practice, and computing
-/// it by subtraction alone would produce a negative extent.
+/// `None` when nothing is left.
 pub fn inset(rect: PhysRect, thickness: i32) -> Option<PhysRect> {
     let w = rect.w - 2 * thickness;
     let h = rect.h - 2 * thickness;
@@ -224,48 +146,7 @@ pub fn inset(rect: PhysRect, thickness: i32) -> Option<PhysRect> {
     Some(PhysRect { x: rect.x + thickness, y: rect.y + thickness, w, h })
 }
 
-/// Places a `size`-shaped popup relative to `anchor`, so it never covers
-/// `anchor` and never crosses `monitor`'s edges.
-///
-/// Default position (spec §4.2): flush with the anchor's left edge, `gap`
-/// pixels below its bottom edge - "below and to the right". Each axis flips
-/// independently to the anchor's *other* side when the default would cross
-/// that axis's monitor edge:
-/// - X carries no gap in either direction - flush-left with the anchor
-///   normally, flush-right with it when flipped - because X is never what
-///   keeps the popup off the anchor; Y does that job unconditionally below.
-/// - Y always carries `gap`, on both the below and the above placement,
-///   because Y is the axis that actually separates the popup from the
-///   character being read.
-///
-/// That split is what makes the anchor provably uncovered on every call,
-/// not just the cases this module happens to test: whichever branch Y takes,
-/// the popup's Y-span lands entirely before or entirely after the anchor's
-/// (given `gap >= 0`), and a 2D overlap needs both axes to overlap - so X
-/// landing anywhere on-screen can never re-introduce it.
-///
-/// The result is finally clamped into `monitor`. That clamp is a no-op
-/// whenever a flip alone already fits (true for every case exercised
-/// below); it exists because the secondary monitor here is only 1080px
-/// wide, so a popup that grows wide with many collapsed rows could
-/// plausibly need it even after flipping.
-///
-/// The clamp is also the one place the anchor-uncovered proof above can
-/// break: if neither the space above nor below the anchor is large enough
-/// to hold `gap + h`, the Y clamp pulls the popup back toward the anchor
-/// and it can genuinely end up covering it. This was checked, not just
-/// reasoned about: an ad hoc sweep (anchor swept across three monitors incl.
-/// non-zero and negative origins, both orientations, sizes at and above the
-/// M3-D4 45%-of-monitor-height contract) found overlap in exactly the
-/// bucket that broke that contract - `h` at 74% of a 1080px-tall monitor -
-/// and nowhere else, including the identical 800px height at 41.7% of the
-/// 1920px-tall portrait monitor. So: any anchor, any monitor origin
-/// (incl. negative), either orientation, is safe *provided* the caller caps
-/// `size` to the M3-D4 45%-of-monitor-height contract first (`present.rs`'s
-/// height cap exists for exactly this) - which is a fine bar for a real
-/// display (the cap can't force this failure until the monitor is under
-/// roughly 240px tall). That call belongs to the code that already knows
-/// the clamp happened - Task 5's `measure()` - not here.
+/// Never covers `anchor`.
 pub fn place_popup(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, gap: i32) -> PhysRect {
     let (w, h) = size;
 
@@ -320,39 +201,35 @@ mod tests {
 
     #[test]
     fn edge_distance_is_orthogonal_when_aligned() {
-        // 5px to the left of the rect, vertically within it.
         assert_eq!(5.0, r(10, 10, 20, 20).edge_distance_to(p(5, 15)));
     }
 
     #[test]
     fn edge_distance_is_diagonal_at_a_corner() {
-        // 3 left, 4 above the top-left corner -> 5 by Pythagoras.
+        // 3-4-5 triangle.
         assert_eq!(5.0, r(10, 10, 20, 20).edge_distance_to(p(7, 6)));
     }
 
     #[test]
     fn edge_distance_is_orthogonal_to_the_right() {
-        // Occupied span is x,y in [10, 29]. 6px to the right, vertically within it.
+        // Occupied span is 10..=29.
         assert_eq!(6.0, r(10, 10, 20, 20).edge_distance_to(p(35, 15)));
     }
 
     #[test]
     fn edge_distance_is_orthogonal_below() {
-        // 6px below the rect, horizontally within it.
         assert_eq!(6.0, r(10, 10, 20, 20).edge_distance_to(p(15, 35)));
     }
 
     #[test]
     fn edge_distance_is_diagonal_off_the_bottom_right_corner() {
-        // 3 right of the far edge (32 - 29), 4 below the far edge (33 - 29) -> 5 by Pythagoras.
+        // 3-4-5 off the far corner.
         assert_eq!(5.0, r(10, 10, 20, 20).edge_distance_to(p(32, 33)));
     }
 
     #[test]
     fn edge_distance_degrades_correctly_when_near_and_far_edges_coincide() {
-        // A 1x1 rect's near and far edge are the same pixel (10). 3 right, 4 below -> 5.
-        // Proves the far-edge term (`self.x + self.w - 1`) still works when it
-        // collapses onto the near edge instead of silently reducing to it.
+        // Near and far edge coincide.
         assert_eq!(5.0, r(10, 10, 1, 1).edge_distance_to(p(13, 14)));
     }
 
@@ -373,16 +250,13 @@ mod tests {
 
     #[test]
     fn scaled_down_truncates_toward_zero_for_odd_values() {
-        // 11/2 = 5.5, 21/2 = 10.5, 31/2 = 15.5, 41/2 = 20.5 -- truncation
-        // drops the fraction, distinguishing it from round-to-nearest (which
-        // would take w:31 to 16, not 15).
+        // Truncation, not rounding.
         assert_eq!(r(5, 10, 15, 20), r(11, 21, 31, 41).scaled_down(2));
     }
 
     #[test]
     fn scaled_down_truncates_toward_zero_for_negative_origin() {
-        // -11/2 = -5.5, -21/2 = -10.5 -- Rust's `/` truncates toward zero, so
-        // these land on -5 and -10, not floor's -6 and -11.
+        // Truncates toward zero.
         assert_eq!(r(-5, -10, 15, 20), r(-11, -21, 30, 40).scaled_down(2));
     }
 
@@ -420,7 +294,7 @@ mod tests {
 
     #[test]
     fn popup_respects_a_monitor_with_a_non_zero_origin() {
-        // The secondary monitor on this machine starts at x=2560.
+        // Secondary starts at x=2560.
         let mon = r(2560, 0, 1080, 1920);
         let got = place_popup(r(3500, 100, 20, 20), (300, 200), mon, 12);
         assert!(got.x >= mon.x, "must not spill onto the primary monitor");
@@ -470,9 +344,7 @@ mod tests {
         assert_eq!(ScanKind::Tile, local[1].kind);
     }
 
-    /// Spec D2, the whole point of the setting being separate: with only the
-    /// highlight on, a hover must draw ONE box. Collecting the capture kinds
-    /// would put four overlapping rectangles on the default path.
+    /// Highlight only: one box.
     #[test]
     fn the_capture_kinds_are_not_shown_when_only_the_highlight_is_on() {
         let d = ScanDisplay { captures: false, highlight: true };
@@ -488,8 +360,7 @@ mod tests {
         assert!(d.highlight);
     }
 
-    /// Both off must create no window at all - the M3 "inert, not merely
-    /// hidden" rule survives the highlight being added beside it.
+    /// Off means no window.
     #[test]
     fn both_settings_off_needs_no_overlay_window() {
         assert!(!ScanDisplay { captures: false, highlight: false }.any());
@@ -503,8 +374,7 @@ mod tests {
         assert!(d.any());
     }
 
-    /// Tiles routinely overlap the pass-1 box they were derived from, so the
-    /// union must not assume they are disjoint.
+    /// Tiles overlap pass 1.
     #[test]
     fn overlapping_rects_still_produce_one_covering_bounds() {
         let (bounds, _) = overlay_layout(&[
@@ -521,8 +391,7 @@ mod tests {
         assert_eq!(PhysRect { x: 12, y: 12, w: 96, h: 36 }, inner);
     }
 
-    /// A real OCR word box from the user's screen measures w=17 h=3. Subtracting
-    /// two 2px edges from a 3px height must yield no interior, not a negative one.
+    /// A real box measures 17x3.
     #[test]
     fn inset_of_a_rect_thinner_than_its_border_has_no_interior() {
         assert!(inset(PhysRect { x: 0, y: 0, w: 17, h: 3 }, 2).is_none());
@@ -530,8 +399,7 @@ mod tests {
         assert!(inset(PhysRect { x: 0, y: 0, w: 4, h: 4 }, 2).is_none());
     }
 
-    /// The popup as `place_popup` produces it: flush with the anchor's left
-    /// edge, POPUP_GAP (12) below its bottom.
+    /// Flush left, 12px below.
     fn anchor_and_popup() -> (PhysRect, PhysRect) {
         (r(100, 100, 26, 27), r(100, 139, 420, 300))
     }
@@ -553,8 +421,7 @@ mod tests {
         }
     }
 
-    /// `contains` is inclusive of the top-left and exclusive of the
-    /// bottom-right, so the three rects must tile with no missed row.
+    /// No missed row at a seam.
     #[test]
     fn the_three_rects_tile_without_a_seam() {
         let (a, pop) = anchor_and_popup();
@@ -563,7 +430,7 @@ mod tests {
         }
     }
 
-    /// D2a's actual guarantee: straight down from the anchor's centre.
+    /// D2a: straight down.
     #[test]
     fn the_vertical_path_into_the_popup_never_leaves_the_region() {
         for ax in [-900, 0, 2560, 3400] {
@@ -583,9 +450,7 @@ mod tests {
         }
     }
 
-    /// `place_popup` flips the popup above the anchor near a monitor's bottom
-    /// edge, so the bridge must come from whichever rect is upper rather than
-    /// assuming the popup is below.
+    /// Popup may sit above.
     #[test]
     fn the_bridge_works_with_the_popup_above_the_anchor() {
         let a = r(100, 900, 26, 27);
@@ -596,9 +461,7 @@ mod tests {
         assert!(in_sticky(p(310, 700), a, pop), "popup centre");
     }
 
-    /// THE assertion that fails if anyone replaces the three rects with their
-    /// bounding box. The next character along the line must stay hoverable, or
-    /// scanning a line freezes the popup on the previous word.
+    /// Fails on a bounding box.
     #[test]
     fn the_next_character_along_the_line_is_not_sticky() {
         let (a, pop) = anchor_and_popup();
@@ -606,10 +469,7 @@ mod tests {
         assert!(!in_sticky(p(300, 113), a, pop), "far along the same line");
     }
 
-    /// Pinned deliberately (spec D2a): a shallow diagonal DOES leave the
-    /// region, exiting onto the neighbouring character. That is correct
-    /// behaviour, and pinning it stops a future widening of the bridge from
-    /// silently breaking `the_next_character_along_the_line_is_not_sticky`.
+    /// Leaving is on purpose.
     #[test]
     fn a_shallow_diagonal_leaves_the_region_on_purpose() {
         let (a, pop) = anchor_and_popup();
@@ -626,8 +486,7 @@ mod tests {
         assert!(!in_sticky(p(1000, 1000), a, pop));
     }
 
-    /// A zero-height bridge must contribute nothing rather than being treated
-    /// as a containing rect - the same rule `inset` applies.
+    /// Zero-height bridge is nil.
     #[test]
     fn a_zero_gap_needs_no_bridge_and_still_tiles() {
         let a = r(100, 100, 26, 27);

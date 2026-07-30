@@ -1,4 +1,4 @@
-//! The lookup engine: prefix scan, deconjugation, POS filter, ranking.
+//! The lookup engine.
 
 use crate::lookup::deconj::{Deconjugator, Form};
 use crate::lookup::model::{Dictionary, Entry, Hit, TermRow};
@@ -11,7 +11,7 @@ pub const MAX_RESULTS: usize = 10;
 const DEFAULT_FREQ: f64 = 999_999.0;
 const SEPARATORS: &[char] = &['、', '。', '「', '」', '！', '？', '…', '\n'];
 
-/// Trim, cut at the first separator, and truncate to MAX_LOOKUP_CHARS.
+/// Trim, cut, truncate.
 pub fn clean_input(text: &str) -> String {
     let trimmed = text.trim();
     let cut = match trimmed.find(SEPARATORS) {
@@ -25,7 +25,7 @@ fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
 
-/// Ported from weikipop's `_calculate_priority`.
+/// From weikipop's priority.
 fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool, steps: usize) -> f64 {
     let f = freq.map(|v| v as f64).unwrap_or(DEFAULT_FREQ).max(1.0);
     let mut s = match_len as f64;
@@ -37,53 +37,18 @@ fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool, steps: usize) ->
     s
 }
 
-/// Maps a deconjugator terminal `dec_tag` to the dictionary `term.pos` token
-/// a row must carry to satisfy it.
-///
-/// The two vocabularies differ in granularity: `data/deconjugator.json`
-/// tags godan and suru forms with fine-grained JMdict-style subtypes (20
-/// terminal tags, i.e. every `dec_tag` not starting with `stem-`), while
-/// `term.pos` (built by `tools/build-dict/build.py`) stores 6 coarse tokens
-/// (`adj-i`, `v1`, `v5`, `vk`, `vs`, `vz`). An exact string-equality filter
-/// therefore rejects every correctly-deconjugated godan/suru candidate.
-///
-/// Return value:
-/// - `Some(Some(token))` — the tag is recognised and constrains matches to
-///   rows whose `pos` contains `token` (an empty `pos` still always
-///   survives — see the filter call site).
-/// - `Some(None)` — the tag is recognised but carries no POS signal in this
-///   dictionary's vocabulary (`exp`, `topic-condition`, `uninflectable`);
-///   no constraint is imposed.
-/// - `None` — the tag is not in this table at all. Filtering treats this
-///   identically to `Some(None)` (fail open, not closed: a future
-///   vocabulary change must not silently make words unlookupable), but the
-///   distinction is kept here so `all_terminal_dec_tags_are_handled_by_the_mapping`
-///   can assert real completeness instead of silently tolerating drift.
-///
-/// Identity mappings (`adj-i`, `v1`, `vk`) are listed explicitly rather than
-/// falling through a catch-all, so this table reads as a complete statement
-/// of the vocabulary relationship, not a partial one.
-///
-/// `vz` (497 rows in the real dictionary) is deliberately absent: it is
-/// never emitted as a terminal tag, so nothing should map to it — those
-/// entries are reachable only as unconjugated literals, where no filter
-/// applies.
+/// Fine dec_tag to coarse pos.
 fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
     match dec_tag {
-        // Godan verbs: every fine-grained conjugation class collapses to
-        // the dictionary's single coarse "v5" bucket.
         "v5aru" | "v5b" | "v5g" | "v5k" | "v5k-s" | "v5m" | "v5n" | "v5r"
         | "v5r-i" | "v5s" | "v5t" | "v5u" | "v5u-s" => Some(Some("v5")),
-        // Suru-compound: fine-grained "vs-i" collapses to coarse "vs".
         "vs-i" => Some(Some("vs")),
-        // Identical strings in both vocabularies - explicit identity
-        // mappings, not a fallthrough default.
         "adj-i" => Some(Some("adj-i")),
         "v1" => Some(Some("v1")),
         "vk" => Some(Some("vk")),
-        // Carry no part-of-speech signal in the dictionary vocabulary.
+        // No POS signal.
         "exp" | "topic-condition" | "uninflectable" => Some(None),
-        // Unrecognised: fail open. See doc comment above.
+        // Unrecognised: fail open.
         _ => None,
     }
 }
@@ -95,31 +60,10 @@ struct Candidate {
     process: Vec<String>,
 }
 
-/// A result slot, per the design spec: distinct entries that share a
-/// headword, reading, and source dictionary are shown once, not once per
-/// entry.
+/// One result slot.
 type GroupKey = (Option<String>, Option<String>, i64);
 
-/// True if `new` should replace `existing` as the retained candidate for a
-/// `GroupKey`. A total order over (match_len, steps, process, entry_id):
-///
-/// 1. Larger `match_len` wins - longest prefix wins (already implied by the
-///    prefix-descending scan order; made explicit here rather than relied
-///    on).
-/// 2. Then fewer `steps` wins - a shorter deconjugation is a better
-///    explanation.
-/// 3. Then the `process` trace, lexicographically - so the `via:` trace
-///    shown to the user is stable too, not just the score.
-/// 4. Then `entry_id` - a final deterministic tiebreak so a residual tie on
-///    1-3 (e.g. two dictionary rows sharing a surface, match_len, and
-///    deconjugation path) still can't leak `HashSet<Form>` iteration order
-///    into the result.
-///
-/// This replaces `best.entry(...).or_insert_with(...)`, which was
-/// first-writer-wins: with forms collected out of a `HashSet` in
-/// hash-random order, whichever form reached a given group first "won",
-/// silently deciding that group's `steps` (and hence its score) differently
-/// from one run to the next.
+/// Deterministic total order.
 fn is_better(new: &Candidate, existing: &Candidate) -> bool {
     fn rank(c: &Candidate) -> (usize, Reverse<usize>, Reverse<&Vec<String>>, Reverse<i64>) {
         (c.match_len, Reverse(c.steps), Reverse(&c.process), Reverse(c.row.entry_id))
@@ -143,15 +87,13 @@ impl LookupEngine {
         }
 
         let chars: Vec<char> = cleaned.chars().collect();
-        // Best candidate seen so far for each (written, reading, dict_id)
-        // group - see `is_better` for the tiebreak order.
         let mut best: HashMap<GroupKey, Candidate> = HashMap::new();
 
-        // No early exit: shorter prefixes can deconjugate to different words.
+        // No early exit: forms differ.
         for prefix_len in (1..=chars.len()).rev() {
             let prefix: String = chars[..prefix_len].iter().collect();
 
-            // `deconjugate` already seeds the unconjugated form.
+            // It seeds the plain form.
             let forms: Vec<Form> = self.deconjugator.deconjugate(&prefix)
                 .into_iter()
                 .collect();
@@ -187,7 +129,7 @@ impl LookupEngine {
 
         let mut ranked: Vec<Candidate> = best.into_values().collect();
 
-        // Kana bonus applies to unconjugated all-kana matches only.
+        // Unconjugated all-kana only.
         ranked.sort_by(|a, b| {
             let sa = score(
                 a.match_len,
@@ -204,9 +146,7 @@ impl LookupEngine {
             b.match_len
                 .cmp(&a.match_len)
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
-                // build.py assigns dict_id in the same order as `priority`
-                // (first archive -> dict_id 1, priority 0), so ascending
-                // dict_id *is* ascending dictionary priority.
+                // dict_id ascends by priority.
                 .then(a.row.dict_id.cmp(&b.row.dict_id))
                 .then(a.row.entry_id.cmp(&b.row.entry_id))
         });
@@ -307,15 +247,12 @@ mod tests {
 
     #[test]
     fn pos_filter_rejects_mismatched_part_of_speech() {
-        // A godan verb row cannot satisfy an ichidan deconjugation.
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v5r", Some(500), 1, 1);
         d.add_entry(1, 1, vec![sense("wrong pos", "v5r")]);
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
     }
-
-    // --- dict_pos_for: direct unit tests for the mapping table ---
 
     #[test]
     fn dict_pos_for_maps_fine_grained_godan_tags_to_v5() {
@@ -348,17 +285,13 @@ mod tests {
 
     #[test]
     fn dict_pos_for_unrecognised_tag_imposes_no_constraint() {
-        // Not in the table at all - must fail open (None), not be treated
-        // as a class that rejects everything.
+        // Must fail open, not closed.
         assert_eq!(None, dict_pos_for("some-future-tag-not-yet-mapped"));
     }
 
-    // --- engine-level: the mapping actually changes filtering behaviour ---
-
     #[test]
     fn v5k_tagged_form_matches_v5_row() {
-        // 行かなかった deconjugates to 行く tagged v5k / v5k-s; the real
-        // dictionary stores godan verbs under the coarse "v5" bucket.
+        // v5k form, v5 row.
         let mut d = FakeDictionary::new();
         d.add_term("行く", Some("行く"), Some("いく"), "v5", Some(50), 1, 1);
         d.add_entry(1, 1, vec![sense("to go", "v5")]);
@@ -372,8 +305,7 @@ mod tests {
 
     #[test]
     fn vs_i_tagged_form_matches_vs_row() {
-        // してしまった deconjugates to する tagged vs-i; the dictionary
-        // stores suru-compounds under "vs".
+        // vs-i form, vs row.
         let mut d = FakeDictionary::new();
         d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1, 1);
         d.add_entry(1, 1, vec![sense("to do", "vs")]);
@@ -387,11 +319,7 @@ mod tests {
 
     #[test]
     fn v1_tagged_form_does_not_match_v5_only_row() {
-        // The filter must keep its protective value: an ichidan
-        // deconjugation (v1) must not be satisfied by a row that only
-        // carries the godan bucket "v5", even though both are now mapped
-        // via dict_pos_for. If this fails, the mapping has become a
-        // no-op instead of an honest translation between vocabularies.
+        // The filter must still bite.
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1, 1);
         d.add_entry(1, 1, vec![sense("wrong pos", "v5")]);
@@ -399,11 +327,7 @@ mod tests {
         assert!(hits.is_empty());
     }
 
-    /// Completeness guard: every terminal `dec_tag` the real rule file can
-    /// produce must be an explicit arm in `dict_pos_for`, not fall into the
-    /// unrecognised-tag default. This is what makes the table
-    /// self-maintaining - if the deconjugator's tag vocabulary ever grows,
-    /// this fails loudly instead of the new tag silently matching nothing.
+    /// Guards vocabulary drift.
     #[test]
     fn all_terminal_dec_tags_are_handled_by_the_mapping() {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -421,8 +345,7 @@ mod tests {
             }
         }
 
-        // Sanity check on the guard itself: if this is empty, the loop
-        // above found nothing and the assertion below would pass vacuously.
+        // Else the guard is vacuous.
         assert!(
             !terminal_tags.is_empty(),
             "expected at least one terminal dec_tag from the real rule file"
@@ -450,10 +373,7 @@ mod tests {
 
     #[test]
     fn more_common_word_ranks_first() {
-        // Two different dict_ids: same (written=None, reading="はし") pair
-        // from two different source dictionaries, so they don't collapse
-        // into one grouped result (Fix 2c groups by written/reading/dict)
-        // and this stays a test of freq-based ranking, not grouping.
+        // Distinct ids: no grouping.
         let mut d = FakeDictionary::new();
         d.add_term("はし", None, Some("はし"), "", Some(50), 1, 1);
         d.add_entry(1, 1, vec![sense("chopsticks", "")]);
@@ -478,10 +398,7 @@ mod tests {
     fn results_truncated_to_max() {
         let mut d = FakeDictionary::new();
         for i in 1..=25 {
-            // Distinct dict_id per entry: otherwise all 25 rows share the
-            // group key (written=None, reading="あ", dict_id) and Fix 2c's
-            // grouping collapses them into a single result, defeating the
-            // truncation behaviour this test exists to check.
+            // Distinct ids, else grouped.
             d.add_term("あ", None, Some("あ"), "", Some(i), i, i);
             d.add_entry(i, i, vec![sense("x", "")]);
         }

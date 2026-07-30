@@ -1,109 +1,70 @@
-//! Decides what actually gets shown in the popup for one hover.
-//!
-//! The lookup engine returns up to ten ranked [`Hit`]s for a single hovered
-//! character, one per dictionary entry that matched - so a common word like
-//! `昨日` legitimately comes back four times (twice from Jitendex JA-EN,
-//! twice from 大辞林 JA-JA). Dumped into a popup that floats over whatever
-//! is being read, that is unusable. `build` is the pure function (no I/O,
-//! no `windows` crate - spec M3-D5) that turns those ranked hits into a
-//! `Presentation`: the best match rendered in full, everything else
-//! collapsed to one line, entries for the same headword+reading merged
-//! together, and 大辞林 ahead of Jitendex inside a card because the
-//! monolingual definition is the answer being read and English is the
-//! confirmation (M3-D2).
+//! What the popup shows.
 
 use crate::geom::PhysRect;
 use crate::lookup::model::Hit;
 use crate::text::layout::union_chars;
 use crate::text::TextSpan;
 
-/// What the popup draws for one hover: the best match in full, everything
-/// else collapsed to a single line.
+/// One hover's popup content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Presentation {
     pub top: Option<Card>,
     pub collapsed: Vec<CollapsedRow>,
 }
 
-/// The top-ranked group, rendered in full. `written`/`reading`/`pos`/`freq`
-/// describe the group's best (highest-ranked) hit; `blocks` covers every
-/// dictionary that matched the same `(written, reading)`.
+/// The top group, in full.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
     pub written: Option<String>,
     pub reading: Option<String>,
     pub pos: Vec<String>,
     pub freq: Option<i64>,
-    /// One block per dictionary, already in display order.
+    /// In display order.
     pub blocks: Vec<GlossBlock>,
-    /// Characters of the hovered text this card's best hit consumed - what
-    /// the overlay highlights.
-    ///
-    /// Counted in **characters** of the *cleaned* lookup input, not bytes and
-    /// not of `written`: a deconjugated match consumes more input than its
-    /// dictionary form is long (`食べさせられた` → 食べる).
+    /// Input chars, not bytes.
     pub match_len: usize,
 }
 
-/// One dictionary's contribution to a `Card`, with every sense's glosses
-/// flattened into a single list - `present.rs` decides what belongs
-/// together and in what order, not how numbered senses get drawn.
+/// One dict's glosses, flat.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlossBlock {
     pub dict_name: String,
     pub glosses: Vec<String>,
 }
 
-/// Every group after the first, reduced to one line.
+/// A non-top group, one line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollapsedRow {
     pub written: Option<String>,
     pub reading: Option<String>,
-    /// First gloss, truncated on a char boundary.
+    /// First gloss, truncated.
     pub summary: String,
 }
 
-/// Dictionary identity, loaded once at startup and passed in as plain data
-/// so `present.rs` stays free of any database dependency.
+/// A dictionary's identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DictInfo {
     pub dict_id: i64,
     pub name: String,
 }
 
-/// Presentation knobs, sourced from the TOML config (spec §4.3).
+/// Presentation knobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresentConfig {
-    /// Case-insensitive substrings matched against `DictInfo::name`, in
-    /// display-priority order. A dictionary matching none of them sorts
-    /// last, by `dict_id`. Substrings rather than exact names because
-    /// Jitendex's stored name embeds a release date
-    /// (`Jitendex.org [2026-07-09]`) that changes whenever the dictionary
-    /// is updated; an exact-match config would silently stop applying the
-    /// moment the file is refreshed, and the popup would quietly start
-    /// showing English first with no error.
+    /// Name substrings, in order.
     pub dict_order: Vec<String>,
-    /// `CollapsedRow::summary` length cap, in characters (not bytes).
+    /// Summary cap, in chars.
     pub summary_chars: usize,
 }
 
-/// One `(written, reading)` group: every hit the engine returned for that
-/// headword, regardless of which dictionary it came from.
+/// One headword group.
 struct Group<'a> {
     written: Option<String>,
     reading: Option<String>,
     hits: Vec<&'a Hit>,
 }
 
-/// Builds the popup content from one hover's ranked hits.
-///
-/// `hits` must already be in rank order, best first - that is the lookup
-/// engine's contract, and this function relies on it rather than
-/// re-deriving a rank from `score`. Hits are grouped by `(written,
-/// reading)`; a group's position is the position of its first hit, which -
-/// given pre-ranked input - is its best hit. That is what keeps merging
-/// from ever reordering groups relative to each other. The first group
-/// becomes `top`; every other group becomes a `CollapsedRow`.
+/// `hits` must be rank-ordered.
 pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentation {
     let mut groups: Vec<Group> = Vec::new();
     for hit in hits {
@@ -127,30 +88,10 @@ pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentat
     Presentation { top, collapsed }
 }
 
-/// Padding between the matched glyphs' ink and the highlight outline, in
-/// physical pixels (spec D6).
+/// Ink-to-outline pad, in px.
 pub const HIGHLIGHT_PAD: i32 = 3;
 
-/// The box around the characters the popup is defining, in virtual-desktop
-/// coordinates.
-///
-/// **The index origin is the hovered character, not the string's start.**
-/// Lookup runs on `span.text[cursor_byte_offset..]` and [`Card::match_len`]
-/// counts characters of *that slice*; on the shipped single-pass path
-/// `text::layout::resolve` builds text for the whole line and the offset is
-/// not zero, so treating `match_len` as an index from the beginning would box
-/// the start of the line. `lookup::engine::clean_input` also trims before
-/// matching, so the run begins at the first non-whitespace character at or
-/// after the cursor.
-///
-/// `None` whenever the box cannot be placed honestly: no top card, a
-/// zero-length match, or a span carrying no geometry (the forward-tiling
-/// path). An absent box is the designed outcome there; a misplaced one is
-/// not.
-///
-/// Shared by the popup application and `probe --show-region` deliberately:
-/// an instrument that computes its own answer separately from the thing it
-/// measures is an instrument that can quietly disagree with it.
+/// Indexed from the cursor.
 pub fn match_highlight(span: &TextSpan, top: Option<&Card>) -> Option<PhysRect> {
     let top = top?;
     let after_cursor = span.text.get(span.cursor_byte_offset..)?;
@@ -160,7 +101,7 @@ pub fn match_highlight(span: &TextSpan, top: Option<&Card>) -> Option<PhysRect> 
 }
 
 fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Card {
-    // Pre-ranked input means the first hit in the group is its best.
+    // Pre-ranked: first is best.
     let best = group.hits[0];
     Card {
         written: group.written,
@@ -186,11 +127,7 @@ fn collapsed_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -
     }
 }
 
-/// One `GlossBlock` per hit in the group - not merged further by
-/// `dict_id`, since a single dictionary can legitimately hold two entries
-/// for the same headword and reading (homonyms). Ordered by
-/// `cfg.dict_order`, with unmatched dictionaries sorted last, by
-/// `dict_id`.
+/// Per hit, not per dict.
 fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec<GlossBlock> {
     let mut ranked: Vec<(usize, i64, GlossBlock)> = hits
         .iter()
@@ -206,8 +143,7 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
     ranked.into_iter().map(|(_, _, block)| block).collect()
 }
 
-/// A hit whose `dict_id` matches no `DictInfo` still produces a block -
-/// named by its id - rather than being silently dropped from the card.
+/// Unknown id: named by id.
 fn dict_name_for(dict_id: i64, dicts: &[DictInfo]) -> String {
     dicts
         .iter()
@@ -216,25 +152,16 @@ fn dict_name_for(dict_id: i64, dicts: &[DictInfo]) -> String {
         .unwrap_or_else(|| format!("dict {dict_id}"))
 }
 
-/// Position of the first `dict_order` entry whose substring appears in
-/// `dict_name`, case-insensitively. `None` when nothing matches, which the
-/// caller sorts last.
-///
-/// Public so the settings window orders its dictionary list by exactly the
-/// rule the popup orders blocks by. A window that computed its own ordering
-/// could disagree with what the user then sees, which is worse than showing
-/// no order at all.
+/// `None` sorts last.
 pub fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> {
     let lower = dict_name.to_lowercase();
-    // A blank entry is a substring of everything.
+    // Blank matches everything.
     dict_order
         .iter()
         .position(|s| !s.trim().is_empty() && lower.contains(&s.to_lowercase()))
 }
 
-/// Cuts `s` to at most `max_chars` characters (not bytes - multi-byte
-/// UTF-8, like 大辞林's Japanese, must never be split mid-codepoint) and
-/// appends `…` only when characters were actually discarded.
+/// Chars, not bytes.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
     let head: String = chars.by_ref().take(max_chars).collect();
@@ -365,7 +292,6 @@ mod tests {
         assert_eq!("also short", p.collapsed[0].summary);
     }
 
-    /// A blank entry matches every name.
     #[test]
     fn a_blank_order_entry_ranks_nothing() {
         let blank = vec![String::new()];
@@ -392,7 +318,7 @@ mod tests {
         }
     }
 
-    /// One 30px box per character of `text`, laid left to right from x=100.
+    /// 30px boxes from x=100.
     fn span_of(text: &str, cursor_byte_offset: usize) -> TextSpan {
         let geom = (0..text.chars().count())
             .map(|i| crate::text::layout::TextGeom {
@@ -408,9 +334,6 @@ mod tests {
         }
     }
 
-    /// D3, the shipped default. `resolve` builds the whole line, so the
-    /// offset is non-zero and the highlight must start from the hovered
-    /// character. Boxing from index 0 would frame `その` instead.
     #[test]
     fn the_highlight_starts_at_the_hovered_character_not_the_line_start() {
         let span = span_of("その可哀想", "その".len());
@@ -419,8 +342,6 @@ mod tests {
                    "three 30px boxes from x=160, padded 3px");
     }
 
-    /// `clean_input` trims before matching, so index 0 of the matched run is
-    /// the first non-whitespace character at or after the cursor.
     #[test]
     fn leading_whitespace_at_the_cursor_is_skipped_by_the_highlight() {
         let span = span_of("あ 猫", "あ".len());
@@ -428,7 +349,7 @@ mod tests {
         assert_eq!(160, r.x + HIGHLIGHT_PAD, "the box must start at 猫, not at the space");
     }
 
-    /// The tiled path stitches from several captures and carries no geometry.
+    /// The tiled path has none.
     #[test]
     fn a_span_without_geometry_draws_no_highlight() {
         let mut span = span_of("可哀想", 0);
@@ -441,8 +362,6 @@ mod tests {
         assert_eq!(None, match_highlight(&span_of("可哀想", 0), None));
     }
 
-    /// `match_len` running past the geometry must clamp to what exists, never
-    /// index past it (spec section 7).
     #[test]
     fn a_match_longer_than_the_known_geometry_boxes_what_is_known() {
         let span = span_of("猫", 0);
@@ -450,9 +369,6 @@ mod tests {
         assert_eq!(PhysRect { x: 97, y: 197, w: 36, h: 46 }, r);
     }
 
-    /// The overlay highlights the characters the card consumed, so the value
-    /// must come from the group's own best hit and survive merging - a card
-    /// built from two dictionaries still describes one match.
     #[test]
     fn the_card_carries_its_best_hits_match_len() {
         let mut long = hit("可哀想", "かわいそう", 1, "pitiable");

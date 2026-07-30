@@ -1,26 +1,7 @@
-//! The settings window: eleven settings, a dictionary order, Apply and Cancel.
+//! The settings window.
 //!
-//! **Modeless, and that is a safety property rather than a preference.**
-//! `DialogBoxParamW` runs its own message pump, and a nested pump on the main
-//! thread stops `WM_TIMER` arriving while the low-level hook keeps firing —
-//! which latches `input::hooks`'s scroll arm and kills the scroll wheel for
-//! every application (popup-interaction spec D9, reproduced there from
-//! `TrackPopupMenuEx`). A tray menu holds that for a second; a settings window
-//! would hold it for minutes. So this is an ordinary `CreateWindowExW` window
-//! serviced by `app::run`'s existing loop through `IsDialogMessageW`.
-//!
-//! **Nothing here is modal, including the error paths.** `MessageBoxW` pumps
-//! too; failures are reported by `app::run` on stderr instead.
-//!
-//! **Numbers are combo boxes, not spin controls.** A spin control is
-//! `msctls_updown32`, which needs `InitCommonControlsEx` and therefore the
-//! `Win32_UI_Controls` feature. Offering the permitted values in a dropdown
-//! keeps the spec's "no free-text entry anywhere" guarantee with one control
-//! type instead of three, needs no common-control initialisation at all, and
-//! avoids widening the crate's Windows feature set for three numbers.
-//!
-//! This module holds no opinion about what any setting means: it is handed a
-//! [`SettingsForm`] and hands one back.
+//! Modeless - see D9.
+//! Numbers are combos, not spins.
 
 use crate::settings::{shown_name, SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use anyhow::{Context, Result};
@@ -46,8 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub enum SettingsOutcome {
     Apply,
     Cancel,
-    /// Close chibipop entirely. Only reachable from a window opened by a
-    /// running instance - see `open`'s `in_app`.
+    /// Only from a running instance.
     Quit,
 }
 
@@ -92,7 +72,7 @@ const WHILE_BUSY: [i32; 11] = [
     ID_FREQ_REMOVE,
 ];
 
-// ---- layout, in 96-DPI pixels; `child` scales every one of them ----
+// ---- layout, 96-DPI px ----
 
 const WIN_W: i32 = 470;
 const PAD: i32 = 14;
@@ -136,13 +116,9 @@ fn class_name() -> PCWSTR {
     w!("ChibipopSettingsClass")
 }
 
-/// Scale a 96-DPI layout value for `hwnd`'s monitor.
+/// Scale a 96-DPI value.
 ///
-/// **Required, not polish.** `text::capture::init_dpi_awareness` puts the
-/// process in `PER_MONITOR_AWARE_V2`, where Windows scales *nothing* on our
-/// behalf — every literal in this file would otherwise be a physical pixel and
-/// the whole window would render at half size on a 200% display while its font,
-/// which comes from the system metrics, did not.
+/// We are PER_MONITOR_AWARE_V2.
 fn dpi_scale(hwnd: HWND, v: i32) -> i32 {
     // SAFETY: FFI call on a live window handle; returns 96 for an invalid one,
     // which degrades to no scaling rather than to a wrong size.
@@ -152,14 +128,7 @@ fn dpi_scale(hwnd: HWND, v: i32) -> i32 {
 }
 
 thread_local! {
-    // The pending outcome, and which window produced it.
-    //
-    // A thread-local rather than `GWLP_USERDATA`, matching `ui::overlay`'s
-    // choice and for the same reason: every settings window is created and
-    // driven from the main thread only, so there is no concurrent access for
-    // a lock to guard, and it avoids stashing and later reclaiming a boxed
-    // pointer across create/`Drop`. Keyed by `HWND` so a stale outcome from a
-    // previous window can never be read by a new one.
+    // Pending outcome, by `HWND`.
     static OUTCOME: Cell<Option<(isize, SettingsOutcome)>> = const { Cell::new(None) };
 
     // The pending Add or Remove.
@@ -186,20 +155,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
             let notify = (wparam.0 >> 16) as u16;
-            // LBN_SELCHANGE: without this the Move buttons keep whatever
-            // enabled state they had when the window opened, so clicking a
-            // dictionary and pressing Move up does nothing at all.
+            // Or Move buttons go stale.
             if (id == ID_DICTS || id == ID_FREQS) && notify == LBN_SELCHANGE as u16 {
                 unsafe { update_list_buttons(hwnd) };
                 return LRESULT(0);
             }
             match id {
-                // 1 is IDOK: this is a plain window, not a dialog, so
-                // `IsDialogMessageW` cannot resolve BS_DEFPUSHBUTTON and sends
-                // IDOK for Enter instead of the button's own id.
+                // 1 is IDOK: Enter, not the id.
                 ID_APPLY | 1 => record_outcome(hwnd, SettingsOutcome::Apply),
-                // The X button and Escape both land here through IDCANCEL,
-                // so closing can never apply by accident.
+                // X and Escape both land here.
                 ID_CANCEL | 2 => record_outcome(hwnd, SettingsOutcome::Cancel),
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
                 ID_DICT_UP => unsafe { move_selected(hwnd, -1) },
@@ -220,9 +184,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// Registers the window class exactly once per process - `ui::window`'s
-/// ordering rationale (latch `true` only *after* `RegisterClassExW` actually
-/// succeeds) applies identically here.
+/// Once per process.
+///
+/// Latch only after success.
 unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -255,11 +219,9 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// The shell's own UI font, so the window looks like every other dialog on the
-/// machine rather than like 1995's system font.
+/// The shell's own UI font.
 ///
-/// `None` on failure; the caller then leaves controls with the default font,
-/// which is ugly but entirely functional.
+/// `None` leaves the default.
 unsafe fn ui_font() -> Option<HFONT> {
     let mut ncm = NONCLIENTMETRICSW {
         cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
@@ -288,21 +250,10 @@ unsafe fn ui_font() -> Option<HFONT> {
     }
 }
 
-/// Every installed font family that can render Japanese.
+/// Fonts that may render kana.
 ///
-/// Enumerated with `SHIFTJIS_CHARSET`, which narrows the list sharply — 142
-/// callbacks down to 77 on this machine — but **does not guarantee kana and
-/// kanji coverage**: measured, the survivors still include Segoe UI, Tahoma
-/// and Ebrima, none of which carry Japanese. DirectWrite falls back per glyph,
-/// so the cost of picking one is ugly rather than broken. Claiming a guarantee
-/// here would be claiming more than the API gives.
-///
-/// Families **and** their named variants: `Klee One SemiBold` and
-/// `Noto Sans JP Light` come back as separate entries, so `Theme::font_name`
-/// can express more than the plain family name.
-///
-/// Names beginning `@` are skipped: those are Windows' vertical-writing
-/// duplicates, listed alongside each family and never wanted here.
+/// No coverage guarantee.
+/// `@` = vertical duplicates.
 pub fn japanese_font_families() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // SAFETY: `lf` and `out` are stack/owned data that outlive the call;
@@ -352,7 +303,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Create one child control and give it the UI font.
+/// One child control, UI font.
 #[allow(clippy::too_many_arguments)]
 unsafe fn child(
     parent: HWND,
@@ -395,11 +346,9 @@ unsafe fn child(
     Ok(hwnd)
 }
 
-/// Swap the listbox's selected dictionary with its neighbour.
+/// Swap with the neighbour.
 ///
-/// The selection **follows the item**, so Move up can be pressed repeatedly
-/// without re-selecting; a listbox that kept the selection on the *index*
-/// would make reordering three dictionaries a nine-click job.
+/// Selection follows the item.
 unsafe fn move_selected(hwnd: HWND, delta: i32) {
     // SAFETY: every call below targets `ID_DICTS`, a live child of `hwnd`
     // created in `open`. The text buffer is stack storage sized to the

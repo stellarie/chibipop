@@ -1,4 +1,4 @@
-//! UI: the popup window and its rendered content.
+//! The popup and its content.
 
 pub mod console;
 pub mod overlay;
