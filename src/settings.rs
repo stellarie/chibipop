@@ -52,7 +52,8 @@ impl SettingsForm {
             return None;
         }
         let name = archive_title(source)?;
-        if self.dict_names.contains(&name) || self.freq_names.contains(&name) {
+        // Titles repeat: split editions.
+        if self.staged_adds.iter().any(|a| a.source == source) {
             return None;
         }
         if kind == Kind::Frequency {
@@ -509,6 +510,31 @@ mod tests {
     }
 
     #[test]
+    fn two_parts_sharing_a_title_can_both_be_staged() {
+        let mut form = staged_form();
+        let dir = std::env::temp_dir().join(format!("chibi_parts_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let a = dir.join("part1.zip");
+        let b = dir.join("part2.zip");
+        std::fs::copy(fixture("terms.zip"), &a).unwrap();
+        std::fs::copy(fixture("terms.zip"), &b).unwrap();
+
+        assert_eq!(Some(Kind::Term), form.stage_add(&a));
+        assert_eq!(Some(Kind::Term), form.stage_add(&b), "a split edition shares its title");
+
+        assert_eq!(2, form.staged_adds.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_same_file_cannot_be_staged_twice() {
+        let mut form = staged_form();
+        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert_eq!(None, form.stage_add(&fixture("terms.zip")));
+        assert_eq!(1, form.staged_adds.len());
+    }
+
+    #[test]
     fn an_add_of_an_already_listed_name_is_rejected_not_duplicated() {
         let mut form = staged_form();
         assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
@@ -519,12 +545,13 @@ mod tests {
         assert_eq!(1, form.dict_names.iter().filter(|n| *n == "FixtureTerms").count());
     }
 
+    /// Only the same file duplicates.
     #[test]
-    fn an_add_of_a_name_an_installed_dictionary_already_uses_is_rejected() {
+    fn a_title_an_installed_dictionary_uses_does_not_block_the_add() {
         let mut form = staged_form();
         form.dict_names.push("FixtureTerms".into());
-        assert_eq!(None, form.stage_add(&fixture("terms.zip")));
-        assert!(form.staged_adds.is_empty());
+        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert_eq!(1, form.staged_adds.len());
     }
 
     #[test]

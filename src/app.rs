@@ -700,12 +700,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             }
 
             // Shift up retracts it.
-            if Hooks::take_hide() && shown.is_some() {
-                let _ = popup.hide();
-                if let Some(ov) = overlay.as_ref() {
-                    ov.hide();
+            if Hooks::take_hide() {
+                // An in-flight hit re-shows it.
+                next_id += 1;
+                latest_dispatched = RequestId(next_id);
+                if shown.is_some() {
+                    let _ = popup.hide();
+                    if let Some(ov) = overlay.as_ref() {
+                        ov.hide();
+                    }
+                    shown = None;
                 }
-                shown = None;
             }
 
             if let Some(cursor) = Hooks::take_pending() {

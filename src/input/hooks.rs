@@ -117,10 +117,11 @@ unsafe fn record_shift_state(wparam: WPARAM, lparam: LPARAM) {
     // WH_KEYBOARD_LL contract under which `lparam` is a live
     // KBDLLHOOKSTRUCT owned by the OS for the duration of this call.
     let vk = unsafe { (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode } as u16;
+    // Its own bit: it is injected.
     let bit: u8 = match vk {
         v if v == VK_LSHIFT.0 => 1,
         v if v == VK_RSHIFT.0 => 2,
-        v if v == VK_SHIFT.0 => 3,
+        v if v == VK_SHIFT.0 => 4,
         _ => return,
     };
     let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
@@ -129,9 +130,12 @@ unsafe fn record_shift_state(wparam: WPARAM, lparam: LPARAM) {
         .unwrap_or(0);
     let (now, released) = shift_transition(before, bit, down);
     SHIFT_DOWN.store(now != 0, Ordering::SeqCst);
-    // Nothing else retracts it.
-    if released {
+    // Live retracts on movement.
+    let hold = matches!(u8_to_mode(MODE.load(Ordering::SeqCst)), TriggerMode::HoldShift);
+    if released && hold {
         LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
+        // Or it re-shows after the hide.
+        PENDING.store(NO_POINT, Ordering::SeqCst);
         HIDE_PENDING.store(true, Ordering::SeqCst);
     }
 }
@@ -417,5 +421,18 @@ mod tests {
     #[test]
     fn an_up_with_nothing_held_asks_for_nothing() {
         assert_eq!((0, false), shift_transition(0, 1, false));
+    }
+
+    #[test]
+    fn an_injected_vk_shift_does_not_strand_a_side_bit() {
+        // VK_SHIFT down, LShift up.
+        let (m, _) = shift_transition(0, 4, true);
+        let (m, hide) = shift_transition(m, 1, false);
+        assert!(!hide, "the injected key is still down");
+
+        let (m, hide) = shift_transition(m, 4, false);
+
+        assert_eq!(0, m, "no phantom bit may survive");
+        assert!(hide, "the popup must be retracted");
     }
 }

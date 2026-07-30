@@ -101,15 +101,13 @@ impl Target {
         }
     }
 
-    fn is_freq(self) -> bool {
-        self == Target::Freqs
-    }
 }
 
 /// A click to service.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    Add(Target),
+    /// The file picks the list.
+    Add,
     Remove(Target),
 }
 
@@ -169,9 +167,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
                 ID_DICT_UP => unsafe { move_selected(hwnd, -1) },
                 ID_DICT_DOWN => unsafe { move_selected(hwnd, 1) },
-                ID_DICT_ADD => record_action(hwnd, Action::Add(Target::Dicts)),
+                ID_DICT_ADD => record_action(hwnd, Action::Add),
                 ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
-                ID_FREQ_ADD => record_action(hwnd, Action::Add(Target::Freqs)),
+                ID_FREQ_ADD => record_action(hwnd, Action::Add),
                 ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
                 _ => {}
             }
@@ -652,10 +650,10 @@ impl SettingsWindow {
         unsafe {
             match action {
                 Action::Remove(target) => self.remove_selected(target),
-                Action::Add(target) => {
+                Action::Add => {
                     // D9: the picker pumps too.
                     before_blocking();
-                    self.add_picked(target);
+                    self.add_picked();
                 }
             }
         }
@@ -725,7 +723,7 @@ impl SettingsWindow {
     }
 
     /// Stage whatever was picked.
-    unsafe fn add_picked(&self, target: Target) {
+    unsafe fn add_picked(&self) {
         // SAFETY: `pick_archives` owns every buffer it hands the dialog;
         // `target.list_id()` names a live child of `self.hwnd`, and the
         // string each `LB_ADDSTRING` copies outlives that call.
@@ -754,7 +752,6 @@ impl SettingsWindow {
                     SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
                 }
             }
-            let _ = target;
             update_list_buttons(self.hwnd);
         }
     }
