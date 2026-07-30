@@ -25,7 +25,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **406** total across **6** targets |
+| Rust tests | **all green**, **416** total across **6** targets |
 | Clippy | **exactly 4** accepted errors (was 5; the comment sweep retired `doc list item`) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -45,13 +45,19 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 > **Do not run `cargo clippy` twice in a row and trust the second number.** Cargo replays cached
 > diagnostics inconsistently; back-to-back runs on an unchanged tree returned 0 then 5. `touch`
 > a source file first, or take the first run's output.
+>
+> **Re-measure this baseline after any commit that could move it.** On 2026-07-31 the comment
+> sweep took it 5 → 4, nobody updated the table, a later branch read 5 and it was called
+> "unchanged" — and that 5 was quoted to a reviewer as the baseline, hiding a dead-code
+> regression inside the one number whose whole job is to expose one. A baseline carried forward
+> from memory is not a baseline.
 
-**Why counts, not exit status.** The repo carries exactly five accepted clippy errors; a plain
-`-D warnings` run therefore always exits non-zero, and CI must assert the count is **5** rather than
-that clippy passed. A 6th is a real regression — most often a field added by one commit and read by
+**Why counts, not exit status.** The repo carries four accepted clippy errors; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **4** rather than
+that clippy passed. A 5th is a real regression — most often a field added by one commit and read by
 the next, which is why a task that adds a field must be the task that reads it.
 
-The bin target needs the five accepted lints suppressed or clippy aborts before `main.rs` compiles:
+The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
 
 ```bash
 cargo clippy --all-targets --all-features -- -D warnings \
