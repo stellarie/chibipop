@@ -26,7 +26,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 | Check | Expected |
 |---|---|
 | Rust tests | **all green**, **406** total across **6** targets |
-| Clippy | **exactly 5** accepted errors |
+| Clippy | **exactly 4** accepted errors (was 5; the comment sweep retired `doc list item`) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 
