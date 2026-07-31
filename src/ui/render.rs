@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows_numerics::Vector2;
 
@@ -148,9 +149,14 @@ impl Renderer {
         })
     }
 
+    fn dpi_scale(&self) -> f32 {
+        let dpi = unsafe { GetDpiForWindow(self.hwnd) };
+        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+    }
+
     /// `(width, view_h, content_h)`.
     ///
-    /// view_h capped, content_h not.
+    /// All three in physical pixels.
     pub fn measure(
         &self,
         p: &Presentation,
@@ -158,8 +164,11 @@ impl Renderer {
         max_w: i32,
         max_h: i32,
     ) -> Result<(i32, i32, i32)> {
+        let scale = self.dpi_scale();
+        let dip_w = max_w as f32 / scale;
+        let dip_h = max_h as f32 / scale;
         let elems = build_elements(p, theme);
-        let content_w = (max_w - 2 * theme.padding).max(0) as f32;
+        let content_w = (dip_w - 2.0 * theme.padding as f32).max(0.0);
         let used_h = layout_pass(
             &self.dwrite_factory,
             &self.formats,
@@ -172,8 +181,13 @@ impl Renderer {
             0.0,
         )
         .context("measuring popup content")?;
-        let content_h = used_h.ceil() as i32 + 2 * theme.padding;
-        Ok((max_w, content_h.min(max_h), content_h))
+        let content_h = used_h.ceil() + 2.0 * theme.padding as f32;
+        let view_h = content_h.min(dip_h);
+        Ok((
+            max_w,
+            (view_h * scale).ceil() as i32,
+            (content_h * scale).ceil() as i32,
+        ))
     }
 
     /// Paints into the client rect.
@@ -212,15 +226,16 @@ impl Renderer {
             return Ok(());
         }
 
+        let dpi = unsafe { GetDpiForWindow(self.hwnd) } as f32;
+        let dpi = if dpi == 0.0 { 96.0 } else { dpi };
         let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                // The OS does the alpha.
                 alphaMode: D2D1_ALPHA_MODE_IGNORE,
             },
-            dpiX: 0.0,
-            dpiY: 0.0,
+            dpiX: dpi,
+            dpiY: dpi,
             usage: D2D1_RENDER_TARGET_USAGE_NONE,
             minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
         };
@@ -251,10 +266,14 @@ impl Renderer {
             .as_ref()
             .expect("ensure_target must run before paint_once");
 
+        let scale = self.dpi_scale();
+        let w = (w as f32 / scale) as i32;
+        let h = (h as f32 / scale) as i32;
+        let scroll = (scroll as f32 / scale) as i32;
+
         unsafe { target.BeginDraw() };
         let scope = DrawScope { target: Some(target) };
 
-        // Closure so `?` can't skip it.
         let draw_result: windows::core::Result<()> = (|| {
             let elems = build_elements(p, theme);
 
