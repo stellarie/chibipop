@@ -44,6 +44,12 @@ static SCROLL_ARMED: AtomicBool = AtomicBool::new(false);
 /// Delta banked while armed.
 static PENDING_SCROLL: AtomicI32 = AtomicI32::new(0);
 
+/// Clicks on the popup area.
+static CLICK_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Screen coords of the click.
+static PENDING_CLICK: AtomicI64 = AtomicI64::new(NO_POINT);
+
 /// `WHEEL_DELTA`, per winuser.h.
 const WHEEL_DELTA_UNITS: i32 = 120;
 
@@ -151,6 +157,17 @@ fn shift_transition(sides: u8, bit: u8, down: bool) -> (u8, bool) {
     (now, sides != 0 && now == 0)
 }
 
+/// Stores the click's screen pt.
+unsafe fn record_click(lparam: LPARAM) {
+    // SAFETY: mouse_hook_proc only calls this when code >= 0 and
+    // wparam == WM_LBUTTONDOWN - the WH_MOUSE_LL contract that
+    // guarantees lparam is a valid, aligned pointer to an
+    // MSLLHOOKSTRUCT for the duration of this call.
+    let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    let p = PhysPoint { x: data.pt.x, y: data.pt.y };
+    PENDING_CLICK.store(pack(p), Ordering::SeqCst);
+}
+
 /// Banks one event's delta.
 unsafe fn record_wheel(lparam: LPARAM) {
     // SAFETY: `mouse_hook_proc` only calls this when code >= 0 and
@@ -180,6 +197,10 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
             }
             WM_MOUSEWHEEL if SCROLL_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe { record_wheel(lparam) });
+                return LRESULT(1);
+            }
+            WM_LBUTTONDOWN if CLICK_ARMED.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe { record_click(lparam) });
                 return LRESULT(1);
             }
             _ => {}
@@ -269,6 +290,17 @@ impl Hooks {
         PENDING_SCROLL.store(0, Ordering::SeqCst);
     }
 
+    /// Arms/disarms click capture.
+    pub fn set_click_armed(armed: bool) {
+        CLICK_ARMED.store(armed, Ordering::SeqCst);
+    }
+
+    /// Takes the banked click, once.
+    pub fn take_click() -> Option<PhysPoint> {
+        let v = PENDING_CLICK.swap(NO_POINT, Ordering::SeqCst);
+        if v == NO_POINT { None } else { Some(unpack(v)) }
+    }
+
     /// Sets the gating mode.
     pub fn set_mode(m: TriggerMode) {
         MODE.store(mode_to_u8(m), Ordering::SeqCst);
@@ -292,6 +324,7 @@ impl Drop for Hooks {
     fn drop(&mut self) {
         // Redundant; unhook restores.
         SCROLL_ARMED.store(false, Ordering::SeqCst);
+        CLICK_ARMED.store(false, Ordering::SeqCst);
         unsafe {
             let _ = UnhookWindowsHookEx(self.mouse);
             let _ = UnhookWindowsHookEx(self.keyboard);

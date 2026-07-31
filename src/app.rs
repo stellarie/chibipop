@@ -17,7 +17,7 @@ use crate::settings::{self, SettingsForm};
 use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
-use crate::ui::render::{max_scroll, Renderer};
+use crate::ui::render::{max_scroll, HitAction, Renderer};
 use crate::ui::settings_window::{SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
@@ -521,6 +521,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let max_height_percent = i32::from(cfg.popup.max_height_percent);
     let max_width_percent = i32::from(cfg.popup.max_width_percent);
     let scroll_popup = cfg.popup.scroll_popup;
+    let summary_chars = cfg.popup.summary_chars;
 
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
@@ -620,6 +621,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             // Spec D9: the picker pumps.
             w.pump(|| {
                 Hooks::set_scroll_armed(false);
+                Hooks::set_click_armed(false);
                 drain_capture_guard();
             });
 
@@ -635,11 +637,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             // Spec D7: the popup's own rect.
             let live = cursor_now();
+            let over_popup = shown.as_ref().is_some_and(|s| s.popup.contains(live));
             let armed = scroll_popup
-                && shown
-                    .as_ref()
-                    .is_some_and(|s| s.popup.contains(live) && s.content_h > s.view_h);
+                && over_popup
+                && shown.as_ref().is_some_and(|s| s.content_h > s.view_h);
             Hooks::set_scroll_armed(armed);
+            Hooks::set_click_armed(over_popup);
 
             armed_ticks = if armed { armed_ticks + 1 } else { 0 };
             if armed_ticks == ARM_WARN_TICKS {
@@ -662,6 +665,39 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         s.scroll = next;
                         if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll) {
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
+                        }
+                    }
+                }
+            }
+
+            if let Some(click) = Hooks::take_click() {
+                if let Some(s) = shown.as_mut() {
+                    let click_y = click.y - s.popup.y;
+                    if let Some(action) = renderer.hit_test(click_y, s.scroll) {
+                        match action {
+                            HitAction::ExpandEntry(i) => {
+                                present::swap_top(&mut s.presentation, i, summary_chars);
+                                match show_presentation(
+                                    &popup,
+                                    &mut renderer,
+                                    &theme,
+                                    max_height_percent,
+                                    max_width_percent,
+                                    &s.presentation,
+                                    s.anchor,
+                                    0,
+                                ) {
+                                    Ok((rect, content_h, view_h)) => {
+                                        s.popup = rect;
+                                        s.scroll = 0;
+                                        s.content_h = content_h;
+                                        s.view_h = view_h;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("chibipop: repaint after swap failed: {e:#}");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -793,6 +829,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam, || {
             // The menu swallows WM_TIMER.
             Hooks::set_scroll_armed(false);
+            Hooks::set_click_armed(false);
             drain_capture_guard();
         }) {
             match cmd {
@@ -1118,6 +1155,7 @@ fn handle_worker_outcome(
                     }
                     *shown = None;
                     Hooks::set_scroll_armed(false);
+                    Hooks::set_click_armed(false);
                 }
                 Ok((rect, content_h, view_h)) => {
                     // Old notches must not land.
@@ -1294,16 +1332,18 @@ mod tests {
     }
 
     fn presentation_of(written: &str) -> Presentation {
+        let card = Card {
+            written: Some(written.to_string()),
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 2,
+        };
         Presentation {
-            top: Some(Card {
-                written: Some(written.to_string()),
-                reading: None,
-                pos: vec![],
-                freq: None,
-                blocks: vec![],
-                match_len: 2,
-            }),
+            top: Some(card.clone()),
             collapsed: vec![],
+            all_cards: vec![card],
         }
     }
 

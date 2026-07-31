@@ -29,6 +29,21 @@ const CORNER_GAP: f32 = 8.0;
 const SEPARATOR_MARGIN: f32 = 10.0;
 const SEPARATOR_THICKNESS: f32 = 1.0;
 
+/// Clickable region in the popup.
+#[derive(Debug, Clone)]
+pub struct HitRect {
+    pub y: f32,
+    pub h: f32,
+    pub action: HitAction,
+}
+
+/// What a click on a region does.
+#[derive(Debug, Clone)]
+pub enum HitAction {
+    /// Expand collapsed row `i`.
+    ExpandEntry(usize),
+}
+
 /// One line to lay out or draw.
 ///
 /// Rebuilt, never cached.
@@ -47,6 +62,8 @@ enum Elem {
     /// Steals width from the next.
     Corner(Line),
     Separator { top_gap: f32 },
+    /// A clickable collapsed row.
+    Collapsed(usize, Line),
 }
 
 /// Overflow past the view, or 0.
@@ -84,6 +101,8 @@ pub struct Renderer {
     target: Option<ID2D1HwndRenderTarget>,
     /// Text formats, reused.
     formats: RefCell<FormatCache>,
+    /// From the last paint pass.
+    hit_rects: RefCell<Vec<HitRect>>,
 }
 
 /// One font's formats, by size.
@@ -146,12 +165,26 @@ impl Renderer {
             dwrite_factory,
             target: None,
             formats: RefCell::default(),
+            hit_rects: RefCell::new(Vec::new()),
         })
     }
 
     fn dpi_scale(&self) -> f32 {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
         if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+    }
+
+    /// Finds the action at `y_phys`.
+    pub fn hit_test(&self, y_phys: i32, scroll_phys: i32) -> Option<HitAction> {
+        let scale = self.dpi_scale();
+        let y = y_phys as f32 / scale;
+        let scroll = scroll_phys as f32 / scale;
+        let adjusted = y + scroll;
+        self.hit_rects
+            .borrow()
+            .iter()
+            .find(|r| adjusted >= r.y && adjusted < r.y + r.h)
+            .map(|r| r.action.clone())
     }
 
     /// `(width, view_h, content_h)`.
@@ -179,6 +212,7 @@ impl Renderer {
             0.0,
             content_w,
             0.0,
+            None,
         )
         .context("measuring popup content")?;
         let content_h = used_h.ceil() + 2.0 * theme.padding as f32;
@@ -294,6 +328,7 @@ impl Renderer {
 
             let content_w = (w - 2 * theme.padding).max(0) as f32;
             let origin = theme.padding as f32;
+            self.hit_rects.borrow_mut().clear();
             let used = layout_pass(
                 &self.dwrite_factory,
                 &self.formats,
@@ -304,6 +339,7 @@ impl Renderer {
                 origin,
                 content_w,
                 scroll as f32,
+                Some(&self.hit_rects),
             )?;
 
             let track_h = h - 2 * theme.padding;
@@ -432,7 +468,7 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
             let head = row.written.clone().or_else(|| row.reading.clone()).unwrap_or_default();
             let text =
                 if head.is_empty() { row.summary.clone() } else { format!("{head} — {}", row.summary) };
-            out.push(Elem::Text(Line {
+            out.push(Elem::Collapsed(i, Line {
                 text,
                 color: theme.collapsed_text,
                 size: theme.collapsed_size,
@@ -447,6 +483,7 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
 /// The shared layout walk.
 ///
 /// Returns the content height.
+#[allow(clippy::too_many_arguments)]
 fn layout_pass(
     dwrite: &IDWriteFactory,
     formats: &RefCell<FormatCache>,
@@ -457,6 +494,7 @@ fn layout_pass(
     origin_y: f32,
     content_w: f32,
     scroll: f32,
+    hit_out: Option<&RefCell<Vec<HitRect>>>,
 ) -> windows::core::Result<f32> {
     let mut y = 0.0f32;
     let mut reserved_w = 0.0f32;
@@ -516,6 +554,33 @@ fn layout_pass(
                 }
                 h
             }
+            Elem::Collapsed(idx, line) => {
+                let avail_w = (content_w - reserved_w).max(1.0);
+                reserved_w = 0.0;
+                let (layout, m) =
+                    build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
+                let h = m.height;
+                y += line.top_gap;
+                if let Some(hits) = hit_out {
+                    hits.borrow_mut().push(HitRect {
+                        y: origin_y + y,
+                        h,
+                        action: HitAction::ExpandEntry(*idx),
+                    });
+                }
+                if let Some(t) = target {
+                    let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
+                    unsafe {
+                        t.DrawTextLayout(
+                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            &layout,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        )
+                    };
+                }
+                h
+            }
         };
         y += drawn_height;
     }
@@ -546,19 +611,21 @@ mod tests {
     use crate::present::{Card, GlossBlock};
 
     fn one_card(pos: &[&str], freq: Option<i64>) -> Presentation {
+        let card = Card {
+            written: Some("雑談".into()),
+            reading: Some("ざつだん".into()),
+            pos: pos.iter().map(|s| s.to_string()).collect(),
+            freq,
+            blocks: vec![GlossBlock {
+                dict_name: "Jitendex".into(),
+                glosses: vec!["chatting".into()],
+            }],
+            match_len: 2,
+        };
         Presentation {
-            top: Some(Card {
-                written: Some("雑談".into()),
-                reading: Some("ざつだん".into()),
-                pos: pos.iter().map(|s| s.to_string()).collect(),
-                freq,
-                blocks: vec![GlossBlock {
-                    dict_name: "Jitendex".into(),
-                    glosses: vec!["chatting".into()],
-                }],
-                match_len: 2,
-            }),
+            top: Some(card.clone()),
             collapsed: vec![],
+            all_cards: vec![card],
         }
     }
 

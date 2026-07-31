@@ -10,6 +10,8 @@ use crate::text::TextSpan;
 pub struct Presentation {
     pub top: Option<Card>,
     pub collapsed: Vec<CollapsedRow>,
+    /// Every group as a full card.
+    pub all_cards: Vec<Card>,
 }
 
 /// The top group, in full.
@@ -81,11 +83,18 @@ pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentat
         }
     }
 
-    let mut groups = groups.into_iter();
-    let top = groups.next().map(|g| card_from_group(g, dicts, cfg));
-    let collapsed = groups.map(|g| collapsed_from_group(g, dicts, cfg)).collect();
+    let all_cards: Vec<Card> = groups
+        .into_iter()
+        .map(|g| card_from_group(g, dicts, cfg))
+        .collect();
+    let top = all_cards.first().cloned();
+    let collapsed = all_cards
+        .iter()
+        .skip(1)
+        .map(|c| collapsed_from_card(c, cfg.summary_chars))
+        .collect();
 
-    Presentation { top, collapsed }
+    Presentation { top, collapsed, all_cards }
 }
 
 /// Ink-to-outline pad, in px.
@@ -113,19 +122,37 @@ fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Car
     }
 }
 
-fn collapsed_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> CollapsedRow {
-    let blocks = ordered_blocks(&group.hits, dicts, cfg);
-    let first_gloss = blocks
+/// Card back to a one-liner.
+pub fn collapsed_from_card(card: &Card, summary_chars: usize) -> CollapsedRow {
+    let first_gloss = card
+        .blocks
         .first()
         .and_then(|b| b.glosses.first())
         .map(String::as_str)
         .unwrap_or("");
     CollapsedRow {
-        written: group.written,
-        reading: group.reading,
-        summary: truncate_chars(first_gloss, cfg.summary_chars),
+        written: card.written.clone(),
+        reading: card.reading.clone(),
+        summary: truncate_chars(first_gloss, summary_chars),
     }
 }
+
+/// Promotes a collapsed entry.
+pub fn swap_top(p: &mut Presentation, collapsed_index: usize, summary_chars: usize) {
+    let card_index = collapsed_index + 1;
+    if card_index >= p.all_cards.len() {
+        return;
+    }
+    p.all_cards.swap(0, card_index);
+    p.top = Some(p.all_cards[0].clone());
+    p.collapsed = p
+        .all_cards
+        .iter()
+        .skip(1)
+        .map(|c| collapsed_from_card(c, summary_chars))
+        .collect();
+}
+
 
 /// Per hit, not per dict.
 fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec<GlossBlock> {
@@ -377,5 +404,129 @@ mod tests {
         short.match_len = 3;
         let p = build(&[long, short], &dicts(), &cfg());
         assert_eq!(3, p.top.as_ref().unwrap().match_len);
+    }
+
+    #[test]
+    fn build_populates_all_cards_for_every_group() {
+        let hits = vec![
+            hit("昨日", "きのう", 1, "yesterday"),
+            hit("昨", "さく", 1, "last (year)"),
+        ];
+        let p = build(&hits, &dicts(), &cfg());
+        assert_eq!(2, p.all_cards.len());
+        assert_eq!(Some("昨日".to_string()), p.all_cards[0].written);
+        assert_eq!(Some("昨".to_string()), p.all_cards[1].written);
+    }
+
+    #[test]
+    fn collapsed_from_card_takes_the_first_gloss() {
+        let card = Card {
+            written: Some("猫".into()),
+            reading: Some("ねこ".into()),
+            pos: vec!["noun".into()],
+            freq: Some(100),
+            blocks: vec![GlossBlock {
+                dict_name: "Test".into(),
+                glosses: vec!["cat".into(), "feline".into()],
+            }],
+            match_len: 1,
+        };
+        let row = collapsed_from_card(&card, 40);
+        assert_eq!(Some("猫".to_string()), row.written);
+        assert_eq!(Some("ねこ".to_string()), row.reading);
+        assert_eq!("cat", row.summary);
+    }
+
+    #[test]
+    fn collapsed_from_card_truncates_long_glosses() {
+        let long = "あ".repeat(80);
+        let card = Card {
+            written: None,
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![GlossBlock {
+                dict_name: "D".into(),
+                glosses: vec![long],
+            }],
+            match_len: 1,
+        };
+        let row = collapsed_from_card(&card, 40);
+        assert!(row.summary.ends_with('…'));
+        assert_eq!(41, row.summary.chars().count());
+    }
+
+    #[test]
+    fn collapsed_from_card_with_no_blocks_yields_an_empty_summary() {
+        let card = bare_card(1);
+        let row = collapsed_from_card(&card, 40);
+        assert_eq!("", row.summary);
+    }
+
+    #[test]
+    fn swap_top_promotes_the_selected_entry() {
+        let hits = vec![
+            hit("昨日", "きのう", 1, "yesterday"),
+            hit("昨", "さく", 1, "last (year)"),
+            hit("日", "にち", 1, "day"),
+        ];
+        let mut p = build(&hits, &dicts(), &cfg());
+        assert_eq!(Some("昨日".to_string()), p.top.as_ref().unwrap().written);
+
+        swap_top(&mut p, 0, 40);
+        assert_eq!(Some("昨".to_string()), p.top.as_ref().unwrap().written);
+        assert_eq!(2, p.collapsed.len());
+        assert_eq!(Some("昨日".to_string()), p.collapsed[0].written);
+        assert_eq!(Some("日".to_string()), p.collapsed[1].written);
+    }
+
+    #[test]
+    fn swap_top_out_of_range_is_a_no_op() {
+        let hits = vec![hit("猫", "ねこ", 1, "cat")];
+        let mut p = build(&hits, &dicts(), &cfg());
+        let before = p.clone();
+        swap_top(&mut p, 0, 40);
+        assert_eq!(before, p);
+    }
+
+    #[test]
+    fn swap_top_preserves_all_cards_content() {
+        let hits = vec![
+            hit("昨日", "きのう", 1, "yesterday"),
+            hit("昨", "さく", 1, "last (year)"),
+        ];
+        let mut p = build(&hits, &dicts(), &cfg());
+        let originals: Vec<String> = p
+            .all_cards
+            .iter()
+            .filter_map(|c| c.written.clone())
+            .collect();
+
+        swap_top(&mut p, 0, 40);
+
+        let mut after: Vec<String> = p
+            .all_cards
+            .iter()
+            .filter_map(|c| c.written.clone())
+            .collect();
+        after.sort();
+        let mut expected = originals;
+        expected.sort();
+        assert_eq!(expected, after);
+    }
+
+    #[test]
+    fn swap_top_then_swap_back_restores_the_original() {
+        let hits = vec![
+            hit("昨日", "きのう", 1, "yesterday"),
+            hit("昨", "さく", 1, "last (year)"),
+        ];
+        let mut p = build(&hits, &dicts(), &cfg());
+        let original_top = p.top.clone();
+
+        swap_top(&mut p, 0, 40);
+        assert_ne!(original_top, p.top);
+        swap_top(&mut p, 0, 40);
+        assert_eq!(original_top, p.top);
     }
 }
