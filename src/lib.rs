@@ -18,3 +18,4 @@ pub mod rebuild;
 pub mod settings;
 pub mod text;
 pub mod ui;
+pub mod update;

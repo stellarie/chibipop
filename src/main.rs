@@ -86,6 +86,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    chibipop::update::cleanup_old();
     chibipop::ui::console::hide();
     let cli = Cli::parse();
     // A double-click passes none.
