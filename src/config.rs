@@ -194,6 +194,9 @@ pub struct DebugConfig {
     /// created - the feature is inert, not merely hidden.
     #[serde(default)]
     pub show_scan_region: bool,
+    /// A console of each hover.
+    #[serde(default)]
+    pub show_lookup_log: bool,
 }
 
 impl Default for Config {
@@ -600,6 +603,22 @@ mod tests {
             "[debug]\n",
         )).unwrap();
         assert!(!load_or_create(&p).unwrap().debug.show_scan_region);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A pre-existing config must still load.
+    #[test]
+    fn a_config_written_before_the_lookup_log_still_loads() {
+        let p = tmp("no_lookup_log");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[debug]\nshow_scan_region = false\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-lookup-log config must load");
+        assert!(!c.debug.show_lookup_log);
         let _ = std::fs::remove_file(&p);
     }
 }

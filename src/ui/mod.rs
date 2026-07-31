@@ -1,5 +1,6 @@
 //! UI: the popup window and its rendered content.
 
+pub mod console;
 pub mod overlay;
 pub mod render;
 pub mod settings_window;

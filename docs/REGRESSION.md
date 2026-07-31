@@ -25,7 +25,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **245** total across 5 targets |
+| Rust tests | **all green**, **252** total across 5 targets |
 | Clippy | **exactly 5** accepted errors |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -46,7 +46,7 @@ cargo clippy --all-targets --all-features -- -D warnings \
 Python dictionary builder, if `tools/build-dict` changed:
 
 ```bash
-cd tools/build-dict && python -m unittest discover -s tests    # 48 tests
+cd tools/build-dict && python -m unittest discover -s tests    # 58 tests
 ```
 
 **Run the suite 3× if anything touched a `static`.** Cargo runs tests in parallel threads of one
@@ -191,7 +191,8 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **A task that adds a field must be the task that reads it** | `field never read` = a 6th clippy error against a 5-error gate. |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
 | **`cargo fmt` is not run here** | The repo has never been rustfmt-clean. Do not "fix" it. |
-| **`Cargo.toml` carries an unstaged reformat** | Never `git add -u`/`-A`. Stage by name. |
+| **Stray files land in a broad `git add`** | Never `git add -u`/`-A`. Stage by name. |
+| **A copy of `data/` beside the exe shadows the repo's** | `--dict` prefers beside-exe and only falls back to the working directory. A stray `target/release/data/` therefore wins silently, and keeps winning after the real data changes. Delete it rather than refreshing it. |
 
 ## When something fails
 
