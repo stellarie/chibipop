@@ -109,8 +109,8 @@ impl OcrTextSource {
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
         let lang = Language::CreateLanguage(&HSTRING::from("ja"))?;
         let engine = OcrEngine::TryCreateFromLanguage(&lang).context(
-            "no Japanese OCR recogniser available - see \
-             docs/superpowers/findings/2026-07-26-m0-ocr-availability.md",
+            "no Japanese OCR recogniser available - add Japanese under \
+             Windows Settings, Time & language, Language & region",
         )?;
         Ok(OcrTextSource { engine, max_passes })
     }

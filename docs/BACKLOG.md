@@ -12,8 +12,8 @@ evidence needed to pick it up cheaply. Newest first.
 working changes on. The design is done and independently reviewed — this is a build, not a
 design round.
 
-**Spec:** `docs/superpowers/specs/2026-07-28-accuracy-and-polish-design.md` §3 (D1-R, D1-R2).
-**Plan:** `docs/superpowers/plans/2026-07-28-accuracy-and-polish.md` Tasks 3–4, 6 §2.1.
+**Source:** the accuracy-and-polish design §3 (D1-R, D1-R2) and its plan,
+Tasks 3–4 and 6 §2.1. Those working notes are not published with the repo.
 
 ### What is already built
 
@@ -48,7 +48,7 @@ design round.
 ## 2. Vertical text: square-to-detect, transpose-to-read
 
 **Measured 2026-07-28**, fix deliberately left to its own round (spec §5 says so).
-**Evidence:** `docs/superpowers/findings/2026-07-28-vertical-text-measurement.md`.
+**Evidence:** the vertical-text measurement of 2026-07-28, summarised below.
 
 Vertical text at the shipped 500×100 region resolves the correct character **2 times in 6** and
 twice returns a sentence spliced across four unrelated columns. A transposed 100×500 probe scores

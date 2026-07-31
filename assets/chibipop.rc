@@ -2,7 +2,7 @@
 // manifest that asks for Common Controls v6.
 //
 // Compiled to chibipop.res once and committed; build.rs only links it. See
-// docs/superpowers/plans/2026-07-28-settings-gui.md Task 1 Step 3 for the
+// the settings-gui plan, Task 1 Step 3, for the
 // regeneration command, and note rc.exe must be run from PowerShell - MSYS2
 // mangles its /flag arguments under git-bash.
 

@@ -242,8 +242,7 @@ already selectable) and **M5** (DPI and Magpie polish) are not started.
 - **Vertical text does not work at the shipped capture shape.** Worse than
   reading short: the 500×100 box spans several columns, so it can return a
   sentence spliced out of unrelated ones. Measured 2/6 correct hovers; a
-  transposed 100×500 probe scores 6/6. The fix has its own round —
-  [measurement](superpowers/findings/2026-07-28-vertical-text-measurement.md).
+  transposed 100×500 probe scores 6/6. The fix has its own round.
 - **Forward tiling is off** (`max_ocr_passes = 1`) because it sometimes
   resolved a different character than the one under the cursor. The rework is
   designed and reviewed, not built — see [`BACKLOG.md`](BACKLOG.md).
@@ -266,6 +265,5 @@ already selectable) and **M5** (DPI and Magpie polish) are not started.
 - **Sticky hover, scrolling and the anti-flicker check are shipped but not yet
   accepted.** Their unit coverage is thorough and the wheel's swallow decision
   is verified on both branches, but every *hover* behaviour needs a human —
-  synthetic mouse movement cannot reach a global low-level hook. The nine-item
-  script is in
-  [the acceptance findings](superpowers/findings/2026-07-28-popup-interaction-acceptance.md).
+  synthetic mouse movement cannot reach a global low-level hook without the
+  user granting input control — see REGRESSION.md tier 2.

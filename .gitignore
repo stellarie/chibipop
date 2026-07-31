@@ -4,3 +4,6 @@ __pycache__/
 *.sqlite
 *.sqlite-journal
 /dist
+
+# Design specs, plans and findings - local only.
+/docs/superpowers/

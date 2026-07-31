@@ -173,9 +173,8 @@ tests, and the measured limits all live in
 [`docs/REFERENCE.md`](docs/REFERENCE.md). How releases are cut is in
 [`docs/RELEASING.md`](docs/RELEASING.md).
 
-Design specs, plans and verification findings are in `docs/superpowers/`;
-work that is deliberately not built yet, with its evidence, is in
-[`docs/BACKLOG.md`](docs/BACKLOG.md).
+Work that is deliberately not built yet, with the evidence behind each
+decision, is in [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ## Licence
 
