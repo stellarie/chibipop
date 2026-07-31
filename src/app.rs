@@ -17,13 +17,14 @@ use crate::settings::{self, SettingsForm};
 use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
-use crate::ui::render::{max_scroll, HitAction, Renderer};
+use crate::ui::render::{max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{CaptureExclusion, Popup};
 use crate::update;
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +49,9 @@ const WM_APP_RESULT: u32 = WM_APP + 1;
 
 /// Wake the pump. +2 is tray's.
 const WM_APP_CAPTURE_GUARD: u32 = WM_APP + 3;
+
+/// Dupe check finished.
+const WM_APP_ANKI: u32 = WM_APP + 4;
 
 /// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
@@ -102,6 +106,12 @@ enum WorkerOutcome {
         matched: Option<PhysRect>,
         scan: Vec<ScanRect>,
     },
+}
+
+/// One dupe check's answer.
+struct AnkiDupeResult {
+    gen: u64,
+    dupes: HashSet<String>,
 }
 
 /// Popup out of one capture.
@@ -522,6 +532,10 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let max_width_percent = i32::from(cfg.popup.max_width_percent);
     let scroll_popup = cfg.popup.scroll_popup;
     let summary_chars = cfg.popup.summary_chars;
+    let anki_enabled = cfg.anki.enabled;
+    let anki_url = cfg.anki.url.clone();
+    let anki_deck = cfg.anki.deck.clone();
+    let anki_model = cfg.anki.model.clone();
 
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
@@ -548,6 +562,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let overlay_prev_visible = std::cell::Cell::new(false);
     // What is on screen now.
     let mut shown: Option<Shown> = None;
+    let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
+    let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
         &form_with_library(&cfg, &dicts, &library),
@@ -663,7 +679,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     let next = s.scroll.saturating_sub(step).clamp(0, span);
                     if next != s.scroll {
                         s.scroll = next;
-                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll) {
+                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, &s.anki) {
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
                         }
                     }
@@ -686,6 +702,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                     &s.presentation,
                                     s.anchor,
                                     0,
+                                    &s.anki,
                                 ) {
                                     Ok((rect, content_h, view_h)) => {
                                         s.popup = rect;
@@ -695,6 +712,33 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                     }
                                     Err(e) => {
                                         eprintln!("chibipop: repaint after swap failed: {e:#}");
+                                    }
+                                }
+                            }
+                            HitAction::AddToAnki => {
+                                let info = s.presentation.top.as_ref().map(|card| {
+                                    let expr = card.written.as_deref()
+                                        .or(card.reading.as_deref())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let fields = anki::fields_from_card(card, &card.blocks);
+                                    (expr, fields)
+                                });
+                                if let Some((expr, fields)) = info {
+                                    if !s.anki.added.contains(&expr) && !s.anki.dupes.contains(&expr) {
+                                        match anki::add_note(&anki_url, &anki_deck, &anki_model, &fields) {
+                                            Ok(_) => {
+                                                s.anki.added.insert(expr);
+                                                if let Err(e) = renderer.paint(
+                                                    &s.presentation, &theme, s.scroll, &s.anki,
+                                                ) {
+                                                    eprintln!("chibipop: repaint after add failed: {e:#}");
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("chibipop: add to Anki failed: {e:#}");
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -810,7 +854,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if result.id < latest_dispatched {
                     // Superseded, not an error.
                 } else {
-                    handle_worker_outcome(
+                    let new_popup = handle_worker_outcome(
                         &popup,
                         &mut renderer,
                         &theme,
@@ -820,7 +864,52 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &mut shown,
                         result.outcome,
                         cfg.debug.show_lookup_log,
+                        anki_enabled,
                     );
+                    if new_popup && anki_enabled {
+                        popup_gen = popup_gen.wrapping_add(1);
+                        let mut exprs: Vec<String> = Vec::new();
+                        if let Some(s) = shown.as_mut() {
+                            s.gen = popup_gen;
+                            if let Some(card) = &s.presentation.top {
+                                if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
+                                    exprs.push(e.to_string());
+                                }
+                            }
+                            for row in &s.presentation.collapsed {
+                                if let Some(e) = row.written.as_deref().or(row.reading.as_deref()) {
+                                    exprs.push(e.to_string());
+                                }
+                            }
+                        }
+                        if !exprs.is_empty() {
+                            let url = anki_url.clone();
+                            let gen = popup_gen;
+                            let tx = anki_tx.clone();
+                            thread::spawn(move || {
+                                let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
+                                if let Ok(dupes) = anki::find_duplicates(&url, &refs) {
+                                    let _ = tx.send(AnkiDupeResult { gen, dupes });
+                                    unsafe {
+                                        let _ = PostThreadMessageW(
+                                            main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        } else if msg.message == WM_APP_ANKI {
+            while let Ok(result) = anki_rx.try_recv() {
+                if let Some(s) = shown.as_mut() {
+                    if s.gen == result.gen {
+                        s.anki.dupes = result.dupes;
+                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, &s.anki) {
+                            eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
+                        }
+                    }
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
@@ -1093,9 +1182,12 @@ struct Shown {
     content_h: i32,
     /// The window's own height.
     view_h: i32,
+    /// Stale-result guard.
+    gen: u64,
+    anki: AnkiPopupState,
 }
 
-/// Applies one outcome.
+/// True if a new popup was shown.
 #[allow(clippy::too_many_arguments)]
 fn handle_worker_outcome(
     popup: &Popup,
@@ -1107,7 +1199,8 @@ fn handle_worker_outcome(
     shown: &mut Option<Shown>,
     outcome: WorkerOutcome,
     log: bool,
-) {
+    anki_enabled: bool,
+) -> bool {
     match outcome {
         WorkerOutcome::Hide => {
             let _ = popup.hide();
@@ -1115,6 +1208,7 @@ fn handle_worker_outcome(
                 ov.hide();
             }
             *shown = None;
+            false
         }
         WorkerOutcome::Failed(msg) => {
             eprintln!("chibipop: hover lookup failed: {msg}");
@@ -1123,12 +1217,12 @@ fn handle_worker_outcome(
                 ov.hide();
             }
             *shown = None;
+            false
         }
         WorkerOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
             if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
-                return; // Already on screen, unchanged.
+                return false;
             }
-            // Only changed popups.
             if log {
                 if let Some(card) = &presentation.top {
                     let head = card.written.clone()
@@ -1137,6 +1231,11 @@ fn handle_worker_outcome(
                     println!("{head}  match={}", card.match_len);
                 }
             }
+            let anki = AnkiPopupState {
+                dupes: HashSet::new(),
+                added: HashSet::new(),
+                enabled: anki_enabled,
+            };
             match show_presentation(
                 popup,
                 renderer,
@@ -1145,7 +1244,8 @@ fn handle_worker_outcome(
                 max_width_percent,
                 &presentation,
                 anchor,
-                0, // A new word always starts at the top.
+                0,
+                &anki,
             ) {
                 Err(e) => {
                     eprintln!("chibipop: showing the popup failed: {e:#}");
@@ -1156,9 +1256,9 @@ fn handle_worker_outcome(
                     *shown = None;
                     Hooks::set_scroll_armed(false);
                     Hooks::set_click_armed(false);
+                    false
                 }
                 Ok((rect, content_h, view_h)) => {
-                    // Old notches must not land.
                     Hooks::discard_scroll();
                     *shown = Some(Shown {
                         anchor,
@@ -1168,12 +1268,15 @@ fn handle_worker_outcome(
                         scroll: 0,
                         content_h,
                         view_h,
+                        gen: 0,
+                        anki,
                     });
                     if let Some(ov) = overlay {
                         if let Err(e) = ov.show_rects(&scan, theme) {
                             eprintln!("chibipop: showing the scan overlay failed: {e:#}");
                         }
                     }
+                    true
                 }
             }
         }
@@ -1191,6 +1294,7 @@ fn show_presentation(
     presentation: &Presentation,
     anchor: PhysRect,
     scroll: i32,
+    anki: &AnkiPopupState,
 ) -> Result<(PhysRect, i32, i32)> {
     let monitor = monitor_rect_for(anchor);
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
@@ -1198,12 +1302,12 @@ fn show_presentation(
 
     // view_h, not content_h, below.
     let (w, view_h, content_h) = renderer
-        .measure(presentation, theme, max_w, max_h)
+        .measure(presentation, theme, max_w, max_h, anki)
         .context("measuring popup content")?;
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
-    renderer.paint(presentation, theme, scroll).context("painting the popup")?;
+    renderer.paint(presentation, theme, scroll, anki).context("painting the popup")?;
     Ok((rect, content_h, view_h))
 }
 
@@ -1356,6 +1460,8 @@ mod tests {
             scroll: 0,
             content_h: 300,
             view_h: 300,
+            gen: 0,
+            anki: AnkiPopupState::disabled(),
         }
     }
 

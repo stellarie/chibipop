@@ -8,7 +8,7 @@ use crate::present::Presentation;
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB, SCROLLBAR_W};
 use anyhow::{Context, Result};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -42,6 +42,26 @@ pub struct HitRect {
 pub enum HitAction {
     /// Expand collapsed row `i`.
     ExpandEntry(usize),
+    /// Add the top card to Anki.
+    AddToAnki,
+}
+
+/// Anki state for this popup.
+pub struct AnkiPopupState {
+    pub dupes: HashSet<String>,
+    pub added: HashSet<String>,
+    pub enabled: bool,
+}
+
+impl AnkiPopupState {
+    /// Disabled, no markers.
+    pub fn disabled() -> Self {
+        Self {
+            dupes: HashSet::new(),
+            added: HashSet::new(),
+            enabled: false,
+        }
+    }
 }
 
 /// One line to lay out or draw.
@@ -64,6 +84,8 @@ enum Elem {
     Separator { top_gap: f32 },
     /// A clickable collapsed row.
     Collapsed(usize, Line),
+    /// Clickable add-to-Anki row.
+    AddButton(Line),
 }
 
 /// Overflow past the view, or 0.
@@ -196,11 +218,12 @@ impl Renderer {
         theme: &Theme,
         max_w: i32,
         max_h: i32,
+        anki: &AnkiPopupState,
     ) -> Result<(i32, i32, i32)> {
         let scale = self.dpi_scale();
         let dip_w = max_w as f32 / scale;
         let dip_h = max_h as f32 / scale;
-        let elems = build_elements(p, theme);
+        let elems = build_elements(p, theme, anki);
         let content_w = (dip_w - 2.0 * theme.padding as f32).max(0.0);
         let used_h = layout_pass(
             &self.dwrite_factory,
@@ -227,16 +250,22 @@ impl Renderer {
     /// Paints into the client rect.
     ///
     /// Device loss retries once.
-    pub fn paint(&mut self, p: &Presentation, theme: &Theme, scroll: i32) -> Result<()> {
+    pub fn paint(
+        &mut self,
+        p: &Presentation,
+        theme: &Theme,
+        scroll: i32,
+        anki: &AnkiPopupState,
+    ) -> Result<()> {
         let (w, h) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(w, h).context("preparing the D2D render target")?;
 
-        if let Err(e) = self.paint_once(p, theme, w, h, scroll) {
+        if let Err(e) = self.paint_once(p, theme, w, h, scroll, anki) {
             if e.code() == D2DERR_RECREATE_TARGET {
                 self.target = None;
                 self.ensure_target(w, h)
                     .context("recreating the D2D render target after device loss")?;
-                self.paint_once(p, theme, w, h, scroll)
+                self.paint_once(p, theme, w, h, scroll, anki)
                     .context("repainting after device-lost recovery")?;
             } else {
                 return Err(e).context("D2D paint failed");
@@ -294,6 +323,7 @@ impl Renderer {
         w: i32,
         h: i32,
         scroll: i32,
+        anki: &AnkiPopupState,
     ) -> windows::core::Result<()> {
         let target = self
             .target
@@ -309,7 +339,7 @@ impl Renderer {
         let scope = DrawScope { target: Some(target) };
 
         let draw_result: windows::core::Result<()> = (|| {
-            let elems = build_elements(p, theme);
+            let elems = build_elements(p, theme, anki);
 
             unsafe {
                 target.Clear(Some(&color_f(theme.background)));
@@ -399,7 +429,7 @@ fn color_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
 /// `p`'s content, in draw order.
 ///
 /// Pure: no factory, no target.
-fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
+fn build_elements(p: &Presentation, theme: &Theme, anki: &AnkiPopupState) -> Vec<Elem> {
     let mut out = Vec::new();
 
     if let Some(card) = &p.top {
@@ -413,10 +443,22 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
             }));
         }
 
-        let headword = card.written.clone().or_else(|| card.reading.clone()).unwrap_or_default();
+        let headword = card.written.clone()
+            .or_else(|| card.reading.clone())
+            .unwrap_or_default();
+        let expr = card.written.as_deref()
+            .or(card.reading.as_deref())
+            .unwrap_or("");
+        let known = anki.dupes.contains(expr)
+            || anki.added.contains(expr);
         if !headword.is_empty() {
+            let text = if known {
+                format!("\u{2713} {headword}")
+            } else {
+                headword
+            };
             out.push(Elem::Text(Line {
-                text: headword,
+                text,
                 color: theme.headword_text,
                 size: theme.headword_size,
                 top_gap: 0.0,
@@ -465,9 +507,20 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
     if !p.collapsed.is_empty() {
         out.push(Elem::Separator { top_gap: SEPARATOR_MARGIN });
         for (i, row) in p.collapsed.iter().enumerate() {
-            let head = row.written.clone().or_else(|| row.reading.clone()).unwrap_or_default();
-            let text =
-                if head.is_empty() { row.summary.clone() } else { format!("{head} — {}", row.summary) };
+            let head = row.written.clone()
+                .or_else(|| row.reading.clone())
+                .unwrap_or_default();
+            let expr = row.written.as_deref()
+                .or(row.reading.as_deref())
+                .unwrap_or("");
+            let known = anki.dupes.contains(expr)
+                || anki.added.contains(expr);
+            let mark = if known { "\u{2713} " } else { "" };
+            let text = if head.is_empty() {
+                format!("{mark}{}", row.summary)
+            } else {
+                format!("{mark}{head} \u{2014} {}", row.summary)
+            };
             out.push(Elem::Collapsed(i, Line {
                 text,
                 color: theme.collapsed_text,
@@ -475,6 +528,25 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
                 top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
             }));
         }
+    }
+
+    if anki.enabled {
+        let expr = p.top.as_ref().and_then(|c| {
+            c.written.as_deref().or(c.reading.as_deref())
+        }).unwrap_or("");
+        let (text, color) = if anki.added.contains(expr) {
+            ("\u{2713} Added", theme.dimmed_text)
+        } else if anki.dupes.contains(expr) {
+            ("\u{2713} Already in Anki", theme.dimmed_text)
+        } else {
+            ("\u{ff0b} Add to Anki", theme.dict_label_text)
+        };
+        out.push(Elem::AddButton(Line {
+            text: text.to_string(),
+            color,
+            size: theme.collapsed_size,
+            top_gap: SECTION_GAP,
+        }));
     }
 
     out
@@ -580,6 +652,33 @@ fn layout_pass(
                 }
                 h
             }
+            Elem::AddButton(line) => {
+                let avail_w = (content_w - reserved_w).max(1.0);
+                reserved_w = 0.0;
+                let (layout, m) =
+                    build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
+                let h = m.height;
+                y += line.top_gap;
+                if let Some(hits) = hit_out {
+                    hits.borrow_mut().push(HitRect {
+                        y: origin_y + y,
+                        h,
+                        action: HitAction::AddToAnki,
+                    });
+                }
+                if let Some(t) = target {
+                    let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
+                    unsafe {
+                        t.DrawTextLayout(
+                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            &layout,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        )
+                    };
+                }
+                h
+            }
         };
         y += drawn_height;
     }
@@ -632,7 +731,7 @@ mod tests {
     #[test]
     fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
         let theme = Theme::dark();
-        let elems = build_elements(&one_card(&[], Some(7671)), &theme);
+        let elems = build_elements(&one_card(&[], Some(7671)), &theme, &AnkiPopupState::disabled());
         match &elems[0] {
             Elem::Corner(line) => {
                 assert_eq!("freq 7671", line.text);
@@ -644,14 +743,14 @@ mod tests {
 
     #[test]
     fn an_unranked_entry_draws_no_corner() {
-        let elems = build_elements(&one_card(&[], None), &Theme::dark());
+        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled());
         assert!(!elems.iter().any(|e| matches!(e, Elem::Corner(_))));
     }
 
     #[test]
     fn part_of_speech_is_dimmed_metadata_not_body_text() {
         let theme = Theme::dark();
-        let elems = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme);
+        let elems = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, &AnkiPopupState::disabled());
         let pos = elems
             .iter()
             .find_map(|e| match e {
@@ -668,7 +767,7 @@ mod tests {
     /// 大辞林 has no POS markup.
     #[test]
     fn an_entry_without_part_of_speech_draws_no_pos_line() {
-        let elems = build_elements(&one_card(&[], Some(1)), &Theme::dark());
+        let elems = build_elements(&one_card(&[], Some(1)), &Theme::dark(), &AnkiPopupState::disabled());
         assert!(!elems
             .iter()
             .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
