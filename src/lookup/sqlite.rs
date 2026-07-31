@@ -38,7 +38,7 @@ impl SqliteDictionary {
             anyhow::bail!(
                 "{}: schema_version is {found_display}, but this build of \
                  chibipop expects {EXPECTED_SCHEMA_VERSION} - rebuild the \
-                 dictionary with tools/build-dict/build.py",
+                 dictionary from the settings window",
                 path.display()
             );
         }

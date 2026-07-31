@@ -1,4 +1,4 @@
-//! Ports of tools/build-dict.
+//! The dictionary builder.
 
 pub mod archive;
 pub mod build;

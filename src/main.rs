@@ -99,7 +99,7 @@ fn main() -> Result<()> {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
             let dictionary = SqliteDictionary::open(&dict).with_context(|| {
-                format!("opening {} - build it with tools/build-dict/build.py",
+                format!("opening {} - add dictionaries in the settings window",
                         dict.display())
             })?;
             let engine =

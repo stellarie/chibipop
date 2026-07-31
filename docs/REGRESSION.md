@@ -65,12 +65,6 @@ cargo clippy --all-targets --all-features -- -D warnings \
   -A clippy::too_many_arguments -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1 | grep -cE "^(error|warning)"
 ```
 
-Python dictionary builder, if `tools/build-dict` changed:
-
-```bash
-cd tools/build-dict && python -m unittest discover -s tests    # 58 tests
-```
-
 **If anything under `src/dict/` changed, measure the rebuild's peak memory.** No test
 catches this — it regressed to **19× the oracle's** and every test stayed green, because a
 32 GB machine simply absorbs it. Needs the real archives, so it is not a CI check.
@@ -92,7 +86,7 @@ Write-Output ("peak {0:N0} MB" -f ($peak/1MB))
 |---|---|---|
 | Rust, streaming (current) | **148 MB** | 33.7 s |
 | Rust, materialised (the regression) | 9,641 MB | 83.3 s |
-| Python oracle | 498 MB | 83.9 s |
+| Python oracle *(deleted 2026-07-31; kept for comparison)* | 498 MB | 83.9 s |
 
 Anything over ~300 MB means the streaming was undone. **`PeakWorkingSet64` reads 0 once the
 process has exited** — the peak must be sampled while it runs, which is why the loop above

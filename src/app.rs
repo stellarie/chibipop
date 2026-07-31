@@ -868,7 +868,7 @@ fn worker_main(
     };
     let dict = match SqliteDictionary::open(&dict_path).with_context(|| {
         format!(
-            "opening {} - build it with tools/build-dict/build.py",
+            "opening {} - add dictionaries in the settings window",
             dict_path.display()
         )
     }) {

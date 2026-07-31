@@ -9,9 +9,6 @@ the limits that were measured rather than assumed.
 ## Toolchain
 
 - **Rust** stable, MSVC toolchain (`stable-x86_64-pc-windows-msvc`).
-- **Python 3.9+**, standard library only — no `pip install`. Needed only for
-  `tools/build-dict`, which is now the *oracle* the Rust builder is verified
-  against rather than the way a dictionary gets built.
 - `data/deconjugator.json` ships with the repository. No build step.
 
 The dictionary database is **not** in the repository (232 MiB). Build it from
@@ -215,11 +212,7 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**250 tests.** Plus the dictionary builder, from `tools/build-dict`:
-
-```bash
-python -m unittest discover -s tests
-```
+**416 tests** across six targets.
 
 **58 tests.**
 
