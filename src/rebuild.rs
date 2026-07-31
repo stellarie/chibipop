@@ -123,6 +123,15 @@ fn with_suffix(out: &Path, suffix: &str) -> PathBuf {
 ///
 /// None for lines to swallow.
 pub fn friendly(line: &str) -> Option<String> {
+    if let Some(rest) = line.strip_prefix("progress") {
+        let (n, t) = rest.trim().split_once('/')?;
+        let n: u64 = n.trim().parse().ok()?;
+        let t: u64 = t.trim().parse().ok()?;
+        return Some(format!("{} of {} entries…", format_thousands(n), format_thousands(t)));
+    }
+    if line.starts_with("building") {
+        return Some("Creating search index…".to_string());
+    }
     let rest = line.strip_prefix("term dict").or_else(|| line.strip_prefix("freq dict"))?;
     let rest = rest.trim();
     // Drop main.rs's [i] prefix.
@@ -134,6 +143,19 @@ pub fn friendly(line: &str) -> Option<String> {
         return None;
     }
     Some(format!("Reading {name}…"))
+}
+
+/// Groups digits by comma.
+fn format_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
 }
 
 /// How many archives are there?
@@ -199,6 +221,30 @@ mod tests {
         assert_eq!(
             Some("Reading b.zip…".to_string()),
             friendly("term dict  [10] b.zip")
+        );
+    }
+
+    #[test]
+    fn a_progress_line_is_formatted_with_commas() {
+        assert_eq!(
+            Some("12,500 of 768,636 entries…".to_string()),
+            friendly("progress  12500 / 768636")
+        );
+    }
+
+    #[test]
+    fn a_small_progress_has_no_commas() {
+        assert_eq!(
+            Some("500 of 3,000 entries…".to_string()),
+            friendly("progress  500 / 3000")
+        );
+    }
+
+    #[test]
+    fn a_building_line_is_passed_through() {
+        assert_eq!(
+            Some("Creating search index…".to_string()),
+            friendly("building  creating index")
         );
     }
 

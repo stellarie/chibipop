@@ -361,7 +361,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("no term archives in {}", library.display());
             }
 
-            let counts = chibipop::dict::build::build(&term_archives, &freq_archives, &out)?;
+            let counts = chibipop::dict::build::build(
+                &term_archives,
+                &freq_archives,
+                &out,
+                &|line| println!("{line}"),
+            )?;
             println!(
                 "wrote {}: {} entries, {} term rows",
                 out.display(),

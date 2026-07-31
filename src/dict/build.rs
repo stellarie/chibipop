@@ -99,7 +99,12 @@ fn to_py_json<T: Serialize>(value: &T) -> Result<String> {
 }
 
 /// Builds chibipop.sqlite.
-pub fn build(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCounts> {
+pub fn build(
+    terms: &[PathBuf],
+    freqs: &[PathBuf],
+    out: &Path,
+    on_progress: &dyn Fn(&str),
+) -> Result<BuildCounts> {
     if terms.is_empty() {
         anyhow::bail!("no term archives to build from");
     }
@@ -116,7 +121,7 @@ pub fn build(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCo
         std::fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
     }
 
-    let counts = build_into(terms, freqs, &tmp).inspect_err(|_| {
+    let counts = build_into(terms, freqs, &tmp, on_progress).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
 
@@ -132,7 +137,12 @@ fn building_path(out: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCounts> {
+fn build_into(
+    terms: &[PathBuf],
+    freqs: &[PathBuf],
+    out: &Path,
+    on_progress: &dyn Fn(&str),
+) -> Result<BuildCounts> {
     let mut freq_table = FreqTable::new();
     for fa in freqs {
         // Per archive, then overwrite.
@@ -175,6 +185,9 @@ fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildC
                     return Ok(());
                 }
                 entry_id += 1;
+                if entry_id % 5000 == 0 {
+                    on_progress(&format!("progress  {entry_id} / ?"));
+                }
                 let sense = Sense { glosses, pos: extract_pos(&t.glossary), misc: Vec::new() };
                 json_buf.clear();
                 {
@@ -230,6 +243,7 @@ fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildC
     }
 
     write_meta(&tx, terms, freqs)?;
+    on_progress("building  creating index");
     tx.execute_batch(INDEXES)?;
     tx.commit()?;
     conn.execute_batch("ANALYZE;")?;
@@ -564,7 +578,7 @@ mod tests {
     fn build_fixture_db(test_name: &str) -> (Connection, TempDbGuard) {
         let out = out_path(test_name);
         let guard = TempDbGuard(out.clone());
-        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out).unwrap();
+        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out, &|_| {}).unwrap();
         (Connection::open(&out).unwrap(), guard)
     }
 
@@ -727,7 +741,7 @@ mod tests {
         let _guard = TempDbGuard(out.clone());
         std::fs::write(&out, b"PRECIOUS").unwrap();
 
-        assert!(build(&[], &[], &out).is_err(), "an empty build must not be attempted");
+        assert!(build(&[], &[], &out, &|_| {}).is_err(), "an empty build must not be attempted");
         assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
     }
 
@@ -740,7 +754,7 @@ mod tests {
         let _bad_guard = TempDbGuard(bad.clone());
         std::fs::write(&bad, b"not a zip at all").unwrap();
 
-        assert!(build(std::slice::from_ref(&bad), &[], &out).is_err());
+        assert!(build(std::slice::from_ref(&bad), &[], &out, &|_| {}).is_err());
         assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
         assert!(!building_path(&out).exists(), "no .building left behind");
     }
@@ -754,7 +768,7 @@ mod tests {
         // A fresh exe has no data/.
         let out = dir.join("data").join("chibipop.sqlite");
 
-        let counts = build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out)
+        let counts = build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out, &|_| {})
             .expect("a fresh install must be able to build");
 
         assert_eq!(3, counts.entries);
@@ -775,8 +789,8 @@ mod tests {
         let _g1 = TempDbGuard(out1.clone());
         let _g2 = TempDbGuard(out2.clone());
 
-        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out1).unwrap();
-        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out2).unwrap();
+        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out1, &|_| {}).unwrap();
+        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out2, &|_| {}).unwrap();
 
         let c1 = Connection::open(&out1).unwrap();
         let c2 = Connection::open(&out2).unwrap();

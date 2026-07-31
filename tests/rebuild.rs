@@ -112,7 +112,11 @@ fn every_archive_line_renders_as_a_name_and_the_last_line_does_not() {
         .collect();
     let shown: Vec<String> = lines.iter().filter_map(|l| friendly(l)).collect();
     assert_eq!(
-        vec!["Reading terms.zip…".to_string(), "Reading freq.zip…".to_string()],
+        vec![
+            "Reading terms.zip…".to_string(),
+            "Reading freq.zip…".to_string(),
+            "Creating search index…".to_string(),
+        ],
         shown
     );
     assert_eq!(lines.len(), shown.len() + 1, "the wrote line is swallowed: {lines:?}");
