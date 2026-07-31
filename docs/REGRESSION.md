@@ -46,6 +46,12 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 > diagnostics inconsistently; back-to-back runs on an unchanged tree returned 0 then 5. `touch`
 > a source file first, or take the first run's output.
 >
+> **In CI, pass `--color never`.** The workflow sets `CARGO_TERM_COLOR: always`, so cargo
+> prefixes every diagnostic with an ANSI escape and `^error` matches nothing. The count comes
+> back 0, the step fails with "expected 4, got 0", and the real clippy output right above it
+> says 4. This gate had never once run before 2026-07-31 — the repo had no remote until then,
+> so nobody had seen it fail.
+>
 > **Re-measure this baseline after any commit that could move it.** On 2026-07-31 the comment
 > sweep took it 5 → 4, nobody updated the table, a later branch read 5 and it was called
 > "unchanged" — and that 5 was quoted to a reviewer as the baseline, hiding a dead-code

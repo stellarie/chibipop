@@ -47,6 +47,10 @@ jobs:
             exit 1
           fi
 
+      # --color never is not cosmetic: CARGO_TERM_COLOR is `always` above, so
+      # cargo prefixes every diagnostic with an ANSI escape and `^error` never
+      # matches. That silently counted 0 and this gate had never once run.
+      #
       # The repo carries four accepted clippy errors, so `-D warnings` always
       # exits non-zero here. CI must assert the COUNT is 4 - a fifth is a real
       # regression. Count every error line and subtract the per-target "could
@@ -57,7 +61,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          raw=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1)
+          raw=$(cargo clippy --color never --all-targets --all-features -- -D warnings 2>&1)
           set -e
           n=$(printf '%s\n' "$raw" | grep -E "^error" | grep -vc "could not compile" || true)
           echo "accepted clippy errors: $n"
@@ -71,7 +75,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          raw=$(cargo clippy --all-targets --all-features -- -D warnings \
+          raw=$(cargo clippy --color never --all-targets --all-features -- -D warnings \
             -A clippy::while_let_loop -A clippy::doc_lazy_continuation \
             -A clippy::useless_conversion -A clippy::too_many_arguments \
             -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1)
