@@ -483,7 +483,6 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
 /// The shared layout walk.
 ///
 /// Returns the content height.
-#[allow(clippy::too_many_arguments)]
 fn layout_pass(
     dwrite: &IDWriteFactory,
     formats: &RefCell<FormatCache>,
