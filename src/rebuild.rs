@@ -124,10 +124,14 @@ fn with_suffix(out: &Path, suffix: &str) -> PathBuf {
 /// None for lines to swallow.
 pub fn friendly(line: &str) -> Option<String> {
     if let Some(rest) = line.strip_prefix("progress") {
-        let (n, t) = rest.trim().split_once('/')?;
+        let rest = rest.trim();
+        let (n, t) = rest.split_once('/')?;
         let n: u64 = n.trim().parse().ok()?;
-        let t: u64 = t.trim().parse().ok()?;
-        return Some(format!("{} of {} entries…", format_thousands(n), format_thousands(t)));
+        let total: Option<u64> = t.trim().parse().ok();
+        return Some(match total {
+            Some(t) => format!("{} of {} entries…", format_thousands(n), format_thousands(t)),
+            None => format!("{} entries…", format_thousands(n)),
+        });
     }
     if line.starts_with("building") {
         return Some("Creating search index…".to_string());
@@ -237,6 +241,14 @@ mod tests {
         assert_eq!(
             Some("500 of 3,000 entries…".to_string()),
             friendly("progress  500 / 3000")
+        );
+    }
+
+    #[test]
+    fn a_progress_line_with_unknown_total_works() {
+        assert_eq!(
+            Some("5,000 entries…".to_string()),
+            friendly("progress  5000 / ?")
         );
     }
 
