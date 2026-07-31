@@ -218,6 +218,8 @@ fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildC
                 }
 
                 if term_batch.len() >= BATCH_ROWS {
+                    // Flush entries first.
+                    flush_entries(&tx, &mut entry_batch)?;
                     flush_terms(&tx, &mut term_batch)?;
                 }
                 Ok(())
