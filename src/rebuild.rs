@@ -98,9 +98,42 @@ fn run(exe: &Path, library: &Path, out: &Path, tmp: &Path, tx: &Sender<Progress>
 
 /// `<out>` with `.tmp` appended.
 fn tmp_path(out: &Path) -> PathBuf {
+    with_suffix(out, ".tmp")
+}
+
+/// Where a staged build lands.
+pub fn staging_path(out: &Path) -> PathBuf {
+    with_suffix(out, ".new")
+}
+
+/// Puts a staged build in place.
+pub fn promote(staged: &Path, out: &Path) -> Result<()> {
+    std::fs::rename(staged, out)
+        .with_context(|| format!("replacing {} with {}", out.display(), staged.display()))
+}
+
+/// `<out>` plus `suffix`.
+fn with_suffix(out: &Path, suffix: &str) -> PathBuf {
     let mut name = out.as_os_str().to_os_string();
-    name.push(".tmp");
+    name.push(suffix);
     PathBuf::from(name)
+}
+
+/// One child line, for a person.
+///
+/// None for lines to swallow.
+pub fn friendly(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("term dict").or_else(|| line.strip_prefix("freq dict"))?;
+    let rest = rest.trim();
+    // Drop main.rs's [i] prefix.
+    let name = match rest.strip_prefix('[').and_then(|a| a.split_once(']')) {
+        Some((n, tail)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => tail.trim(),
+        _ => rest,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!("Reading {name}…"))
 }
 
 /// How many archives are there?
@@ -139,6 +172,45 @@ mod tests {
     #[test]
     fn a_missing_directory_counts_as_an_error_not_as_zero() {
         assert!(archive_count(Path::new(r"C:\nope\chibipop\nope")).is_err());
+    }
+
+    #[test]
+    fn the_staging_file_sits_beside_the_output() {
+        let staged = staging_path(Path::new(r"C:\a\data\chibipop.sqlite"));
+        assert_eq!(Path::new(r"C:\a\data\chibipop.sqlite.new"), staged);
+    }
+
+    #[test]
+    fn a_staged_build_does_not_share_the_live_temp_name() {
+        let out = Path::new(r"C:\a\data\chibipop.sqlite");
+        assert_ne!(tmp_path(out), tmp_path(&staging_path(out)));
+    }
+
+    #[test]
+    fn an_archive_line_is_rendered_without_its_index() {
+        assert_eq!(
+            Some("Reading 01 [JA-EN] jitendex.zip…".to_string()),
+            friendly("term dict  [0] 01 [JA-EN] jitendex.zip")
+        );
+        assert_eq!(
+            Some("Reading [JA Freq] jiten_freq.zip…".to_string()),
+            friendly("freq dict      [JA Freq] jiten_freq.zip")
+        );
+        assert_eq!(
+            Some("Reading b.zip…".to_string()),
+            friendly("term dict  [10] b.zip")
+        );
+    }
+
+    /// Not for the user.
+    #[test]
+    fn the_builders_final_line_is_swallowed() {
+        assert_eq!(
+            None,
+            friendly(r"wrote C:\Users\x\data\chibipop.sqlite.tmp: 3 entries, 5 term rows")
+        );
+        assert_eq!(None, friendly("term dict  [0] "));
+        assert_eq!(None, friendly(""));
     }
 
     #[test]

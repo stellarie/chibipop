@@ -9,15 +9,17 @@ the limits that were measured rather than assumed.
 ## Toolchain
 
 - **Rust** stable, MSVC toolchain (`stable-x86_64-pc-windows-msvc`).
-- **Python 3.9+**, standard library only — no `pip install`. It builds the
-  dictionary and nothing else.
+- **Python 3.9+**, standard library only — no `pip install`. Needed only for
+  `tools/build-dict`, which is now the *oracle* the Rust builder is verified
+  against rather than the way a dictionary gets built.
 - `data/deconjugator.json` ships with the repository. No build step.
 
 The dictionary database is **not** in the repository (232 MiB). Build it from
-Yomitan format-3 archives:
+Yomitan format-3 archives, either in the settings window or from the command
+line:
 
 ```bash
-python tools/build-dict/build.py --dicts-dir "C:\path\to\dicts" --out data/chibipop.sqlite
+chibipop build-dict --library "C:\path\to\dicts" --out data/chibipop.sqlite
 ```
 
 Frequency archives are detected automatically — by `frequencyMode` in
@@ -35,6 +37,17 @@ dictionary, ranked in filename order. Roughly 70 seconds.
 | `chibipop lookup 食べた` | Dictionary lookup only. No screen, no OCR. |
 | `chibipop probe --at 1200,400` | One point, every stage printed: capture region → OCR lines and word boxes → resolved span → ranked hits → match box. Tells apart "OCR saw nothing" from "OCR saw text but nothing near the cursor". |
 | `chibipop watch` | Follows the cursor and prints a lookup whenever the hovered word changes. Ctrl-C to stop. |
+| `chibipop build-dict --library DIR --out FILE` | Builds `chibipop.sqlite` from a folder of Yomitan `.zip` archives, printing one line per archive. Term archives are ordered by filename, which is what assigns `dict_id`; frequency archives are detected by their `index.json`. |
+
+`build-dict` is what the settings window runs, **as a child process** — the
+builder holds the whole frequency table in memory and that spike must not land
+in a process that idles at 12 MB. It writes to `<out>.tmp` and renames on
+success only, so a failed build leaves the previous database byte-identical.
+
+Windows will not rename over a database that a process still holds open, so a
+running `chibipop run` rebuilds to `<out>.new` and swaps it in as it exits, on
+its way to the restart. `chibipop settings` closes the database before opening
+the window and writes straight to it.
 
 `probe` and `watch` both take `--tiles N`, mirroring `[ocr] max_ocr_passes`.
 **Both default to 1, matching the shipped configuration** — a diagnostic that

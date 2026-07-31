@@ -14,11 +14,11 @@ you're reading.
 ## What you'll need
 
 - **Windows 10 or 11**, with Japanese language support added.
-- **Python 3.9 or newer** — used once, to build your dictionary.
 - **Your own dictionary files.** chibipop doesn't include any. See
   [Dictionaries](#dictionaries).
 
-Setup takes about five minutes, and you only do it once.
+Setup takes about five minutes, and you only do it once. Nothing else to
+install — no Python, no toolchain.
 
 **Check your Japanese support first.** Paste this into PowerShell:
 
@@ -43,27 +43,27 @@ Documents folder is fine.
 There's no installer. Everything chibipop needs lives in that one folder, and
 it doesn't write anything outside it.
 
-### 2. Install Python
+### 2. Add your dictionaries
 
-From [python.org](https://www.python.org/downloads/). Tick
-**"Add Python to PATH"** during the install.
+Start chibipop. The settings window opens by itself.
 
-You need it for the next step only — chibipop itself doesn't use Python.
+In **Dictionaries**, press **Add…** and pick your Yomitan `.zip` files. Put
+word-frequency lists under **Frequency data** instead — they rank the results
+rather than define anything.
 
-### 3. Build your dictionary
+Nothing happens to your files until you press **Apply**. Then chibipop copies
+each archive into a `library` folder beside `chibipop.exe` and builds
+`data\chibipop.sqlite` from it, which takes about a minute for a full set. The
+window shows which dictionary it's reading as it goes.
 
-Put your Yomitan dictionary `.zip` files together in one folder. Then open a
-terminal **in the chibipop folder** and run:
+chibipop closes once that first build finishes — start it again and you're
+ready. After that, applying from a running chibipop restarts it for you.
 
-```bash
-python tools\build-dict\build.py --dicts-dir "C:\Users\You\Documents\dicts" --out data\chibipop.sqlite
-```
+You only do this again when you add or update a dictionary. **Remove** takes
+one out the same way — select it, press Remove, press Apply.
 
-It takes about 70 seconds, and you only do it again when you add or update a
-dictionary.
-
-*(This step can't be skipped or shipped for you — the dictionaries are 232 MB
-and aren't ours to hand out. See [Dictionaries](#dictionaries).)*
+*(The dictionaries can't be shipped for you: they're 232 MB and aren't ours to
+hand out. See [Dictionaries](#dictionaries).)*
 
 ---
 
@@ -117,13 +117,18 @@ Everything is in the settings window — you shouldn't need to edit any files.
 | **Box the word being defined** | Draws a faint outline around exactly the characters being defined, so you can see it picked the right word. |
 | **Scroll long entries with the wheel** | Lets the wheel scroll the popup while your cursor is inside it. |
 | **Hide the popup from screen capture** | Makes the popup invisible to screen recorders, screenshots and screen sharing — visible only to you. Off by default. |
-| **Dictionaries** | Drag the order around. The one at the top is shown first. |
+| **Dictionaries** | Add and remove your dictionaries, and set their order — the one at the top is shown first. |
+| **Frequency data** | Word-frequency lists, which rank the results. No order: a rank is a lookup, not a display order. |
 | **OCR passes per hover** | Leave at 1. Higher reads further ahead but can pick the wrong character. |
 | **Outline what each hover captured** | A diagnostic view showing where chibipop looked. Off by default. |
 
 Pressing **Apply** saves your settings and restarts chibipop, which takes
 about a fifth of a second. Your settings live in `chibipop.toml` beside
 `chibipop.exe`, and you can edit that by hand if you prefer.
+
+If you added or removed a dictionary, Apply rebuilds `data\chibipop.sqlite`
+first and that takes a minute or so. Your old dictionary keeps working the
+whole time, and stays in place untouched if the rebuild fails.
 
 ---
 

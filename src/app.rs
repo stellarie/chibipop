@@ -42,13 +42,16 @@
 use crate::config::Config;
 use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
+use crate::library::{Library, Pending};
+use crate::lock::LibraryLock;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
-use crate::settings::{self};
+use crate::rebuild::{self, Progress};
+use crate::settings::{self, SettingsForm};
 use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
@@ -128,6 +131,9 @@ const SCROLL_STEP_PX: i32 = 48;
 /// application, and without it the bug report is "chibipop broke my mouse"
 /// with nothing to search for.
 const ARM_WARN_TICKS: u32 = 250;
+
+/// Rebuild progress poll, ms.
+const REBUILD_TICK_MS: u32 = 100;
 
 /// The popup's width has no config knob (`config.rs`'s `PopupConfig` only
 /// exposes `max_height_percent`) - 420 matches the width Task 5 verified
@@ -278,16 +284,31 @@ impl CaptureGuard {
 /// `run` instance it is not part of, because a half-applied round trip - new
 /// file on disk, old settings still running - is the one outcome `run`'s own
 /// Apply refuses outright, and guessing at another process is worse.
-pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Result<()> {
-    let form = settings::from_config(&cfg, dicts);
+pub fn settings_only(
+    cfg: Config,
+    dicts: &[DictInfo],
+    config_path: &Path,
+    dict_path: &Path,
+) -> Result<()> {
+    let library = library_dir();
+    let form = form_with_library(&cfg, dicts, &library);
     let stale = settings::stale_order_entries(&cfg, dicts);
     let window =
         SettingsWindow::open(&form, &stale, false).context("opening the settings window")?;
+
+    // A run may hold it open.
+    let staged_db = rebuild::staging_path(dict_path);
+    let mut rebuild: Option<InFlight> = None;
+    let mut pending: Option<Config> = None;
+    let mut tick = 0usize;
 
     let mut msg = MSG::default();
     // SAFETY: `msg` is this loop's own stack storage, and `window` is alive
     // for the whole loop - it is dropped only after this function returns.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        // No hooks, nothing to disarm.
+        window.pump(|| {});
+
         // Same order as `run`'s loop: the dialog manager gets first refusal
         // so Tab, arrows and Esc reach the controls rather than the app.
         if !unsafe { IsDialogMessageW(window.hwnd(), &msg) }.as_bool() {
@@ -297,24 +318,186 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
             }
         }
 
+        if rebuild.is_some() {
+            // Not while the child writes.
+            let _ = window.take_outcome();
+            // Taken only when finished.
+            let Some(built) = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, &window)) else {
+                continue;
+            };
+            let Some(flight) = rebuild.take() else { continue };
+            // SAFETY: `tick` is this loop's own timer, set below.
+            unsafe {
+                let _ = KillTimer(None, tick);
+            }
+            window.set_busy(false);
+            match built {
+                // Built beside the live one.
+                Ok(()) => match rebuild::promote(&staged_db, dict_path) {
+                    Err(e) => {
+                        undo_apply(&flight, &e);
+                        let _ = std::fs::remove_file(&staged_db);
+                        window.set_status(
+                            "Another chibipop is running. Close it, then Apply again.",
+                        );
+                    }
+                    Ok(()) => {
+                        keep_apply(&flight, &window);
+                        let updated = pending.take().unwrap_or_else(|| cfg.clone());
+                        updated.save(config_path).with_context(|| {
+                            format!("saving settings to {}", config_path.display())
+                        })?;
+                        println!("chibipop: rebuilt {}.", dict_path.display());
+                        println!("chibipop: settings saved to {}.", config_path.display());
+                        println!("chibipop: restart chibipop for them to take effect.");
+                        return Ok(());
+                    }
+                },
+                Err(e) => {
+                    undo_apply(&flight, &e);
+                    report_failed_rebuild(&window, &e);
+                }
+            }
+            continue;
+        }
+
         match window.take_outcome() {
             // Quit cannot arrive here - `open(.., false)` does not create the
             // button - but closing the window is the only honest reading if
             // it ever did, since there is no instance to quit.
             Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
-                let updated = settings::apply_to(&window.read(&form), &cfg);
-                updated.save(config_path).with_context(|| {
-                    format!("saving settings to {}", config_path.display())
-                })?;
-                println!("chibipop: settings saved to {}.", config_path.display());
-                println!("chibipop: restart chibipop for them to take effect.");
-                return Ok(());
+                let edited = window.read(&form);
+                let updated = settings::apply_to(&edited, &cfg);
+                // A font is not a rebuild.
+                if !edited.has_staged() {
+                    updated.save(config_path).with_context(|| {
+                        format!("saving settings to {}", config_path.display())
+                    })?;
+                    println!("chibipop: settings saved to {}.", config_path.display());
+                    println!("chibipop: restart chibipop for them to take effect.");
+                    return Ok(());
+                }
+                match start_rebuild(&edited, &library, &staged_db) {
+                    Err(e) => refuse_apply(&window, &e),
+                    Ok(flight) => {
+                        begin_rebuild(&window);
+                        // SAFETY: a thread timer, killed above on every exit
+                        // from the rebuild - the same shape `run` uses.
+                        tick = unsafe { SetTimer(None, 0, REBUILD_TICK_MS, None) };
+                        pending = Some(updated);
+                        rebuild = Some(flight);
+                    }
+                }
             }
             None => {}
         }
     }
     Ok(())
+}
+
+/// The archive folder.
+fn library_dir() -> PathBuf {
+    crate::paths::beside_exe("library")
+}
+
+/// The form and the library.
+fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
+    let form = settings::from_config(cfg, dicts);
+    match Library::load(dir) {
+        Ok(lib) => settings::with_library(form, &lib),
+        Err(e) => {
+            eprintln!("chibipop: reading {} failed: {e:#}", dir.display());
+            form
+        }
+    }
+}
+
+/// A change and its rebuild.
+struct InFlight {
+    pending: Pending,
+    rx: mpsc::Receiver<Progress>,
+    _lock: LibraryLock,
+}
+
+/// Lock, update, build.
+fn start_rebuild(form: &SettingsForm, dir: &Path, out: &Path) -> Result<InFlight> {
+    let lock = LibraryLock::acquire(dir)?;
+    let pending = settings::stage_into_library(form, dir)?;
+    match rebuild::spawn(dir, out) {
+        Ok(rx) => Ok(InFlight { pending, rx, _lock: lock }),
+        Err(e) => {
+            undo_apply_pending(&pending, &e);
+            Err(e)
+        }
+    }
+}
+
+/// Put every archive back.
+fn undo_apply(flight: &InFlight, why: &anyhow::Error) {
+    undo_apply_pending(&flight.pending, why);
+}
+
+/// Put every archive back.
+fn undo_apply_pending(pending: &Pending, why: &anyhow::Error) {
+    match pending.rollback() {
+        Ok(()) => eprintln!("chibipop: {why:#} - your dictionary archives were put back."),
+        Err(e) => {
+            eprintln!("chibipop: {why:#}");
+            eprintln!("chibipop: putting your archives back failed: {e:#}");
+            eprintln!("chibipop: they are in the library's .removed folder.");
+        }
+    }
+}
+
+/// Let the removals go.
+fn keep_apply(flight: &InFlight, w: &SettingsWindow) {
+    if let Err(e) = flight.pending.commit() {
+        eprintln!("chibipop: clearing the library's .removed folder failed: {e:#}");
+    }
+    w.clear_staged();
+}
+
+/// Progress, never blocking.
+///
+/// None while it runs.
+fn pump_rebuild(rx: &mpsc::Receiver<Progress>, w: &SettingsWindow) -> Option<Result<()>> {
+    loop {
+        match rx.try_recv() {
+            Ok(Progress::Line(line)) => {
+                println!("chibipop: {line}");
+                // Never the raw .tmp line.
+                if let Some(text) = rebuild::friendly(&line) {
+                    w.set_status(&text);
+                }
+            }
+            Ok(Progress::Done(_)) => return Some(Ok(())),
+            Ok(Progress::Failed(why)) => return Some(Err(anyhow::anyhow!(why))),
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Some(Err(anyhow::anyhow!("the rebuild ended without reporting")));
+            }
+        }
+    }
+}
+
+/// Lock it and say so.
+fn begin_rebuild(w: &SettingsWindow) {
+    w.set_busy(true);
+    w.set_status("Rebuilding your dictionary. This can take a few minutes.");
+}
+
+/// Say why Apply did nothing.
+fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
+    w.set_status(&format!("Not applied: {e}"));
+    eprintln!("chibipop: not applied: {e:#}");
+}
+
+/// Say nothing was changed.
+fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
+    w.set_status("The rebuild failed. Your dictionary is unchanged.");
+    eprintln!("chibipop: the rebuild failed: {e:#}");
+    eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
 /// `config_path` is where `cfg` was loaded from (`main.rs`'s
@@ -324,9 +507,13 @@ pub fn settings_only(cfg: Config, dicts: &[DictInfo], config_path: &Path) -> Res
 pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
     // No dictionary or rules on first run.
     if !dict_path.exists() || !rules_path.exists() {
-        return settings_only(cfg, &[], config_path);
+        return settings_only(cfg, &[], config_path, dict_path);
     }
 
+    let library = library_dir();
+    // The worker holds it open.
+    let staged_db = rebuild::staging_path(dict_path);
+    let db_path = dict_path.to_path_buf();
     let dict_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
@@ -510,7 +697,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     // That is the honest consequence of both behaviours, not a loop: it
     // takes a click each time, and it shows the values that were just saved.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
-        &settings::from_config(&cfg, &dicts),
+        &form_with_library(&cfg, &dicts, &library),
         &settings::stale_order_entries(&cfg, &dicts),
         true,
     ) {
@@ -523,6 +710,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     };
     // Consecutive ticks the wheel has been captured - see ARM_WARN_TICKS.
     let mut armed_ticks: u32 = 0;
+    // A rebuild in flight.
+    let mut rebuild: Option<InFlight> = None;
+    let mut pending_cfg: Option<Config> = None;
+    let mut promote: Option<PathBuf> = None;
+    // The swap can still fail.
+    let mut applied: Option<InFlight> = None;
+    let mut restart_at_exit = false;
 
     // I4: kept in one place.
     let mut drain_capture_guard = || {
@@ -577,6 +771,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         // without `DialogBoxParamW`'s nested pump, which would stop WM_TIMER
         // arriving and latch the wheel arm (spec D2).
         if let Some(w) = &settings {
+            // Spec D9: the picker pumps.
+            w.pump(|| {
+                Hooks::set_scroll_armed(false);
+                drain_capture_guard();
+            });
+
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
             if unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool() {
@@ -625,31 +825,78 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             }
 
             if let Some(w) = &settings {
-                match w.take_outcome() {
-                    Some(SettingsOutcome::Cancel) => settings = None,
-                    // Same PostQuitMessage the tray's Quit uses, and for the
-                    // same reason: this runs ON the main thread, inside this
-                    // very loop. BACKLOG 7 left the tray's Quit unreachable,
-                    // so for now this is the only one that can be pressed.
-                    Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
-                    Some(SettingsOutcome::Apply) => {
-                        let updated = settings::apply_to(&w.read(&settings::from_config(&cfg, &dicts)), &cfg);
-                        // Both failures leave the running instance alive and
-                        // the window open. A settings round-trip that half
-                        // applies - new file on disk with old settings
-                        // running, or nothing running at all - is the one
-                        // outcome worth refusing outright.
-                        if let Err(e) = updated.save(config_path) {
-                            eprintln!("chibipop: could not save settings to {}: {e:#}",
-                                      config_path.display());
-                        } else if let Err(e) = restart_self() {
-                            eprintln!("chibipop: settings saved, but the restart failed: {e:#}");
-                            eprintln!("chibipop: they will apply next time you start chibipop.");
-                        } else {
-                            unsafe { PostQuitMessage(0) };
+                if rebuild.is_some() {
+                    // Not while the child writes.
+                    let _ = w.take_outcome();
+                    // Taken only when finished.
+                    let done = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, w));
+                    if let Some(built) = done {
+                        let flight = rebuild.take();
+                        w.set_busy(false);
+                        match (built, flight) {
+                            (_, None) => {}
+                            (Ok(()), Some(flight)) => {
+                                let updated =
+                                    pending_cfg.take().unwrap_or_else(|| cfg.clone());
+                                if let Err(e) = updated.save(config_path) {
+                                    eprintln!("chibipop: could not save settings to {}: {e:#}",
+                                              config_path.display());
+                                    let _ = std::fs::remove_file(&staged_db);
+                                    undo_apply(&flight, &e);
+                                    w.set_status("Settings could not be saved. Nothing changed.");
+                                } else {
+                                    // The swap needs it closed.
+                                    w.set_status("Dictionary rebuilt. Restarting chibipop.");
+                                    w.clear_staged();
+                                    promote = Some(staged_db.clone());
+                                    applied = Some(flight);
+                                    restart_at_exit = true;
+                                    unsafe { PostQuitMessage(0) };
+                                }
+                            }
+                            (Err(e), Some(flight)) => {
+                                undo_apply(&flight, &e);
+                                report_failed_rebuild(w, &e);
+                            }
                         }
                     }
-                    None => {}
+                } else {
+                    match w.take_outcome() {
+                        Some(SettingsOutcome::Cancel) => settings = None,
+                        // Same PostQuitMessage the tray's Quit uses, and for the
+                        // same reason: this runs ON the main thread, inside this
+                        // very loop. BACKLOG 7 left the tray's Quit unreachable,
+                        // so for now this is the only one that can be pressed.
+                        Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
+                        Some(SettingsOutcome::Apply) => {
+                            let edited = w.read(&form_with_library(&cfg, &dicts, &library));
+                            let updated = settings::apply_to(&edited, &cfg);
+                            // Both failures leave the running instance alive and
+                            // the window open. A settings round-trip that half
+                            // applies - new file on disk with old settings
+                            // running, or nothing running at all - is the one
+                            // outcome worth refusing outright.
+                            if edited.has_staged() {
+                                match start_rebuild(&edited, &library, &staged_db) {
+                                    Err(e) => refuse_apply(w, &e),
+                                    Ok(flight) => {
+                                        begin_rebuild(w);
+                                        pending_cfg = Some(updated);
+                                        rebuild = Some(flight);
+                                    }
+                                }
+                            } else if let Err(e) = updated.save(config_path) {
+                                eprintln!("chibipop: could not save settings to {}: {e:#}",
+                                          config_path.display());
+                            } else if let Err(e) = restart_self() {
+                                eprintln!("chibipop: settings saved, but the restart failed: {e:#}");
+                                eprintln!("chibipop: they will apply next time you start chibipop.");
+                            } else {
+                                unsafe { PostQuitMessage(0) };
+                            }
+                        }
+                        None => {}
+                    }
                 }
             }
 
@@ -714,7 +961,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if let Some(w) = &settings {
                         w.focus();
                     } else {
-                        let form = settings::from_config(&cfg, &dicts);
+                        let form = form_with_library(&cfg, &dicts, &library);
                         let stale = settings::stale_order_entries(&cfg, &dicts);
                         match SettingsWindow::open(&form, &stale, true) {
                             // Never fatal - the same rule the overlay
@@ -782,6 +1029,34 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let _ = worker_handle.join(); // now instant: the worker has already finished.
 
     drop(tray); // 4. drop Tray - removes the notification-area icon and its owner window
+
+    // 5. the database is closed.
+    if let Some(staged) = promote {
+        match rebuild::promote(&staged, &db_path) {
+            Err(e) => {
+                eprintln!("chibipop: the rebuilt dictionary could not be put in place: {e:#}");
+                eprintln!("chibipop: the old one is still there, and the new one is at {}.",
+                          staged.display());
+                if let Some(flight) = &applied {
+                    undo_apply(flight, &e);
+                }
+            }
+            Ok(()) => {
+                if let Some(flight) = &applied {
+                    if let Err(e) = flight.pending.commit() {
+                        eprintln!("chibipop: clearing the library's .removed folder failed: {e:#}");
+                    }
+                }
+                println!("chibipop: rebuilt {}.", db_path.display());
+            }
+        }
+    }
+    if restart_at_exit {
+        if let Err(e) = restart_self() {
+            eprintln!("chibipop: the restart failed: {e:#}");
+            eprintln!("chibipop: your settings are saved; start chibipop again.");
+        }
+    }
 
     Ok(())
 }

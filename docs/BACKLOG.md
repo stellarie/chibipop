@@ -110,6 +110,23 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
 `CreateMutexW` or equivalent anywhere in `src/`, so two `chibipop run` processes install two
 `WH_MOUSE_LL` hooks.
 
+> **Partly closed 2026-07-29.** `lock::LibraryLock` now serialises the *library* across
+> processes — a named `CreateMutexW` per library folder, held for the whole Apply — because two
+> instances between them could delete every archive the user had. It does **not** guard the
+> hooks: two `chibipop run` processes still install two `WH_MOUSE_LL` hooks, which is what this
+> item was originally about. A startup-wide guard is still wanted; it can reuse `lock.rs`.
+
+Two residual races the library lock does not cover, both non-destructive and both stated rather
+than fixed:
+
+- Another process calling `Library::load` while an Apply is in flight restores that Apply's
+  quarantine, because `reconcile` cannot tell a live quarantine from one a killed process left
+  behind. The archives survive; the removal is silently undone and the database no longer matches
+  the library until the next Apply. Closing it wants an owner marker in `.removed/` plus a
+  liveness check, not more locking.
+- A quarantined file whose name is already taken at the top level is left in `.removed/` on the
+  next load, as a duplicate of a live archive. Harmless, but it accumulates.
+
 That was harmless before wheel capture existed. It is not now: the armed instance swallows wheel
 events for everybody, and quitting the instance whose popup is visible does not necessarily fix it,
 because the other one's arm is independent. One named mutex at startup, with a clear message and a

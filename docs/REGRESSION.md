@@ -25,7 +25,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **347** total across **6** targets |
+| Rust tests | **all green**, **406** total across **6** targets |
 | Clippy | **exactly 5** accepted errors |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -208,16 +208,90 @@ doubts it.
     appears here, something changed — find out what before celebrating.* Note the icon lives behind
     the `^` chevron, not in the visible tray.
 11c. **Press "Quit chibipop" in the settings window** → chibipop exits. ✅ **Confirmed by oniichan
-    2026-07-29.** Still not agent-verifiable, for a newly-measured reason: the settings window's Win32 layer is unreachable from a tool
-    shell. UIA sees the button (name "Quit chibipop") but it exposes **no patterns**, so `Invoke`
-    throws `InvalidOperationException`; `FindWindowW('ChibipopSettingsClass', null)` returns **0**;
-    and `FindWindowExW(hwnd, .., 'BUTTON', null)` enumerates **no children** on the same hwnd UIA
-    reports. Three mechanisms, none reaching it. The button is verified to *render* only.
+    2026-07-29.**
+
+> [!important] Corrected 2026-07-29 — this window **is** agent-verifiable
+> This entry previously said the settings window's Win32 layer was unreachable from a tool
+> shell, citing three failed mechanisms. That conclusion was **wrong**, and it cost real
+> coverage — several rounds were reported as "unverifiable" when they were not.
+>
+> `FindWindowW` does fail, and now we know why: **window classes registered with
+> `RegisterClassW` are process-local**, so another process cannot resolve the class *name* to
+> an atom. `GetClassName` reads the string back perfectly well, which is why the class looked
+> present and unfindable at the same time.
+>
+> What works, measured:
+> ```
+> FindWindowW('ChibipopSettingsClass', null)  ->  0           (the dead end)
+> EnumWindows + GetWindowThreadProcessId==pid ->  hwnd, class 'ChibipopSettingsClass'
+> EnumChildWindows(hwnd)                      ->  34 controls
+> GetDlgCtrlID / GetWindowText                ->  id=117 'Add…', 118 'Remove', 119 ListBox, …
+> PostMessageW(WM_COMMAND, id) / SendMessageW(LB_GETCOUNT)  ->  work cross-process
+> ```
+> So button presses, list contents and enable state can all be driven and asserted from a
+> tool shell. **Only the visual result — wrapping, spacing, whether it looks right — still
+> needs eyes.** Filter `EnumWindows` by PID; do not use `FindWindowW` on this class.
+
+11d. **The console is hidden on a double-click.** Agent-verifiable by the same route, and
+    confirmed 2026-07-29: launched without inheriting a console, `ConsoleWindowClass` exists
+    with **`IsWindowVisible` = False** while `ChibipopSettingsClass` is True. That is
+    `own_console()` hiding a console it owns alone. A visible black box here means
+    `GetConsoleProcessList` returned something other than 1.
 11b. **`chibipop settings`** → the same window, captioned **"Apply"** and "Restart chibipop to use
     them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
 12. **Reorder dictionaries → Apply** → order changes, and **`chibipop.toml` still holds the
     original substrings**, merely reordered. Invisible from the UI; check the file.
-13. **Open Settings, touch nothing, Apply** → the TOML is unchanged apart from formatting.
+13. **Open Settings, touch nothing, Apply** → the TOML is unchanged apart from formatting, and it
+    returns in well under a second. *(A settings-only Apply must never trigger a rebuild. Measured
+    2026-07-29: 128 ms for `chibipop settings`.)*
+14. **Add… → pick a `.zip` → Apply.**
+    The acceptance run: import two term archives and one frequency archive into a clean `library/`,
+    Apply, confirm the rebuild completes and lookups reflect all three; then remove one, Apply,
+    confirm it is gone and the others still rank correctly.
+
+> [!important] Corrected 2026-07-29 — the picker **is** agent-drivable
+> This entry previously said `GetOpenFileNameW` could not be driven from a tool shell, citing
+> three failed mechanisms. A fourth works, measured on 2026-07-29 and used to reproduce the
+> staged-add defects end to end:
+> ```
+> EnumWindows by pid, class '#32770'          ->  the picker's hwnd
+> GetDlgItem(dlg, 0x047C /* cmb13 */)         ->  the filename combo (created LATE - poll for it)
+> SendMessageW(cmb13, WM_SETTEXT, 0, path)    ->  fills it, cross-process
+> PostMessageW(dlg, WM_COMMAND, 1 /* IDOK */) ->  the dialog closes and the file is picked
+> ```
+> The trap that made it look impossible: the combo does not exist for the first ~1 s, and IDOK
+> on an **empty** filename is a no-op that leaves the dialog open — which reads exactly like
+> "IDOK is ignored". Wait for `GetDlgItem` to return non-zero before setting the text.
+> Only the visual result still needs eyes.
+14a. **Remove → Apply, with no picker involved.** ✅ **Agent-verified 2026-07-29** on
+    `chibipop settings` against a fixture library, driven by `EnumWindows` + `PostMessage`:
+    the row leaves the listbox and **`library/` is untouched until Apply**; Apply then moves that
+    one archive into `library/.removed/`, writes `library.json`, rebuilds, swaps the database in,
+    and only then deletes it. The database's `dict` table loses exactly that dictionary. During
+    the build, `id=100` and `id=117` read `en=False` and the status line
+    (`id=122`) shows `Rebuilding your dictionary…` then `Reading <name>…` — **never the child's own
+    `wrote …chibipop.sqlite.tmp: 3 entries, 5 term rows`**.
+14b. **Remove *everything* → Apply** → refused, in the window: `Not applied: that would leave
+    chibipop with no dictionary`. ✅ **Agent-verified 2026-07-29** — the window stays open, the
+    database's hash is unchanged and **no archive is deleted**, because the refusal comes before the
+    first removal.
+14c. **A corrupt `.zip` in `library/` → Apply** → `The rebuild failed. Your dictionary is
+    unchanged.` ✅ **Agent-verified 2026-07-29** — window stays open, Apply re-enables, database
+    hash unchanged, and stderr carries the innermost cause (`invalid Zip archive: Could not find
+    EOCD`). **The library is put back too**: pressing Apply three times leaves one copy of each
+    archive, not `extra (2).zip` and `extra (3).zip`.
+14d. **Remove your last real dictionary while a corrupt `.zip`, or a frequency list filed under
+    Dictionaries, is present** → refused, same message as 14b. ✅ **Agent-verified 2026-07-29** —
+    the guard classifies by reading each archive, so neither can stand in for a dictionary. An
+    unreadable file is listed in the Dictionaries box under its **file** name, so it can be
+    selected and removed.
+14e. **Two `chibipop settings` at once, each removing a different dictionary, both Apply** → one
+    proceeds; the other is refused with `Not applied: another chibipop is changing your
+    dictionaries - close it and try again`. ✅ **Agent-verified 2026-07-29**. Before the named
+    mutex, both passed the guard and `library/` ended holding nothing but `library.json`.
+14f. **Apply from `chibipop settings` while a `chibipop run` holds the database** → `Another
+    chibipop is running. Close it, then Apply again.` ✅ **Agent-verified 2026-07-29** with the
+    database held open without `FILE_SHARE_DELETE`: every archive is still there afterwards.
 
 ---
 
@@ -234,6 +308,11 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **`display_order` holds substrings, not names** | Order works today, silently stops after the next dictionary rebuild. Never write live names back. |
 | **A task that adds a field must be the task that reads it** | `field never read` = a 6th clippy error against a 5-error gate. |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
+| **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so `chibipop run` cannot have the new database renamed over the one its worker is holding. It builds to `<out>.new` and swaps it in **after** the worker is joined, on the way to the restart. Measured, and pinned by `tests/rebuild.rs`. |
+| **Never delete an archive before the rebuild proves out** | The user's `.zip` files are 50–200 MB downloads chibipop may not redistribute. Apply moves removals to `library/.removed/`, which `build-dict` cannot see because it scans top-level `*.zip` only, and deletes them only after the new database is in place. Every failure path calls `Pending::rollback`. |
+| **"Which listbox is it in?" is not "is it a dictionary?"** | The builder decides by reading `index.json`. A frequency list filed under Dictionaries, or a corrupt `.zip`, once satisfied the "you would have no dictionary left" guard and got the last real one deleted. Ask `library::kind_of`. |
+| **Nothing serialises two chibipops** | Both can read the library, both satisfy the guard, both delete a different archive. `lock::LibraryLock` (`CreateMutexW` + `ERROR_ALREADY_EXISTS`, named per library folder) is held for the whole Apply, rebuild included. |
+| **`Option::take()` inside a tuple pattern always runs** | `if let (Some(a), Some(b)) = (poll(), flight.take())` takes on *every* poll, so the in-flight state is dropped before it is ever read. Cost a rebuild that reported nothing and never committed. Take only after the poll has matched. |
 | **`cargo fmt` is not run here** | The repo has never been rustfmt-clean. Do not "fix" it. |
 | **Stray files land in a broad `git add`** | Never `git add -u`/`-A`. Stage by name. |
 | **A copy of `data/` beside the exe shadows the repo's** | `--dict` prefers beside-exe and only falls back to the working directory. A stray `target/release/data/` therefore wins silently, and keeps winning after the real data changes. Delete it rather than refreshing it. |

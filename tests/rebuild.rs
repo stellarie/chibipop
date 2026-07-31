@@ -2,7 +2,7 @@
 
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
-use chibipop::rebuild::{spawn_with, Progress};
+use chibipop::rebuild::{friendly, promote, spawn_with, staging_path, Progress};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
@@ -94,6 +94,55 @@ fn progress_lines_arrive_before_done() {
     assert!(lines.iter().any(|l| l.starts_with("wrote ")), "{lines:?}");
 }
 
+/// From real child output.
+#[test]
+fn every_archive_line_renders_as_a_name_and_the_last_line_does_not() {
+    let (dir, _guard) = scratch("friendly");
+    let library = stock_library(&dir);
+    let out = dir.join("chibipop.sqlite");
+
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &out).unwrap());
+
+    let lines: Vec<&String> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            Progress::Line(l) => Some(l),
+            _ => None,
+        })
+        .collect();
+    let shown: Vec<String> = lines.iter().filter_map(|l| friendly(l)).collect();
+    assert_eq!(
+        vec!["Reading terms.zip…".to_string(), "Reading freq.zip…".to_string()],
+        shown
+    );
+    assert_eq!(lines.len(), shown.len() + 1, "the wrote line is swallowed: {lines:?}");
+    assert!(!shown.iter().any(|s| s.contains(".tmp")), "{shown:?}");
+}
+
+/// An open file blocks it.
+#[test]
+fn a_staged_build_is_promoted_only_once_the_database_is_closed() {
+    let (dir, _guard) = scratch("promote");
+    let library = stock_library(&dir);
+    let db = dir.join("chibipop.sqlite");
+    drain(spawn_with(Path::new(BUILDER), &library, &db).unwrap());
+    let held = SqliteDictionary::open(&db).unwrap();
+
+    let staged = staging_path(&db);
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &staged).unwrap());
+    assert!(
+        matches!(msgs.last(), Some(Progress::Done(_))),
+        "a staged build lands beside an open database: {msgs:?}"
+    );
+
+    assert!(promote(&staged, &db).is_err(), "the open handle blocks the swap");
+    drop(held);
+
+    promote(&staged, &db).unwrap();
+    assert!(!staged.exists(), "the staged file is moved, not copied");
+    assert_eq!("FixtureTerms", SqliteDictionary::open(&db).unwrap().dicts().unwrap()[0].name);
+}
+
 #[test]
 fn a_failed_build_leaves_an_existing_output_byte_identical() {
     let (dir, _guard) = scratch("failed");
@@ -147,4 +196,47 @@ fn a_missing_library_directory_is_a_failure() {
 
     assert!(matches!(msgs.last(), Some(Progress::Failed(_))), "{msgs:?}");
     assert!(!out.exists(), "nothing is created from nothing");
+}
+
+/// Held files are not built.
+#[test]
+fn a_quarantined_archive_is_invisible_to_the_real_builder() {
+    let (dir, _guard) = scratch("quarantined");
+    let library = stock_library(&dir);
+    let held = library.join(".removed");
+    std::fs::create_dir_all(&held).unwrap();
+    std::fs::rename(library.join("terms.zip"), held.join("terms.zip")).unwrap();
+    std::fs::copy(fixture("terms.zip"), library.join("other.zip")).unwrap();
+    let out = dir.join("chibipop.sqlite");
+
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &out).unwrap());
+
+    assert!(matches!(msgs.last(), Some(Progress::Done(_))), "{msgs:?}");
+    assert!(
+        !msgs.iter().any(|m| matches!(m, Progress::Line(l) if l.contains("terms.zip"))),
+        "the held archive was read anyway: {msgs:?}"
+    );
+    assert!(held.join("terms.zip").is_file(), "and it is still there");
+    assert_eq!(1, SqliteDictionary::open(&out).unwrap().dicts().unwrap().len());
+}
+
+/// All held is still empty.
+#[test]
+fn a_library_whose_archives_are_all_quarantined_refuses() {
+    let (dir, _guard) = scratch("all_held");
+    let library = stock_library(&dir);
+    let held = library.join(".removed");
+    std::fs::create_dir_all(&held).unwrap();
+    for name in ["terms.zip", "freq.zip"] {
+        std::fs::rename(library.join(name), held.join(name)).unwrap();
+    }
+    let out = dir.join("chibipop.sqlite");
+
+    let msgs = drain(spawn_with(Path::new(BUILDER), &library, &out).unwrap());
+
+    let Some(Progress::Failed(why)) = msgs.last() else {
+        panic!("expected Failed last, got {msgs:?}");
+    };
+    assert!(why.contains("no dictionary archives"), "{why}");
+    assert!(!out.exists());
 }
