@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA_VERSION: i64 = 2;
+const BATCH_ROWS: usize = 500;
+
+/// One buffered `term` row.
+#[allow(clippy::type_complexity)]
+type TermBatchRow = (String, Option<String>, String, String, Option<i64>, i64, i64);
 
 const DDL: &str = "
 CREATE TABLE dict (
@@ -137,21 +142,23 @@ fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildC
     }
 
     let mut conn = Connection::open(out).with_context(|| format!("creating {}", out.display()))?;
+    conn.execute_batch(
+        "PRAGMA page_size = 8192;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = OFF;",
+    )?;
     create_schema(&conn)?;
 
     let mut entry_id: i64 = 0;
     let mut term_rows: i64 = 0;
+    let mut json_buf = Vec::with_capacity(512);
+    let mut entry_batch: Vec<(i64, i64, String)> = Vec::with_capacity(BATCH_ROWS);
+    let mut term_batch: Vec<TermBatchRow> = Vec::with_capacity(BATCH_ROWS);
 
     let tx = conn.transaction()?;
     {
         let mut insert_dict =
             tx.prepare("INSERT INTO dict (dict_id, name, priority) VALUES (?1, ?2, ?3)")?;
-        let mut insert_entry =
-            tx.prepare("INSERT INTO entry (entry_id, dict_id, senses) VALUES (?1, ?2, ?3)")?;
-        let mut insert_term = tx.prepare(
-            "INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
 
         for (i, archive) in terms.iter().enumerate() {
             let dict_id = i as i64 + 1;
@@ -166,47 +173,144 @@ fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildC
                 }
                 entry_id += 1;
                 let sense = Sense { glosses, pos: extract_pos(&t.glossary), misc: Vec::new() };
-                let senses_json = to_py_json(&[sense])?;
-                insert_entry.execute(params![entry_id, dict_id, senses_json])?;
+                json_buf.clear();
+                {
+                    let mut ser = serde_json::Serializer::with_formatter(&mut json_buf, PySpaced);
+                    [&sense].serialize(&mut ser)?;
+                }
+                let senses_json =
+                    std::str::from_utf8(&json_buf).context("json output was not utf-8")?;
+                entry_batch.push((entry_id, dict_id, senses_json.to_string()));
+                if entry_batch.len() >= BATCH_ROWS {
+                    flush_entries(&tx, &mut entry_batch)?;
+                }
 
                 let written: &str = &t.term;
                 let reading: &str = if t.reading.is_empty() { &t.term } else { &t.reading };
                 let rank = lookup_freq(&freq_table, written, Some(reading));
                 let same = written == reading;
 
-                insert_term.execute(params![
-                    reading,
-                    if same { None } else { Some(written) },
-                    reading,
-                    t.rules,
+                term_batch.push((
+                    reading.to_string(),
+                    if same { None } else { Some(written.to_string()) },
+                    reading.to_string(),
+                    t.rules.clone(),
                     rank,
                     entry_id,
-                    dict_id
-                ])?;
+                    dict_id,
+                ));
                 term_rows += 1;
 
                 if !same {
-                    insert_term.execute(params![
-                        written, written, reading, t.rules, rank, entry_id, dict_id
-                    ])?;
+                    term_batch.push((
+                        written.to_string(),
+                        Some(written.to_string()),
+                        reading.to_string(),
+                        t.rules.clone(),
+                        rank,
+                        entry_id,
+                        dict_id,
+                    ));
                     term_rows += 1;
+                }
+
+                if term_batch.len() >= BATCH_ROWS {
+                    flush_terms(&tx, &mut term_batch)?;
                 }
                 Ok(())
             })?;
         }
+        flush_entries(&tx, &mut entry_batch)?;
+        flush_terms(&tx, &mut term_batch)?;
     }
 
     write_meta(&tx, terms, freqs)?;
+    tx.execute_batch(INDEXES)?;
     tx.commit()?;
     conn.execute_batch("ANALYZE;")?;
 
     Ok(BuildCounts { entries: entry_id, terms: term_rows })
 }
 
-/// Creates tables and indexes.
+/// Flushes buffered entry rows.
+fn flush_entries(tx: &rusqlite::Transaction, batch: &mut Vec<(i64, i64, String)>) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let placeholders: Vec<String> = (0..batch.len())
+        .map(|i| {
+            let b = i * 3 + 1;
+            format!("(?{b},?{},?{})", b + 1, b + 2)
+        })
+        .collect();
+    let sql = format!(
+        "INSERT INTO entry (entry_id, dict_id, senses) VALUES {}",
+        placeholders.join(","),
+    );
+    let mut stmt = tx.prepare_cached(&sql)?;
+    let mut idx = 1;
+    for row in batch.iter() {
+        stmt.raw_bind_parameter(idx, row.0)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, row.1)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, &row.2)?;
+        idx += 1;
+    }
+    stmt.raw_execute()?;
+    batch.clear();
+    Ok(())
+}
+
+/// Flushes buffered term rows.
+fn flush_terms(tx: &rusqlite::Transaction, batch: &mut Vec<TermBatchRow>) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let placeholders: Vec<String> = (0..batch.len())
+        .map(|i| {
+            let b = i * 7 + 1;
+            format!(
+                "(?{b},?{},?{},?{},?{},?{},?{})",
+                b + 1,
+                b + 2,
+                b + 3,
+                b + 4,
+                b + 5,
+                b + 6,
+            )
+        })
+        .collect();
+    let sql = format!(
+        "INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id) VALUES {}",
+        placeholders.join(","),
+    );
+    let mut stmt = tx.prepare_cached(&sql)?;
+    let mut idx = 1;
+    for row in batch.iter() {
+        stmt.raw_bind_parameter(idx, &row.0)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, &row.1)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, &row.2)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, &row.3)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, row.4)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, row.5)?;
+        idx += 1;
+        stmt.raw_bind_parameter(idx, row.6)?;
+        idx += 1;
+    }
+    stmt.raw_execute()?;
+    batch.clear();
+    Ok(())
+}
+
+/// Creates the table schema.
 fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(DDL)?;
-    conn.execute_batch(INDEXES)?;
     conn.execute(
         "INSERT INTO meta (k, v) VALUES ('schema_version', ?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -657,5 +761,26 @@ mod tests {
     fn a_successful_build_leaves_no_building_file() {
         let (_conn, guard) = build_fixture_db("no_building_left");
         assert!(!building_path(&guard.0).exists());
+    }
+
+    #[test]
+    fn build_with_fixture_is_query_identical_across_runs() {
+        let out1 = out_path("identical_a");
+        let out2 = out_path("identical_b");
+        let _g1 = TempDbGuard(out1.clone());
+        let _g2 = TempDbGuard(out2.clone());
+
+        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out1).unwrap();
+        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out2).unwrap();
+
+        let c1 = Connection::open(&out1).unwrap();
+        let c2 = Connection::open(&out2).unwrap();
+
+        let count = |c: &Connection, t: &str| -> i64 {
+            c.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap()
+        };
+        for table in ["dict", "entry", "term"] {
+            assert_eq!(count(&c1, table), count(&c2, table), "{table} row count mismatch");
+        }
     }
 }
