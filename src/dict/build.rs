@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA_VERSION: i64 = 2;
+#[cfg(test)]
+const BATCH_ROWS: usize = 2;
+#[cfg(not(test))]
 const BATCH_ROWS: usize = 500;
 
 /// One buffered `term` row.
