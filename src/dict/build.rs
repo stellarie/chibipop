@@ -1,7 +1,7 @@
 //! The schema and the writer.
 
-use crate::dict::archive::{iter_freq_rows, iter_terms, read_index};
-use crate::dict::frequency::{lookup_freq, parse_freq_rows, FreqTable};
+use crate::dict::archive::{for_each_freq_row, for_each_term, read_index};
+use crate::dict::frequency::{lookup_freq, merge_freq_row, FreqTable};
 use crate::dict::glossary::{extract_pos, flatten_glossary};
 use crate::lookup::model::Sense;
 use anyhow::{Context, Result};
@@ -121,7 +121,13 @@ fn building_path(out: &Path) -> PathBuf {
 fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildCounts> {
     let mut freq_table = FreqTable::new();
     for fa in freqs {
-        freq_table.extend(parse_freq_rows(&iter_freq_rows(fa)?));
+        // Per archive, then overwrite.
+        let mut one = FreqTable::new();
+        for_each_freq_row(fa, |row| {
+            merge_freq_row(&mut one, &row);
+            Ok(())
+        })?;
+        freq_table.extend(one);
     }
 
     let mut conn = Connection::open(out).with_context(|| format!("creating {}", out.display()))?;
@@ -147,10 +153,10 @@ fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildC
             let title = dict_title(archive)?;
             insert_dict.execute(params![dict_id, title, priority])?;
 
-            for t in iter_terms(archive)? {
+            for_each_term(archive, |t| {
                 let glosses = flatten_glossary(&t.glossary);
                 if glosses.is_empty() {
-                    continue;
+                    return Ok(());
                 }
                 entry_id += 1;
                 let sense = Sense { glosses, pos: extract_pos(&t.glossary), misc: Vec::new() };
@@ -179,7 +185,8 @@ fn build_into(terms: &[PathBuf], freqs: &[PathBuf], out: &Path) -> Result<BuildC
                     ])?;
                     term_rows += 1;
                 }
-            }
+                Ok(())
+            })?;
         }
     }
 
@@ -618,7 +625,7 @@ mod tests {
         let _bad_guard = TempDbGuard(bad.clone());
         std::fs::write(&bad, b"not a zip at all").unwrap();
 
-        assert!(build(&[bad.clone()], &[], &out).is_err());
+        assert!(build(std::slice::from_ref(&bad), &[], &out).is_err());
         assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
         assert!(!building_path(&out).exists(), "no .building left behind");
     }

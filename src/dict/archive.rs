@@ -1,11 +1,14 @@
 //! Yomitan archive reading.
 
 use anyhow::{Context, Result};
+use serde::de::{DeserializeSeed, SeqAccess, Visitor};
 use serde_json::Value;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
+
+const MAX_BANK: usize = 256 << 20;
 
 /// One row from a term bank.
 pub struct TermEntry {
@@ -21,35 +24,25 @@ pub fn read_index(zip: &Path) -> Result<Value> {
     read_json(&mut archive, "index.json")
 }
 
-/// Every term bank row.
-pub fn iter_terms(zip: &Path) -> Result<Vec<TermEntry>> {
-    let mut archive = open_archive(zip)?;
-    let banks = sorted_banks(&archive_names(&archive), "term_bank_");
-    let mut out = Vec::new();
-    for bank in banks {
-        for row in read_json_array(&mut archive, &bank)? {
-            let Some(row) = row.as_array() else { continue };
-            let Some(term) = row.first().and_then(Value::as_str) else { continue };
-            out.push(TermEntry {
-                term: term.to_string(),
-                reading: str_at(row, 1),
-                rules: str_at(row, 3),
-                glossary: row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new())),
-            });
-        }
-    }
-    Ok(out)
+/// Streams term bank rows.
+pub fn for_each_term(zip: &Path, mut on_term: impl FnMut(TermEntry) -> Result<()>) -> Result<()> {
+    for_each_bank_row(zip, "term_bank_", |row| {
+        let Value::Array(mut row) = row else { return Ok(()) };
+        let Some(term) = row.first().and_then(Value::as_str).map(str::to_string) else {
+            return Ok(());
+        };
+        on_term(TermEntry {
+            term,
+            reading: str_at(&row, 1),
+            rules: str_at(&row, 3),
+            glossary: take_at(&mut row, 5),
+        })
+    })
 }
 
-/// Every frequency bank row.
-pub fn iter_freq_rows(zip: &Path) -> Result<Vec<Value>> {
-    let mut archive = open_archive(zip)?;
-    let banks = sorted_banks(&archive_names(&archive), "term_meta_bank_");
-    let mut out = Vec::new();
-    for bank in banks {
-        out.extend(read_json_array(&mut archive, &bank)?);
-    }
-    Ok(out)
+/// Streams frequency bank rows.
+pub fn for_each_freq_row(zip: &Path, on_row: impl FnMut(Value) -> Result<()>) -> Result<()> {
+    for_each_bank_row(zip, "term_meta_bank_", on_row)
 }
 
 /// Detects a frequency archive.
@@ -64,6 +57,11 @@ pub fn is_frequency_archive(zip: &Path) -> bool {
 /// A row field, or empty.
 fn str_at(row: &[Value], i: usize) -> String {
     row.get(i).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+/// A row field, moved out.
+fn take_at(row: &mut [Value], i: usize) -> Value {
+    row.get_mut(i).map_or_else(|| Value::Array(Vec::new()), Value::take)
 }
 
 /// Python-style truthiness.
@@ -91,17 +89,94 @@ fn archive_names(archive: &ZipArchive<File>) -> Vec<String> {
 
 /// One zip entry as JSON.
 fn read_json(archive: &mut ZipArchive<File>, name: &str) -> Result<Value> {
-    let mut entry = archive.by_name(name).with_context(|| format!("reading {name}"))?;
-    let mut text = String::new();
-    entry.read_to_string(&mut text).with_context(|| format!("decoding {name}"))?;
+    let text = read_entry(archive, name)?;
     serde_json::from_str(&text).with_context(|| format!("parsing {name}"))
 }
 
-/// A bank file's JSON rows.
-fn read_json_array(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec<Value>> {
-    match read_json(archive, name)? {
-        Value::Array(rows) => Ok(rows),
-        _ => anyhow::bail!("{name}: not a JSON array"),
+/// One zip entry's text.
+fn read_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<String> {
+    let entry = archive.by_name(name).with_context(|| format!("reading {name}"))?;
+    let mut buf = Vec::new();
+    entry
+        .take(MAX_BANK as u64 + 1)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("reading {name}"))?;
+    if buf.len() > MAX_BANK {
+        anyhow::bail!("{name}: over {MAX_BANK} bytes");
+    }
+    String::from_utf8(buf).with_context(|| format!("decoding {name}"))
+}
+
+/// Streams one archive's rows.
+fn for_each_bank_row(
+    zip: &Path,
+    prefix: &str,
+    mut on_row: impl FnMut(Value) -> Result<()>,
+) -> Result<()> {
+    let mut archive = open_archive(zip)?;
+    for bank in sorted_banks(&archive_names(&archive), prefix) {
+        let text = read_entry(&mut archive, &bank)?;
+        stream_rows(&text, &bank, &mut on_row)?;
+    }
+    Ok(())
+}
+
+/// Streams one bank's rows.
+fn stream_rows<F>(text: &str, name: &str, on_row: &mut F) -> Result<()>
+where
+    F: FnMut(Value) -> Result<()>,
+{
+    let mut failed = None;
+    let mut de = serde_json::Deserializer::from_str(text);
+    let outcome = Rows { on_row, failed: &mut failed }.deserialize(&mut de);
+    if let Some(err) = failed {
+        return Err(err);
+    }
+    outcome.with_context(|| format!("parsing {name}"))?;
+    de.end().with_context(|| format!("parsing {name}"))
+}
+
+/// Visits array elements.
+struct Rows<'a, F> {
+    on_row: &'a mut F,
+    failed: &'a mut Option<anyhow::Error>,
+}
+
+impl<'de, F> DeserializeSeed<'de> for Rows<'_, F>
+where
+    F: FnMut(Value) -> Result<()>,
+{
+    type Value = ();
+
+    fn deserialize<D>(self, de: D) -> std::result::Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        de.deserialize_seq(self)
+    }
+}
+
+impl<'de, F> Visitor<'de> for Rows<'_, F>
+where
+    F: FnMut(Value) -> Result<()>,
+{
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON array")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<(), A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while let Some(row) = seq.next_element::<Value>()? {
+            if let Err(err) = (self.on_row)(row) {
+                *self.failed = Some(err);
+                return Err(serde::de::Error::custom("row rejected"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -146,9 +221,19 @@ mod tests {
         assert_eq!(Some("FixtureTerms"), idx["title"].as_str());
     }
 
+    fn collect_terms(zip: &Path) -> Vec<TermEntry> {
+        let mut out = Vec::new();
+        for_each_term(zip, |t| {
+            out.push(t);
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
     #[test]
     fn every_term_row_is_read_with_its_rules_field() {
-        let terms = iter_terms(&fixture("terms.zip")).unwrap();
+        let terms = collect_terms(&fixture("terms.zip"));
         assert_eq!(3, terms.len());
         let taberu = terms.iter().find(|t| t.term == "食べる").expect("食べる present");
         assert_eq!("たべる", taberu.reading);
@@ -163,8 +248,44 @@ mod tests {
 
     #[test]
     fn frequency_rows_come_back_raw_for_the_parser() {
-        let rows = iter_freq_rows(&fixture("freq.zip")).unwrap();
+        let mut rows = Vec::new();
+        for_each_freq_row(&fixture("freq.zip"), |row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(3, rows.len());
+        assert!(rows.iter().all(|r| r.is_array()));
+    }
+
+    #[test]
+    fn a_rejected_term_row_stops_the_stream_with_its_own_error() {
+        let mut seen = 0;
+        let err = for_each_term(&fixture("terms.zip"), |_| {
+            seen += 1;
+            anyhow::bail!("caller said no")
+        })
+        .unwrap_err();
+        assert_eq!(1, seen, "stopped at the first row");
+        assert_eq!("caller said no", format!("{err}"));
+    }
+
+    #[test]
+    fn a_rejected_frequency_row_stops_the_stream_with_its_own_error() {
+        let err = for_each_freq_row(&fixture("freq.zip"), |_| anyhow::bail!("caller said no"))
+            .unwrap_err();
+        assert_eq!("caller said no", format!("{err}"));
+    }
+
+    #[test]
+    fn a_missing_bank_prefix_streams_nothing_rather_than_failing() {
+        let mut seen = 0;
+        for_each_freq_row(&fixture("terms.zip"), |_| {
+            seen += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(0, seen);
     }
 
     #[test]

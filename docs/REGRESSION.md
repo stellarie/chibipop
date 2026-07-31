@@ -18,17 +18,33 @@ reproduces the stated numbers, so it can be lifted into a workflow as-is. Two of
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
 powershell -NoProfile -Command "Stop-Process -Name chibipop -Force -ErrorAction SilentlyContinue"
-cargo test 2>&1 | grep -E "^test result"
-cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -cE "^error: (doc list|explicit call|this function|this loop)"
+cargo test 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
+cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
 cargo build --release 2>&1 | grep -E "^error|Finished"
 ```
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **252** total across 5 targets |
+| Rust tests | **all green**, **347** total across **6** targets |
 | Clippy | **exactly 5** accepted errors |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
+
+> [!warning] The clippy line changed on 2026-07-29, because the old one could not fail
+> It used to be `grep -cE "^error: (doc list|explicit call|this function|this loop)"` —
+> a count of **four hardcoded lint texts**. Any error from a *fifth* lint was invisible to it.
+> That is not hypothetical: a test added that day introduced `cloned_ref_to_slice_refs` in the
+> lib-test target, clippy reported **6** errors, and the gate still printed **5**. A gate that
+> only counts the failures you already know about does not detect regressions.
+>
+> The replacement counts every `error` line and subtracts the two `could not compile … due to N
+> previous errors` summaries. Also note **`--all-targets` means lib and lib-test are counted
+> separately** — the summary lines said "5 previous errors" and "6 previous errors" for the same
+> run, and only the second one was the truth.
+>
+> **Do not run `cargo clippy` twice in a row and trust the second number.** Cargo replays cached
+> diagnostics inconsistently; back-to-back runs on an unchanged tree returned 0 then 5. `touch`
+> a source file first, or take the first run's output.
 
 **Why counts, not exit status.** The repo carries exactly five accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **5** rather than
@@ -48,6 +64,34 @@ Python dictionary builder, if `tools/build-dict` changed:
 ```bash
 cd tools/build-dict && python -m unittest discover -s tests    # 58 tests
 ```
+
+**If anything under `src/dict/` changed, measure the rebuild's peak memory.** No test
+catches this — it regressed to **19× the oracle's** and every test stayed green, because a
+32 GB machine simply absorbs it. Needs the real archives, so it is not a CI check.
+
+```powershell
+$out = Join-Path $env:TEMP "mem_check.sqlite"
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = "C:\Users\Stella\chibipop\target\release\chibipop.exe"
+$psi.Arguments = 'build-dict --library "C:\Users\Stella\Documents\dicts" --out "' + $out + '"'
+$psi.RedirectStandardOutput = $true; $psi.UseShellExecute = $false
+$p = [System.Diagnostics.Process]::Start($psi)
+$peak = 0
+while (-not $p.HasExited) { try { $p.Refresh(); $w = $p.WorkingSet64; if ($w -gt $peak) { $peak = $w } } catch {}; Start-Sleep -Milliseconds 100 }
+$p.WaitForExit(); $p.StandardOutput.ReadToEnd() | Out-Null
+Write-Output ("peak {0:N0} MB" -f ($peak/1MB))
+```
+
+| Measured 2026-07-29 | peak | elapsed |
+|---|---|---|
+| Rust, streaming (current) | **148 MB** | 33.7 s |
+| Rust, materialised (the regression) | 9,641 MB | 83.3 s |
+| Python oracle | 498 MB | 83.9 s |
+
+Anything over ~300 MB means the streaming was undone. **`PeakWorkingSet64` reads 0 once the
+process has exited** — the peak must be sampled while it runs, which is why the loop above
+exists. And `python` on this box is a **mise shim**: measuring it returns the launcher's 4 MB,
+not the interpreter's. Use `AppData\Local\mise\installs\python\3.13.14\python.exe` directly.
 
 **Run the suite 3× if anything touched a `static`.** Cargo runs tests in parallel threads of one
 process, and a shared static produces an intermittent red that a single run will miss — this

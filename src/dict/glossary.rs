@@ -52,6 +52,11 @@ pub fn extract_pos(glossary: &Value) -> Vec<String> {
     out
 }
 
+/// data.content, if not null.
+fn content_marker(node: &Value) -> Option<&Value> {
+    node.get("data").and_then(|d| d.get("content")).filter(|v| !v.is_null())
+}
+
 /// One node to plain text.
 fn render(node: &Value) -> String {
     match node {
@@ -59,7 +64,8 @@ fn render(node: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Array(items) => items.iter().map(render).collect(),
         Value::Object(_) => {
-            let marker = node.get("data").and_then(|d| d.get("content")).and_then(Value::as_str);
+            let present = content_marker(node);
+            let marker = present.and_then(Value::as_str);
             if marker.is_some_and(|m| DROP_CONTENT.contains(&m) || m == POS_CONTENT) {
                 return String::new();
             }
@@ -70,7 +76,7 @@ fn render(node: &Value) -> String {
             if tag == Some("br") {
                 return "\n".to_string();
             }
-            if tag == Some("li") || marker.is_some() {
+            if tag == Some("li") || present.is_some() {
                 let mut marked = String::from(BLOCK_MARK);
                 marked.push_str(&content_of(node));
                 return marked;
@@ -186,6 +192,24 @@ mod tests {
             {"tag": "span", "data": {"content": "sense"}, "content": "two"}
         ]}]);
         assert_eq!(vec!["one; two".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn a_non_string_marker_still_separates_blocks() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "span", "data": {"content": 5}, "content": "one"},
+            {"tag": "span", "data": {"content": true}, "content": "two"}
+        ]}]);
+        assert_eq!(vec!["one; two".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn a_null_marker_does_not_separate_blocks() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "span", "data": {"content": null}, "content": "one"},
+            {"tag": "span", "data": {"content": null}, "content": "two"}
+        ]}]);
+        assert_eq!(vec!["onetwo".to_string()], flatten_glossary(&g));
     }
 
     #[test]
