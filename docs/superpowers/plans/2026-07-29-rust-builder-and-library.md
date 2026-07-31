@@ -20,21 +20,26 @@ at 12 MB. The settings window stages Add/Remove and rebuilds once on Apply.
 **Covers:** design §2–§8 phases 2 and 3
 ([spec](../specs/2026-07-29-dictionary-management-design.md)).
 
-> ### Detail level: Tasks 1–5 are executable, Tasks 6–9 are outlines
+> ### Detail level: all nine tasks are executable
 >
-> Tasks 1–5 carry complete test code and every trap with a line number, and
-> can be handed to an implementer as they stand.
+> Tasks 1–5 shipped. **Tasks 6–9 were expanded on 2026-07-29 after Task 5
+> landed**, which is what the earlier version of this callout required: their
+> interfaces are now read off the merged code rather than proposed. Every
+> signature, control id, line number and Cargo feature below was verified
+> against the tree at `db3546c`, not recalled.
 >
-> **Tasks 6–9 do not, and should not be dispatched without being expanded
-> first.** Two honest reasons. The interfaces they build on (`build`,
-> `is_frequency_archive`, the subcommand's progress output) do not exist yet,
-> so their signatures here are proposals rather than facts. And Task 8 edits a
-> 938-line hand-rolled Win32 window whose control layout has to be re-read
-> before anyone can say where two new groups go — writing that from memory
-> would produce confident fiction.
+> What that re-reading changed, versus the outlines:
 >
-> Expand 6–9 into full tasks once Task 5 lands and the real signatures are
-> known. That is a twenty-minute job at that point and guesswork before it.
+> - **A data-loss hazard the outline did not see.** If `library/` is empty and
+>   `data/chibipop.sqlite` already has dictionaries — every current user,
+>   because the shipped database was built by the Python builder — then adding
+>   one archive and pressing Apply rebuilds from a library of one and destroys
+>   the other three. Task 6 and Task 8 now carry the mitigation.
+> - **`Win32_UI_Controls_Dialogs` is not an enabled feature.** `GetOpenFileNameW`
+>   does not compile today. Task 8 adds it.
+> - **The D9 disarm is two calls, not one** — `Hooks::set_scroll_armed(false)`
+>   *and* `drain_capture_guard()` (`app.rs:709-710`). The outline named one.
+> - **Control ids 100–116 are taken.** New ones start at 117.
 
 **Where `library/` lives:** beside the executable, via
 `paths::beside_exe("library")` — the same rule `chibipop.toml` uses, and for
@@ -684,36 +689,98 @@ afterwards** and confirm its size.
 
 **Files:**
 - Create: `src/library.rs`
-- Modify: `src/lib.rs`
+- Modify: `src/lib.rs` (add `pub mod library;` — the list is alphabetical, so
+  it goes **between `input` and `lookup`**: `libr` < `look`)
 
 **Interfaces:**
-- Produces:
-  ```rust
-  pub enum Kind { Term, Frequency }
-  pub struct Entry { pub file: String, pub name: String, pub kind: Kind }
-  pub struct Library { pub entries: Vec<Entry> }
-  impl Library {
-      pub fn load(dir: &Path) -> Result<Library>;
-      pub fn save(&self, dir: &Path) -> Result<()>;
-      pub fn import(&mut self, dir: &Path, source: &Path) -> Result<()>;
-      pub fn remove(&mut self, dir: &Path, file: &str) -> Result<()>;
-  }
-  ```
+```rust
+pub enum Kind { Term, Frequency }
+pub struct Entry { pub file: String, pub name: String, pub kind: Kind }
+pub struct Library { pub entries: Vec<Entry> }
+impl Library {
+    pub fn load(dir: &Path) -> Result<Library>;
+    pub fn save(&self, dir: &Path) -> Result<()>;
+    pub fn import(&mut self, dir: &Path, source: &Path) -> Result<Entry>;
+    pub fn remove(&mut self, dir: &Path, file: &str) -> Result<()>;
+    pub fn term_paths(&self, dir: &Path) -> Vec<PathBuf>;
+    pub fn freq_paths(&self, dir: &Path) -> Vec<PathBuf>;
+}
+```
 
-- `import` copies the archive into `dir`, reads its title from `index.json`,
-  classifies it, and appends. **A name collision must not overwrite** — suffix
-  the filename rather than clobbering a dictionary the user already has.
-- `save` writes `library.json` with the write-then-rename discipline
-  `Config::save` uses, so an interrupted write cannot corrupt the manifest.
-- `load` on a missing folder returns an empty library, not an error — that is
-  first run.
+`import` returns the `Entry` it created — Task 8 needs the resolved name and
+kind to put a row in the right listbox without re-reading the archive.
 
-- [ ] **Step 1: Write failing tests** covering: import classifies a frequency
-  archive by `frequencyMode`; import of a duplicate filename does not
-  overwrite; remove deletes both the manifest entry and the file; load of a
-  missing directory is empty; save/load round-trips order.
+**These are real functions now, not proposals.** Use them as they exist:
+- `crate::dict::archive::read_index(zip) -> Result<Value>` — the title is
+  `index["title"].as_str()`, verified at `archive.rs:19`.
+- `crate::dict::archive::is_frequency_archive(zip) -> bool` — `archive.rs:56`.
+  Note it takes a **path** and returns a plain `bool`, swallowing IO errors, so
+  an unreadable file classifies as a term archive. Import must therefore call
+  `read_index` **first** and fail there on a corrupt zip, before classifying.
+
+**Behaviour that must hold:**
+- `import` copies into `dir`, then classifies. **A name collision must not
+  overwrite** — suffix the stem (`foo.zip` → `foo (2).zip`) rather than
+  clobbering a dictionary the user already has.
+- `save` writes `library.json` with the **write-then-rename** discipline at
+  `config.rs:234-238`: write `library.json.tmp`, then `std::fs::rename`. Copy
+  that shape exactly, including creating `dir` if absent.
+- `load` on a missing folder or missing manifest returns an **empty library,
+  not an error** — that is first run.
+- `remove` deletes the file **and** the manifest entry. A missing file is not
+  an error: the entry still goes.
+
+> #### ⚠ The hazard the outline missed — read before implementing
+>
+> `data/chibipop.sqlite` on every existing install was built by the **Python**
+> builder from archives in `~/Documents/dicts`, and `library/` does not exist.
+> A rebuild is **from the library only**. So: empty library + populated
+> database + user adds one archive + Apply ⇒ a database with **one**
+> dictionary and three destroyed.
+>
+> The library layer cannot fix this alone; it just must not pretend the
+> situation is normal. Provide:
+>
+> ```rust
+> pub fn is_empty(&self) -> bool;
+> ```
+>
+> and let Task 8 render the warning and Task 9 refuse the destructive path.
+> **Do not silently seed the library from the database** — the archives may no
+> longer be on disk, and inventing entries that point at missing files is
+> worse than saying so.
+
+- [ ] **Step 1: Write the failing tests**
+
+Against a `tempfile`-style scratch directory (the crate already builds
+temporary paths in `dict::build`'s tests — follow whatever that does rather
+than adding a dev-dependency):
+
+```rust
+#[test] fn a_missing_directory_loads_as_an_empty_library() { … }
+#[test] fn import_classifies_a_frequency_archive_by_its_index() { … }   // freq.zip → Kind::Frequency
+#[test] fn import_classifies_a_term_archive() { … }                     // terms.zip → Kind::Term
+#[test] fn import_reads_the_title_from_index_json() { … }               // terms.zip → "FixtureTerms"
+#[test] fn importing_the_same_filename_twice_keeps_both() { … }         // second becomes "terms (2).zip"
+#[test] fn a_corrupt_archive_fails_import_and_changes_nothing() { … }   // not a zip → Err, dir unchanged
+#[test] fn remove_deletes_the_file_and_the_entry() { … }
+#[test] fn remove_of_an_entry_whose_file_is_gone_still_removes_it() { … }
+#[test] fn save_then_load_round_trips_order_and_kind() { … }
+#[test] fn term_and_freq_paths_split_by_kind_in_manifest_order() { … }
+```
+
+The last one matters: `term_paths` feeds `dict::build::build`'s first argument
+and **its order assigns `dict_id`**, so a wrong order silently renumbers every
+dictionary.
 
 - [ ] **Step 2: Implement, gate, commit**
+
+```bash
+cargo test 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
+cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -cE "^error: (doc list|explicit call|this function|this loop)"
+git add src/library.rs src/lib.rs
+git commit -m "feat(library): the archive folder and its manifest"
+```
 
 ---
 
@@ -721,32 +788,63 @@ afterwards** and confirm its size.
 
 **Files:**
 - Create: `src/rebuild.rs`
-- Modify: `src/lib.rs`
+- Modify: `src/lib.rs` (`pub mod rebuild;` sits **between `present` and
+  `settings`**)
 
 **Interfaces:**
-- Produces:
-  ```rust
-  pub enum Progress { Line(String), Done(PathBuf), Failed(String) }
-  pub fn spawn(library: &Path, out: &Path) -> Result<Receiver<Progress>>;
-  ```
+```rust
+pub enum Progress { Line(String), Done(PathBuf), Failed(String) }
+pub fn spawn(library: &Path, out: &Path) -> Result<Receiver<Progress>>;
+```
 
 **Why a child process** (spec §5): the builder holds the whole frequency table
 in memory, plausibly 50–80 MB, and that spike must not land in a process that
 idles at 12 MB. It also means the parent never holds the database open while
 it is rewritten, and a builder crash cannot take the popup down.
 
-- Spawn `std::env::current_exe()` with `build-dict`, **stdout piped**. Piped
-  stdio is what gives the child a working stdout and stops a second console
-  appearing; `own_console()` declines to touch an inherited console because
-  two processes are attached.
-- Write to `<out>.tmp` and **rename on success only**. A failed or killed
-  build must leave the existing database untouched.
-- Read stdout line by line on a reader thread and forward through the channel,
-  so the caller never blocks.
+**The command line is fixed and already shipped** (`main.rs:353`):
 
-- [ ] **Step 1: Write failing tests** — spawn against the fixture library and
-  assert `Done` arrives with a database that opens; assert a deliberately bad
-  library yields `Failed` and leaves an existing `out` file byte-identical.
+```
+<current_exe> build-dict --library <dir> --out <file>
+```
+
+It prints one line per archive as it starts and a final count. Forward those
+verbatim as `Progress::Line`; do not parse them into a percentage, because the
+subcommand emits no total.
+
+**Three traps, each with its reason:**
+
+1. **`CREATE_NO_WINDOW` (`0x0800_0000`) is required.** chibipop is
+   console-subsystem. When it was double-clicked, `ui::console::hide()` hid
+   *our* console — but a child spawned without that flag gets a **brand new
+   visible console window**, so a rebuild would flash a black box at someone
+   who has never seen a terminal. Set it via
+   `std::os::windows::process::CommandExt::creation_flags`. Piping stdout is
+   not sufficient on its own.
+2. **Write to `<out>.tmp`, rename on success only.** A failed, crashed or
+   killed build must leave the existing database byte-identical. Rename after
+   the exit status is checked, never before.
+3. **Drain stdout on a reader thread.** A pipe has a finite buffer; if the
+   parent waits on exit before reading, a chatty child blocks writing and both
+   deadlock. Read to end first, then `wait`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[test] fn a_fixture_library_builds_and_reports_done() { … }
+    // Copy tests/fixtures/yomitan/*.zip into a temp dir, spawn, collect the
+    // channel to exhaustion, assert the last message is Done and the file at
+    // that path opens as a database with 3 entries.
+#[test] fn progress_lines_arrive_before_done() { … }
+#[test] fn a_failed_build_leaves_an_existing_output_byte_identical() { … }
+    // Put known bytes at `out`, point --library at a dir holding a file named
+    // *.zip that is not a zip, assert Failed and that `out` still hashes the
+    // same and no `.tmp` is left behind.
+#[test] fn an_empty_library_directory_is_a_failure_not_an_empty_database() { … }
+```
+
+That last case is the one that decides whether "Remove everything, Apply"
+wipes the user's dictionary or refuses. **Refuse.**
 
 - [ ] **Step 2: Implement, gate, commit**
 
@@ -755,31 +853,107 @@ it is rewritten, and a builder crash cannot take the popup down.
 ## Task 8: The settings window's two dictionary groups
 
 **Files:**
-- Modify: `src/ui/settings_window.rs`, `src/settings.rs`
+- Modify: `src/ui/settings_window.rs`, `src/settings.rs`, `Cargo.toml`
 
-**The trap that will bite:** a file picker is **modal and pumps its own
-message loop**. That is the documented D9 hazard — `WM_TIMER` stops arriving
-while it is open, so `SCROLL_ARMED` cannot be recomputed and the wheel latches
-for every application on the machine. `ui::tray::show_menu` already solves
-this with a `before_blocking` callback that disarms first; the picker needs
-the same treatment.
+### The Cargo change (this does not compile without it)
 
-- Replace the existing single dictionary list with two groups: **Dictionaries**
-  (ordered, Move up/down, Add…, Remove) and **Frequency data** (Add…, Remove).
-- Kind is detected on import, never asked.
-- `GetOpenFileNameW` with `OFN_ALLOWMULTISELECT | OFN_EXPLORER`, filtered to
-  `*.zip`.
-- Changes are **staged** in the form; nothing touches `library/` until Apply.
-- The window auto-sizes via `fit_to`, so it will grow. **Measure the new
-  height** and report it — a window taller than a short screen is a real
-  failure, not a cosmetic one.
+`GetOpenFileNameW` lives in `windows::Win32::UI::Controls::Dialogs`, and
+**`Win32_UI_Controls_Dialogs` is not in the feature list** (`Cargo.toml:21-41`).
+Add it, keeping the list's existing order. Report the binary size after —
+3,928,064 bytes (3.75 MB) is the figure to beat, budget 100 MB.
 
-- [ ] **Step 1** Extend `SettingsForm` with staged additions and removals, and
-  test the pure model: staging an add then a remove of the same file is a
-  no-op; removals preserve order of the rest.
-- [ ] **Step 2** Build the controls. **UNVERIFIABLE BY AGENT** — report the
-  measured window height and leave the visual check to a human.
-- [ ] **Step 3** Gate and commit.
+`GetOpenFileNameW` rather than `IFileOpenDialog` deliberately: the shell dialog
+is COM and wants an STA, while this process establishes
+`RoInitialize(RO_INIT_MULTITHREADED)` apartments per thread for OCR
+(`app.rs:8-12`). The old dialog takes no COM at all and cannot conflict.
+
+### The D9 trap, stated correctly
+
+A file picker is **modal and pumps its own message loop**. `WM_TIMER` stops
+arriving while it is open while the low-level hook keeps firing, so
+`SCROLL_ARMED` latches and the wheel is captured **for every application on the
+machine** until chibipop is killed.
+
+`app.rs:703-711` is the existing solution and the exact thing to copy. It is
+**two calls, not one**:
+
+```rust
+Hooks::set_scroll_armed(false);
+drain_capture_guard();
+```
+
+`Hooks::set_scroll_armed` is `pub` at `hooks.rs:305`. `drain_capture_guard` is
+private to `app.rs`, so the picker must either be invoked through a callback
+supplied by `app.rs` (mirroring `tray.rs:237`'s `before_blocking: impl FnOnce()`)
+or that helper made `pub(crate)`. **Prefer the callback** — it keeps the
+window module free of app state, exactly as the tray does.
+
+### The layout, read from the current file
+
+Existing ids run **100–116** (`settings_window.rs:51-67`). New ones start at
+117. Geometry constants: `WIN_W = 470`, `PAD = 14`, `ROW_H = 24`,
+`ROW_GAP = 6` (`:71-77`).
+
+The **Dictionaries** group today is `settings_window.rs:681-716`:
+`dict_h = 5 * ROW_H + 34` = **154px**, a listbox `4 * ROW_H` tall with Move
+up / Move down at `bx = WIN_W - PAD - 100`, then a static hint, then the
+optional stale-entry warning.
+
+Replace with two groups:
+
+| Group | Controls | New ids |
+|---|---|---|
+| **Dictionaries** — topmost is shown first | existing listbox + Move up/down, **plus Add… and Remove** | `ID_DICT_ADD = 117`, `ID_DICT_REMOVE = 118` |
+| **Frequency data** — how common each word is | listbox + Add… and Remove (no ordering; rank is a lookup, not a display order) | `ID_FREQS = 119`, `ID_FREQ_ADD = 120`, `ID_FREQ_REMOVE = 121` |
+
+Four buttons will not fit beside a `4 * ROW_H` listbox at 92px each in the
+`WIN_W - 2*PAD - 110` column that remains. **Shorten the Dictionaries listbox
+to `3 * ROW_H` and stack four buttons at `ROW_H + 4` pitch**, or widen the
+button column — either is fine, but recompute `dict_h` to match instead of
+leaving the old constant, which would clip the last button.
+
+Use `group_start` (not `group`) for **Frequency data**: `WS_GROUP` terminates
+the preceding control group, the same reason `:605` uses it for Popup. Without
+it, arrow keys walk out of one listbox into the next.
+
+### The staged model
+
+Extend `SettingsForm` (`settings.rs:23-35`, 11 fields today). Add:
+
+```rust
+pub freq_names: Vec<String>,
+pub staged_adds: Vec<PathBuf>,
+pub staged_removes: Vec<String>,
+```
+
+`dict_names` stays as-is so `from_config` and `apply_to` keep working
+unchanged. Nothing touches `library/` until Apply.
+
+### The data-loss warning belongs here
+
+When `Library::is_empty()` but the loaded database has dictionaries, render a
+static line in the Dictionaries group, in the style of the existing stale-entry
+warning at `:707-715`:
+
+> chibipop is using a dictionary built outside the app. Adding or removing
+> here rebuilds from this list only — import your original .zip files first.
+
+- [ ] **Step 1** Extend `SettingsForm` and test the **pure model only** (no
+  window): staging an add then a remove of the same file is a no-op; a remove
+  preserves the order of the rest; a staged add of an already-present filename
+  is rejected rather than duplicated.
+- [ ] **Step 2** Build the controls, and add `Win32_UI_Controls_Dialogs`.
+  Multi-select via `OFN_ALLOWMULTISELECT | OFN_EXPLORER`, filter `*.zip`.
+  **The multi-select return format is a trap**: with `OFN_EXPLORER` the buffer
+  is a directory, then a NUL, then each filename, then a double NUL — and when
+  exactly **one** file is picked it is instead a single full path. Handle both;
+  a naive split yields a path that does not exist.
+- [ ] **Step 3** **UNVERIFIABLE BY AGENT.** `build` returns the layout's `y`
+  and `fit_to` sizes the window to it. Report the **measured** returned height
+  before and after. The window is already tall; a settings window that does not
+  fit a 1080px screen is a real failure, not cosmetic. Leave the visual check
+  to a human and say plainly that it is unverified.
+- [ ] **Step 4** Gate and commit, reporting the binary size.
 
 ---
 
@@ -788,18 +962,35 @@ the same treatment.
 **Files:**
 - Modify: `src/app.rs`, `src/settings.rs`, `README.md`, `docs/REFERENCE.md`
 
-Sequence: stage → Apply → write `library/` → spawn the builder → show progress
-→ swap on success → restart. Apply already restarts chibipop, so this extends
-an existing flow.
+The existing Apply is `app.rs:635-651`: `apply_to` → `Config::save` →
+`restart_self` → `PostQuitMessage`. Its comment at `:637-641` already states
+the rule this task must not break — *a settings round-trip that half applies is
+the one outcome worth refusing outright.*
 
-- A rebuild that **fails** must leave the previous database in place and say
-  so, not restart into a broken state.
-- The README's setup section loses its Python step: importing dictionaries
-  becomes a thing you do in the settings window. Update
-  [`README.md`](../../README.md) §"Setting it up" and the settings table.
-- `docs/REFERENCE.md` gains `build-dict` in the subcommand table.
+New sequence, inserted **before** the config save:
 
-- [ ] **Step 1** Wire it. - [ ] **Step 2** Gate. - [ ] **Step 3** Docs.
+1. If nothing is staged, behave exactly as today. A settings-only Apply must
+   not trigger a multi-minute rebuild.
+2. Apply staged adds/removes to the `Library`, `save` the manifest.
+3. `rebuild::spawn` and pump `Progress` **on the main thread's existing message
+   loop** — do not block it, or the window stops repainting and Windows paints
+   the ghost-white "not responding" overlay over a build that is fine.
+4. On `Done`: save the config, then `restart_self`.
+5. On `Failed`: **leave the previous database in place**, keep the window open,
+   report the failure. Do not save the config and do not restart — restarting
+   into a half-applied state is precisely what `:637-641` forbids.
+
+**Refuse the destructive case** identified in Task 6: if applying the staged
+removals would leave the library empty while a database exists, refuse with a
+message rather than building an empty dictionary.
+
+- [ ] **Step 1** Wire it, with a progress line in the settings window.
+- [ ] **Step 2** Gate. **UNVERIFIABLE BY AGENT** — the full flow needs a human
+  with real archives; say so rather than implying it was exercised.
+- [ ] **Step 3** Docs. [`README.md`](../../README.md) §"Setting it up" loses
+  its Python step — importing dictionaries becomes something you do in the
+  settings window. `docs/REFERENCE.md` gains `build-dict` in the subcommand
+  table.
 - [ ] **Step 4** Commit.
 
 ---
