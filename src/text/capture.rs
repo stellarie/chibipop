@@ -1,4 +1,4 @@
-//! Screen capture. Windows-only; the rest of `text/` stays platform-free.
+//! Screen capture. Win32.
 
 use crate::geom::{PhysPoint, PhysRect};
 use anyhow::{Context, Result};
@@ -13,15 +13,10 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
-/// How much the captured region is enlarged before OCR. Small on-screen text
-/// otherwise degrades into plausible-but-wrong characters — the worst failure
-/// mode for a dictionary, because it silently looks up a different word.
+/// Small text else misreads.
 pub const UPSCALE: i32 = 2;
 
-/// Must be called before any other GDI call.
-///
-/// Without it, BitBlt silently returns DPI-virtualized pixels on any display
-/// above 100% scale: no error, just wrong pixels at wrong coordinates.
+/// First; else DPI-scaled.
 pub fn init_dpi_awareness() -> Result<()> {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
@@ -30,9 +25,7 @@ pub fn init_dpi_awareness() -> Result<()> {
     Ok(())
 }
 
-/// BitBlt `region` off the virtual desktop, upscale it, and return the buffer
-/// with its upscaled dimensions. The buffer is tightly packed BGRA with alpha
-/// forced to 0xFF — GDI leaves that byte as garbage.
+/// Capture + upscale; BGRA.
 pub fn capture_upscaled(region: PhysRect) -> Result<(Vec<u8>, i32, i32)> {
     let raw = capture_region(region)?;
     Ok(upscale(&raw, region.w, region.h))
@@ -69,7 +62,7 @@ impl Drop for Bitmap {
     }
 }
 
-/// Reselects the DC's old object.
+/// Reselects the old object.
 struct Selection {
     dc: HDC,
     prev: HGDIOBJ,
@@ -130,9 +123,7 @@ fn capture_region(region: PhysRect) -> Result<Vec<u8>> {
     }
 }
 
-/// Nearest-neighbour upscale. Forces alpha to 0xFF: GDI does not populate it,
-/// and a zero alpha byte read as meaningful would make the whole capture
-/// transparent.
+/// Nearest-neighbour upscale.
 fn upscale(src: &[u8], w: i32, h: i32) -> (Vec<u8>, i32, i32) {
     let (w2, h2) = (w * UPSCALE, h * UPSCALE);
     let mut dst = vec![0u8; (w2 as usize) * (h2 as usize) * 4];
@@ -151,7 +142,7 @@ fn upscale(src: &[u8], w: i32, h: i32) -> (Vec<u8>, i32, i32) {
     (dst, w2, h2)
 }
 
-/// The cursor's current position, in virtual-desktop physical pixels.
+/// The cursor's position.
 pub fn cursor_position() -> Result<PhysPoint> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;

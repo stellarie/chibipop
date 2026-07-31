@@ -1,20 +1,6 @@
-//! User-facing settings, read from a TOML file beside the executable
-//! (spec §4.3). There is deliberately no settings GUI - "configuration is a
-//! hand-edited TOML file" is a design decision (M3 plan), not a gap - so
-//! this module is the *entire* interface between the user and their
-//! settings. Two consequences follow from that:
+//! Settings, from a TOML file.
 //!
-//! - [`load_or_create`] writes real defaults to disk on first run rather
-//!   than only returning them in memory, so the file that shows up beside
-//!   the executable is something the user can find and edit.
-//! - Malformed TOML is a hard [`anyhow::Error`] naming the file, never a
-//!   silent fall-back to defaults. A silent fallback is how a user's
-//!   settings quietly vanish after a typo, and they blame the feature
-//!   instead of the line they mistyped.
-//!
-//! Kept in the pure layer deliberately - no `windows` crate here - so it
-//! compiles and tests on any platform, same rule `present.rs` and
-//! `ui/theme.rs` follow.
+//! No `windows` crate here.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -27,9 +13,7 @@ pub const SUMMARY_RANGE: (usize, usize) = (10, 200);
 /// OCR captures per hover.
 pub const PASSES_RANGE: (u8, u8) = (1, 5);
 
-/// Root of the TOML file. Field names match the `[section]` headers in
-/// spec §4.3 exactly, so `#[derive(Serialize, Deserialize)]` needs no
-/// renaming at this level.
+/// Root of the TOML file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub trigger: TriggerConfig,
@@ -47,9 +31,7 @@ pub struct TriggerConfig {
     pub mode: TriggerMode,
 }
 
-/// Always-live vs. hold-Shift (spec M3-D3). `kebab-case` so the TOML reads
-/// `mode = "live"` / `mode = "hold-shift"` instead of a Rust-style
-/// identifier leaking into a file the user hand-edits.
+/// `kebab-case` for the TOML.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TriggerMode {
@@ -60,73 +42,31 @@ pub enum TriggerMode {
 /// `[popup]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PopupConfig {
-    /// `"dark"` | `"light"` - selects `ui::theme::Theme::dark()` /
-    /// `light()`. Kept as a plain string here rather than sharing an enum
-    /// with `ui::theme`, since that module stays Windows-adjacent-free but
-    /// otherwise independent of `config.rs`.
+    /// `"dark"` | `"light"`.
     pub theme: String,
-    /// Whether the popup asks the OS to exclude it from screen captures
-    /// (`WDA_EXCLUDEFROMCAPTURE` - spec §5).
+    /// Hide from screen capture.
     ///
-    /// **Defaults `false`**, which makes the popup recordable. Exclusion
-    /// hides it from *every* capture API, not just chibipop's own, so
-    /// with it on the popup cannot be screen-recorded, screenshotted or
-    /// screen-shared - it is visible to the user's own eyes and nothing
-    /// else. That was the shipped default until the hide/reshow guard was
-    /// measured in real use (spec §5.1) and found to cost no noticeable
-    /// lookup latency, at which point the more useful behaviour became
-    /// the default and exclusion became the opt-in.
-    ///
-    /// Set `true` to restore exclusion. Either way `app.rs`'s capture
-    /// guard keeps the popup out of chibipop's *own* OCR captures, so it
-    /// never photographs its own rendered text back into the next lookup.
-    /// That guard is why `Popup::create` takes this as a plain `bool`
-    /// rather than letting the caller decide whether to call
-    /// `SetWindowDisplayAffinity` at all.
+    /// Off - recordable by default.
     pub exclude_from_capture: bool,
-    /// Popup height cap, as a percentage of the current monitor's height
-    /// (spec M3-D4). 0-100 fits comfortably in a `u8`.
+    /// Height cap, % of monitor.
     pub max_height_percent: u8,
-    /// `CollapsedRow::summary` length cap, in characters. Matches
-    /// `present::PresentConfig::summary_chars`'s type exactly so
-    /// `Config::present_config` needs no cast.
+    /// Summary length, in chars.
     pub summary_chars: usize,
     pub font: String,
-    /// Draw a faint box around the characters the popup is defining.
-    ///
-    /// On by default: it is the visible answer to "is it defining the word I
-    /// am pointing at?". Turning it off also removes the overlay window
-    /// entirely when `[debug] show_scan_region` is off.
-    ///
-    /// The field-level default is deliberate and load-bearing. A bare
-    /// `#[serde(default)]` yields `bool`'s default - **`false`** - so every
-    /// config file written before this field existed would load with the
-    /// highlight silently off, and it would only work on a fresh install.
-    /// `PopupConfig` has no `Default` derive to fall back on.
+    /// Box the word being defined.
     #[serde(default = "default_highlight_match")]
     pub highlight_match: bool,
-    /// Let the wheel scroll a popup whose content overflows the height cap.
-    ///
-    /// On by default. Turning it off disables **only** the wheel handling —
-    /// the scrollbar is still drawn, so overflowing content stays visibly
-    /// marked as overflowing rather than silently cut.
-    ///
-    /// That narrow scope is the point. This is the escape hatch for the one
-    /// part of the feature that can affect input *outside* chibipop: while
-    /// armed, the low-level mouse hook swallows wheel events so the window
-    /// underneath does not scroll at the same time. Disabling the scrollbar
-    /// too would leave a truncated entry with no indication at all, which is
-    /// worse than the behaviour this replaced.
+    /// Wheel-scroll a long popup.
     #[serde(default = "default_scroll_popup")]
     pub scroll_popup: bool,
 }
 
-/// On. See [`PopupConfig::highlight_match`].
+/// On by default.
 fn default_highlight_match() -> bool {
     true
 }
 
-/// On. See [`PopupConfig::scroll_popup`].
+/// On by default.
 fn default_scroll_popup() -> bool {
     true
 }
@@ -134,44 +74,21 @@ fn default_scroll_popup() -> bool {
 /// `[dictionaries]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DictionariesConfig {
-    /// Case-insensitive substrings, in display-priority order. See
-    /// `present::PresentConfig::dict_order` for why substrings rather than
-    /// exact names.
+    /// Substrings, priority order.
     pub display_order: Vec<String>,
 }
 
-/// `[ocr]`. Carries `#[serde(default)]` at the `Config` level so a file
-/// written before this section existed still loads - see `load_or_create`,
-/// which treats malformed TOML as a hard error rather than falling back.
+/// `[ocr]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrConfig {
-    /// Total OCR captures per hover: one to locate the hovered word, the
-    /// rest to read forward from it.
+    /// Captures per hover.
     ///
-    /// **Defaults to `1`, which means no forward tiling.** Tiling buys
-    /// reading distance - roughly 10 characters ahead of the cursor instead
-    /// of 7 - but as measured on 2026-07-28 it pays for that by sometimes
-    /// resolving a *different character than the one under the cursor*, and
-    /// a longer reading of the wrong word is worse than a short reading of
-    /// the right one.
-    ///
-    /// Set to `2` or more to turn tiling back on. It is not removed, because
-    /// the reading-distance problem it solves is real and the accuracy
-    /// problem it introduces is understood well enough to be fixable; see
-    /// the two-pass spec's revision for the measurement and the two failure
-    /// modes.
+    /// 1 = no tiling, the default.
     #[serde(default = "default_max_ocr_passes")]
     pub max_ocr_passes: u8,
 }
 
-/// **1 as of 2026-07-28: tiling is off by default.** Measured against a
-/// browser reader at ~25px text, hovering nine characters and comparing the
-/// character actually handed to lookup: single-pass scored **9/9**, three
-/// passes **4/9**. Tiling failed two distinct ways - it re-read a character
-/// the centred pass-1 capture had got right (`明` as `月`, `振` as `一`), and
-/// it lost its position entirely, returning text starting most of a line
-/// before the hovered character. Reading distance is worth nothing if the
-/// word it starts from is the wrong one. See the two-pass spec's revision.
+/// 1: tiling is off by default.
 fn default_max_ocr_passes() -> u8 {
     1
 }
@@ -182,16 +99,12 @@ impl Default for OcrConfig {
     }
 }
 
-/// `[debug]`. Carries `#[serde(default)]` at the `Config` level so a file
-/// written before this section existed still loads - `load_or_create` treats
-/// malformed TOML as a hard error rather than falling back.
+/// `[debug]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
-    /// Draw a faint outline around every region a hover captured: pass 1's
-    /// box, each forward tile, and the resolved word's anchor.
+    /// Outline what a hover captured.
     ///
-    /// Off by default. When off nothing is collected and no window is
-    /// created - the feature is inert, not merely hidden.
+    /// Off: inert, not just hidden.
     #[serde(default)]
     pub show_scan_region: bool,
     /// A console of each hover.
@@ -200,7 +113,7 @@ pub struct DebugConfig {
 }
 
 impl Default for Config {
-    /// Spec §4.3's shipped defaults, verbatim.
+    /// Spec §4.3's shipped values.
     fn default() -> Config {
         Config {
             trigger: TriggerConfig { mode: TriggerMode::Live },
@@ -223,14 +136,14 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Writes this config to `path` as TOML, formatted for hand-editing.
+    /// Writes the TOML.
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut text = toml::to_string_pretty(self)
             .with_context(|| format!("serialising config for {}", path.display()))?;
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        // Apply rewrites the whole file, so a torn write loses every setting.
+        // A torn write loses the lot.
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)
             .with_context(|| format!("writing config to {}", tmp.display()))?;
@@ -264,10 +177,7 @@ impl Config {
         );
     }
 
-    /// The one place `config.rs` and `present.rs` meet: `present.rs`
-    /// deliberately keeps its own small `PresentConfig` instead of
-    /// depending on the whole `Config`, so it stays independently
-    /// testable.
+    /// The bridge to `present.rs`.
     pub fn present_config(&self) -> crate::present::PresentConfig {
         crate::present::PresentConfig {
             dict_order: self.dictionaries.display_order.clone(),
@@ -276,7 +186,7 @@ impl Config {
     }
 }
 
-/// Clamps `value`, naming it if it moved.
+/// Clamps, naming any move.
 fn clamped<T>(path: &Path, field: &str, value: T, lo: T, hi: T) -> T
 where
     T: Ord + Copy + std::fmt::Display,
@@ -289,13 +199,10 @@ where
     out
 }
 
-/// Loads `path`, creating it with [`Config::default`] if it does not exist
-/// yet. Malformed TOML is returned as an `Err` naming `path` - never
-/// silently swapped for defaults; see the module docs for why.
+/// Loads, creating if absent.
 ///
-/// A value that parses but is out of range is clamped and named on stderr -
-/// the settings window already clamps on Apply, and a hand-edited file
-/// reaches the running app without ever passing through it.
+/// Malformed TOML is an `Err`.
+/// Out-of-range values clamp.
 pub fn load_or_create(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
@@ -317,7 +224,7 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
 mod tests {
     use super::*;
 
-    /// Unique per process and per test, so concurrent runs cannot collide.
+    /// Unique per process and test.
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("chibipop_cfg_{}_{}.toml", std::process::id(), name))
     }
@@ -334,16 +241,7 @@ mod tests {
                    c.dictionaries.display_order);
     }
 
-    /// Spec §5.1: exclusion is the *opt-in*. A fresh install must be
-    /// recordable, because an excluded popup is invisible to every capture
-    /// API - screen recorders, screenshots, screen sharing - and a user
-    /// who hits that has no way to tell a hidden window from a broken one.
-    /// The hide/reshow guard that replaces exclusion was measured in real
-    /// use and costs no noticeable lookup latency, so there is no
-    /// performance argument for defaulting the other way. Kept as its own
-    /// test (not folded into `defaults_match_the_spec`) so that exact
-    /// regression fails with its own name, not a generic multi-field
-    /// assertion.
+    /// §5.1: exclusion is opt-in.
     #[test]
     fn capture_exclusion_defaults_to_false() {
         assert!(
@@ -384,16 +282,12 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// Tiling is off by default. It was measured resolving the wrong
-    /// character 5 times in 9 where single-pass got 9 of 9, so reading
-    /// distance is not worth its cost until that is fixed.
     #[test]
     fn ocr_passes_defaults_to_one() {
         assert_eq!(1, Config::default().ocr.max_ocr_passes);
     }
 
-    /// Tiling stays reachable by editing one line, with no rebuild - the
-    /// inverse of the kill switch it was introduced as.
+    /// Re-enabled by one TOML line.
     #[test]
     fn a_multi_pass_round_trips() {
         let p = tmp("multipass");
@@ -416,9 +310,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// Every config file written before this feature existed lacks an [ocr]
-    /// section. Without serde(default) they stop loading and chibipop refuses
-    /// to start, because malformed TOML is deliberately a hard error here.
+    /// A missing section must load.
     #[test]
     fn a_config_written_before_the_ocr_section_existed_still_loads() {
         let p = tmp("no_ocr_section");
@@ -433,12 +325,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// A hand-edit can leave `[ocr]` present but blank - the section
-    /// header survived, only the `max_ocr_passes` line under it was
-    /// deleted. That exercises the *field-level*
-    /// `#[serde(default = "default_max_ocr_passes")]`, distinct from the
-    /// container-level `#[serde(default)]` on `Config::ocr` that the test
-    /// above (whole section missing) exercises instead.
+    /// The field-level default.
     #[test]
     fn an_empty_ocr_section_still_defaults_max_ocr_passes_to_one() {
         let p = tmp("empty_ocr_section");
@@ -471,8 +358,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// Every config written before this section existed lacks [debug]. Without
-    /// serde(default) they stop loading and chibipop refuses to start.
+    /// A missing section must load.
     #[test]
     fn a_config_written_before_the_debug_section_existed_still_loads() {
         let p = tmp("no_debug_section");
@@ -505,11 +391,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The bare-`serde(default)` trap, as its own regression: a `[popup]`
-    /// section written before this field existed must load with the highlight
-    /// **on**. A bare default would yield `false` here and the feature would
-    /// work only on fresh installs - which is exactly how it would escape
-    /// notice.
+    /// The bare-serde-default trap.
     #[test]
     fn a_config_written_before_the_highlight_existed_loads_with_it_on() {
         let p = tmp("no_highlight_field");
@@ -540,8 +422,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The bare-`serde(default)` trap again: a `[popup]` section written before
-    /// this field existed must load with scrolling ON.
+    /// The same trap, for scrolling.
     #[test]
     fn a_config_written_before_scroll_popup_loads_with_it_on() {
         let p = tmp("no_scroll_field");
@@ -556,7 +437,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// Apply clamps; loading must too.
+    /// Loading clamps too.
     #[test]
     fn an_out_of_range_hand_edit_is_clamped_on_load() {
         let p = tmp("out_of_range");
@@ -606,7 +487,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// A pre-existing config must still load.
+    /// A pre-existing config loads.
     #[test]
     fn a_config_written_before_the_lookup_log_still_loads() {
         let p = tmp("no_lookup_log");

@@ -1,4 +1,4 @@
-//! Read-only, memory-mapped SQLite implementation of `Dictionary`.
+//! Read-only mmap'd SQLite.
 
 use crate::lookup::model::{Dictionary, Entry, Sense, TermRow};
 use crate::present::DictInfo;
@@ -10,12 +10,7 @@ pub struct SqliteDictionary {
     conn: Connection,
 }
 
-/// The `meta.schema_version` this build of chibipop requires. Bumped
-/// alongside `tools/build-dict/schema.py::SCHEMA_VERSION`. The builder
-/// (Python) and reader (Rust) share an on-disk contract but no shared type
-/// to enforce it, so `open` checks this explicitly instead of trusting a
-/// dictionary file blindly - a mismatch fails loudly instead of the reader
-/// silently misinterpreting columns that moved.
+/// Must match schema.py.
 const EXPECTED_SCHEMA_VERSION: i64 = 2;
 
 impl SqliteDictionary {
@@ -25,8 +20,7 @@ impl SqliteDictionary {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .with_context(|| format!("opening dictionary {}", path.display()))?;
-        // 256MB mmap window: the OS pages what is touched, so resident
-        // memory stays near zero.
+        // 256MB window; OS pages it.
         conn.pragma_update(None, "mmap_size", 268_435_456i64)?;
 
         let found_version: Option<String> = conn
@@ -113,9 +107,7 @@ mod tests {
     use crate::lookup::model::Dictionary;
     use std::path::{Path, PathBuf};
 
-    /// Removes the wrapped fixture file when dropped — including when a test
-    /// panics mid-assertion (Rust unwinds through `Drop` on panic), so a
-    /// failing test doesn't leave a `.sqlite` file behind either.
+    /// Removes the file on drop.
     struct TempDbGuard(PathBuf);
 
     impl Drop for TempDbGuard {
@@ -124,11 +116,7 @@ mod tests {
         }
     }
 
-    /// Unique fixture path for `test_name`: the process id plus the test
-    /// name means two concurrent `cargo test` runs, or two fixture-backed
-    /// tests in this module, never contend for the same file. That matters
-    /// on Windows, where a handle left open by one process/test can block
-    /// another's create or delete on the same path.
+    /// Unique per process+test.
     fn fixture_path(test_name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("chibipop_sqlite_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -137,8 +125,7 @@ mod tests {
         path
     }
 
-    /// Creates the production `dict`/`entry`/`term`/`meta` schema at `path`,
-    /// then runs `seed_sql` (plain `INSERT`s) to populate it.
+    /// Real schema, then seeds.
     fn seed_fixture_db(path: &Path, seed_sql: &str) {
         let conn = rusqlite::Connection::open(path).unwrap();
         conn.execute_batch(
@@ -181,15 +168,7 @@ mod tests {
         assert!(d.entries(&[]).unwrap().is_empty());
     }
 
-    /// Real-world shape check: `written IS NULL` on 275,818/1,261,454 term
-    /// rows (kana-only headwords) and `freq IS NULL` on 589,498/1,261,454
-    /// (unranked entries) — 21.9% and 46.7% of the real dictionary
-    /// respectively. Neither was exercised by `reads_terms_and_entries`,
-    /// whose one row is fully populated. This also covers `pos = ''`
-    /// (`pos` is `String`, not `Option<String>`; empty means "part of
-    /// speech unknown" and is extremely common in the real data), and
-    /// confirms `reading`, `surface`, and `entry_id` still round-trip
-    /// correctly alongside the two NULLs.
+    /// Common in the real data.
     #[test]
     fn nullable_columns_come_back_as_none() {
         let path = fixture_path("nullable_columns_come_back_as_none");
@@ -215,13 +194,7 @@ mod tests {
         assert_eq!(2, rows[0].dict_id);
     }
 
-    /// Fix 3: `meta.schema_version` is the one drift detector already
-    /// present in the on-disk data, shared across a language boundary
-    /// (Python builder, Rust reader) with no shared type to enforce it.
-    /// `open` must hard-fail with a clear, actionable message - naming both
-    /// the version found and the version expected, and telling the reader
-    /// to rebuild - rather than silently reading a dictionary built under a
-    /// different column layout.
+    /// Must fail loudly.
     #[test]
     fn open_fails_when_schema_version_does_not_match() {
         let path = fixture_path("open_fails_when_schema_version_does_not_match");
@@ -229,10 +202,7 @@ mod tests {
 
         seed_fixture_db(&path, "INSERT INTO meta VALUES ('schema_version','1');");
 
-        // `.err()` + `.expect()`, not `.unwrap_err()`: the latter requires
-        // the `Ok` type (`SqliteDictionary`, which wraps a raw `Connection`
-        // and has no `Debug` impl) to be `Debug` too, for a panic message
-        // this branch never prints.
+        // No Debug on the Ok type.
         let err = SqliteDictionary::open(&path)
             .err()
             .expect("opening a dictionary with the wrong schema_version should fail");

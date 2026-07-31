@@ -1,4 +1,4 @@
-// Allow-by-default, so silent until asked for.
+// Allow-by-default lints.
 #![warn(missing_unsafe_on_extern)]
 #![warn(unsafe_attr_outside_unsafe)]
 #![warn(unsafe_op_in_unsafe_fn)]
@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Look up Japanese text and print ranked results.
+    /// Look up text, print hits.
     Lookup {
         text: String,
         #[arg(long)]
@@ -29,68 +29,49 @@ enum Command {
         #[arg(long)]
         rules: Option<PathBuf>,
     },
-    /// Resolve and look up the text at one screen point, showing every stage.
+    /// Look up one screen point.
     Probe {
-        /// Screen coordinates as X,Y in physical pixels.
+        /// X,Y in physical pixels.
         #[arg(long, value_name = "X,Y")]
         at: String,
-        /// Capture box size as W,H, centred on --at. Defaults to the
-        /// shipped REGION_W,REGION_H. Windows' OCR reads a whole image at
-        /// once, so this changes what it recognises - vary it to measure.
+        /// Capture box W,H, centred.
         #[arg(long, value_name = "W,H")]
         region: Option<String>,
-        /// Total OCR passes, as [ocr] max_ocr_passes would set. Defaults to
-        /// 1 because that is what the app ships: a diagnostic that defaults
-        /// to a configuration production does not use measures the wrong
-        /// thing. Ignored when --region is given, which is single-capture by
-        /// definition.
+        /// Total OCR passes.
         #[arg(long, default_value_t = 1)]
         tiles: u8,
         #[arg(long)]
         dict: Option<PathBuf>,
         #[arg(long)]
         rules: Option<PathBuf>,
-        /// Draw the captured regions, and the match box, for this many
-        /// seconds after probing. Bare `--show-region` shows them for 3s.
-        /// Omitted, nothing is drawn. Note probe always draws both, being
-        /// the diagnostic view; the app draws the capture regions only
-        /// under `[debug] show_scan_region`, so a real hover on the shipped
-        /// defaults shows one box where this shows several.
+        /// Draw boxes for N seconds.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "3")]
         show_region: Option<u64>,
     },
-    /// Open the settings window on its own, without starting the popup.
-    ///
-    /// The way in when the tray icon will not open its menu. Applying saves
-    /// `chibipop.toml`; restart chibipop for it to take effect.
+    /// Open the settings window.
     Settings {
         #[arg(long)]
         dict: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Follow the cursor and print a lookup whenever the hovered word changes.
+    /// Print lookups on hover.
     Watch {
         #[arg(long)]
         dict: Option<PathBuf>,
         #[arg(long)]
         rules: Option<PathBuf>,
-        /// Total OCR passes, as [ocr] max_ocr_passes would set. The memory
-        /// figures in docs/REGRESSION.md were taken at 3.
+        /// Total OCR passes.
         #[arg(long, default_value_t = 1)]
         tiles: u8,
     },
-    /// Run the popup application: hover Japanese text anywhere on screen to
-    /// see its definition beside it. Right-click the tray icon to change
-    /// mode or quit.
+    /// Run the popup application.
     Run {
         #[arg(long)]
         dict: Option<PathBuf>,
         #[arg(long)]
         rules: Option<PathBuf>,
-        /// Defaults to chibipop.toml beside the running executable (spec
-        /// section 4.3), not this crate's data/-relative CWD convention -
-        /// so a shortcut-launched chibipop.exe still finds its settings.
+        /// Defaults beside the exe.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -177,9 +158,7 @@ fn main() -> Result<()> {
 
             let mut highlight: Option<chibipop::geom::PhysRect> = None;
             match &resolved {
-                // Distinguish "OCR itself found nothing" from "OCR found
-                // text, but none of it was close enough to the cursor" -
-                // probe exists to tell these two failure stages apart.
+                // Two failure stages apart.
                 None if lines.is_empty() => {
                     println!("\nno text resolved at that point: OCR recognised no lines in the region");
                 }
@@ -245,7 +224,7 @@ fn main() -> Result<()> {
                     scan
                 });
 
-                // Last: drawn over the captures.
+                // Last: drawn over captures.
                 if let Some(rect) = highlight {
                     scan.push(chibipop::geom::ScanRect {
                         rect,
@@ -291,7 +270,7 @@ fn main() -> Result<()> {
                     Err(e) => { eprintln!("cursor: {e}"); continue; }
                 };
 
-                // Skip the work entirely unless the pointer actually moved.
+                // Only when it moved.
                 if let Some(prev) = last_pos {
                     if (cursor.x - prev.x).abs() <= 4 && (cursor.y - prev.y).abs() <= 4 {
                         continue;
@@ -299,20 +278,14 @@ fn main() -> Result<()> {
                 }
                 last_pos = Some(cursor);
 
-                // One bad frame must not end the session.
+                // One bad frame is not fatal.
                 let resolved = match source.resolve_at_tiled(cursor) {
                     Ok(r) => r,
                     Err(e) => { eprintln!("resolve: {e}"); continue; }
                 };
                 let Some(r) = resolved else { continue };
 
-                // Key on the hovered character's own anchor - absolute
-                // virtual-desktop space, independent of how the sliding
-                // capture region clipped the surrounding line - plus the
-                // character itself. Keying on the assembled line text
-                // instead (as before) reprints on every re-clip, because the
-                // line gains or loses characters at either end as the region
-                // slides even when the cursor is still over the same glyph.
+                // Anchor+char, not line text.
                 let ch = r.span.text[r.span.cursor_byte_offset..].chars().next();
                 let key = (r.span.anchor.x, r.span.anchor.y, ch);
                 if last_key.as_ref() == Some(&key) {
@@ -333,8 +306,7 @@ fn main() -> Result<()> {
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
-            // Opened only for the dictionary identities the reorder list
-            // shows - no engine, no rules, no OCR.
+            // Only for the dict names.
             //
             // A rebuild renames onto it.
             let dicts = {
@@ -416,16 +388,12 @@ fn file_name(path: &Path) -> String {
     path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()
 }
 
-/// `chibipop.toml` beside the running executable (spec section 4.3). Falls
-/// back to the current directory if the executable's own path can't be
-/// determined, which should not happen in practice.
+/// Beside the running exe.
 fn default_config_path() -> PathBuf {
     chibipop::paths::beside_exe("chibipop.toml")
 }
 
-/// Pump this thread's messages for `dur`, so a window created by a one-shot
-/// command stays painted instead of appearing frozen. `probe` has no message
-/// loop of its own; this exists only for `--show-region`.
+/// Keeps a window painted.
 fn pump_messages_for(dur: std::time::Duration) {
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,

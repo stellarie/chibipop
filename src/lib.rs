@@ -1,4 +1,4 @@
-// Allow-by-default, so silent until asked for.
+// Allow-by-default lints.
 #![warn(missing_unsafe_on_extern)]
 #![warn(unsafe_attr_outside_unsafe)]
 #![warn(unsafe_op_in_unsafe_fn)]

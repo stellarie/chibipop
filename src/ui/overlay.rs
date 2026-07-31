@@ -1,26 +1,6 @@
-//! The scan overlay window - faint outlines drawn over the small screen
-//! regions M2's OCR pipeline actually captures (pass-1 box, forward tiles,
-//! the resolved anchor), so that geometry stops being invisible arithmetic.
+//! The scan overlay window.
 //!
-//! **Shaped, not painted transparent, and why.** `ui::window`'s module docs
-//! record the measurement this window relies on too: `WDA_EXCLUDEFROMCAPTURE`
-//! is incompatible with per-pixel alpha via `UpdateLayeredWindow` - the
-//! affinity call fails with a misleading "not enough memory" HRESULT and
-//! silently no-ops, leaving the window fully capturable. An outline needs an
-//! *interior*-transparent shape, and constant alpha
-//! (`SetLayeredWindowAttributes`) cannot single out an interior - it applies
-//! uniformly to the whole window. So this window is shaped instead:
-//! `SetWindowRgn` is set to the union of every rect's *frame* region (its
-//! outer rectangle minus its inset interior), so the interior is genuinely
-//! transparent rather than merely unpainted, and `WM_PAINT` separately fills
-//! each rect's own four border strips - not its full bounds - in its kind's
-//! colour, so one rect's fill can never repaint a neighbour's frame where
-//! the two overlap (`edge_strips`).
-//!
-//! Structure otherwise mirrors `ui::window` throughout: the one-shot class
-//! registration guard, the same extended-style set, constant alpha via
-//! `SetLayeredWindowAttributes`, the same opt-in `SetWindowDisplayAffinity`,
-//! and the same `SetWindowRgn` ownership/leak discipline on every path.
+//! Shaped: the middle is clear.
 
 use crate::geom::{inset, overlay_layout, PhysRect, ScanKind, ScanRect};
 use crate::ui::theme::Theme;
@@ -36,44 +16,23 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Constant alpha applied via `SetLayeredWindowAttributes` (0-255 scale).
-/// 90 - the spec's own word for the look this produces is "faint".
+/// Constant alpha, 0-255.
 const OVERLAY_ALPHA: u8 = 90;
 
-/// Frame thickness, in physical pixels, that each rect is inset by to find
-/// its interior (`geom::inset`'s `thickness` argument) - what remains after
-/// removing that interior is the outline `WM_PAINT` actually shows.
+/// Outline thickness, in pixels.
 const FRAME_THICKNESS: i32 = 2;
 
-/// Distinct from `ui::window`'s popup class: a shared class would mean a
-/// shared `wndproc`, and this window's `WM_PAINT` handling shares nothing
-/// with the popup's.
+/// Not the popup's wndproc.
 fn class_name() -> PCWSTR {
     w!("ChibipopOverlayClass")
 }
 
-/// What `WM_PAINT` needs to redraw the last `Overlay::show_rects` call's
-/// content. Unlike `ui::window::Popup`, which paints imperatively right
-/// after showing and keeps no state its `wndproc` can reach, this window's
-/// `wndproc` really does need to reproduce the outlines on every repaint
-/// (e.g. after the overlay is occluded and re-exposed) - and `wndproc` is a
-/// bare `extern "system" fn` with no `self` to hold them on.
+/// What WM_PAINT redraws from.
 ///
-/// A thread-local, not `GWLP_USERDATA`: every `Overlay` is created and
-/// driven from the main thread only, the same assumption `ui::window`'s
-/// process-wide class-registration guard already makes, so there is no
-/// concurrent access for a `RefCell` to guard against, and it avoids the
-/// raw-pointer lifetime bookkeeping `GWLP_USERDATA` would need instead
-/// (stashing, and later reclaiming, a boxed pointer across `create`/`Drop`).
-/// `HWND`'s raw pointer field also makes `Overlay` itself `!Send`, so the
-/// compiler already rules out the one thing that would make this unsound.
-///
-/// Keyed by `hwnd` rather than holding one bare value, so a `WM_PAINT` for
-/// any window other than the current overlay's paints nothing instead of
-/// showing stale content under the wrong `HWND`.
+/// Keyed by hwnd; one at a time.
 struct PaintState {
     hwnd: HWND,
-    /// Window-local rectangles, exactly as `overlay_layout` returns them.
+    /// Window-local, not screen.
     rects: Vec<ScanRect>,
     pass1: (u8, u8, u8),
     tile: (u8, u8, u8),
@@ -102,19 +61,9 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
-/// The four border strips `paint_overlay` fills for one rect, `thickness`
-/// px wide on each side - not its full bounds, so that when two rects
-/// overlap (routine - see `geom::overlay_layout`'s own doc comment),
-/// filling the later one can never repaint pixels of the earlier one's
-/// frame that fall outside its own strips (IMPORTANT-2).
+/// A rect's four border strips.
 ///
-/// Mirrors `build_region`'s use of `geom::inset` exactly: when `inset`
-/// returns `None` the rect has no interior at all (too thin - see its doc
-/// comment), so the four strips would just be the rect sliced apart for no
-/// benefit, and the whole rect is returned instead, unchanged from filling
-/// its bounds directly.
-///
-/// Pure geometry, no window needed - see the tests below.
+/// Not bounds: rects overlap.
 fn edge_strips(rect: PhysRect, thickness: i32) -> Vec<PhysRect> {
     if inset(rect, thickness).is_none() {
         return vec![rect];
@@ -128,14 +77,6 @@ fn edge_strips(rect: PhysRect, thickness: i32) -> Vec<PhysRect> {
     ]
 }
 
-/// The actual `WM_PAINT` work, split out so it can run inside
-/// `catch_unwind` from `wndproc` - same shape as `ui::window`'s
-/// `validate_paint_region`/`wndproc` split.
-///
-/// `BeginPaint`/`EndPaint` are unconditionally paired (mirroring
-/// `render.rs`'s `BeginDraw`/`EndDraw` discipline): a bad `hdc` skips only
-/// the fill loop below, never the matching `EndPaint`, so the OS's
-/// paint/update-region bookkeeping for `hwnd` always gets closed out.
 /// Ends the paint on drop.
 struct PaintScope {
     hwnd: HWND,
@@ -197,11 +138,9 @@ unsafe fn paint_overlay(hwnd: HWND) {
     }
 }
 
-/// Validates/paints on `WM_PAINT`; forwards everything else. A panic must
-/// never unwind across this `extern "system"` boundary (M3 spec §6) - it
-/// would unwind into whichever window procedure the OS calls next, not just
-/// this one - so `catch_unwind` wraps the working half, matching
-/// `ui::window::wndproc`'s own discipline.
+/// Paints on WM_PAINT.
+///
+/// Unwinding here would be UB.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_PAINT {
         // SAFETY: `hwnd` is the live handle the OS just supplied to
@@ -214,10 +153,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// Registers the window class exactly once per process - see
-/// `ui::window::register_class`, whose ordering rationale (latch `true`
-/// only *after* `RegisterClassExW` actually succeeds) applies identically
-/// here.
+/// Registers the class once.
 unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.load(Ordering::SeqCst) {
@@ -248,12 +184,7 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// Builds the union of every local rect's frame region: each rect's outer
-/// rectangle, minus its inset interior when `geom::inset` returns one, or
-/// the solid outer rectangle when it does not - a rectangle no thicker than
-/// two frame borders is all border, so there is nothing left to cut out,
-/// and `geom::inset` returns `None` for exactly that case (it happens in
-/// practice - see its own doc comment).
+/// Union of every rect's frame.
 unsafe fn build_region(rects: &[ScanRect]) -> Result<HRGN> {
     // SAFETY: every `HRGN` created below is either deleted before this
     // function returns or is `accum`, the single handle handed back to the
@@ -311,46 +242,19 @@ unsafe fn build_region(rects: &[ScanRect]) -> Result<HRGN> {
     }
 }
 
-/// A layered, click-through, always-on-top window that outlines the OCR
-/// pipeline's capture regions instead of painting content - see the module
-/// docs for why it is shaped rather than made transparent.
+/// The shaped outline window.
 pub struct Overlay {
     hwnd: HWND,
     capture_exclusion: CaptureExclusion,
 }
 
-/// Guards against a second live `Overlay` - see `create`'s docs for why
-/// only one may exist. Released by `Drop`, so create -> drop -> create
-/// succeeds. Only ever stored `true` after `create` has fully
-/// succeeded, mirroring `register_class`'s own latch-after-success
-/// ordering: setting it any earlier would leave it stuck `true` after
-/// a failed `create`, permanently refusing every later attempt.
+/// Guards a second live Overlay.
 static OVERLAY_LIVE: AtomicBool = AtomicBool::new(false);
 
 impl Overlay {
-    /// Registers the window class if needed and creates the overlay
-    /// window, hidden, with the same flags `ui::window::Popup::create`
-    /// uses (see the module docs).
+    /// Creates the window, hidden.
     ///
-    /// Only one `Overlay` may be alive at a time: `PAINT_STATE` is a
-    /// single process-global slot keyed by `hwnd` (see its doc
-    /// comment), so a second live instance would let each
-    /// `show_rects` clobber the other's entry - the loser would find
-    /// `state.hwnd != hwnd` on its next repaint and paint nothing.
-    /// Calling this while an `Overlay` already exists returns `Err`
-    /// instead of that silently-broken window; dropping the existing
-    /// `Overlay` first (its `Drop` releases the guard) lets a later
-    /// call succeed.
-    ///
-    /// When `exclude_from_capture` is true, `SetWindowDisplayAffinity` is
-    /// attempted the same way `Popup::create` attempts it for the popup -
-    /// deliberately not propagated via `?`, since whether the OS accepts it
-    /// is not grounds to fail window creation. The outcome is captured into
-    /// a `CaptureExclusion`, exactly like `Popup::create` does, and readable
-    /// back via `capture_exclusion()` - `app.rs`'s `run` uses it so the
-    /// overlay's own affinity result (which can differ from the popup's) is
-    /// never silently dropped: it is reported on `AttemptFailed` and folded
-    /// into whether the capture guard needs to run, same as `Popup`'s.
+    /// Errs if one is already alive.
     pub fn create(exclude_from_capture: bool) -> Result<Overlay> {
         if OVERLAY_LIVE.load(Ordering::SeqCst) {
             anyhow::bail!("an Overlay already exists; only one may be alive at a time");
@@ -402,16 +306,9 @@ impl Overlay {
         }
     }
 
-    /// Lays out `rects` (`geom::overlay_layout`), moves/sizes/reshapes the
-    /// window to their bounds, stores `rects`/`theme` where `WM_PAINT` can
-    /// reach them, and shows the window without activating it. Empty
-    /// `rects` hides the overlay instead of showing an empty window.
+    /// Reshapes and shows the rects.
     ///
-    /// Finishes with an explicit `UpdateWindow`: `WM_PAINT` is only a
-    /// posted message, and nothing here runs a message loop to
-    /// dispatch it, so without this call the freshly-applied region
-    /// would show stale or empty content until something else happens
-    /// to pump the queue - the same reason `Popup::show_at` does it.
+    /// Empty hides it instead.
     pub fn show_rects(&self, rects: &[ScanRect], theme: &Theme) -> Result<()> {
         let Some((bounds, local)) = overlay_layout(rects) else {
             self.hide();
@@ -451,7 +348,7 @@ impl Overlay {
         Ok(())
     }
 
-    /// Hides the overlay without destroying it.
+    /// Hides without destroying.
     pub fn hide(&self) {
         // SAFETY: `self.hwnd` is valid for the lifetime of `&self` (see
         // `show_rects`); `ShowWindow`'s failure is intentionally ignored,
@@ -465,23 +362,16 @@ impl Overlay {
         self.hwnd
     }
 
-    /// Whether (and why not) this overlay is excluded from the app's own
-    /// screen captures - see `CaptureExclusion`. Independent of
-    /// `Popup::capture_exclusion()`: the two windows get the same
-    /// `exclude_from_capture` input but the OS accepts or refuses each
-    /// window's affinity call on its own, so one can diverge from the
-    /// other.
+    /// Whether it is excluded.
+    ///
+    /// May differ from the popup's.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.capture_exclusion
     }
 }
 
 impl Drop for Overlay {
-    /// `ui::window::Popup` has no `Drop` - one popup is created and lives
-    /// for the process's lifetime, so the OS reclaims it on exit. This
-    /// window is created and torn down per this task's spec instead, so it
-    /// needs an explicit one; this is a deliberate difference from
-    /// `Popup`'s pattern, not an oversight.
+    /// This one is torn down.
     fn drop(&mut self) {
         PAINT_STATE.with(|cell| {
             let mut state = cell.borrow_mut();
@@ -504,10 +394,7 @@ mod tests {
     use super::*;
     use crate::geom::PhysPoint;
 
-    /// IMPORTANT-2: the four strips must together cover the frame and must
-    /// never reach the interior. Same rect `geom.rs`'s own
-    /// `inset_leaves_an_interior_for_an_ordinary_rect` uses, so it is
-    /// pinned to have an interior at `FRAME_THICKNESS`.
+    /// Frame yes, interior never.
     #[test]
     fn edge_strips_cover_the_frame_but_never_the_interior() {
         let rect = PhysRect { x: 10, y: 10, w: 100, h: 40 };
@@ -545,19 +432,14 @@ mod tests {
         }
     }
 
-    /// A rect no thicker than two borders has no interior (`geom::inset`),
-    /// so there is nothing to slice into strips - same 17x3 word box
-    /// `geom.rs`'s own `inset_of_a_rect_thinner_than_its_border_has_no_interior`
-    /// pins.
+    /// Too thin: no interior.
     #[test]
     fn edge_strips_of_a_too_thin_rect_is_the_whole_rect() {
         let rect = PhysRect { x: 0, y: 0, w: 17, h: 3 };
         assert_eq!(vec![rect], edge_strips(rect, FRAME_THICKNESS));
     }
 
-    /// Needs a real desktop session - `CreateWindowExW` fails headless
-    /// (no interactive window station), so this only runs explicitly
-    /// via `cargo test -- --ignored`, never as part of the normal suite.
+    /// Needs a real desktop session.
     #[test]
     #[ignore]
     fn create_after_drop_succeeds_while_a_second_live_one_is_rejected() {

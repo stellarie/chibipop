@@ -1,10 +1,4 @@
-//! The settings window's data model: a [`Config`] flattened into plain fields
-//! and folded back again.
-//!
-//! Deliberately free of the `windows` crate, so every decision this round
-//! makes that is worth testing can be tested without a screen. `ui`'s settings
-//! window owns the controls and speaks only these types; it holds no opinion
-//! about what any of them mean.
+//! The settings window's model.
 
 use crate::config::{Config, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
@@ -12,16 +6,10 @@ use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// The bounds live beside the fields they bound, so `config::load_or_create`
-/// can apply the same ones to a hand-edited file that never reaches Apply.
+/// Re-exported for config.rs.
 pub use crate::config::{MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 
-/// Every user-facing setting, as the window edits it.
-///
-/// `dict_names` holds **live dictionary names**, not the substrings the config
-/// stores — the window shows the user what is actually installed, and
-/// [`apply_to`] converts back. See its documentation for why that conversion
-/// is emphatically not the identity.
+/// What the window edits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsForm {
     pub mode: TriggerMode,
@@ -32,6 +20,7 @@ pub struct SettingsForm {
     pub highlight_match: bool,
     pub scroll_popup: bool,
     pub exclude_from_capture: bool,
+    /// Live names, not substrings.
     pub dict_names: Vec<String>,
     pub max_ocr_passes: u8,
     pub show_scan_region: bool,
@@ -185,12 +174,7 @@ fn mutate(
     lib.save(dir)
 }
 
-/// Flatten `cfg` for editing, listing `dicts` in the order the popup would
-/// actually show them.
-///
-/// The ordering runs through [`dict_order_rank`], the same function
-/// `present::build` uses, so the list cannot show an order the popup will not
-/// honour.
+/// Flatten, in popup order.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
     ordered.sort_by_key(|d| {
@@ -220,20 +204,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     }
 }
 
-/// Fold `form` back onto `cfg`, returning the config to write.
-///
-/// **`display_order` is rebuilt from substrings, never from live names**, and
-/// that is the whole reason this is not a field-for-field copy.
-/// `dictionaries.display_order` holds case-insensitive *substrings* because
-/// Jitendex's stored name embeds a release date that changes on every rebuild;
-/// writing live names back would work perfectly until the next rebuild and
-/// then silently stop applying, dropping that dictionary to the bottom with no
-/// error anywhere. See [`order_key`].
-///
-/// Numbers are clamped rather than rejected: the window's spin controls cannot
-/// produce an out-of-range value, so one that is out of range came from a
-/// hand-edited file, and quietly bringing it into range beats refusing to
-/// apply anything at all.
+/// Substrings, not live names.
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
     out.trigger.mode = form.mode;
@@ -258,18 +229,10 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out
 }
 
-/// The `display_order` entry to write for a dictionary called `name`.
-///
-/// Keeps whichever existing entry already matches, **verbatim**, so a config
-/// the user has been running keeps working across dictionary rebuilds. Only a
-/// dictionary that has never been ordered gets a derived key, truncated at the
-/// first bracket so a release date cannot become part of it.
-///
-/// Falls back to the whole name when truncation would leave nothing — an empty
-/// entry would match *every* dictionary and silently pin the order.
+/// Keeps a matching entry.
 fn order_key(name: &str, existing: &[String]) -> String {
     let lower = name.to_lowercase();
-    // A blank entry is a substring of everything.
+    // Blank matches everything.
     if let Some(entry) = existing
         .iter()
         .filter(|e| !e.trim().is_empty())
@@ -282,14 +245,7 @@ fn order_key(name: &str, existing: &[String]) -> String {
     if derived.is_empty() { name.to_string() } else { derived.to_string() }
 }
 
-/// `display_order` entries matching no installed dictionary (spec D6a).
-///
-/// This is what a dictionary rename looks like from inside the settings
-/// window, and it is worth reporting precisely: [`dict_order_rank`] returns
-/// `None` for an unmatched dictionary and the caller sorts it **last**, so the
-/// user-visible symptom is a dictionary silently dropping to the bottom —
-/// which reads as chibipop reordering things by itself rather than as a stale
-/// line in a file.
+/// Entries matching nothing.
 pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
     cfg.dictionaries
         .display_order
@@ -326,18 +282,13 @@ mod tests {
         assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], form.dict_names);
     }
 
-    /// A dictionary matching no entry sorts last, by dict_id - the same rule
-    /// `present::build` applies, so the window cannot show an order the popup
-    /// will not honour.
     #[test]
     fn an_unordered_dictionary_is_listed_last() {
         let form = from_config(&cfg_with(&["大辞林"]), &dicts());
         assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], form.dict_names);
     }
 
-    /// THE trap (spec D6). `display_order` holds substrings because
-    /// Jitendex's name carries a release date that changes on every rebuild.
-    /// Reordering must return the user's own strings, never the live names.
+    /// THE trap: substrings.
     #[test]
     fn reordering_preserves_the_existing_substrings_verbatim() {
         let cfg = cfg_with(&["大辞林", "Jitendex"]);
@@ -363,8 +314,7 @@ mod tests {
         assert!(out.dictionaries.display_order.contains(&"大辞林　第四版".to_string()));
     }
 
-    /// A name that is entirely bracketed would derive an empty key, which
-    /// would then match every dictionary.
+    /// Empty key matches all.
     #[test]
     fn a_key_that_would_be_empty_falls_back_to_the_whole_name() {
         let cfg = cfg_with(&[]);
@@ -374,7 +324,7 @@ mod tests {
         assert_eq!(vec!["[2026] Something".to_string()], out.dictionaries.display_order);
     }
 
-    /// A blank entry matches every name.
+    /// Blank matches every name.
     #[test]
     fn a_blank_order_entry_never_claims_a_dictionary() {
         let cfg = cfg_with(&["", "大辞林"]);
@@ -387,7 +337,7 @@ mod tests {
         assert!(out.dictionaries.display_order.contains(&"Jitendex.org".to_string()));
     }
 
-    /// D6a: an entry matching nothing is what a rename looks like from here.
+    /// A rename looks like this.
     #[test]
     fn an_entry_matching_no_dictionary_is_reported() {
         let stale = stale_order_entries(&cfg_with(&["大辞林", "Kenkyusha"]), &dicts());
@@ -399,8 +349,7 @@ mod tests {
         assert!(stale_order_entries(&cfg_with(&["大辞林", "Jitendex"]), &dicts()).is_empty());
     }
 
-    /// The detection must agree with the ordering it warns about. A warning
-    /// that disagreed with `dict_order_rank` would be worse than none.
+    /// Must agree with ranking.
     #[test]
     fn a_reported_entry_is_exactly_one_dict_order_rank_cannot_use() {
         let cfg = cfg_with(&["大辞林", "Kenkyusha", "Jitendex"]);
@@ -416,8 +365,7 @@ mod tests {
         }
     }
 
-    /// The window must never silently change a setting the user did not
-    /// touch. This is the assertion that catches a mis-wired control.
+    /// Catches a bad control.
     #[test]
     fn an_untouched_form_round_trips_to_an_equal_config() {
         let cfg = cfg_with(&["大辞林", "Jitendex"]);
@@ -649,10 +597,7 @@ mod tests {
         assert_eq!(0, terms_after_apply(&form, &Library::default()));
     }
 
-    /// An entry that no longer matches is KEPT, not deleted - it may match a
-    /// dictionary that simply is not built right now, and dropping a user's
-    /// setting because it is momentarily inapplicable is worse than carrying
-    /// it. It disappears only when the user reorders and applies.
+    /// Kept, not deleted.
     #[test]
     fn a_stale_entry_is_replaced_by_applying_not_by_reporting() {
         let cfg = cfg_with(&["Kenkyusha", "大辞林"]);
