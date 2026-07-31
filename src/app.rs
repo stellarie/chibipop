@@ -159,7 +159,7 @@ pub fn settings_only(
     let form = form_with_library(&cfg, dicts, &library);
     let stale = settings::stale_order_entries(&cfg, dicts);
     let window =
-        SettingsWindow::open(&form, &stale, false).context("opening the settings window")?;
+        SettingsWindow::open(&form, &stale).context("opening the settings window")?;
 
     // A run may hold it open.
     let staged_db = rebuild::staging_path(dict_path);
@@ -213,7 +213,14 @@ pub fn settings_only(
                         })?;
                         println!("chibipop: rebuilt {}.", dict_path.display());
                         println!("chibipop: settings saved to {}.", config_path.display());
-                        println!("chibipop: restart chibipop for them to take effect.");
+                        // A new dictionary: start it.
+                        match start_run(config_path, dict_path) {
+                            Ok(()) => println!("chibipop: starting."),
+                            Err(e) => {
+                                eprintln!("chibipop: could not start chibipop: {e:#}");
+                                eprintln!("chibipop: the dictionary is ready - start it yourself.");
+                            }
+                        }
                         return Ok(());
                     }
                 },
@@ -226,7 +233,7 @@ pub fn settings_only(
         }
 
         match window.take_outcome() {
-            // No Quit button in this mode.
+            // Quit and dismiss both end it.
             Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
                 let edited = window.read(&form);
@@ -506,16 +513,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let mut next_id: u64 = 0;
     let mut latest_dispatched = RequestId(0);
     // Visible just before the Hide.
-    let mut capture_guard_prev_visible = false;
+    //
+    // Cleared by hides elsewhere.
+    let capture_guard_prev_visible = std::cell::Cell::new(false);
     // Overlay's own visibility.
-    let mut overlay_prev_visible = false;
+    let overlay_prev_visible = std::cell::Cell::new(false);
     // What is on screen now.
     let mut shown: Option<Shown> = None;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
         &form_with_library(&cfg, &dicts, &library),
         &settings::stale_order_entries(&cfg, &dicts),
-        true,
     ) {
         // Never fatal.
         Err(e) => {
@@ -535,11 +543,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let mut restart_at_exit = false;
 
     // I4: kept in one place.
-    let mut drain_capture_guard = || {
+    let drain_capture_guard = || {
         while let Ok(req) = capture_guard_rx.try_recv() {
             match req {
                 CaptureGuardMsg::Hide { ack } => {
-                    capture_guard_prev_visible = popup.is_visible();
+                    capture_guard_prev_visible.set(popup.is_visible());
                     let _ = popup.hide();
                     if let Some(hwnd) = overlay_hwnd {
                         // SAFETY: `hwnd` is `Overlay::hwnd()`'s own handle;
@@ -547,7 +555,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         // `overlay` for this whole loop, so the window is
                         // still live here. Both calls only read/set
                         // visibility - no other precondition applies.
-                        overlay_prev_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+                        overlay_prev_visible.set(unsafe { IsWindowVisible(hwnd).as_bool() });
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_HIDE);
                         }
@@ -555,11 +563,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     let _ = ack.send(());
                 }
                 CaptureGuardMsg::Restore => {
-                    if capture_guard_prev_visible {
+                    if capture_guard_prev_visible.get() {
                         let _ = popup.show_without_activating();
                     }
                     if let Some(hwnd) = overlay_hwnd {
-                        if overlay_prev_visible {
+                        if overlay_prev_visible.get() {
                             // SAFETY: same handle, same guarantee as above.
                             unsafe {
                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -704,6 +712,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 // An in-flight hit re-shows it.
                 next_id += 1;
                 latest_dispatched = RequestId(next_id);
+                // Restore would re-show it.
+                capture_guard_prev_visible.set(false);
+                overlay_prev_visible.set(false);
                 if shown.is_some() {
                     let _ = popup.hide();
                     if let Some(ov) = overlay.as_ref() {
@@ -761,7 +772,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     } else {
                         let form = form_with_library(&cfg, &dicts, &library);
                         let stale = settings::stale_order_entries(&cfg, &dicts);
-                        match SettingsWindow::open(&form, &stale, true) {
+                        match SettingsWindow::open(&form, &stale) {
                             // Never fatal.
                             Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
                             Ok(w) => settings = Some(w),
@@ -1151,6 +1162,21 @@ fn hold_region(anchor: PhysRect, matched: Option<PhysRect>, orientation: Orienta
 }
 
 /// Relaunch with this argv.
+/// Start the popup app.
+fn start_run(config_path: &Path, dict_path: &Path) -> Result<()> {
+    let exe = std::env::current_exe().context("locating this executable")?;
+    // Explicit: may be non-default.
+    std::process::Command::new(exe)
+        .arg("run")
+        .arg("--config")
+        .arg(config_path)
+        .arg("--dict")
+        .arg(dict_path)
+        .spawn()
+        .context("starting chibipop")?;
+    Ok(())
+}
+
 fn restart_self() -> Result<()> {
     let exe = std::env::current_exe().context("locating this executable")?;
     let args: Vec<String> = std::env::args().skip(1).collect();

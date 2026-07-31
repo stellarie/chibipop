@@ -35,7 +35,6 @@ pub enum SettingsOutcome {
 // ---- control ids ----
 
 const ID_APPLY: i32 = 100;
-const ID_CANCEL: i32 = 101;
 const ID_MODE_LIVE: i32 = 102;
 const ID_MODE_HOLD: i32 = 103;
 const ID_THEME: i32 = 104;
@@ -59,9 +58,8 @@ const ID_FREQ_REMOVE: i32 = 121;
 const ID_STATUS: i32 = 122;
 
 /// What a rebuild disables.
-const WHILE_BUSY: [i32; 11] = [
+const WHILE_BUSY: [i32; 10] = [
     ID_APPLY,
-    ID_CANCEL,
     ID_QUIT,
     ID_DICTS,
     ID_DICT_UP,
@@ -162,8 +160,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             match id {
                 // 1 is IDOK: Enter, not the id.
                 ID_APPLY | 1 => record_outcome(hwnd, SettingsOutcome::Apply),
-                // X and Escape both land here.
-                ID_CANCEL | 2 => record_outcome(hwnd, SettingsOutcome::Cancel),
+                // Escape. X goes via WM_CLOSE.
+                2 => record_outcome(hwnd, SettingsOutcome::Cancel),
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
                 ID_DICT_UP => unsafe { move_selected(hwnd, -1) },
                 ID_DICT_DOWN => unsafe { move_selected(hwnd, 1) },
@@ -541,15 +539,7 @@ impl SettingsWindow {
     /// `stale` are `display_order` entries matching no installed dictionary
     /// (spec D6a); when non-empty a warning naming them is shown, because that
     /// is what a dictionary rename looks like from in here.
-    ///
-    /// `in_app` is whether this window belongs to a running `chibipop run`
-    /// instance (true from the tray and from startup, false for the standalone
-    /// `chibipop settings`). It governs two things, both for the same reason -
-    /// a window must not offer what it is in no position to do:
-    ///
-    /// - Apply restarts chibipop, so the button says so;
-    /// - Quit is offered at all, since standalone has no instance to quit.
-    pub fn open(form: &SettingsForm, stale: &[String], in_app: bool) -> Result<SettingsWindow> {
+    pub fn open(form: &SettingsForm, stale: &[String]) -> Result<SettingsWindow> {
         // SAFETY: every call below is an ordinary window-creation FFI call
         // with handles this function owns; each `?` leaves nothing to leak
         // because the window is the only resource and it is not yet created.
@@ -592,7 +582,7 @@ impl SettingsWindow {
             // caption and frame ate the Apply and Cancel buttons entirely and
             // the window opened with no way to accept anything. Measuring the
             // content means that cannot recur, at any DPI or font size.
-            let content_h = win.build(form, stale, in_app)?;
+            let content_h = win.build(form, stale)?;
             // Sizes AND shows - see `fit_to` for why showing cannot go
             // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
@@ -798,7 +788,7 @@ impl SettingsWindow {
     }
 
     /// Create every control, returning the 96-DPI `y` its layout reached.
-    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String], in_app: bool)
+    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String])
         -> Result<i32> {
         let f = self.font;
         let h = self.hwnd;
@@ -1023,27 +1013,15 @@ impl SettingsWindow {
             // ---- Apply / Cancel ----
             // Also the progress line.
             child(h, w!("STATIC"),
-                if in_app {
-                    "Applying saves your settings and restarts chibipop."
-                } else {
-                    "Applying saves your settings. Restart chibipop to use them."
-                },
+                "Applying saves your settings and restarts chibipop.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 16, ROW_H, ID_STATUS, f)?;
             y += ROW_H + 2;
-            child(h, w!("BUTTON"), if in_app { "Apply && Restart" } else { "Apply" },
+            child(h, w!("BUTTON"), "Apply && Restart",
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
-                  WIN_W - PAD - 238, y, 128, ROW_H + 4, ID_APPLY, f)?;
-            child(h, w!("BUTTON"), "Cancel", WS_TABSTOP,
-                  WIN_W - PAD - 104, y, 96, ROW_H + 4, ID_CANCEL, f)?;
-            // Far left, deliberately: Quit is the one button here that
-            // discards nothing but ends the app, and it must not sit next to
-            // the one people press by reflex. Only exists when there is an
-            // instance to quit - BACKLOG 7 left Quit stranded on a tray menu
-            // that does not open, which is why it is here at all.
-            if in_app {
-                child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
-                      PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
-            }
+                  WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
+            // Far left: not beside Apply.
+            child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
+                  PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
 
             update_list_buttons(h);
         }
