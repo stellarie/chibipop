@@ -1,277 +1,173 @@
 # chibipop
 
-A screen-wide Japanese pop-up dictionary for Windows. Hover any Japanese text
-— in a game, a PDF, a video, a screenshot, anything the display can render —
-and its definition appears beside it.
+**Hover over Japanese text anywhere on your screen and see what it means.**
 
-Text is acquired by OCR of a small region around the cursor, so it works on
-pixels, not on selectable text. No browser extension, no clipboard, no
-injection into the target application.
+It works on any Japanese your screen can show — games, videos, subtitles,
+PDFs, images, screenshots. The text doesn't need to be selectable or
+copyable, because chibipop reads the pixels rather than the document.
 
-## Requirements
+No browser extension, no copying and pasting, nothing installed into the app
+you're reading.
 
-- **Windows 10/11** with the Japanese OCR recognizer installed. Verify:
+---
 
-  ```bash
-  powershell -NoProfile -Command "[Windows.Media.Ocr.OcrEngine,Windows.Media,ContentType=WindowsRuntime] | Out-Null; [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag }"
-  ```
+## What you'll need
 
-  `ja` must appear in the output. If it does not, add the Japanese language
-  pack in Settings → Time & language.
-- **Rust** stable, MSVC toolchain (`stable-x86_64-pc-windows-msvc`).
-- **Python 3.9+** — only to build the dictionary database. Standard library
-  only, no pip install.
+- **Windows 10 or 11**, with Japanese language support added.
+- **Python 3.9 or newer** — used once, to build your dictionary.
+- **Your own dictionary files.** chibipop doesn't include any. See
+  [Dictionaries](#dictionaries).
 
-## Build
+Setup takes about five minutes, and you only do it once.
 
-```bash
-cargo build --release
+**Check your Japanese support first.** Paste this into PowerShell:
+
+```powershell
+[Windows.Media.Ocr.OcrEngine,Windows.Media,ContentType=WindowsRuntime] | Out-Null; [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag }
 ```
 
-Produces `target/release/chibipop.exe`.
+If `ja` appears in the list, you're ready. If it doesn't, open **Settings →
+Time & language → Language & region**, add **日本語 (Japanese)**, and run the
+check again.
 
-### Build the dictionary
+---
 
-The database is **not** in the repository (232 MiB). Build it from Yomitan
-format-3 archives — put the `.zip` files in one directory and point the
-builder at it:
+## Setting it up
+
+### 1. Download chibipop
+
+Get the latest **`chibipop-vX.Y.Z-windows-x64.zip`** from the
+[Releases page](../../releases), and unzip it anywhere you like — your
+Documents folder is fine.
+
+There's no installer. Everything chibipop needs lives in that one folder, and
+it doesn't write anything outside it.
+
+### 2. Install Python
+
+From [python.org](https://www.python.org/downloads/). Tick
+**"Add Python to PATH"** during the install.
+
+You need it for the next step only — chibipop itself doesn't use Python.
+
+### 3. Build your dictionary
+
+Put your Yomitan dictionary `.zip` files together in one folder. Then open a
+terminal **in the chibipop folder** and run:
 
 ```bash
-python tools/build-dict/build.py --dicts-dir "C:\Users\Stella\Documents\dicts" --out data/chibipop.sqlite
+python tools\build-dict\build.py --dicts-dir "C:\Users\You\Documents\dicts" --out data\chibipop.sqlite
 ```
 
-Frequency archives are detected automatically (by `frequencyMode` in
-`index.json`, or `Freq` in the filename); everything else is treated as a term
-dictionary, ranked in filename order. Takes roughly 70 seconds.
+It takes about 70 seconds, and you only do it again when you add or update a
+dictionary.
 
-`data/deconjugator.json` ships with the repository — no build step.
+*(This step can't be skipped or shipped for you — the dictionaries are 232 MB
+and aren't ours to hand out. See [Dictionaries](#dictionaries).)*
 
-## Usage
+---
+
+## Using it
+
+From a terminal opened **in the chibipop folder**, so it can find the
+dictionary you built:
 
 ```bash
-chibipop run
+chibipop.exe run
 ```
 
-Starts the popup. Hover Japanese text; the definition appears beside it.
-**The settings window opens by itself at startup** — Cancel or the X dismisses
-it and hovering works normally underneath. That is the way in for now because
-**right-clicking the tray icon does not open its menu** (a real bug, not a
-missing feature — [`docs/BACKLOG.md`](docs/BACKLOG.md) §7). `chibipop settings`
-reaches the same window without starting the popup at all. **Quit** is still on
-the tray menu, so until §7 is fixed, close chibipop from Task Manager or
-`Stop-Process -Name chibipop`.
+*(To start it with a double-click instead: right-click `chibipop.exe` → **Send
+to → Desktop (create shortcut)**, then right-click the new shortcut →
+**Properties**, and add a space and the word `run` to the end of the Target
+box.)*
 
-Three diagnostic subcommands, useful when something isn't working:
+Then just **hover over Japanese text**. The definition appears beside it.
 
-| Command | What it does |
+A few things worth knowing:
+
+- **The settings window opens by itself** when chibipop starts. Close it or
+  press Cancel — hovering works normally underneath.
+- **You can move your mouse into the popup** to read it. It stays put while
+  you're inside it, and disappears when you move away.
+- **Long entries scroll.** A thin bar appears on the right when there's more
+  to read; the wheel scrolls it.
+- **Reading a whole word works.** Hovering any character of 振り向けた shows
+  one definition for the whole verb, not a different one per character.
+- **To quit**, press **Quit chibipop** in the settings window.
+
+To open settings again later without starting the popup:
+
+```bash
+chibipop.exe settings
+```
+
+---
+
+## Settings
+
+Everything is in the settings window — you shouldn't need to edit any files.
+
+| Setting | What it does |
 |---|---|
-| `chibipop lookup 食べた` | Dictionary lookup only. No screen, no OCR. |
-| `chibipop probe --at 1200,400` | One point, every stage printed: capture region → OCR lines and word boxes → resolved span → hits. Tells apart "OCR saw nothing" from "OCR saw text but nothing near the cursor". |
-| `chibipop settings` | Opens the settings window on its own, no popup and no tray. The way in when the tray icon will not open its menu. Applying saves `chibipop.toml`; restart chibipop to use it. |
-| `chibipop watch` | Follows the cursor and prints a lookup whenever the hovered word changes. Ctrl-C to stop. |
+| **Trigger** | *Live* shows definitions as you hover. *Hold Shift* only shows them while Shift is held. |
+| **Theme** | Dark or light. Dark is the default, since most reading happens on dark screens. |
+| **Font** | Which font the popup uses. Only fonts that can display Japanese are listed. |
+| **Max height** | How tall the popup may grow, as a share of your screen. Longer entries scroll instead of growing past it. |
+| **Summary length** | How much of each extra definition is shown on its one-line row. |
+| **Box the word being defined** | Draws a faint outline around exactly the characters being defined, so you can see it picked the right word. |
+| **Scroll long entries with the wheel** | Lets the wheel scroll the popup while your cursor is inside it. |
+| **Hide the popup from screen capture** | Makes the popup invisible to screen recorders, screenshots and screen sharing — visible only to you. Off by default. |
+| **Dictionaries** | Drag the order around. The one at the top is shown first. |
+| **OCR passes per hover** | Leave at 1. Higher reads further ahead but can pick the wrong character. |
+| **Outline what each hover captured** | A diagnostic view showing where chibipop looked. Off by default. |
 
-**Paths.** `--dict` and `--rules` default to `data/chibipop.sqlite` and
-`data/deconjugator.json` *relative to the working directory*, so run from the
-repository root or pass absolute paths. `--config` is different on purpose: it
-defaults to `chibipop.toml` **beside the executable**, so a shortcut-launched
-`chibipop.exe` still finds its settings.
+Pressing **Apply** saves your settings and restarts chibipop, which takes
+about a fifth of a second. Your settings live in `chibipop.toml` beside
+`chibipop.exe`, and you can edit that by hand if you prefer.
 
-## Configuration
+---
 
-**The settings window opens at startup**, and covers every option below —
-trigger mode, theme, font, the popup's size caps, the three popup toggles, the
-dictionary order, and a Debug group for OCR passes and the scan overlay. It is
-modeless, so hovering works normally underneath and Cancel or the X dismisses
-it. **Apply saves and restarts chibipop**, which takes about 0.18 s; the button
-says so, and so does the line beside it. It reappears after Apply, because
-Apply restarts the process — a click each time, showing what was just saved.
+## If something doesn't work
 
-**`Quit chibipop`** is in that window too, far left, away from the button you
-press by reflex. It exists because the tray's own Quit is unreachable — see
-below.
+| What you're seeing | What's going on |
+|---|---|
+| **No popup appears at all** | Check `ja` shows up in the language check at the top. If chibipop won't start, it prints the reason — most often the dictionary hasn't been built yet. |
+| **Vertical text gives nonsense** | Vertical Japanese isn't supported yet. It can return a sentence stitched together from several unrelated columns. Being worked on. |
+| **Right-clicking the tray icon does nothing** | A known bug. Everything the menu offered is reachable anyway: settings open at startup, `chibipop settings` opens them any time, and Quit is a button in that window. |
+| **Text at the edge of a window won't read** | If the characters are physically cut off on screen, nothing can recover them. This is a limit, not a bug. |
+| **It defined a similar-looking word** | OCR occasionally misreads a character. Nudging the cursor a few pixels and hovering again usually fixes it. |
+| **The popup covers what I'm reading** | It's placed below and to the left of the word, flipping when it would run off screen. If it still gets in the way, lower **Max height**. |
+| **chibipop won't close** | Press **Quit chibipop** in the settings window. If that's gone, end the `chibipop` process in Task Manager. |
 
-`chibipop settings` opens the same window with no popup, no hooks and no OCR.
-There it reads **`Apply`** and "Restart chibipop to use them" rather than
-"Apply & Restart", and carries no Quit button: standalone, there is no running
-instance to restart or to quit, and a window must not offer what it cannot do.
-
-The window offers no free-text fields anywhere: every value is a choice from a
-list, so nothing you can select will fail to load later. Two deliberate
-consequences — a font that is configured but not installed is still offered and
-selected, and a hand-edited number that is off the list's step is offered as-is
-rather than snapped. Opening Settings and pressing Apply without touching
-anything never changes a setting.
-
-The TOML below remains the reference, and is still hand-editable — it is simply
-no longer the only way in. Malformed TOML is a hard error naming the file,
-never a silent fallback.
-
-```toml
-[trigger]
-mode = "live"           # "live" | "hold-shift"
-
-[popup]
-theme = "dark"          # "dark" | "light"
-exclude_from_capture = false
-max_height_percent = 45 # cap, as a percentage of the monitor's height
-summary_chars = 40      # collapsed-row summary length
-font = "Yu Gothic UI"
-highlight_match = true  # box the characters the popup is defining
-scroll_popup = true     # let the wheel scroll a popup that overflows
-
-[dictionaries]
-display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
-
-[ocr]
-max_ocr_passes = 1      # 1 = no forward tiling (the default); 2+ enables it
-
-[debug]
-show_scan_region = false   # outline what each hover captured - see the scan-overlay spec
-```
-
-**`exclude_from_capture`** is **off by default**, so the popup records normally.
-Set it to `true` and the OS hides the popup from *every* capture API —
-screen recorders, screenshots, screen sharing, remote desktop — while it stays
-plainly visible on your own display. Either way chibipop hides the popup around
-its own OCR captures, so it never reads its own rendered text back into the
-next lookup. Exclusion was the original default; measured in real use the
-hide/reshow guard costs no noticeable lookup latency, so being recordable won.
-
-**`max_ocr_passes`** is how many screen captures each hover costs: one to find
-the word under the cursor, the rest to read forward from it. **It defaults to
-`1`, meaning no forward tiling.**
-
-Tiling reads further ahead — roughly 10 characters past the cursor rather than
-7 — but measured on 2026-07-28 it sometimes resolves *a different character
-than the one you are pointing at*, and a longer reading of the wrong word is
-worse than a short reading of the right one. Over nine hovers on one line,
-single-pass got the character right 9 times out of 9; three passes managed 4.
-Set it to `2` or more to turn tiling back on.
-
-Every setting is read **once at startup**. Edit the TOML with chibipop stopped,
-or use the settings window — pressing Apply there rewrites the whole file from
-memory, so it would overwrite a hand-edit made while it was running.
-
-**`highlight_match`** draws **one** faint box around the characters the popup
-is currently defining, and is **on by default**. Hover 可哀想 and the box
-surrounds 可哀想 — the visible answer to "is it defining the word I am pointing
-at?", which otherwise means reading numbers out of `probe`. It follows the
-*match*, so a deconjugated verb is boxed across everything it consumed
-(食べさせられた, not just 食べ).
-
-It does not draw on a hover where the match cannot be located honestly: no
-dictionary hit, or `max_ocr_passes ≥ 2`, where text is stitched from several
-captures that do not carry their character boxes with them. An absent box is
-the designed behaviour there; a misplaced one would not be.
-
-**The popup stays put while you read it.** Move the cursor from the word into
-the popup and it holds still — the hovered character, the gap, and the popup
-itself count as one region, and while the cursor is anywhere in it chibipop
-does no new lookup at all. Move fully off and hovering resumes. A word whose
-answer has not changed is not redrawn either, so holding still does not flicker.
-
-The held region is the characters the entry actually *matched*, not just the one
-glyph under the cursor, so scanning along a conjugated verb shows one popup
-rather than one per character. It also allows the few pixels of vertical slack
-that resolve the same character anyway, which is what stopped small kana from
-flickering.
-
-One deliberate exception: moving *sideways* past the end of the matched word
-shows the next word, rather than holding the previous popup. That is what you
-want when scanning a line, and it is why the held area is the word plus the
-popup rather than the box enclosing both.
-
-**`scroll_popup`** lets the wheel scroll a popup whose content overflows the
-`max_height_percent` cap, and is **on by default**. A thin scrollbar appears at
-the right edge when there is more to read; the window itself never grows.
-
-While the cursor is inside such a popup, chibipop takes the wheel so the window
-underneath does not scroll at the same time. It takes it **only** then — cursor
-on the word rather than the popup, or content that fits, and the wheel behaves
-normally. Setting `scroll_popup = false` stops chibipop touching the wheel at
-all while still drawing the scrollbar, so you can see there is more even though
-you cannot reach it.
-
-**Dictionary order is matched by *name*, and the settings window says so.** The
-TOML stores case-insensitive substrings rather than full names, because a
-rebuilt Jitendex changes its own name (the release date is part of it). The
-window preserves whatever substring you already have, so reordering never
-rewrites your entries — and if one of them stops matching any installed
-dictionary, it tells you which, because the visible symptom otherwise is that
-dictionary quietly sorting last.
-
-**`show_scan_region`** is the separate *debug* view: a faint outline around
-every region a hover captured — pass 1's box, each forward tile, and the word
-it resolved. Turn it on when OCR is behaving oddly and you want to see what it
-actually looked at rather than infer it. It is **off by default**, and the two
-settings are independent: with only `highlight_match` on you get one box, not
-four. `probe --show-region` shows the capture outlines for a single coordinate
-without running the app.
-
-## Tests
-
-```bash
-cargo test
-```
-
-**After any large change, work through
-[`docs/REGRESSION.md`](docs/REGRESSION.md)** — a cheapest-first checklist: the
-automated gate, then what can be verified against real pixels with `probe`, then
-the dozen things only a human at the keyboard can check. It also lists the traps
-that have bitten more than once.
-
-241 tests. Plus the dictionary builder, from `tools/build-dict`:
-
-```bash
-python -m unittest discover -s tests
-```
-
-48 tests.
-
-## Status
-
-M0–M3 are built and merged: OCR text acquisition, the lookup core
-(deconjugation, ranking, SQLite), the popup, and a native settings window
-covering every option plus dictionary order.
-M4 (UI Automation tier, for a cheaper path than OCR where the text is already
-selectable) and M5 (DPI and Magpie polish) are not started.
-
-**Known limits**, measured rather than assumed:
-
-- **Vertical text does not work at the shipped capture shape.** Worse than reading
-  short: the 500×100 box spans several columns, so it can return a sentence spliced
-  out of unrelated ones. Measured 2/6 correct hovers; a transposed 100×500 probe
-  scores 6/6. The fix has its own round —
-  [measurement](docs/superpowers/findings/2026-07-28-vertical-text-measurement.md).
-- **Forward tiling is off** (`max_ocr_passes = 1`) because it sometimes resolved a
-  different character than the one under the cursor. The rework is designed and
-  reviewed, not built — see [`docs/BACKLOG.md`](docs/BACKLOG.md).
-- **Text clipped by a window edge cannot be read** at any capture shape. The glyphs
-  are physically incomplete on screen; this is a ceiling, not a bug.
-- **Right-clicking the tray icon does not open its menu.** A real bug with two
-  unproven suspects and a one-click diagnosis, written up in
-  [`docs/BACKLOG.md`](docs/BACKLOG.md) §7. Everything the menu offered is
-  reachable anyway — settings open at startup, `chibipop settings` opens them
-  without the popup, and Quit is a button in that window. The lesson it cost:
-  posting `WM_TRAYICON` by hand proves the *handler* works and says nothing
-  about whether Windows *delivers* a real click.
-- **The 50 MB memory target is not confirmed met.** The OCR→lookup path measures at
-  37 MB working set / 15 MB private, flat over 417 hovers with no handle growth, and
-  the app idles at 12 MB. But sustained real hovering also drives the Direct2D text
-  renderer, and that configuration measured 94.8 MB / 60 MB at M3 and has not been
-  re-measured since. Binary size is 3.3 MB; CPU is under 1% while hovering and
-  0.000% idle.
-- **Sticky hover, scrolling and the anti-flicker check are shipped but not yet
-  accepted.** Their unit coverage is thorough and the wheel's swallow decision is
-  verified on both branches, but every *hover* behaviour needs a human — synthetic
-  mouse movement cannot reach a global low-level hook. The nine-item script is in
-  [the acceptance findings](docs/superpowers/findings/2026-07-28-popup-interaction-acceptance.md).
-
-Design specs, plans, and verification findings live in `docs/superpowers/`;
-deferred work with its evidence lives in [`docs/BACKLOG.md`](docs/BACKLOG.md).
+---
 
 ## Dictionaries
 
-None are redistributed here. The shipped build uses Jitendex (CC BY-SA 4.0),
-大辞林 第四版 (© Sanseido), and jiten_freq_global — you supply your own copies
-and build the database locally.
+chibipop ships **no dictionaries** — you supply your own, and they stay on
+your machine.
+
+The build these instructions were written against used:
+
+- **Jitendex** — free, CC BY-SA 4.0. A good Japanese→English starting point.
+- **大辞林 第四版** — © Sanseido. Japanese→Japanese.
+- **jiten_freq_global** — word-frequency data, used to rank results.
+
+Any Yomitan-format dictionary should work. Frequency lists are detected
+automatically.
+
+---
+
+## For developers
+
+**Building from source** needs [Rust](https://rustup.rs) (stable, MSVC) and
+nothing else — `cargo build --release`. The executable's icon is a committed
+resource, so no Windows SDK is required.
+
+The configuration file reference, the diagnostic subcommands, how to run the
+tests, and the measured limits all live in
+[`docs/REFERENCE.md`](docs/REFERENCE.md). How releases are cut is in
+[`docs/RELEASING.md`](docs/RELEASING.md).
+
+Design specs, plans and verification findings are in `docs/superpowers/`;
+work that is deliberately not built yet, with its evidence, is in
+[`docs/BACKLOG.md`](docs/BACKLOG.md).

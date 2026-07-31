@@ -99,8 +99,8 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
 - **Ruby hover on pass 1.** `nearest_line` keeps the tiled path from splicing furigana, but
   `hit_scan` on pass 1 will happily resolve a ruby character if the cursor is nearer to it than
   to the base text. Reproduced live at (3550,1450) → `ん` from `かんたん`.
-- **Text clipped by a window edge is unrecoverable** at any capture shape. Worth a line in the
-  README if users report it as a bug; it is a ceiling, not a defect.
+- ~~**Text clipped by a window edge is unrecoverable**~~ at any capture shape. **DONE** — it is
+  now a row in the README's troubleshooting table. It is a ceiling, not a defect.
 
 ---
 

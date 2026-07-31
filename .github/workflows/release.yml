@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and package
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag that disagrees with Cargo.toml ships a binary whose --version
+      # lies about which build it is. Cheaper to catch here than in a bug
+      # report.
+      - name: Tag must match Cargo.toml
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "tag $tag, Cargo.toml $crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
+      # Tagging a red commit is the one mistake a release process must not
+      # make quietly.
+      - name: Tests
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
+
+      # Everything the binary needs at runtime, plus the dictionary builder -
+      # the database itself is 232 MiB and cannot be redistributed, so the
+      # user still builds it from their own Yomitan archives.
+      - name: Assemble
+        shell: bash
+        run: |
+          name="chibipop-${GITHUB_REF_NAME}-windows-x64"
+          echo "PKG=$name" >> "$GITHUB_ENV"
+          mkdir -p "dist/$name/data" "dist/$name/tools/build-dict"
+          cp target/release/chibipop.exe "dist/$name/"
+          cp data/deconjugator.json     "dist/$name/data/"
+          cp tools/build-dict/*.py      "dist/$name/tools/build-dict/"
+          cp README.md                  "dist/$name/"
+          find "dist/$name" -type f | sort
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist/$env:PKG" -DestinationPath "dist/$env:PKG.zip"
+
+      # Draft on purpose: a published release is hard to unpublish, and the
+      # zip is worth opening once before anyone downloads it. Drop --draft
+      # here to publish straight away.
+      - name: Publish as a draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/$PKG.zip" \
+            --title "chibipop $GITHUB_REF_NAME" \
+            --generate-notes \
+            --draft
