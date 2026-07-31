@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "chibipop", about = "Japanese lookup engine")]
+#[command(name = "chibipop", version, about = "Japanese lookup engine")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

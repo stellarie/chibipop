@@ -79,8 +79,6 @@ Push-Location assets; & $rc.FullName /nologo /fo chibipop.res chibipop.rc; Pop-L
 
 ## Open decisions
 
-- **There is no `LICENSE` file.** A release without one leaves recipients
-  with no stated terms. Worth settling before the first public tag.
 - **The package is self-contained.** `chibipop build-dict` is in the binary
   and the settings window drives it, so a download needs no toolchain at all.
   The Python builder was deleted on 2026-07-31, once the Rust one had been

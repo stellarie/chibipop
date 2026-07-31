@@ -176,3 +176,15 @@ tests, and the measured limits all live in
 Design specs, plans and verification findings are in `docs/superpowers/`;
 work that is deliberately not built yet, with its evidence, is in
 [`docs/BACKLOG.md`](docs/BACKLOG.md).
+
+## Licence
+
+chibipop is free software under the **GNU General Public License v3.0 or
+later** — see [`LICENSE`](LICENSE). You may use, study, share and modify it;
+if you distribute a modified version, it has to come with its source under
+the same terms.
+
+The bundled deconjugation rules (`data/deconjugator.json`) are public domain.
+Dictionaries are not included and are not ours to give: you supply your own
+Yomitan archives.
+

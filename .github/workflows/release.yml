@@ -57,6 +57,7 @@ jobs:
           cp target/release/chibipop.exe "dist/$name/"
           cp data/deconjugator.json     "dist/$name/data/"
           cp README.md                  "dist/$name/"
+          cp LICENSE                    "dist/$name/"
           find "dist/$name" -type f | sort
 
       - name: Zip
