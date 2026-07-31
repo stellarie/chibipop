@@ -33,6 +33,10 @@ pub struct SettingsForm {
     ///
     /// Listed, never ordered.
     pub unreadable: Vec<String>,
+    pub anki_enabled: bool,
+    pub anki_url: String,
+    pub anki_deck: String,
+    pub anki_model: String,
 }
 
 /// An import waiting for Apply.
@@ -233,6 +237,10 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         staged_removes: Vec::new(),
         library_empty: false,
         unreadable: Vec::new(),
+        anki_enabled: cfg.anki.enabled,
+        anki_url: cfg.anki.url.clone(),
+        anki_deck: cfg.anki.deck.clone(),
+        anki_model: cfg.anki.model.clone(),
     }
 }
 
@@ -252,6 +260,10 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup.exclude_from_capture = form.exclude_from_capture;
     out.ocr.max_ocr_passes = form.max_ocr_passes.clamp(PASSES_RANGE.0, PASSES_RANGE.1);
     out.debug.show_scan_region = form.show_scan_region;
+    out.anki.enabled = form.anki_enabled;
+    out.anki.url = form.anki_url.clone();
+    out.anki.deck = form.anki_deck.clone();
+    out.anki.model = form.anki_model.clone();
     out.dictionaries.display_order = form
         .dict_names
         .iter()
@@ -419,6 +431,10 @@ mod tests {
         cfg.popup.exclude_from_capture = true;
         cfg.ocr.max_ocr_passes = 3;
         cfg.debug.show_scan_region = true;
+        cfg.anki.enabled = true;
+        cfg.anki.url = "http://localhost:9999".into();
+        cfg.anki.deck = "Mining".into();
+        cfg.anki.model = "Custom".into();
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
     }

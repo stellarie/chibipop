@@ -1,5 +1,6 @@
 //! Two threads: pump and worker.
 
+use crate::anki;
 use crate::config::Config;
 use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
@@ -17,10 +18,11 @@ use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{max_scroll, Renderer};
-use crate::ui::settings_window::{SettingsOutcome, SettingsWindow};
+use crate::ui::settings_window::{SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{CaptureExclusion, Popup};
+use crate::update;
 use anyhow::{Context, Result};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -179,6 +181,7 @@ pub fn settings_only(
                 DispatchMessageW(&msg);
             }
         }
+        service_settings_click(&window);
 
         if rebuild.is_some() {
             // Not while the child writes.
@@ -365,6 +368,31 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     w.set_status("The rebuild failed. Your dictionary is unchanged.");
     eprintln!("chibipop: the rebuild failed: {e:#}");
     eprintln!("chibipop: the dictionary in use was not touched.");
+}
+
+/// Runs the Anki/update click.
+fn service_settings_click(w: &SettingsWindow) {
+    match w.take_click() {
+        Some(SettingsClick::AnkiTest) => {
+            let url = w.anki_url();
+            match anki::check_connection(&url) {
+                Ok(true) => w.set_status("AnkiConnect is reachable."),
+                Ok(false) => w.set_status("AnkiConnect did not respond."),
+                Err(e) => w.set_status(&format!("Anki test failed: {e:#}")),
+            }
+        }
+        Some(SettingsClick::CheckUpdate) => match update::check(env!("CARGO_PKG_VERSION")) {
+            Ok(None) => w.set_status("You already have the latest version."),
+            Ok(Some(release)) => match update::download_and_replace(&release) {
+                Ok(()) => {
+                    w.set_status(&format!("Updated to {}. Restart to use it.", release.tag));
+                }
+                Err(e) => w.set_status(&format!("Update to {} failed: {e:#}", release.tag)),
+            },
+            Err(e) => w.set_status(&format!("Update check failed: {e:#}")),
+        },
+        None => {}
+    }
 }
 
 /// Run until the user quits.
@@ -597,7 +625,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
-            if unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool() {
+            let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
+            service_settings_click(w);
+            if handled {
                 continue;
             }
         }

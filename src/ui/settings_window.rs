@@ -32,6 +32,13 @@ pub enum SettingsOutcome {
     Quit,
 }
 
+/// A click app.rs must service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsClick {
+    AnkiTest,
+    CheckUpdate,
+}
+
 // ---- control ids ----
 
 const ID_APPLY: i32 = 100;
@@ -57,9 +64,15 @@ const ID_FREQ_ADD: i32 = 120;
 const ID_FREQ_REMOVE: i32 = 121;
 const ID_STATUS: i32 = 122;
 const ID_MAX_WIDTH: i32 = 123;
+const ID_CHECK_UPDATE: i32 = 124;
+const ID_ANKI_ENABLED: i32 = 125;
+const ID_ANKI_URL: i32 = 126;
+const ID_ANKI_DECK: i32 = 127;
+const ID_ANKI_MODEL: i32 = 128;
+const ID_ANKI_TEST: i32 = 129;
 
 /// What a rebuild disables.
-const WHILE_BUSY: [i32; 10] = [
+const WHILE_BUSY: [i32; 12] = [
     ID_APPLY,
     ID_QUIT,
     ID_DICTS,
@@ -70,6 +83,8 @@ const WHILE_BUSY: [i32; 10] = [
     ID_FREQS,
     ID_FREQ_ADD,
     ID_FREQ_REMOVE,
+    ID_ANKI_TEST,
+    ID_CHECK_UPDATE,
 ];
 
 // ---- layout, 96-DPI px ----
@@ -131,6 +146,9 @@ thread_local! {
 
     // The pending Add or Remove.
     static ACTION: Cell<Option<(isize, Action)>> = const { Cell::new(None) };
+
+    // Pending Anki/update click.
+    static CLICK: Cell<Option<(isize, SettingsClick)>> = const { Cell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -146,6 +164,10 @@ fn record_action(hwnd: HWND, action: Action) {
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
     }
+}
+
+fn record_click(hwnd: HWND, click: SettingsClick) {
+    CLICK.with(|c| c.set(Some((hwnd.0 as isize, click))));
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -170,6 +192,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
                 ID_FREQ_ADD => record_action(hwnd, Action::Add),
                 ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
+                ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
+                ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 _ => {}
             }
             LRESULT(0)
@@ -448,6 +472,24 @@ unsafe fn list_rows(hwnd: HWND, id: i32) -> Option<Vec<String>> {
     }
 }
 
+/// An edit or combo's own text.
+unsafe fn window_text(ctrl: HWND) -> String {
+    // SAFETY: `ctrl` is a live control the caller
+    // obtained from `GetDlgItem`; the buffer is sized
+    // to the length `GetWindowTextLengthW` itself
+    // reported, which is the contract `GetWindowTextW`
+    // writes against.
+    unsafe {
+        let len = GetWindowTextLengthW(ctrl);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let n = GetWindowTextW(ctrl, &mut buf);
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
+}
+
 /// Pick .zip archives.
 ///
 /// Empty when cancelled.
@@ -622,6 +664,28 @@ impl SettingsWindow {
             }
             _ => None,
         })
+    }
+
+    /// Anki/update click, if any.
+    pub fn take_click(&self) -> Option<SettingsClick> {
+        CLICK.with(|c| match c.get() {
+            Some((h, k)) if h == self.hwnd.0 as isize => {
+                c.set(None);
+                Some(k)
+            }
+            _ => None,
+        })
+    }
+
+    /// The Anki URL field's text.
+    pub fn anki_url(&self) -> String {
+        // SAFETY: `ID_ANKI_URL` is a live child of
+        // `self.hwnd`, created in `build`.
+        unsafe {
+            GetDlgItem(Some(self.hwnd), ID_ANKI_URL)
+                .map(|c| window_text(c))
+                .unwrap_or_default()
+        }
     }
 
     /// Run a pending button.
@@ -1023,6 +1087,45 @@ impl SettingsWindow {
                 Some(WPARAM(if form.show_scan_region { 1 } else { 0 })), None);
             y += ROW_H + 18;
 
+            // ---- Anki ----
+            group("Anki", y, 5 * ROW_H + 34)?;
+            y += 20;
+            let anki_chk = child(h, w!("BUTTON"), "Enable Anki integration",
+                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_ANKI_ENABLED, f)?;
+            SendMessageW(anki_chk, BM_SETCHECK,
+                Some(WPARAM(if form.anki_enabled { 1 } else { 0 })), None);
+            y += ROW_H;
+            label("AnkiConnect URL", y)?;
+            child(h, w!("EDIT"), &form.anki_url,
+                WS_TABSTOP | WS_BORDER,
+                FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_URL, f)?;
+            y += ROW_H;
+            label("Deck", y)?;
+            let deck = child(h, w!("COMBOBOX"), &form.anki_deck,
+                WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 160, ID_ANKI_DECK, f)?;
+            SendMessageW(deck, WM_SETTEXT, None,
+                Some(LPARAM(wide(&form.anki_deck).as_ptr() as isize)));
+            y += ROW_H;
+            label("Note type", y)?;
+            let model = child(h, w!("COMBOBOX"), &form.anki_model,
+                WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 160, ID_ANKI_MODEL, f)?;
+            SendMessageW(model, WM_SETTEXT, None,
+                Some(LPARAM(wide(&form.anki_model).as_ptr() as isize)));
+            y += ROW_H;
+            child(h, w!("BUTTON"), "Test connection", WS_TABSTOP,
+                  PAD, y, 116, ROW_H, ID_ANKI_TEST, f)?;
+            y += ROW_H + 8 + GROUP_GAP;
+
+            // ---- Updates ----
+            group("Updates", y, ROW_H + 24)?;
+            y += 20;
+            child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
+                  PAD, y, 136, ROW_H, ID_CHECK_UPDATE, f)?;
+            y += ROW_H + 8 + GROUP_GAP;
+
             // ---- Apply / Cancel ----
             // Also the progress line.
             child(h, w!("STATIC"),
@@ -1060,6 +1163,9 @@ impl SettingsWindow {
             let pick = |values: &[i64], id: i32, fallback: i64| -> i64 {
                 let i = combo_index(id);
                 if i < 0 { fallback } else { *values.get(i as usize).unwrap_or(&fallback) }
+            };
+            let text_of = |id: i32| -> String {
+                GetDlgItem(Some(h), id).map(|c| window_text(c)).unwrap_or_default()
             };
 
             // Empty is not missing.
@@ -1105,6 +1211,10 @@ impl SettingsWindow {
                 staged_removes: staged.staged_removes.clone(),
                 library_empty: staged.library_empty,
                 unreadable: staged.unreadable.clone(),
+                anki_enabled: checked(ID_ANKI_ENABLED),
+                anki_url: text_of(ID_ANKI_URL),
+                anki_deck: text_of(ID_ANKI_DECK),
+                anki_model: text_of(ID_ANKI_MODEL),
             }
         }
     }
@@ -1135,6 +1245,11 @@ impl Drop for SettingsWindow {
             }
         });
         ACTION.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        CLICK.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
