@@ -206,7 +206,12 @@ unsafe fn ui_font() -> Option<HFONT> {
         return None;
     }
     // SAFETY: `lfMessageFont` was populated by the call above.
-    unsafe { CreateFontIndirectW(&ncm.lfMessageFont) }.into()
+    let font = unsafe { CreateFontIndirectW(&ncm.lfMessageFont) };
+    if font.is_invalid() {
+        None
+    } else {
+        Some(font)
+    }
 }
 
 /// Every installed font family that can render Japanese.

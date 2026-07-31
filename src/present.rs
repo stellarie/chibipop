@@ -226,7 +226,10 @@ fn dict_name_for(dict_id: i64, dicts: &[DictInfo]) -> String {
 /// no order at all.
 pub fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> {
     let lower = dict_name.to_lowercase();
-    dict_order.iter().position(|s| lower.contains(&s.to_lowercase()))
+    // A blank entry is a substring of everything.
+    dict_order
+        .iter()
+        .position(|s| !s.trim().is_empty() && lower.contains(&s.to_lowercase()))
 }
 
 /// Cuts `s` to at most `max_chars` characters (not bytes - multi-byte
@@ -360,6 +363,15 @@ mod tests {
         let hits = vec![hit("A", "あ", 1, "short"), hit("B", "い", 1, "also short")];
         let p = build(&hits, &dicts(), &cfg());
         assert_eq!("also short", p.collapsed[0].summary);
+    }
+
+    /// A blank entry matches every name.
+    #[test]
+    fn a_blank_order_entry_ranks_nothing() {
+        let blank = vec![String::new()];
+        assert_eq!(None, dict_order_rank("Jitendex.org", &blank));
+        let with_blank = vec![String::new(), "Jitendex".to_string()];
+        assert_eq!(Some(1), dict_order_rank("Jitendex.org", &with_blank));
     }
 
     #[test]

@@ -51,6 +51,8 @@
 use crate::present::Presentation;
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB, SCROLLBAR_W};
 use anyhow::{Context, Result};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -144,6 +146,56 @@ pub struct Renderer {
     /// real pixel size. `measure` never touches this - it is pure
     /// DirectWrite layout, no device involved.
     target: Option<ID2D1HwndRenderTarget>,
+    /// Text formats, reused across paints.
+    formats: RefCell<FormatCache>,
+}
+
+/// One font's formats, by size.
+#[derive(Default)]
+struct FormatCache {
+    font: String,
+    by_size: HashMap<u32, IDWriteTextFormat>,
+}
+
+/// Creates one format per font and size.
+///
+/// `CreateTextFormat` ran once per line, per paint, per hover. Alignment is
+/// set on the *layout*, never the format, so sharing one is safe.
+fn text_format(
+    dwrite: &IDWriteFactory,
+    formats: &RefCell<FormatCache>,
+    font: &str,
+    size: f32,
+) -> windows::core::Result<IDWriteTextFormat> {
+    let key = size.to_bits();
+    {
+        let cache = formats.borrow();
+        if cache.font == font {
+            if let Some(f) = cache.by_size.get(&key) {
+                return Ok(f.clone());
+            }
+        }
+    }
+
+    let created = unsafe {
+        dwrite.CreateTextFormat(
+            &HSTRING::from(font),
+            None,
+            DWRITE_FONT_WEIGHT_REGULAR,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("ja-JP"),
+        )
+    }?;
+
+    let mut cache = formats.borrow_mut();
+    if cache.font != font {
+        cache.font = font.to_string();
+        cache.by_size.clear();
+    }
+    cache.by_size.insert(key, created.clone());
+    Ok(created)
 }
 
 impl Renderer {
@@ -156,7 +208,13 @@ impl Renderer {
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
                 .context("DWriteCreateFactory")?;
-        Ok(Renderer { hwnd, d2d_factory, dwrite_factory, target: None })
+        Ok(Renderer {
+            hwnd,
+            d2d_factory,
+            dwrite_factory,
+            target: None,
+            formats: RefCell::default(),
+        })
     }
 
     /// Computes the popup's `(width, height)` for `p`/`theme` before the
@@ -199,13 +257,13 @@ impl Renderer {
         let content_w = (max_w - 2 * theme.padding).max(0) as f32;
         let used_h = layout_pass(
             &self.dwrite_factory,
+            &self.formats,
             None,
             &elems,
             theme,
             0.0,
             0.0,
             content_w,
-            f32::MAX,
             0.0,
         )
         .context("measuring popup content")?;
@@ -312,6 +370,7 @@ impl Renderer {
             .expect("ensure_target must run before paint_once");
 
         unsafe { target.BeginDraw() };
+        let scope = DrawScope { target: Some(target) };
 
         // `BeginDraw`/`EndDraw` must always be paired, even when something
         // in between fails - an early `?` return from this span (e.g.
@@ -338,17 +397,16 @@ impl Renderer {
             }
 
             let content_w = (w - 2 * theme.padding).max(0) as f32;
-            let content_h = (h - 2 * theme.padding).max(0) as f32;
             let origin = theme.padding as f32;
             let used = layout_pass(
                 &self.dwrite_factory,
+                &self.formats,
                 Some(target),
                 &elems,
                 theme,
                 origin,
                 origin,
                 content_w,
-                content_h,
                 scroll as f32,
             )?;
 
@@ -369,7 +427,7 @@ impl Renderer {
             Ok(())
         })();
 
-        let end_result = unsafe { target.EndDraw(None, None) };
+        let end_result = scope.end();
 
         // Prioritise the draw-phase error when both fail - it is usually
         // more specific (e.g. a font/format failure) than whatever EndDraw
@@ -377,6 +435,31 @@ impl Renderer {
         // must still surface whatever EndDraw returns, since that is where
         // device-lost is authoritatively signalled.
         draw_result.and(end_result)
+    }
+}
+
+/// Ends the draw on drop.
+struct DrawScope<'a> {
+    target: Option<&'a ID2D1HwndRenderTarget>,
+}
+
+impl DrawScope<'_> {
+    /// Ends it, returning its result.
+    fn end(mut self) -> windows::core::Result<()> {
+        match self.target.take() {
+            Some(t) => unsafe { t.EndDraw(None, None) },
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for DrawScope<'_> {
+    fn drop(&mut self) {
+        if let Some(t) = self.target {
+            unsafe {
+                let _ = t.EndDraw(None, None);
+            }
+        }
     }
 }
 
@@ -485,20 +568,18 @@ fn build_elements(p: &Presentation, theme: &Theme) -> Vec<Elem> {
 /// panel's top-left corner in paint mode; irrelevant, so `0.0, 0.0`, in
 /// measure mode, since nothing is actually drawn).
 ///
-/// Returns the total content height used (always `<= content_h`) and
-/// whether anything was cut off.
+/// The content height used.
 fn layout_pass(
     dwrite: &IDWriteFactory,
+    formats: &RefCell<FormatCache>,
     target: Option<&ID2D1HwndRenderTarget>,
     elems: &[Elem],
     theme: &Theme,
     origin_x: f32,
     origin_y: f32,
     content_w: f32,
-    content_h: f32,
     scroll: f32,
 ) -> windows::core::Result<f32> {
-    let font_name = HSTRING::from(theme.font_name.as_str());
     let mut y = 0.0f32;
     let mut reserved_w = 0.0f32;
 
@@ -520,11 +601,8 @@ fn layout_pass(
                 h
             }
             Elem::Corner(line) => {
-                let (layout, m) = build_text_layout(dwrite, &font_name, line, content_w)?;
-                // Decoration: skipped when it cannot fit.
-                if m.height > content_h && scroll == 0.0 {
-                    continue;
-                }
+                let (layout, m) =
+                    build_text_layout(dwrite, formats, &theme.font_name, line, content_w)?;
                 unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
                 if let Some(t) = target {
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
@@ -543,7 +621,8 @@ fn layout_pass(
             Elem::Text(line) => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                let (layout, m) = build_text_layout(dwrite, &font_name, line, avail_w)?;
+                let (layout, m) =
+                    build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
                 let h = m.height;
                 y += line.top_gap;
                 if let Some(t) = target {
@@ -573,21 +652,12 @@ fn layout_pass(
 /// string wraps.
 fn build_text_layout(
     dwrite: &IDWriteFactory,
-    font_name: &HSTRING,
+    formats: &RefCell<FormatCache>,
+    font: &str,
     line: &Line,
     max_w: f32,
 ) -> windows::core::Result<(IDWriteTextLayout, DWRITE_TEXT_METRICS)> {
-    let format = unsafe {
-        dwrite.CreateTextFormat(
-            font_name,
-            None,
-            DWRITE_FONT_WEIGHT_REGULAR,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            line.size,
-            w!("ja-JP"),
-        )
-    }?;
+    let format = text_format(dwrite, formats, font, line.size)?;
     let wide: Vec<u16> = line.text.encode_utf16().collect();
     let layout = unsafe { dwrite.CreateTextLayout(&wide, &format, max_w.max(1.0), f32::MAX) }?;
     let mut metrics = DWRITE_TEXT_METRICS::default();

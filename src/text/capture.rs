@@ -6,7 +6,8 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
+    HGDIOBJ, SRCCOPY,
 };
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -37,38 +38,91 @@ pub fn capture_upscaled(region: PhysRect) -> Result<(Vec<u8>, i32, i32)> {
     Ok(upscale(&raw, region.w, region.h))
 }
 
-fn capture_region(region: PhysRect) -> Result<Vec<u8>> {
-    unsafe {
-        let screen_dc = GetDC(None); // NULL hwnd => the whole virtual screen
-        let mem_dc = CreateCompatibleDC(Some(screen_dc));
-        let bitmap = CreateCompatibleBitmap(screen_dc, region.w, region.h);
-        let old = SelectObject(mem_dc, bitmap.into());
+/// Releases the screen DC.
+struct ScreenDc(HDC);
 
-        let blt = BitBlt(
-            mem_dc, 0, 0, region.w, region.h,
-            Some(screen_dc), region.x, region.y, SRCCOPY,
-        );
+impl Drop for ScreenDc {
+    fn drop(&mut self) {
+        unsafe { ReleaseDC(None, self.0) };
+    }
+}
+
+/// Deletes the memory DC.
+struct MemDc(HDC);
+
+impl Drop for MemDc {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteDC(self.0);
+        }
+    }
+}
+
+/// Deletes the bitmap.
+struct Bitmap(HBITMAP);
+
+impl Drop for Bitmap {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(self.0.into());
+        }
+    }
+}
+
+/// Reselects the DC's old object.
+struct Selection {
+    dc: HDC,
+    prev: HGDIOBJ,
+}
+
+impl Drop for Selection {
+    fn drop(&mut self) {
+        unsafe { SelectObject(self.dc, self.prev) };
+    }
+}
+
+/// Guards free every handle.
+fn capture_region(region: PhysRect) -> Result<Vec<u8>> {
+    let (w, h) = (region.w, region.h);
+    if w <= 0 || h <= 0 {
+        anyhow::bail!("capture region has a non-positive extent: {w}x{h}");
+    }
+    let len = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|n| n.checked_mul(4))
+        .context("capture region is too large to allocate")?;
+
+    unsafe {
+        let screen = ScreenDc(GetDC(None)); // NULL hwnd => the whole virtual screen
+        if screen.0.is_invalid() {
+            anyhow::bail!("GetDC(None) returned a null device context");
+        }
+        let mem = MemDc(CreateCompatibleDC(Some(screen.0)));
+        if mem.0.is_invalid() {
+            anyhow::bail!("CreateCompatibleDC returned a null device context");
+        }
+        let bitmap = Bitmap(CreateCompatibleBitmap(screen.0, w, h));
+        if bitmap.0.is_invalid() {
+            anyhow::bail!("CreateCompatibleBitmap({w}, {h}) returned a null bitmap");
+        }
+        let _sel = Selection { dc: mem.0, prev: SelectObject(mem.0, bitmap.0.into()) };
+
+        BitBlt(mem.0, 0, 0, w, h, Some(screen.0), region.x, region.y, SRCCOPY)
+            .context("BitBlt of the screen region")?;
 
         let mut bmi = BITMAPINFO::default();
         bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-        bmi.bmiHeader.biWidth = region.w;
-        bmi.bmiHeader.biHeight = -region.h; // negative => top-down rows
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h; // negative => top-down rows
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB.0;
 
-        let mut buf = vec![0u8; (region.w as usize) * (region.h as usize) * 4];
+        let mut buf = vec![0u8; len];
         let scanlines = GetDIBits(
-            mem_dc, bitmap, 0, region.h as u32,
+            mem.0, bitmap.0, 0, h as u32,
             Some(buf.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS,
         );
-
-        SelectObject(mem_dc, old);
-        let _ = DeleteObject(bitmap.into());
-        let _ = DeleteDC(mem_dc);
-        ReleaseDC(None, screen_dc);
-
-        blt.context("BitBlt of the screen region")?;
         if scanlines == 0 {
             anyhow::bail!("GetDIBits copied no scanlines - capture was empty");
         }

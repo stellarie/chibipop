@@ -9,12 +9,9 @@
 use crate::config::{Config, TriggerMode};
 use crate::present::{dict_order_rank, DictInfo};
 
-/// Popup height cap, as a percentage of the monitor's height.
-pub const MAX_HEIGHT_RANGE: (u8, u8) = (10, 90);
-/// Collapsed-row summary length, in characters.
-pub const SUMMARY_RANGE: (usize, usize) = (10, 200);
-/// OCR captures per hover. 1 disables forward tiling.
-pub const PASSES_RANGE: (u8, u8) = (1, 5);
+/// The bounds live beside the fields they bound, so `config::load_or_create`
+/// can apply the same ones to a hand-edited file that never reaches Apply.
+pub use crate::config::{MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 
 /// Every user-facing setting, as the window edits it.
 ///
@@ -113,7 +110,12 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
 /// entry would match *every* dictionary and silently pin the order.
 fn order_key(name: &str, existing: &[String]) -> String {
     let lower = name.to_lowercase();
-    if let Some(entry) = existing.iter().find(|e| lower.contains(&e.to_lowercase())) {
+    // A blank entry is a substring of everything.
+    if let Some(entry) = existing
+        .iter()
+        .filter(|e| !e.trim().is_empty())
+        .find(|e| lower.contains(&e.to_lowercase()))
+    {
         return entry.clone();
     }
     let cut = name.find(['[', '(']).unwrap_or(name.len());
@@ -211,6 +213,19 @@ mod tests {
         let form = from_config(&cfg, &odd);
         let out = apply_to(&form, &cfg);
         assert_eq!(vec!["[2026] Something".to_string()], out.dictionaries.display_order);
+    }
+
+    /// A blank entry matches every name.
+    #[test]
+    fn a_blank_order_entry_never_claims_a_dictionary() {
+        let cfg = cfg_with(&["", "大辞林"]);
+        let out = apply_to(&from_config(&cfg, &dicts()), &cfg);
+        assert!(
+            !out.dictionaries.display_order.iter().any(|e| e.trim().is_empty()),
+            "a blank entry silently pins every dictionary, got {:?}",
+            out.dictionaries.display_order
+        );
+        assert!(out.dictionaries.display_order.contains(&"Jitendex.org".to_string()));
     }
 
     /// D6a: an entry matching nothing is what a rename looks like from here.

@@ -84,7 +84,7 @@ fn owner_class_name() -> PCWSTR {
 /// wrapper, not the `unsafe extern "system" fn` pointer shape `WNDPROC`
 /// requires.
 unsafe extern "system" fn owner_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    DefWindowProcW(hwnd, msg, wparam, lparam)
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 /// Registers the owner-window class exactly once per process - the same
@@ -99,16 +99,18 @@ unsafe fn register_owner_class(hinstance: HINSTANCE) -> Result<()> {
         return Ok(());
     }
 
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(owner_wndproc),
-        hInstance: hinstance,
-        lpszClassName: owner_class_name(),
-        ..Default::default()
-    };
-    let atom = RegisterClassExW(&wc);
-    if atom == 0 {
-        return Err(Error::from_thread()).context("RegisterClassExW for the tray owner window");
+    unsafe {
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(owner_wndproc),
+            hInstance: hinstance,
+            lpszClassName: owner_class_name(),
+            ..Default::default()
+        };
+        if RegisterClassExW(&wc) == 0 {
+            return Err(Error::from_thread())
+                .context("RegisterClassExW for the tray owner window");
+        }
     }
 
     REGISTERED.store(true, Ordering::SeqCst);
@@ -332,9 +334,11 @@ impl Drop for Tray {
 /// 128-`u16` array and a silent overrun is not an acceptable way to find
 /// that out).
 fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let n = wide.len().min(nid.szTip.len());
-    nid.szTip[..n].copy_from_slice(&wide[..n]);
+    // Truncating must not eat the NUL Shell32 reads to.
+    let cap = nid.szTip.len();
+    let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
+    wide.push(0);
+    nid.szTip[..wide.len()].copy_from_slice(&wide);
 }
 
 /// Builds the right-click menu fresh: Settings, a separator, and Quit.
@@ -347,19 +351,23 @@ fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
 /// Destroys the partially-built `HMENU` on any
 /// failure so a construction error can never leak it.
 unsafe fn build_menu() -> Result<HMENU> {
-    let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
-    if let Err(e) = populate_menu(hmenu) {
-        let _ = DestroyMenu(hmenu);
-        return Err(e);
+    unsafe {
+        let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
+        if let Err(e) = populate_menu(hmenu) {
+            let _ = DestroyMenu(hmenu);
+            return Err(e);
+        }
+        Ok(hmenu)
     }
-    Ok(hmenu)
 }
 
 unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
-    AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
-        .context("AppendMenuW Settings")?;
-    AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator")?;
-    AppendMenuW(hmenu, MF_STRING, ID_QUIT as usize, w!("Quit")).context("AppendMenuW Quit")?;
+    unsafe {
+        AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
+            .context("AppendMenuW Settings")?;
+        AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator")?;
+        AppendMenuW(hmenu, MF_STRING, ID_QUIT as usize, w!("Quit")).context("AppendMenuW Quit")?;
+    }
     Ok(())
 }
 
@@ -372,11 +380,12 @@ unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
 /// owned handle, which `Drop` must destroy), `false` from `LoadIconW`
 /// (a shared handle, which `Drop` must never destroy).
 unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
-    if let Some(hicon) = load_embedded_icon() {
+    if let Some(hicon) = unsafe { load_embedded_icon() } {
         return Ok((hicon, true));
     }
     eprintln!("chibipop: could not load the tray's own icon, using the default");
-    let hicon = LoadIconW(None, IDI_APPLICATION).context("LoadIconW(IDI_APPLICATION)")?;
+    let hicon =
+        unsafe { LoadIconW(None, IDI_APPLICATION) }.context("LoadIconW(IDI_APPLICATION)")?;
     Ok((hicon, false))
 }
 
@@ -385,7 +394,7 @@ unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
 /// malformed directory, out-of-range offsets, or `CreateIconFromResourceEx`
 /// itself rejecting the bytes - so the caller can fall back cleanly.
 unsafe fn load_embedded_icon() -> Option<HICON> {
-    let desired = GetSystemMetrics(SM_CXSMICON) as u32;
+    let desired = unsafe { GetSystemMetrics(SM_CXSMICON) } as u32;
     let bytes = ico_frame_bytes(ICON_BYTES, desired)?;
     // SAFETY: `bytes` is a sub-slice of `ICON_BYTES`, a `'static`
     // buffer embedded in this binary, so the pointer and length
@@ -393,7 +402,8 @@ unsafe fn load_embedded_icon() -> Option<HICON> {
     // call - the only precondition its docs place on `presbits` /
     // `dwResSize`. `0x0003_0000` is `dwVer`'s documented "generally
     // set to" value (MS Learn, CreateIconFromResourceEx).
-    let icon = CreateIconFromResourceEx(bytes, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR);
+    let icon =
+        unsafe { CreateIconFromResourceEx(bytes, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR) };
     icon.ok()
 }
 
@@ -426,4 +436,29 @@ fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
         }
     }
     best.map(|(_, bytes)| bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shell32 reads szTip up to a NUL.
+    #[test]
+    fn a_tip_too_long_to_fit_is_still_terminated() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_tip(&mut nid, &"あ".repeat(500));
+        assert_eq!(
+            0,
+            nid.szTip[nid.szTip.len() - 1],
+            "a truncated tip must not cost the terminator"
+        );
+    }
+
+    #[test]
+    fn a_short_tip_round_trips() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_tip(&mut nid, "chibipop");
+        let n = nid.szTip.iter().position(|&c| c == 0).expect("terminated");
+        assert_eq!("chibipop", String::from_utf16_lossy(&nid.szTip[..n]));
+    }
 }
