@@ -25,8 +25,8 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **406** total across **6** targets |
-| Clippy | **exactly 5** accepted errors |
+| Rust tests | **all green**, **416** total across **6** targets |
+| Clippy | **exactly 4** accepted errors (was 5; the comment sweep retired `doc list item`) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 
@@ -45,24 +45,24 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 > **Do not run `cargo clippy` twice in a row and trust the second number.** Cargo replays cached
 > diagnostics inconsistently; back-to-back runs on an unchanged tree returned 0 then 5. `touch`
 > a source file first, or take the first run's output.
+>
+> **Re-measure this baseline after any commit that could move it.** On 2026-07-31 the comment
+> sweep took it 5 → 4, nobody updated the table, a later branch read 5 and it was called
+> "unchanged" — and that 5 was quoted to a reviewer as the baseline, hiding a dead-code
+> regression inside the one number whose whole job is to expose one. A baseline carried forward
+> from memory is not a baseline.
 
-**Why counts, not exit status.** The repo carries exactly five accepted clippy errors; a plain
-`-D warnings` run therefore always exits non-zero, and CI must assert the count is **5** rather than
-that clippy passed. A 6th is a real regression — most often a field added by one commit and read by
+**Why counts, not exit status.** The repo carries four accepted clippy errors; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **4** rather than
+that clippy passed. A 5th is a real regression — most often a field added by one commit and read by
 the next, which is why a task that adds a field must be the task that reads it.
 
-The bin target needs the five accepted lints suppressed or clippy aborts before `main.rs` compiles:
+The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
 
 ```bash
 cargo clippy --all-targets --all-features -- -D warnings \
   -A clippy::while_let_loop -A clippy::doc_lazy_continuation -A clippy::useless_conversion \
   -A clippy::too_many_arguments -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1 | grep -cE "^(error|warning)"
-```
-
-Python dictionary builder, if `tools/build-dict` changed:
-
-```bash
-cd tools/build-dict && python -m unittest discover -s tests    # 58 tests
 ```
 
 **If anything under `src/dict/` changed, measure the rebuild's peak memory.** No test
@@ -86,7 +86,7 @@ Write-Output ("peak {0:N0} MB" -f ($peak/1MB))
 |---|---|---|
 | Rust, streaming (current) | **148 MB** | 33.7 s |
 | Rust, materialised (the regression) | 9,641 MB | 83.3 s |
-| Python oracle | 498 MB | 83.9 s |
+| Python oracle *(deleted 2026-07-31; kept for comparison)* | 498 MB | 83.9 s |
 
 Anything over ~300 MB means the streaming was undone. **`PeakWorkingSet64` reads 0 once the
 process has exited** — the peak must be sampled while it runs, which is why the loop above
@@ -180,11 +180,24 @@ That is the one number still outstanding.
 
 ---
 
-## Tier 2 — human-only (~5 min)
+## Tier 2 — mostly automatable (~5 min)
 
-**None of this can be automated.** Synthetic mouse *movement* cannot reach a global `WH_MOUSE_LL`
-hook — `SendInput` returns **0**, the call is rejected. Print that return value first if anyone ever
-doubts it.
+> [!important] Corrected 2026-07-31 — this tier is **not** human-only
+> It said "none of this can be automated", because `SendInput` returned **0** and the call was
+> rejected. That is true only **until the user grants input control**. Once they have, `SendInput`
+> returns **1** and `WH_MOUSE_LL`/`WH_KEYBOARD_LL` fire normally — hold-shift mode was driven end
+> to end on 2026-07-31 this way: Shift down + mouse move raised the popup, Shift up retracted it,
+> reproducibly over two cycles.
+>
+> **Print `SendInput`'s return value first.** 0 = not permitted, ask the user. 1 = drive it.
+>
+> **And read the cursor back before believing anything.** `MOUSEEVENTF_ABSOLUTE` targets the
+> **primary monitor** unless you also pass `MOUSEEVENTF_VIRTUALDESK` (`0x4000`) and normalise over
+> the whole virtual desktop (`x * 65535 / (vw - 1)`; this box is 3640x1920). Asking for `2696,491`
+> without it put the cursor at `1355,246` and looked exactly like a dead hook.
+>
+> Detecting the popup needs no screenshot: `EnumWindows` filtered by pid, then `GetClassName` —
+> `ChibipopPopupClass` and `ChibipopOverlayClass` appear and disappear with it.
 
 1. **Hover** Japanese text → popup appears beside it.
 2. **Reach into it** — move the cursor from the word into the popup. It must not change or vanish.

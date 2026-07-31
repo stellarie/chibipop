@@ -42,29 +42,32 @@ jobs:
           echo "passing tests: $n"
           # A floor, not equality: adding a test must not break CI, but a
           # whole target silently not running must.
-          if [ "$n" -lt 245 ]; then
-            echo "::error::expected at least 245 passing tests, got $n"
+          if [ "$n" -lt 400 ]; then
+            echo "::error::expected at least 400 passing tests, got $n"
             exit 1
           fi
 
-      # The repo carries exactly five accepted clippy errors, so `-D warnings`
-      # always exits non-zero here. CI must assert the COUNT is 5 - a sixth is
-      # a real regression. See docs/REGRESSION.md for why.
-      - name: Clippy - exactly five accepted errors
+      # The repo carries four accepted clippy errors, so `-D warnings` always
+      # exits non-zero here. CI must assert the COUNT is 4 - a fifth is a real
+      # regression. Count every error line and subtract the per-target "could
+      # not compile" summaries; matching known lint TEXTS instead is blind to
+      # any new lint, which is how a dead-code regression got through on
+      # 2026-07-31. See docs/REGRESSION.md.
+      - name: Clippy - exactly four accepted errors
         shell: bash
         run: |
           set +e
           raw=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1)
           set -e
-          n=$(printf '%s\n' "$raw" | grep -cE "^error: (doc list|explicit call|this function|this loop)" || true)
+          n=$(printf '%s\n' "$raw" | grep -E "^error" | grep -vc "could not compile" || true)
           echo "accepted clippy errors: $n"
-          if [ "$n" -ne 5 ]; then
+          if [ "$n" -ne 4 ]; then
             printf '%s\n' "$raw"
-            echo "::error::expected exactly 5 accepted clippy errors, got $n"
+            echo "::error::expected exactly 4 accepted clippy errors, got $n"
             exit 1
           fi
 
-      - name: Clippy - nothing else, with those five suppressed
+      - name: Clippy - nothing else, with those suppressed
         shell: bash
         run: |
           set +e
@@ -83,15 +86,6 @@ jobs:
 
       - name: Release build
         run: cargo build --release
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Dictionary builder tests
-        shell: bash
-        working-directory: tools/build-dict
-        run: python -m unittest discover -s tests
 
       # A build anyone can download without cutting a tag.
       - uses: actions/upload-artifact@v4

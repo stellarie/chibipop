@@ -3,7 +3,8 @@
 //! Modeless - see D9.
 //! Numbers are combos, not spins.
 
-use crate::settings::{shown_name, SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+use crate::library::Kind;
+use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -34,7 +35,6 @@ pub enum SettingsOutcome {
 // ---- control ids ----
 
 const ID_APPLY: i32 = 100;
-const ID_CANCEL: i32 = 101;
 const ID_MODE_LIVE: i32 = 102;
 const ID_MODE_HOLD: i32 = 103;
 const ID_THEME: i32 = 104;
@@ -58,9 +58,8 @@ const ID_FREQ_REMOVE: i32 = 121;
 const ID_STATUS: i32 = 122;
 
 /// What a rebuild disables.
-const WHILE_BUSY: [i32; 11] = [
+const WHILE_BUSY: [i32; 10] = [
     ID_APPLY,
-    ID_CANCEL,
     ID_QUIT,
     ID_DICTS,
     ID_DICT_UP,
@@ -100,15 +99,13 @@ impl Target {
         }
     }
 
-    fn is_freq(self) -> bool {
-        self == Target::Freqs
-    }
 }
 
 /// A click to service.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    Add(Target),
+    /// The file picks the list.
+    Add,
     Remove(Target),
 }
 
@@ -163,14 +160,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             match id {
                 // 1 is IDOK: Enter, not the id.
                 ID_APPLY | 1 => record_outcome(hwnd, SettingsOutcome::Apply),
-                // X and Escape both land here.
-                ID_CANCEL | 2 => record_outcome(hwnd, SettingsOutcome::Cancel),
+                // Escape. X goes via WM_CLOSE.
+                2 => record_outcome(hwnd, SettingsOutcome::Cancel),
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
                 ID_DICT_UP => unsafe { move_selected(hwnd, -1) },
                 ID_DICT_DOWN => unsafe { move_selected(hwnd, 1) },
-                ID_DICT_ADD => record_action(hwnd, Action::Add(Target::Dicts)),
+                ID_DICT_ADD => record_action(hwnd, Action::Add),
                 ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
-                ID_FREQ_ADD => record_action(hwnd, Action::Add(Target::Freqs)),
+                ID_FREQ_ADD => record_action(hwnd, Action::Add),
                 ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
                 _ => {}
             }
@@ -542,15 +539,7 @@ impl SettingsWindow {
     /// `stale` are `display_order` entries matching no installed dictionary
     /// (spec D6a); when non-empty a warning naming them is shown, because that
     /// is what a dictionary rename looks like from in here.
-    ///
-    /// `in_app` is whether this window belongs to a running `chibipop run`
-    /// instance (true from the tray and from startup, false for the standalone
-    /// `chibipop settings`). It governs two things, both for the same reason -
-    /// a window must not offer what it is in no position to do:
-    ///
-    /// - Apply restarts chibipop, so the button says so;
-    /// - Quit is offered at all, since standalone has no instance to quit.
-    pub fn open(form: &SettingsForm, stale: &[String], in_app: bool) -> Result<SettingsWindow> {
+    pub fn open(form: &SettingsForm, stale: &[String]) -> Result<SettingsWindow> {
         // SAFETY: every call below is an ordinary window-creation FFI call
         // with handles this function owns; each `?` leaves nothing to leak
         // because the window is the only resource and it is not yet created.
@@ -593,7 +582,7 @@ impl SettingsWindow {
             // caption and frame ate the Apply and Cancel buttons entirely and
             // the window opened with no way to accept anything. Measuring the
             // content means that cannot recur, at any DPI or font size.
-            let content_h = win.build(form, stale, in_app)?;
+            let content_h = win.build(form, stale)?;
             // Sizes AND shows - see `fit_to` for why showing cannot go
             // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
@@ -651,10 +640,10 @@ impl SettingsWindow {
         unsafe {
             match action {
                 Action::Remove(target) => self.remove_selected(target),
-                Action::Add(target) => {
+                Action::Add => {
                     // D9: the picker pumps too.
                     before_blocking();
-                    self.add_picked(target);
+                    self.add_picked();
                 }
             }
         }
@@ -724,27 +713,34 @@ impl SettingsWindow {
     }
 
     /// Stage whatever was picked.
-    unsafe fn add_picked(&self, target: Target) {
+    unsafe fn add_picked(&self) {
         // SAFETY: `pick_archives` owns every buffer it hands the dialog;
         // `target.list_id()` names a live child of `self.hwnd`, and the
         // string each `LB_ADDSTRING` copies outlives that call.
         unsafe {
             let picked = pick_archives(self.hwnd);
-            let Ok(list) = GetDlgItem(Some(self.hwnd), target.list_id()) else {
-                return;
-            };
             for path in picked {
-                if !self.staged.borrow_mut().stage_add(&path, target.is_freq()) {
-                    eprintln!("chibipop: {} is already in the list.", path.display());
+                // The file picks the list.
+                let Some(kind) = self.staged.borrow_mut().stage_add(&path) else {
+                    eprintln!(
+                        "chibipop: {} is already listed, or is not a dictionary chibipop can read.",
+                        path.display()
+                    );
                     continue;
-                }
-                let Some(name) = shown_name(&path) else {
+                };
+                let Some(name) =
+                    self.staged.borrow().staged_adds.last().map(|a| a.name.clone())
+                else {
+                    continue;
+                };
+                let id = if kind == Kind::Frequency { ID_FREQS } else { ID_DICTS };
+                let Ok(list) = GetDlgItem(Some(self.hwnd), id) else {
                     continue;
                 };
                 SendMessageW(list, LB_ADDSTRING, None, Some(LPARAM(wide(&name).as_ptr() as isize)));
-            }
-            if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+                if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
+                    SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+                }
             }
             update_list_buttons(self.hwnd);
         }
@@ -792,7 +788,7 @@ impl SettingsWindow {
     }
 
     /// Create every control, returning the 96-DPI `y` its layout reached.
-    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String], in_app: bool)
+    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String])
         -> Result<i32> {
         let f = self.font;
         let h = self.hwnd;
@@ -1017,27 +1013,15 @@ impl SettingsWindow {
             // ---- Apply / Cancel ----
             // Also the progress line.
             child(h, w!("STATIC"),
-                if in_app {
-                    "Applying saves your settings and restarts chibipop."
-                } else {
-                    "Applying saves your settings. Restart chibipop to use them."
-                },
+                "Applying saves your settings and restarts chibipop.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 16, ROW_H, ID_STATUS, f)?;
             y += ROW_H + 2;
-            child(h, w!("BUTTON"), if in_app { "Apply && Restart" } else { "Apply" },
+            child(h, w!("BUTTON"), "Apply && Restart",
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
-                  WIN_W - PAD - 238, y, 128, ROW_H + 4, ID_APPLY, f)?;
-            child(h, w!("BUTTON"), "Cancel", WS_TABSTOP,
-                  WIN_W - PAD - 104, y, 96, ROW_H + 4, ID_CANCEL, f)?;
-            // Far left, deliberately: Quit is the one button here that
-            // discards nothing but ends the app, and it must not sit next to
-            // the one people press by reflex. Only exists when there is an
-            // instance to quit - BACKLOG 7 left Quit stranded on a tray menu
-            // that does not open, which is why it is here at all.
-            if in_app {
-                child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
-                      PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
-            }
+                  WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
+            // Far left: not beside Apply.
+            child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
+                  PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
 
             update_list_buttons(h);
         }

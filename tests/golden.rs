@@ -1,7 +1,7 @@
 //! Golden corpus: (input, expected headword) against the real dictionary.
 //!
 //! Skipped when data/chibipop.sqlite is absent, so a fresh clone still
-//! passes `cargo test`. Build it with tools/build-dict/build.py.
+//! passes `cargo test`.
 
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;

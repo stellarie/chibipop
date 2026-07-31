@@ -45,18 +45,17 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      # Everything the binary needs at runtime, plus the dictionary builder -
-      # the database itself is 232 MiB and cannot be redistributed, so the
-      # user still builds it from their own Yomitan archives.
+      # Everything the binary needs at runtime. The database is ~232 MiB and
+      # is not ours to redistribute, so the user builds it from their own
+      # Yomitan archives - in the settings window, with no toolchain.
       - name: Assemble
         shell: bash
         run: |
           name="chibipop-${GITHUB_REF_NAME}-windows-x64"
           echo "PKG=$name" >> "$GITHUB_ENV"
-          mkdir -p "dist/$name/data" "dist/$name/tools/build-dict"
+          mkdir -p "dist/$name/data"
           cp target/release/chibipop.exe "dist/$name/"
           cp data/deconjugator.json     "dist/$name/data/"
-          cp tools/build-dict/*.py      "dist/$name/tools/build-dict/"
           cp README.md                  "dist/$name/"
           find "dist/$name" -type f | sort
 

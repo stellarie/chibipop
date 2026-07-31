@@ -8,7 +8,6 @@ One zip, `chibipop-vX.Y.Z-windows-x64.zip`, containing:
 chibipop-vX.Y.Z-windows-x64/
   chibipop.exe                 the application
   data/deconjugator.json       required at runtime
-  tools/build-dict/*.py        the dictionary builder
   README.md
 ```
 
@@ -51,7 +50,6 @@ every push to `main` and every pull request:
   the difference.
 - Clippy again with those five suppressed, asserting **zero** other findings.
 - `cargo build --release`.
-- The dictionary builder's 58 Python tests.
 
 The release workflow additionally refuses to build if the tag disagrees with
 `Cargo.toml`.
@@ -83,6 +81,8 @@ Push-Location assets; & $rc.FullName /nologo /fo chibipop.res chibipop.rc; Pop-L
 
 - **There is no `LICENSE` file.** A release without one leaves recipients
   with no stated terms. Worth settling before the first public tag.
-- **The builder is Python.** It is the only reason a downloaded binary still
-  needs a toolchain installed. A `chibipop build-dict` subcommand would remove
-  that last step; it is not built.
+- **The package is self-contained.** `chibipop build-dict` is in the binary
+  and the settings window drives it, so a download needs no toolchain at all.
+  The Python builder was deleted on 2026-07-31, once the Rust one had been
+  verified byte-identical on the real archives and a fresh install had been
+  driven end to end.

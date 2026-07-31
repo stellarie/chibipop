@@ -27,25 +27,20 @@ fn cargo_root(exe_dir: &Path) -> Option<PathBuf> {
     target.parent().map(Path::to_path_buf)
 }
 
-/// Beside the exe, then a cargo root, then the cwd.
+/// Beside the exe or cargo root.
+///
+/// Never the working directory.
 pub fn data_file(relative: &str) -> PathBuf {
     let beside = beside_exe(relative);
     if beside.exists() {
         return beside;
     }
 
-    // A double-click sets the cwd to the exe's own folder, so in a cargo tree
-    // the cwd fallback below resolves to the same place `beside` just missed.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(root) = exe.parent().and_then(cargo_root) {
-            let in_root = root.join(relative);
-            if in_root.exists() {
-                return in_root;
-            }
-        }
+    // Dev has data/ at repo root.
+    match std::env::current_exe().ok().and_then(|e| e.parent().and_then(cargo_root)) {
+        Some(root) => root.join(relative),
+        None => beside,
     }
-
-    PathBuf::from(relative)
 }
 
 #[cfg(test)]
@@ -67,10 +62,14 @@ mod tests {
         assert_eq!(exe.parent().unwrap(), got.parent().unwrap());
     }
 
+    /// The cwd must never decide.
     #[test]
-    fn a_data_file_missing_beside_the_exe_falls_back_to_the_cwd() {
+    fn a_data_file_that_exists_nowhere_is_still_an_absolute_path() {
         let name = "definitely-not-a-real-chibipop-file.sqlite";
-        assert_eq!(PathBuf::from(name), data_file(name));
+        let got = data_file(name);
+        assert!(got.is_absolute(), "{got:?}");
+        assert_ne!(PathBuf::from(name), got);
+        assert!(got.ends_with(name), "{got:?}");
     }
 
     #[test]
