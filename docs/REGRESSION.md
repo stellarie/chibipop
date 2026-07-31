@@ -186,11 +186,24 @@ That is the one number still outstanding.
 
 ---
 
-## Tier 2 — human-only (~5 min)
+## Tier 2 — mostly automatable (~5 min)
 
-**None of this can be automated.** Synthetic mouse *movement* cannot reach a global `WH_MOUSE_LL`
-hook — `SendInput` returns **0**, the call is rejected. Print that return value first if anyone ever
-doubts it.
+> [!important] Corrected 2026-07-31 — this tier is **not** human-only
+> It said "none of this can be automated", because `SendInput` returned **0** and the call was
+> rejected. That is true only **until the user grants input control**. Once they have, `SendInput`
+> returns **1** and `WH_MOUSE_LL`/`WH_KEYBOARD_LL` fire normally — hold-shift mode was driven end
+> to end on 2026-07-31 this way: Shift down + mouse move raised the popup, Shift up retracted it,
+> reproducibly over two cycles.
+>
+> **Print `SendInput`'s return value first.** 0 = not permitted, ask the user. 1 = drive it.
+>
+> **And read the cursor back before believing anything.** `MOUSEEVENTF_ABSOLUTE` targets the
+> **primary monitor** unless you also pass `MOUSEEVENTF_VIRTUALDESK` (`0x4000`) and normalise over
+> the whole virtual desktop (`x * 65535 / (vw - 1)`; this box is 3640x1920). Asking for `2696,491`
+> without it put the cursor at `1355,246` and looked exactly like a dead hook.
+>
+> Detecting the popup needs no screenshot: `EnumWindows` filtered by pid, then `GetClassName` —
+> `ChibipopPopupClass` and `ChibipopOverlayClass` appear and disappear with it.
 
 1. **Hover** Japanese text → popup appears beside it.
 2. **Reach into it** — move the cursor from the word into the popup. It must not change or vanish.
