@@ -25,6 +25,8 @@ pub struct Config {
     pub ocr: OcrConfig,
     #[serde(default)]
     pub debug: DebugConfig,
+    #[serde(default)]
+    pub anki: AnkiConfig,
 }
 
 /// `[trigger]`.
@@ -122,6 +124,45 @@ pub struct DebugConfig {
     pub show_lookup_log: bool,
 }
 
+/// `[anki]`. Optional section.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnkiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_anki_url")]
+    pub url: String,
+    #[serde(default = "default_anki_deck")]
+    pub deck: String,
+    #[serde(default = "default_anki_model")]
+    pub model: String,
+}
+
+/// Default Anki URL.
+fn default_anki_url() -> String {
+    "http://localhost:8765".to_string()
+}
+
+/// Default Anki deck name.
+fn default_anki_deck() -> String {
+    "Default".to_string()
+}
+
+/// Default Anki model name.
+fn default_anki_model() -> String {
+    "Lapis".to_string()
+}
+
+impl Default for AnkiConfig {
+    fn default() -> AnkiConfig {
+        AnkiConfig {
+            enabled: false,
+            url: default_anki_url(),
+            deck: default_anki_deck(),
+            model: default_anki_model(),
+        }
+    }
+}
+
 impl Default for Config {
     /// Spec §4.3's shipped values.
     fn default() -> Config {
@@ -142,6 +183,7 @@ impl Default for Config {
             },
             ocr: OcrConfig::default(),
             debug: DebugConfig::default(),
+            anki: AnkiConfig::default(),
         }
     }
 }
@@ -548,6 +590,37 @@ mod tests {
         c.popup.max_width_percent = 40;
         c.save(&p).unwrap();
         assert_eq!(40, load_or_create(&p).unwrap().popup.max_width_percent);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn anki_config_round_trips() {
+        let p = tmp("anki_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.enabled = true;
+        c.anki.deck = "Mining".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert!(back.anki.enabled);
+        assert_eq!("Mining", back.anki.deck);
+        assert_eq!("http://localhost:8765", back.anki.url);
+        assert_eq!("Lapis", back.anki.model);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_config_without_anki_section_loads() {
+        let p = tmp("no_anki");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-anki config must load");
+        assert!(!c.anki.enabled);
+        assert_eq!("http://localhost:8765", c.anki.url);
         let _ = std::fs::remove_file(&p);
     }
 }
