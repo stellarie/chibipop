@@ -116,6 +116,12 @@ pub fn shown_name(source: &Path) -> Option<String> {
 /// Unreadable files are listed.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
     form.freq_names = named(lib, Kind::Frequency);
+    // Built first, then the rest.
+    for name in named(lib, Kind::Term) {
+        if !form.dict_names.contains(&name) {
+            form.dict_names.push(name);
+        }
+    }
     form.unreadable =
         lib.entries.iter().filter(|e| e.kind == Kind::Unreadable).map(|e| e.file.clone()).collect();
     for file in &form.unreadable {
@@ -948,6 +954,19 @@ mod tests {
         let dir = std::env::temp_dir().join("chibipop_stage_test").join("never_created");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(form_for(&dir).library_empty);
+    }
+    /// The list is what Apply builds.
+    #[test]
+    fn a_library_term_with_no_database_row_is_still_listed() {
+        let lib = Library {
+            entries: vec![crate::library::Entry {
+                file: "dropped-in.zip".into(),
+                name: "DroppedIn".into(),
+                kind: Kind::Term,
+            }],
+        };
+        let form = with_library(from_config(&Config::default(), &[]), &lib);
+        assert!(form.dict_names.contains(&"DroppedIn".to_string()), "{form:?}");
     }
 }
 
