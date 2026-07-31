@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Re-exported for config.rs.
-pub use crate::config::{MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+pub use crate::config::{MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 
 /// What the window edits.
 #[derive(Debug, Clone, PartialEq)]
@@ -15,6 +15,7 @@ pub struct SettingsForm {
     pub mode: TriggerMode,
     pub theme: String,
     pub font: String,
+    pub max_width_percent: u8,
     pub max_height_percent: u8,
     pub summary_chars: usize,
     pub highlight_match: bool,
@@ -218,6 +219,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         mode: cfg.trigger.mode,
         theme: cfg.popup.theme.clone(),
         font: cfg.popup.font.clone(),
+        max_width_percent: cfg.popup.max_width_percent,
         max_height_percent: cfg.popup.max_height_percent,
         summary_chars: cfg.popup.summary_chars,
         highlight_match: cfg.popup.highlight_match,
@@ -240,6 +242,8 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.trigger.mode = form.mode;
     out.popup.theme = form.theme.clone();
     out.popup.font = form.font.clone();
+    out.popup.max_width_percent =
+        form.max_width_percent.clamp(MAX_WIDTH_RANGE.0, MAX_WIDTH_RANGE.1);
     out.popup.max_height_percent =
         form.max_height_percent.clamp(MAX_HEIGHT_RANGE.0, MAX_HEIGHT_RANGE.1);
     out.popup.summary_chars = form.summary_chars.clamp(SUMMARY_RANGE.0, SUMMARY_RANGE.1);
@@ -407,6 +411,7 @@ mod tests {
         cfg.trigger.mode = TriggerMode::HoldShift;
         cfg.popup.theme = "light".into();
         cfg.popup.font = "Noto Sans JP".into();
+        cfg.popup.max_width_percent = 35;
         cfg.popup.max_height_percent = 70;
         cfg.popup.summary_chars = 25;
         cfg.popup.highlight_match = false;
@@ -422,10 +427,12 @@ mod tests {
     fn out_of_range_numbers_are_clamped_not_rejected() {
         let cfg = cfg_with(&[]);
         let mut form = from_config(&cfg, &dicts());
+        form.max_width_percent = 250;
         form.max_height_percent = 250;
         form.summary_chars = 1;
         form.max_ocr_passes = 99;
         let out = apply_to(&form, &cfg);
+        assert_eq!(MAX_WIDTH_RANGE.1, out.popup.max_width_percent);
         assert_eq!(MAX_HEIGHT_RANGE.1, out.popup.max_height_percent);
         assert_eq!(SUMMARY_RANGE.0, out.popup.summary_chars);
         assert_eq!(PASSES_RANGE.1, out.ocr.max_ocr_passes);

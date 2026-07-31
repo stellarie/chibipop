@@ -68,8 +68,6 @@ const ARM_WARN_TICKS: u32 = 250;
 /// Rebuild progress poll, ms.
 const REBUILD_TICK_MS: u32 = 100;
 
-/// Task 5's verified wrap width.
-const POPUP_MAX_WIDTH: i32 = 420;
 
 /// Staleness by id, no sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -493,6 +491,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         crate::ui::console::show();
     }
     let max_height_percent = i32::from(cfg.popup.max_height_percent);
+    let max_width_percent = i32::from(cfg.popup.max_width_percent);
     let scroll_popup = cfg.popup.scroll_popup;
 
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
@@ -750,6 +749,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &mut renderer,
                         &theme,
                         max_height_percent,
+                        max_width_percent,
                         overlay.as_ref(),
                         &mut shown,
                         result.outcome,
@@ -1035,6 +1035,7 @@ fn handle_worker_outcome(
     renderer: &mut Renderer,
     theme: &Theme,
     max_height_percent: i32,
+    max_width_percent: i32,
     overlay: Option<&Overlay>,
     shown: &mut Option<Shown>,
     outcome: WorkerOutcome,
@@ -1074,6 +1075,7 @@ fn handle_worker_outcome(
                 renderer,
                 theme,
                 max_height_percent,
+                max_width_percent,
                 &presentation,
                 anchor,
                 0, // A new word always starts at the top.
@@ -1111,17 +1113,19 @@ fn handle_worker_outcome(
 }
 
 /// Measure, place, show, paint.
+#[allow(clippy::too_many_arguments)]
 fn show_presentation(
     popup: &Popup,
     renderer: &mut Renderer,
     theme: &Theme,
     max_height_percent: i32,
+    max_width_percent: i32,
     presentation: &Presentation,
     anchor: PhysRect,
     scroll: i32,
 ) -> Result<(PhysRect, i32, i32)> {
     let monitor = monitor_rect_for(anchor);
-    let max_w = POPUP_MAX_WIDTH.min(monitor.w.max(1));
+    let max_w = ((monitor.w * max_width_percent) / 100).max(1);
     let max_h = ((monitor.h * max_height_percent) / 100).max(1);
 
     // view_h, not content_h, below.
@@ -1208,7 +1212,7 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-            let rc = mi.rcMonitor;
+            let rc = mi.rcWork;
             PhysRect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top }
         } else {
             eprintln!("chibipop: GetMonitorInfoW failed; placing against a 1920x1080 fallback");
@@ -1237,6 +1241,7 @@ mod tests {
         PopupConfig {
             theme: theme.to_string(),
             exclude_from_capture: false,
+            max_width_percent: 25,
             max_height_percent: 45,
             summary_chars: 40,
             font: font.to_string(),

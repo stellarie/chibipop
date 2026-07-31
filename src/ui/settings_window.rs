@@ -4,7 +4,7 @@
 //! Numbers are combos, not spins.
 
 use crate::library::Kind;
-use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -56,6 +56,7 @@ const ID_FREQS: i32 = 119;
 const ID_FREQ_ADD: i32 = 120;
 const ID_FREQ_REMOVE: i32 = 121;
 const ID_STATUS: i32 = 122;
+const ID_MAX_WIDTH: i32 = 123;
 
 /// What a rebuild disables.
 const WHILE_BUSY: [i32; 10] = [
@@ -525,6 +526,7 @@ pub struct SettingsWindow {
     font: Option<HFONT>,
     /// The numeric values each combo offers, in the order they were added, so
     /// `read` can map a selection index back to a value.
+    widths: Vec<i64>,
     heights: Vec<i64>,
     summaries: Vec<i64>,
     passes: Vec<i64>,
@@ -569,6 +571,7 @@ impl SettingsWindow {
             let mut win = SettingsWindow {
                 hwnd,
                 font,
+                widths: Vec::new(),
                 heights: Vec::new(),
                 summaries: Vec::new(),
                 passes: Vec::new(),
@@ -872,6 +875,16 @@ impl SettingsWindow {
             self.fonts = families;
             y += ROW_H + ROW_GAP;
 
+            self.widths = numeric_choices(
+                MAX_WIDTH_RANGE.0 as i64, MAX_WIDTH_RANGE.1 as i64, 5,
+                form.max_width_percent as i64);
+            label("Max width (% of screen)", y)?;
+            let mw = child(h, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_MAX_WIDTH, f)?;
+            fill_numeric(mw, &self.widths, form.max_width_percent as i64);
+            y += ROW_H + ROW_GAP;
+
             self.heights = numeric_choices(
                 MAX_HEIGHT_RANGE.0 as i64, MAX_HEIGHT_RANGE.1 as i64, 5,
                 form.max_height_percent as i64);
@@ -1074,6 +1087,8 @@ impl SettingsWindow {
                 },
                 theme: theme.to_string(),
                 font,
+                max_width_percent: pick(&self.widths, ID_MAX_WIDTH,
+                                        template.max_width_percent as i64) as u8,
                 max_height_percent: pick(&self.heights, ID_MAX_HEIGHT,
                                          template.max_height_percent as i64) as u8,
                 summary_chars: pick(&self.summaries, ID_SUMMARY,

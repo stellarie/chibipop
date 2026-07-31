@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Width cap, % of monitor.
+pub const MAX_WIDTH_RANGE: (u8, u8) = (10, 90);
 /// Height cap, % of monitor.
 pub const MAX_HEIGHT_RANGE: (u8, u8) = (10, 90);
 /// Summary length, in chars.
@@ -48,6 +50,9 @@ pub struct PopupConfig {
     ///
     /// Off - recordable by default.
     pub exclude_from_capture: bool,
+    /// Width cap, % of monitor.
+    #[serde(default = "default_max_width_percent")]
+    pub max_width_percent: u8,
     /// Height cap, % of monitor.
     pub max_height_percent: u8,
     /// Summary length, in chars.
@@ -59,6 +64,11 @@ pub struct PopupConfig {
     /// Wheel-scroll a long popup.
     #[serde(default = "default_scroll_popup")]
     pub scroll_popup: bool,
+}
+
+/// 25% of the monitor.
+fn default_max_width_percent() -> u8 {
+    25
 }
 
 /// On by default.
@@ -120,6 +130,7 @@ impl Default for Config {
             popup: PopupConfig {
                 theme: "dark".to_string(),
                 exclude_from_capture: false,
+                max_width_percent: default_max_width_percent(),
                 max_height_percent: 45,
                 summary_chars: 40,
                 font: "Yu Gothic UI".to_string(),
@@ -154,6 +165,13 @@ impl Config {
 
     /// Clamps bounded numbers.
     fn clamp_ranges(&mut self, path: &Path) {
+        self.popup.max_width_percent = clamped(
+            path,
+            "max_width_percent",
+            self.popup.max_width_percent,
+            MAX_WIDTH_RANGE.0,
+            MAX_WIDTH_RANGE.1,
+        );
         self.popup.max_height_percent = clamped(
             path,
             "max_height_percent",
@@ -234,6 +252,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(TriggerMode::Live, c.trigger.mode);
         assert_eq!("dark", c.popup.theme);
+        assert_eq!(25, c.popup.max_width_percent);
         assert_eq!(45, c.popup.max_height_percent);
         assert_eq!(40, c.popup.summary_chars);
         assert_eq!("Yu Gothic UI", c.popup.font);
@@ -444,11 +463,13 @@ mod tests {
         std::fs::write(&p, concat!(
             "[trigger]\nmode = \"live\"\n\n",
             "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
-            "max_height_percent = 0\nsummary_chars = 5000\nfont = \"Yu Gothic UI\"\n\n",
+            "max_width_percent = 0\nmax_height_percent = 0\n",
+            "summary_chars = 5000\nfont = \"Yu Gothic UI\"\n\n",
             "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
             "[ocr]\nmax_ocr_passes = 99\n",
         )).unwrap();
         let c = load_or_create(&p).expect("an out-of-range value must load, clamped");
+        assert_eq!(MAX_WIDTH_RANGE.0, c.popup.max_width_percent);
         assert_eq!(MAX_HEIGHT_RANGE.0, c.popup.max_height_percent);
         assert_eq!(SUMMARY_RANGE.1, c.popup.summary_chars);
         assert_eq!(PASSES_RANGE.1, c.ocr.max_ocr_passes);
@@ -461,11 +482,13 @@ mod tests {
         let p = tmp("in_range");
         let _ = std::fs::remove_file(&p);
         let mut c = Config::default();
+        c.popup.max_width_percent = 35;
         c.popup.max_height_percent = 70;
         c.popup.summary_chars = 25;
         c.ocr.max_ocr_passes = 3;
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
+        assert_eq!(35, back.popup.max_width_percent);
         assert_eq!(70, back.popup.max_height_percent);
         assert_eq!(25, back.popup.summary_chars);
         assert_eq!(3, back.ocr.max_ocr_passes);
@@ -500,6 +523,31 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-lookup-log config must load");
         assert!(!c.debug.show_lookup_log);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_config_without_max_width_percent_defaults_to_25() {
+        let p = tmp("no_width_field");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-width config must load");
+        assert_eq!(25, c.popup.max_width_percent);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn max_width_percent_round_trips() {
+        let p = tmp("width_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.popup.max_width_percent = 40;
+        c.save(&p).unwrap();
+        assert_eq!(40, load_or_create(&p).unwrap().popup.max_width_percent);
         let _ = std::fs::remove_file(&p);
     }
 }
