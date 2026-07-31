@@ -46,3 +46,4 @@ windows-future = "0.3.2"
 # directly here does not change what gets built, only what render.rs is
 # allowed to import by name.
 windows-numerics = "0.3.1"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

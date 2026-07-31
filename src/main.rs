@@ -10,7 +10,7 @@ use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "chibipop", about = "Japanese lookup engine")]
@@ -93,6 +93,14 @@ enum Command {
         /// so a shortcut-launched chibipop.exe still finds its settings.
         #[arg(long)]
         config: Option<PathBuf>,
+    },
+    /// Rebuilds chibipop.sqlite.
+    BuildDict {
+        /// Folder of .zip archives.
+        #[arg(long)]
+        library: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -342,6 +350,44 @@ fn main() -> Result<()> {
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
             chibipop::app::run(cfg, &dict, &rules, &config_path)
         }
+        Command::BuildDict { library, out } => {
+            let mut archives = Vec::new();
+            for entry in std::fs::read_dir(&library)
+                .with_context(|| format!("reading {}", library.display()))?
+            {
+                let path = entry?.path();
+                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+                    archives.push(path);
+                }
+            }
+            archives.sort();
+
+            let mut term_archives = Vec::new();
+            let mut freq_archives = Vec::new();
+            for a in archives {
+                if chibipop::dict::archive::is_frequency_archive(&a) {
+                    freq_archives.push(a);
+                } else {
+                    term_archives.push(a);
+                }
+            }
+
+            for (i, t) in term_archives.iter().enumerate() {
+                println!("term dict  [{i}] {}", file_name(t));
+            }
+            for f in &freq_archives {
+                println!("freq dict      {}", file_name(f));
+            }
+
+            let counts = chibipop::dict::build::build(&term_archives, &freq_archives, &out)?;
+            println!(
+                "wrote {}: {} entries, {} term rows",
+                out.display(),
+                counts.entries,
+                counts.terms
+            );
+            Ok(())
+        }
     }
 }
 
@@ -353,6 +399,11 @@ fn dict_path(given: Option<PathBuf>) -> PathBuf {
 /// --rules, or the default.
 fn rules_path(given: Option<PathBuf>) -> PathBuf {
     given.unwrap_or_else(|| chibipop::paths::data_file("data/deconjugator.json"))
+}
+
+/// A path's file name, or empty.
+fn file_name(path: &Path) -> String {
+    path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()
 }
 
 /// `chibipop.toml` beside the running executable (spec section 4.3). Falls
