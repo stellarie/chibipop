@@ -94,7 +94,7 @@ enum WorkerOutcome {
     Failed(String),
     /// `scan` empty without debug.
     Ready {
-        presentation: Presentation,
+        presentation: Box<Presentation>,
         anchor: PhysRect,
         /// Which axis the hold may grow.
         orientation: Orientation,
@@ -1069,7 +1069,7 @@ fn resolve_trigger(
         }
     }
     WorkerOutcome::Ready {
-        presentation,
+        presentation: Box::new(presentation),
         anchor: resolved.span.anchor,
         orientation: resolved.orientation,
         matched,
@@ -1164,7 +1164,7 @@ fn handle_worker_outcome(
                         anchor,
                         popup: rect,
                         hold: hold_region(anchor, matched, orientation),
-                        presentation,
+                        presentation: *presentation,
                         scroll: 0,
                         content_h,
                         view_h,
