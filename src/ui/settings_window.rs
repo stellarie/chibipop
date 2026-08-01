@@ -199,6 +199,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_CLOSE => {
+            // Same outcome as Escape.
             record_outcome(hwnd, SettingsOutcome::Cancel);
             LRESULT(0)
         }
@@ -1269,6 +1270,15 @@ impl Drop for SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X quits standalone chibipop.
+    #[test]
+    fn wm_close_records_a_cancel_outcome() {
+        let hwnd = HWND(4242 as *mut core::ffi::c_void);
+        let _ = unsafe { wndproc(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        let got = OUTCOME.with(|c| c.get());
+        assert_eq!(Some((hwnd.0 as isize, SettingsOutcome::Cancel)), got);
+    }
 
     #[test]
     fn numeric_choices_step_the_range() {

@@ -265,7 +265,7 @@ pub fn settings_only(
         }
 
         match window.take_outcome() {
-            // Quit and dismiss both end it.
+            // No tray: X exits like Quit.
             Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
                 let edited = window.read(&form);
@@ -857,6 +857,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     }
                 } else {
                     match w.take_outcome() {
+                        // Tray remains; just hide.
                         Some(SettingsOutcome::Cancel) => settings = None,
                         // Already on the main thread.
                         Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },

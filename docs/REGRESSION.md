@@ -258,6 +258,19 @@ That is the one number still outstanding.
     `GetConsoleProcessList` returned something other than 1.
 11b. **`chibipop settings`** → the same window, captioned **"Apply"** and "Restart chibipop to use
     them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
+11e. **Close via the X (`WM_CLOSE`), not Escape or a button.** In `settings_only`
+    (`chibipop settings`, or `chibipop run` before a dictionary exists) it fully exits
+    chibipop, same as "Quit chibipop" — there is no tray to fall back on, so `wndproc`'s
+    `WM_CLOSE` records the same `Cancel` outcome Escape does, and `settings_only`'s own match
+    arm already treats `Cancel` and `Quit` alike. In a normal `chibipop run` (tray already up)
+    it only destroys the settings window; hooks, popup and tray keep running. ✅
+    **Agent-verified 2026-08-01**: `EnumWindows` filtered by pid, `PostMessageW(WM_CLOSE)` on
+    `ChibipopSettingsClass`, `Get-Process` read after — `settings_only` exits with no
+    stdout/stderr (a silent, successful return); `run` loses only `ChibipopSettingsClass` from
+    the window list, with `ChibipopTrayOwnerClass` and the popup and overlay classes unchanged
+    at the same pid. Suspected broken beforehand from reading `wndproc` alone: `WM_CLOSE` only
+    ever records `Cancel`, which reads like "only Quit can end a windowless run" until you also
+    read `settings_only`'s match arm. The two sites carry comments pointing at each other now.
 12. **Reorder dictionaries → Apply** → order changes, and **`chibipop.toml` still holds the
     original substrings**, merely reordered. Invisible from the UI; check the file.
 13. **Open Settings, touch nothing, Apply** → the TOML is unchanged apart from formatting, and it
