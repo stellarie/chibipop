@@ -81,23 +81,50 @@ pub fn model_field_names(url: &str, model: &str) -> Result<Vec<String>> {
 
 /// Expressions already in Anki.
 pub fn find_duplicates(url: &str, expressions: &[&str]) -> Result<HashSet<String>> {
-    let mut found = HashSet::new();
-    for expr in expressions {
-        let query = format!("Expression:{expr}");
+    find_duplicates_with(expressions, |expr| {
+        let query = format!("Expression:{}", quote_search(expr));
         let body = serde_json::json!({
             "action": "findNotes",
             "version": VERSION,
             "params": { "query": query },
         });
         let resp = post(url, &body)?;
-        let has_match = resp.get("result")
+        Ok(resp.get("result")
             .and_then(|r| r.as_array())
-            .is_some_and(|a| !a.is_empty());
-        if has_match {
-            found.insert(expr.to_string());
+            .is_some_and(|a| !a.is_empty()))
+    })
+}
+
+/// Testable without network.
+fn find_duplicates_with(
+    expressions: &[&str],
+    mut check: impl FnMut(&str) -> Result<bool>,
+) -> Result<HashSet<String>> {
+    let mut found = HashSet::new();
+    let mut last_err = None;
+    let mut any_ok = false;
+    for expr in expressions {
+        match check(expr) {
+            Ok(true) => {
+                any_ok = true;
+                found.insert(expr.to_string());
+            }
+            Ok(false) => any_ok = true,
+            // Skip one bad expr, keep rest.
+            Err(e) => last_err = Some(e),
         }
     }
-    Ok(found)
+    match last_err {
+        // All failed: a real error.
+        Some(e) if !any_ok => Err(e),
+        _ => Ok(found),
+    }
+}
+
+/// Escapes for Anki search.
+fn quote_search(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 /// Adds a note, returns its id.
@@ -198,5 +225,68 @@ mod tests {
         let f = fields_from_card(&card, &[]);
         assert_eq!("ねこ", f.expression);
         assert_eq!(None, f.frequency);
+    }
+
+    #[test]
+    fn quote_search_wraps_a_plain_word() {
+        assert_eq!("\"食べる\"", quote_search("食べる"));
+    }
+
+    #[test]
+    fn quote_search_escapes_embedded_quotes() {
+        assert_eq!("\"foo\\\"bar\"", quote_search("foo\"bar"));
+    }
+
+    #[test]
+    fn quote_search_escapes_backslashes() {
+        assert_eq!("\"a\\\\b\"", quote_search("a\\b"));
+    }
+
+    /// Bare spaces split into terms.
+    #[test]
+    fn quote_search_keeps_a_space_as_one_value() {
+        assert_eq!("\"AT & T\"", quote_search("AT & T"));
+    }
+
+    #[test]
+    fn find_duplicates_with_reports_the_matching_expr() {
+        let exprs = ["食べる", "猫"];
+        let got = find_duplicates_with(&exprs, |e| Ok(e == "食べる")).unwrap();
+        assert_eq!(HashSet::from(["食べる".to_string()]), got);
+    }
+
+    #[test]
+    fn find_duplicates_with_finds_none() {
+        let exprs = ["食べる", "猫"];
+        let got = find_duplicates_with(&exprs, |_| Ok(false)).unwrap();
+        assert!(got.is_empty());
+    }
+
+    /// A bad query won't blank all.
+    #[test]
+    fn find_duplicates_with_survives_one_bad_expr() {
+        let exprs = ["AT & T", "食べる"];
+        let got = find_duplicates_with(&exprs, |e| {
+            if e == "AT & T" {
+                anyhow::bail!("invalid search")
+            }
+            Ok(e == "食べる")
+        })
+        .unwrap();
+        assert_eq!(HashSet::from(["食べる".to_string()]), got);
+    }
+
+    /// Full outage must not hide.
+    #[test]
+    fn find_duplicates_with_errors_when_every_expr_fails() {
+        let exprs = ["食べる", "猫"];
+        let got = find_duplicates_with(&exprs, |_| anyhow::bail!("connection refused"));
+        assert!(got.is_err());
+    }
+
+    #[test]
+    fn find_duplicates_with_on_no_expressions_is_empty() {
+        let got = find_duplicates_with(&[], |_| Ok(true)).unwrap();
+        assert!(got.is_empty());
     }
 }

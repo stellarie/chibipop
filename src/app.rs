@@ -960,12 +960,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             let tx = anki_tx.clone();
                             thread::spawn(move || {
                                 let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                if let Ok(dupes) = anki::find_duplicates(&url, &refs) {
-                                    let _ = tx.send(AnkiDupeResult { gen, dupes });
-                                    unsafe {
-                                        let _ = PostThreadMessageW(
-                                            main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
-                                        );
+                                match anki::find_duplicates(&url, &refs) {
+                                    Ok(dupes) => {
+                                        let _ = tx.send(AnkiDupeResult { gen, dupes });
+                                        unsafe {
+                                            let _ = PostThreadMessageW(
+                                                main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("chibipop: dupe check failed: {e:#}");
                                     }
                                 }
                             });
