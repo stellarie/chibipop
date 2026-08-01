@@ -236,7 +236,7 @@ pub fn settings_only(
         // Tab switch -> detect.
         if let Some(tab) = window.take_tab_change() {
             window.switch_tab(tab);
-            if tab == 1 {
+            if tab == 3 {
                 let url = window.anki_url();
                 let tx = detect_tx.clone();
                 thread::spawn(move || {
@@ -799,7 +799,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             // Tab switch -> detect.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
-                if tab == 1 {
+                if tab == 3 {
                     let url = w.anki_url();
                     let tx = detect_tx.clone();
                     thread::spawn(move || {

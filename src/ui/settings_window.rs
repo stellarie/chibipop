@@ -710,6 +710,10 @@ pub struct SettingsWindow {
     staged: RefCell<SettingsForm>,
     /// General-tab-only controls.
     general_ctrls: Vec<HWND>,
+    /// Dictionaries-tab controls.
+    dict_ctrls: Vec<HWND>,
+    /// OCR/Debug-tab controls.
+    ocr_ctrls: Vec<HWND>,
     /// Anki-tab-only controls.
     anki_ctrls: Vec<HWND>,
 }
@@ -757,6 +761,8 @@ impl SettingsWindow {
                 fonts: Vec::new(),
                 staged: RefCell::new(form.clone()),
                 general_ctrls: Vec::new(),
+                dict_ctrls: Vec::new(),
+                ocr_ctrls: Vec::new(),
                 anki_ctrls: Vec::new(),
             };
             // `build` reports where its layout actually ended; the window is
@@ -903,23 +909,28 @@ impl SettingsWindow {
         })
     }
 
-    /// Show one tab, hide the other.
+    /// Show one tab, hide the rest.
     pub fn switch_tab(&self, tab: u32) {
         // SAFETY: `self.hwnd` is live until `Drop`.
         unsafe { cancel_capture(self.hwnd) };
-        let (show, hide) = match tab {
-            0 => (&self.general_ctrls, &self.anki_ctrls),
-            1 => (&self.anki_ctrls, &self.general_ctrls),
-            _ => return,
-        };
-        // SAFETY: every HWND in both vectors was created in `build` as a
-        // child of `self.hwnd` and lives until the window is destroyed.
+        let groups = [
+            &self.general_ctrls,
+            &self.dict_ctrls,
+            &self.ocr_ctrls,
+            &self.anki_ctrls,
+        ];
+        if tab as usize >= groups.len() {
+            return;
+        }
+        // SAFETY: every HWND in every group was created in
+        // `build` as a child of `self.hwnd` and lives until
+        // the window is destroyed.
         unsafe {
-            for &c in hide {
-                let _ = ShowWindow(c, SW_HIDE);
-            }
-            for &c in show {
-                let _ = ShowWindow(c, SW_SHOW);
+            for (i, ctrls) in groups.iter().enumerate() {
+                let cmd = if i as u32 == tab { SW_SHOW } else { SW_HIDE };
+                for &c in *ctrls {
+                    let _ = ShowWindow(c, cmd);
+                }
             }
         }
     }
@@ -1074,6 +1085,8 @@ impl SettingsWindow {
         let h = self.hwnd;
         let mut y = PAD;
         let mut gen: Vec<HWND> = Vec::new();
+        let mut dict: Vec<HWND> = Vec::new();
+        let mut ocr: Vec<HWND> = Vec::new();
         let mut ank: Vec<HWND> = Vec::new();
 
         // SAFETY: `h` is the window just created by `open`; every control is
@@ -1103,9 +1116,17 @@ impl SettingsWindow {
             };
             SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(0)),
                 Some(LPARAM(&item as *const _ as isize)));
-            let mut t1 = wide("Anki");
+            let mut t1 = wide("Dictionaries");
             item.psz_text = t1.as_mut_ptr();
             SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(1)),
+                Some(LPARAM(&item as *const _ as isize)));
+            let mut t2 = wide("OCR / Debug");
+            item.psz_text = t2.as_mut_ptr();
+            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(2)),
+                Some(LPARAM(&item as *const _ as isize)));
+            let mut t3 = wide("Anki");
+            item.psz_text = t3.as_mut_ptr();
+            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(3)),
                 Some(LPARAM(&item as *const _ as isize)));
             y += TAB_H + 4;
             let content_y = y;
@@ -1245,20 +1266,22 @@ impl SettingsWindow {
             gen.push(check("Hide the popup from screen capture", ID_EXCLUDE,
                   form.exclude_from_capture, y)?);
             y += ROW_H + 18;
+            let y_general = y;
 
-            // ---- Dictionaries ----
+            // ---- Dictionaries (own tab) ----
+            y = content_y;
             let bx = WIN_W - PAD - 100;
             let list_w = WIN_W - 2 * PAD - 110;
             let hint_h = 28;
             // Four buttons set the height.
             let dict_span = 3 * BTN_PITCH + ROW_H;
             let dict_h = 20 + dict_span + ROW_GAP + hint_h + 8;
-            gen.push(group("Dictionaries — topmost is shown first", y, dict_h)?);
+            dict.push(group("Dictionaries — topmost is shown first", y, dict_h)?);
             y += 20;
             let list = child(h, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                 PAD, y, list_w, dict_span, ID_DICTS, f)?;
-            gen.push(list);
+            dict.push(list);
             for name in &form.dict_names {
                 SendMessageW(list, LB_ADDSTRING, None,
                     Some(LPARAM(wide(name).as_ptr() as isize)));
@@ -1273,11 +1296,11 @@ impl SettingsWindow {
             .iter()
             .enumerate()
             {
-                gen.push(child(h, w!("BUTTON"), text, WS_TABSTOP,
+                dict.push(child(h, w!("BUTTON"), text, WS_TABSTOP,
                       bx, y + i as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?);
             }
             y += dict_span + ROW_GAP;
-            gen.push(child(h, w!("STATIC"),
+            dict.push(child(h, w!("STATIC"),
                 "Order is matched by dictionary name. If you rebuild your \
                  dictionaries, check this list again.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, hint_h, 0, f)?);
@@ -1285,7 +1308,7 @@ impl SettingsWindow {
 
             // A rebuild is library-only.
             if form.library_empty && !form.dict_names.is_empty() {
-                gen.push(child(h, w!("STATIC"),
+                dict.push(child(h, w!("STATIC"),
                     "chibipop is using a dictionary built outside the app. Adding or \
                      removing here rebuilds from this list only — import your original \
                      .zip files first.",
@@ -1301,7 +1324,7 @@ impl SettingsWindow {
                      removed. Dictionaries it used to order are now sorted last.",
                     stale.join("\", \"")
                 );
-                gen.push(child(h, w!("STATIC"), &msg, WINDOW_STYLE(0),
+                dict.push(child(h, w!("STATIC"), &msg, WINDOW_STYLE(0),
                       PAD, y, WIN_W - 2 * PAD - 20, 32, 0, f)?);
                 y += 36;
             }
@@ -1311,51 +1334,53 @@ impl SettingsWindow {
             // WS_GROUP ends the last one.
             let freq_span = BTN_PITCH + ROW_H;
             let freq_h = 20 + freq_span + 8;
-            gen.push(group_start("Frequency data — how common each word is", y, freq_h)?);
+            dict.push(group_start("Frequency data — how common each word is", y, freq_h)?);
             y += 20;
             let freqs = child(h, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                 PAD, y, list_w, freq_span, ID_FREQS, f)?;
-            gen.push(freqs);
+            dict.push(freqs);
             for name in &form.freq_names {
                 SendMessageW(freqs, LB_ADDSTRING, None,
                     Some(LPARAM(wide(name).as_ptr() as isize)));
             }
             SendMessageW(freqs, LB_SETCURSEL, Some(WPARAM(0)), None);
-            gen.push(child(h, w!("BUTTON"), "Add…", WS_TABSTOP,
+            dict.push(child(h, w!("BUTTON"), "Add…", WS_TABSTOP,
                   bx, y, BTN_W, ROW_H, ID_FREQ_ADD, f)?);
-            gen.push(child(h, w!("BUTTON"), "Remove", WS_TABSTOP,
+            dict.push(child(h, w!("BUTTON"), "Remove", WS_TABSTOP,
                   bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?);
             y += freq_span + 8 + GROUP_GAP;
+            let y_dict = y;
 
-            // ---- OCR / Debug ----
-            gen.push(group("OCR / Debug", y, 4 * ROW_H + 34)?);
+            // ---- OCR / Debug (own tab) ----
+            y = content_y;
+            ocr.push(group("OCR / Debug", y, 4 * ROW_H + 34)?);
             y += 20;
             self.passes = numeric_choices(
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
                 form.max_ocr_passes as i64);
-            gen.push(label("OCR passes per hover", y)?);
+            ocr.push(label("OCR passes per hover", y)?);
             let ps = child(h, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_PASSES, f)?;
-            gen.push(ps);
+            ocr.push(ps);
             fill_numeric(ps, &self.passes, form.max_ocr_passes as i64);
             y += ROW_H;
-            gen.push(child(h, w!("STATIC"),
+            ocr.push(child(h, w!("STATIC"),
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
-            gen.push(check("Prefer vertical text (manga, VN)",
+            ocr.push(check("Prefer vertical text (manga, VN)",
                 ID_PREFER_VERT, form.prefer_vertical, y)?);
             y += ROW_H;
             let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
-            gen.push(scan);
+            ocr.push(scan);
             SendMessageW(scan, BM_SETCHECK,
                 Some(WPARAM(if form.show_scan_region { 1 } else { 0 })), None);
             y += ROW_H + 18;
-            let y_general = y;
+            let y_ocr = y;
 
             // ---- Anki (own tab) ----
             y = content_y;
@@ -1392,7 +1417,7 @@ impl SettingsWindow {
             ank.push(child(h, w!("BUTTON"), "Test connection", WS_TABSTOP,
                   PAD, y, 116, ROW_H, ID_ANKI_TEST, f)?);
             y += ROW_H + 8 + GROUP_GAP;
-            y = y_general.max(y);
+            y = y_general.max(y_dict).max(y_ocr).max(y);
 
             // ---- Updates ----
             group("Updates", y, ROW_H + 24)?;
@@ -1415,13 +1440,15 @@ impl SettingsWindow {
                   PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
 
             // Start on General tab.
-            for &c in &ank {
+            for &c in dict.iter().chain(&ocr).chain(&ank) {
                 let _ = ShowWindow(c, SW_HIDE);
             }
 
             update_list_buttons(h);
         }
         self.general_ctrls = gen;
+        self.dict_ctrls = dict;
+        self.ocr_ctrls = ocr;
         self.anki_ctrls = ank;
         Ok(y + ROW_H + 8)
     }
