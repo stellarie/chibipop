@@ -477,6 +477,12 @@ mod tests {
     }
 
     #[test]
+    fn matches_trigger_arbitrary_letter_key() {
+        assert!(matches_trigger(0x41, 0x41));
+        assert!(!matches_trigger(0x42, 0x41));
+    }
+
+    #[test]
     fn modifier_variants_known() {
         assert_eq!(Some((0xA0, 0xA1)), modifier_variants(0x10));
         assert_eq!(Some((0xA2, 0xA3)), modifier_variants(0x11));

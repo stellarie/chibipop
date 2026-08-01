@@ -57,7 +57,7 @@ pub enum TriggerMode {
 
 /// VK code from a key name.
 pub fn parse_trigger_key(name: &str) -> Option<u16> {
-    match name.to_ascii_lowercase().as_str() {
+    let named = match name.to_ascii_lowercase().as_str() {
         "shift" => Some(0x10),
         "ctrl" | "control" => Some(0x11),
         "alt" => Some(0x12),
@@ -74,28 +74,32 @@ pub fn parse_trigger_key(name: &str) -> Option<u16> {
         "f11" => Some(0x7A),
         "f12" => Some(0x7B),
         _ => None,
+    };
+    named.or_else(|| parse_vk_number(name))
+}
+
+/// Hex or decimal VK number.
+fn parse_vk_number(name: &str) -> Option<u16> {
+    let s = name.trim();
+    match s.strip_prefix("0x").or(s.strip_prefix("0X")) {
+        Some(hex) => u16::from_str_radix(hex, 16).ok(),
+        None => s.parse().ok(),
     }
 }
 
 /// Display name from a VK code.
-pub fn trigger_key_name(vk: u16) -> &'static str {
+pub fn trigger_key_name(vk: u16) -> String {
     match vk {
-        0x10 => "shift",
-        0x11 => "ctrl",
-        0x12 => "alt",
-        0x70 => "f1",
-        0x71 => "f2",
-        0x72 => "f3",
-        0x73 => "f4",
-        0x74 => "f5",
-        0x75 => "f6",
-        0x76 => "f7",
-        0x77 => "f8",
-        0x78 => "f9",
-        0x79 => "f10",
-        0x7A => "f11",
-        0x7B => "f12",
-        _ => "shift",
+        0x10 => "Shift".into(),
+        0x11 => "Ctrl".into(),
+        0x12 => "Alt".into(),
+        0x70..=0x7B => format!("F{}", vk - 0x6F),
+        0x30..=0x39 | 0x41..=0x5A => char::from(vk as u8).to_string(),
+        0x20 => "Space".into(),
+        0x1B => "Esc".into(),
+        0x09 => "Tab".into(),
+        0x14 => "CapsLock".into(),
+        _ => format!("Key 0x{vk:02X}"),
     }
 }
 
@@ -728,15 +732,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_trigger_key_hex() {
+        assert_eq!(Some(0x41), parse_trigger_key("0x41"));
+    }
+
+    #[test]
+    fn parse_trigger_key_hex_uppercase_prefix() {
+        assert_eq!(Some(0x41), parse_trigger_key("0X41"));
+    }
+
+    #[test]
+    fn parse_trigger_key_decimal() {
+        assert_eq!(Some(0x41), parse_trigger_key("65"));
+    }
+
+    /// Overflows `u16`: not silently wrapped.
+    #[test]
+    fn parse_trigger_key_out_of_range_decimal_is_rejected() {
+        assert_eq!(None, parse_trigger_key("99999"));
+    }
+
+    #[test]
     fn trigger_key_name_round_trips() {
-        for name in &[
-            "shift", "ctrl", "alt",
-            "f1", "f2", "f3", "f4", "f5", "f6",
-            "f7", "f8", "f9", "f10", "f11", "f12",
+        for (name, want) in &[
+            ("shift", "Shift"), ("ctrl", "Ctrl"), ("alt", "Alt"),
+            ("f1", "F1"), ("f2", "F2"), ("f3", "F3"), ("f4", "F4"),
+            ("f5", "F5"), ("f6", "F6"), ("f7", "F7"), ("f8", "F8"),
+            ("f9", "F9"), ("f10", "F10"), ("f11", "F11"), ("f12", "F12"),
         ] {
             let vk = parse_trigger_key(name).unwrap();
-            assert_eq!(*name, trigger_key_name(vk));
+            assert_eq!(*want, trigger_key_name(vk));
         }
+    }
+
+    #[test]
+    fn trigger_key_name_letter() {
+        assert_eq!("A", trigger_key_name(0x41));
+    }
+
+    #[test]
+    fn trigger_key_name_digit() {
+        assert_eq!("5", trigger_key_name(0x35));
+    }
+
+    #[test]
+    fn trigger_key_name_space() {
+        assert_eq!("Space", trigger_key_name(0x20));
+    }
+
+    #[test]
+    fn trigger_key_name_named_specials() {
+        assert_eq!("Esc", trigger_key_name(0x1B));
+        assert_eq!("Tab", trigger_key_name(0x09));
+        assert_eq!("CapsLock", trigger_key_name(0x14));
+    }
+
+    #[test]
+    fn trigger_key_name_unknown_falls_back_to_hex() {
+        assert_eq!("Key 0xBA", trigger_key_name(0xBA));
     }
 
     #[test]

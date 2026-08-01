@@ -192,6 +192,9 @@ thread_local! {
 
     // Button text before capture.
     static CAPTURE_PREV: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
+
+    // Captured vkcode, by `HWND`.
+    static CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -661,17 +664,6 @@ fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
     v
 }
 
-/// Key names the button offers.
-const TRIGGER_KEY_NAMES: &[&str] = &[
-    "Shift", "Ctrl", "Alt",
-    "F1", "F2", "F3", "F4", "F5", "F6",
-    "F7", "F8", "F9", "F10", "F11", "F12",
-];
-
-fn trigger_display_name(vk: u16) -> Option<&'static str> {
-    TRIGGER_KEY_NAMES.iter().copied().find(|n| crate::config::parse_trigger_key(n) == Some(vk))
-}
-
 /// `None` unless capturing.
 fn take_captured_key(hwnd: HWND, vk: u16) -> Option<String> {
     let mine = hwnd.0 as isize;
@@ -679,24 +671,27 @@ fn take_captured_key(hwnd: HWND, vk: u16) -> Option<String> {
         return None;
     }
     CAPTURING.with(|c| c.set(None));
-    let prev = CAPTURE_PREV
-        .with(|c| c.borrow_mut().take())
-        .and_then(|(h, s)| (h == mine).then_some(s));
-    Some(
-        trigger_display_name(vk)
-            .map(str::to_string)
-            .or(prev)
-            .unwrap_or_else(|| "Shift".to_string()),
-    )
+    CAPTURED_VK.with(|c| c.set(Some((mine, vk))));
+    Some(crate::config::trigger_key_name(vk))
 }
 
-/// A valid key, or fall back.
-fn resolved_trigger_key(button_text: &str, template: &str) -> String {
-    let lower = button_text.to_ascii_lowercase();
-    if crate::config::parse_trigger_key(&lower).is_some() {
-        lower
-    } else {
-        template.to_string()
+/// What `read()` persists.
+fn resolved_trigger_key(hwnd: HWND, template: &str) -> String {
+    CAPTURED_VK
+        .with(|c| c.get())
+        .and_then(|(h, vk)| (h == hwnd.0 as isize).then_some(vk))
+        .or_else(|| crate::config::parse_trigger_key(template))
+        .map_or_else(|| template.to_string(), stored_trigger_key)
+}
+
+/// Parseable form of `vk`.
+fn stored_trigger_key(vk: u16) -> String {
+    match vk {
+        0x10 => "shift".into(),
+        0x11 => "ctrl".into(),
+        0x12 => "alt".into(),
+        0x70..=0x7B => format!("f{}", vk - 0x6F),
+        _ => format!("0x{vk:02X}"),
     }
 }
 
@@ -1146,13 +1141,10 @@ impl SettingsWindow {
                 Some(WPARAM(if is_live { 0 } else { 1 })), None);
             y += ROW_H + ROW_GAP;
             gen.push(label("Trigger key", y)?);
-            let key_lower = form.trigger_key.to_ascii_lowercase();
-            let key_name = TRIGGER_KEY_NAMES
-                .iter()
-                .find(|n| n.to_ascii_lowercase() == key_lower)
-                .copied()
-                .unwrap_or("Shift");
-            let key_btn = child(h, w!("BUTTON"), key_name, WS_TABSTOP,
+            let key_vk = crate::config::parse_trigger_key(&form.trigger_key).unwrap_or(0x10);
+            CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, key_vk))));
+            let key_name = crate::config::trigger_key_name(key_vk);
+            let key_btn = child(h, w!("BUTTON"), &key_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_TRIGGER_KEY, f)?;
             gen.push(key_btn);
             let _ = EnableWindow(key_btn, !is_live);
@@ -1471,8 +1463,7 @@ impl SettingsWindow {
                 }
             };
 
-            let trigger_key =
-                resolved_trigger_key(&text_of(ID_TRIGGER_KEY), &template.trigger_key);
+            let trigger_key = resolved_trigger_key(h, &template.trigger_key);
 
             SettingsForm {
                 mode: if checked(ID_MODE_HOLD) {
@@ -1551,6 +1542,11 @@ impl Drop for SettingsWindow {
         });
         CAPTURING.with(|c| {
             if c.get() == Some(self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        CAPTURED_VK.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
         });
@@ -1710,19 +1706,6 @@ mod tests {
     // ---- trigger-key capture ----
 
     #[test]
-    fn trigger_display_name_matches_known_vks() {
-        assert_eq!(Some("Shift"), trigger_display_name(0x10));
-        assert_eq!(Some("Ctrl"), trigger_display_name(0x11));
-        assert_eq!(Some("F12"), trigger_display_name(0x7B));
-    }
-
-    #[test]
-    fn trigger_display_name_rejects_an_unlisted_vk() {
-        assert_eq!(None, trigger_display_name(0x41)); // 'A'
-        assert_eq!(None, trigger_display_name(0x0D)); // Enter
-    }
-
-    #[test]
     fn take_captured_key_is_none_when_not_capturing() {
         let hwnd = HWND(6001 as *mut core::ffi::c_void);
         assert_eq!(None, take_captured_key(hwnd, 0x10));
@@ -1730,10 +1713,9 @@ mod tests {
 
     /// Ends capture with its name.
     #[test]
-    fn take_captured_key_accepts_a_known_key() {
+    fn take_captured_key_accepts_a_named_key() {
         let hwnd = HWND(6002 as *mut core::ffi::c_void);
         CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
-        CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, "Shift".to_string())));
 
         let got = take_captured_key(hwnd, 0x11);
 
@@ -1741,26 +1723,64 @@ mod tests {
         assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
     }
 
-    /// Reverts on an unknown key.
+    /// Any vk is now valid.
     #[test]
-    fn take_captured_key_reverts_on_an_unknown_key() {
+    fn take_captured_key_accepts_a_previously_unlisted_key() {
         let hwnd = HWND(6003 as *mut core::ffi::c_void);
         CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
-        CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, "F5".to_string())));
 
-        let got = take_captured_key(hwnd, 0x41); // 'A' is not offered.
+        let got = take_captured_key(hwnd, 0x41); // 'A'
 
-        assert_eq!(Some("F5".to_string()), got);
+        assert_eq!(Some("A".to_string()), got);
+        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
+    }
+
+    /// Stashed so `read()` can see it later.
+    #[test]
+    fn take_captured_key_records_the_vk_for_read() {
+        let hwnd = HWND(6007 as *mut core::ffi::c_void);
+        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+
+        take_captured_key(hwnd, 0x41);
+
+        assert_eq!("0x41", resolved_trigger_key(hwnd, "shift"));
+        CAPTURED_VK.with(|c| c.set(None));
     }
 
     #[test]
-    fn resolved_trigger_key_accepts_a_valid_label() {
-        assert_eq!("ctrl", resolved_trigger_key("Ctrl", "shift"));
+    fn resolved_trigger_key_falls_back_to_the_template_when_uncaptured() {
+        let hwnd = HWND(6005 as *mut core::ffi::c_void);
+        CAPTURED_VK.with(|c| c.set(None));
+
+        assert_eq!("ctrl", resolved_trigger_key(hwnd, "ctrl"));
     }
 
-    /// Never saves mid-capture.
     #[test]
-    fn resolved_trigger_key_falls_back_mid_capture() {
-        assert_eq!("shift", resolved_trigger_key("Press a key...", "shift"));
+    fn resolved_trigger_key_falls_back_verbatim_when_unparseable() {
+        let hwnd = HWND(6006 as *mut core::ffi::c_void);
+        CAPTURED_VK.with(|c| c.set(None));
+
+        assert_eq!("garbage", resolved_trigger_key(hwnd, "garbage"));
+    }
+
+    #[test]
+    fn stored_trigger_key_names_known_keys() {
+        assert_eq!("shift", stored_trigger_key(0x10));
+        assert_eq!("ctrl", stored_trigger_key(0x11));
+        assert_eq!("alt", stored_trigger_key(0x12));
+        assert_eq!("f5", stored_trigger_key(0x74));
+    }
+
+    #[test]
+    fn stored_trigger_key_hexes_everything_else() {
+        assert_eq!("0x41", stored_trigger_key(0x41));
+    }
+
+    #[test]
+    fn stored_trigger_key_round_trips_through_parse_trigger_key() {
+        for vk in [0x10u16, 0x11, 0x12, 0x70, 0x7B, 0x41, 0x30, 0x20, 0xBA] {
+            let stored = stored_trigger_key(vk);
+            assert_eq!(Some(vk), crate::config::parse_trigger_key(&stored), "{stored}");
+        }
     }
 }
