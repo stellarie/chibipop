@@ -17,11 +17,7 @@
 ### 1. Download chibipop
 
 Get the latest **`chibipop-vX.Y.Z-windows-x64.zip`** from the
-[Releases page](../../releases), and unzip it anywhere you like — your
-Documents folder is fine.
-
-There's no installer. Everything chibipop needs lives in that one folder, and
-it doesn't write anything outside it.
+[Releases page](../../releases), and unzip it anywhere you like.
 
 ### 2. Add your dictionaries
 
@@ -35,34 +31,15 @@ Start chibipop. The settings window opens by itself.
 
 Everything is in the settings window — you shouldn't need to edit any files.
 
-| Setting | What it does |
-|---|---|
-| **Trigger** | *Live* shows definitions as you hover. *Hold Shift* only shows them while Shift is held. |
-| **Theme** | Dark or light. Dark is the default, since most reading happens on dark screens. |
-| **Font** | Which font the popup uses. Only fonts that can display Japanese are listed. |
-| **Max height** | How tall the popup may grow, as a share of your screen. Longer entries scroll instead of growing past it. |
-| **Summary length** | How much of each extra definition is shown on its one-line row. |
-| **Box the word being defined** | Draws a faint outline around exactly the characters being defined, so you can see it picked the right word. |
-| **Scroll long entries with the wheel** | Lets the wheel scroll the popup while your cursor is inside it. |
-| **Hide the popup from screen capture** | Makes the popup invisible to screen recorders, screenshots and screen sharing — visible only to you. Off by default. |
-| **Dictionaries** | Add and remove your dictionaries, and set their order — the one at the top is shown first. |
-| **Frequency data** | Word-frequency lists, which rank the results. No order: a rank is a lookup, not a display order. |
-| **OCR passes per hover** | Leave at 1. Higher reads further ahead but can pick the wrong character. |
-| **Outline what each hover captured** | A diagnostic view showing where chibipop looked. Off by default. |
-
 Pressing **Apply** saves your settings and restarts chibipop, which takes
-about a fifth of a second. Your settings live in `chibipop.toml` beside
+a couple of seconds. Your settings live in `chibipop.toml` beside
 `chibipop.exe`, and you can edit that by hand if you prefer.
-
-If you added or removed a dictionary, Apply rebuilds `data\chibipop.sqlite`
-first and that takes a minute or so. Your old dictionary keeps working the
-whole time, and stays in place untouched if the rebuild fails.
 
 ---
 
 ## If something doesn't work
 
-Head over to [Issues](https://github.com/stellarie/chibipop/issues) ~
+Head over to [Issues](https://github.com/stellarie/chibipop/issues)!
 
 ---
 
@@ -72,9 +49,9 @@ Add your own dictionaries - as this does not include any dictionaries at all.
 
 The build these instructions were written against used:
 
-- **Jitendex** — free, CC BY-SA 4.0. A good Japanese→English starting point.
-- **大辞林 第四版** — © Sanseido. Japanese→Japanese.
-- **jiten_freq_global** — word-frequency data, used to rank results.
+- **Jitendex** - free, CC BY-SA 4.0. A good Japanese→English starting point.
+- **大辞林 第四版** - © Sanseido. Japanese→Japanese.
+- **jiten_freq_global** - word-frequency data, used to rank results.
 
 Any Yomitan-format dictionary should work. Frequency lists are detected
 automatically.
