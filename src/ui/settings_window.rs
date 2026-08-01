@@ -1268,7 +1268,7 @@ impl SettingsWindow {
             y += ROW_H + 18;
             let y_general = y;
 
-            // ---- Dictionaries (own tab) ----
+            // ---- Dictionaries ----
             y = content_y;
             let bx = WIN_W - PAD - 100;
             let list_w = WIN_W - 2 * PAD - 110;
@@ -1352,7 +1352,7 @@ impl SettingsWindow {
             y += freq_span + 8 + GROUP_GAP;
             let y_dict = y;
 
-            // ---- OCR / Debug (own tab) ----
+            // ---- OCR / Debug ----
             y = content_y;
             ocr.push(group("OCR / Debug", y, 4 * ROW_H + 34)?);
             y += 20;
