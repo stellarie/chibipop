@@ -53,6 +53,12 @@ const WM_APP_CAPTURE_GUARD: u32 = WM_APP + 3;
 /// Dupe check finished.
 const WM_APP_ANKI: u32 = WM_APP + 4;
 
+/// Add-note finished.
+const WM_APP_ADD_NOTE: u32 = WM_APP + 5;
+
+/// Settings op finished.
+const WM_APP_SETTINGS: u32 = WM_APP + 6;
+
 /// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -112,6 +118,12 @@ enum WorkerOutcome {
 struct AnkiDupeResult {
     gen: u64,
     dupes: HashSet<String>,
+}
+
+/// One add-note's answer.
+struct AddNoteResult {
+    expr: String,
+    err: Option<String>,
 }
 
 /// Popup out of one capture.
@@ -176,6 +188,9 @@ pub fn settings_only(
     let mut rebuild: Option<InFlight> = None;
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
+    let (settings_tx, settings_rx) = mpsc::channel::<String>();
+    // SAFETY: no preconditions.
+    let tid = unsafe { GetCurrentThreadId() };
 
     let mut msg = MSG::default();
     // SAFETY: `msg` is this loop's own stack storage, and `window` is alive
@@ -184,6 +199,12 @@ pub fn settings_only(
         // No hooks, nothing to disarm.
         window.pump(|| {});
 
+        if msg.message == WM_APP_SETTINGS {
+            while let Ok(status) = settings_rx.try_recv() {
+                window.set_status(&status);
+            }
+        }
+
         // Dialog keys first, as in run.
         if !unsafe { IsDialogMessageW(window.hwnd(), &msg) }.as_bool() {
             unsafe {
@@ -191,7 +212,7 @@ pub fn settings_only(
                 DispatchMessageW(&msg);
             }
         }
-        service_settings_click(&window);
+        service_settings_click(&window, &settings_tx, tid);
 
         if rebuild.is_some() {
             // Not while the child writes.
@@ -380,27 +401,63 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
-/// Runs the Anki/update click.
-fn service_settings_click(w: &SettingsWindow) {
+/// Spawns the Anki/update op.
+fn service_settings_click(
+    w: &SettingsWindow,
+    tx: &mpsc::Sender<String>,
+    tid: u32,
+) {
     match w.take_click() {
         Some(SettingsClick::AnkiTest) => {
+            w.set_status("Testing\u{2026}");
             let url = w.anki_url();
-            match anki::check_connection(&url) {
-                Ok(true) => w.set_status("AnkiConnect is reachable."),
-                Ok(false) => w.set_status("AnkiConnect did not respond."),
-                Err(e) => w.set_status(&format!("Anki test failed: {e:#}")),
-            }
-        }
-        Some(SettingsClick::CheckUpdate) => match update::check(env!("CARGO_PKG_VERSION")) {
-            Ok(None) => w.set_status("You already have the latest version."),
-            Ok(Some(release)) => match update::download_and_replace(&release) {
-                Ok(()) => {
-                    w.set_status(&format!("Updated to {}. Restart to use it.", release.tag));
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let msg = match anki::check_connection(&url) {
+                    Ok(true) => "AnkiConnect is reachable.".into(),
+                    Ok(false) => "AnkiConnect did not respond.".into(),
+                    Err(e) => format!("Anki test failed: {e:#}"),
+                };
+                let _ = tx.send(msg);
+                // SAFETY: wakes the pump thread.
+                unsafe {
+                    let _ = PostThreadMessageW(
+                        tid, WM_APP_SETTINGS,
+                        WPARAM(0), LPARAM(0),
+                    );
                 }
-                Err(e) => w.set_status(&format!("Update to {} failed: {e:#}", release.tag)),
-            },
-            Err(e) => w.set_status(&format!("Update check failed: {e:#}")),
-        },
+            });
+        }
+        Some(SettingsClick::CheckUpdate) => {
+            w.set_status("Checking\u{2026}");
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let msg = match update::check(env!("CARGO_PKG_VERSION")) {
+                    Ok(None) => "You already have the latest version.".into(),
+                    Ok(Some(release)) => {
+                        match update::download_and_replace(&release) {
+                            Ok(()) => format!(
+                                "Updated to {}. Restart to use it.",
+                                release.tag,
+                            ),
+                            Err(e) => format!(
+                                "Update to {} failed: {e:#}",
+                                release.tag,
+                            ),
+                        }
+                    }
+                    Err(e) => format!("Update check failed: {e:#}"),
+                };
+                let _ = tx.send(msg);
+                // SAFETY: wakes the pump thread.
+                unsafe {
+                    let _ = PostThreadMessageW(
+                        tid, WM_APP_SETTINGS,
+                        WPARAM(0), LPARAM(0),
+                    );
+                }
+            });
+        }
         None => {}
     }
 }
@@ -563,6 +620,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     // What is on screen now.
     let mut shown: Option<Shown> = None;
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
+    let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
+    let (settings_tx, settings_rx) = mpsc::channel::<String>();
     let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
@@ -644,7 +703,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
             let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
-            service_settings_click(w);
+            service_settings_click(w, &settings_tx, main_tid);
             if handled {
                 continue;
             }
@@ -725,20 +784,33 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                     (expr, fields)
                                 });
                                 if let Some((expr, fields)) = info {
-                                    if !s.anki.added.contains(&expr) && !s.anki.dupes.contains(&expr) {
-                                        match anki::add_note(&anki_url, &anki_deck, &anki_model, &fields) {
-                                            Ok(_) => {
-                                                s.anki.added.insert(expr);
-                                                if let Err(e) = renderer.paint(
-                                                    &s.presentation, &theme, s.scroll, &s.anki,
-                                                ) {
-                                                    eprintln!("chibipop: repaint after add failed: {e:#}");
-                                                }
-                                            }
-                                            Err(e) => {
-                                                eprintln!("chibipop: add to Anki failed: {e:#}");
-                                            }
+                                    if !s.anki.adding
+                                        && !s.anki.added.contains(&expr)
+                                        && !s.anki.dupes.contains(&expr)
+                                    {
+                                        s.anki.adding = true;
+                                        if let Err(e) = renderer.paint(
+                                            &s.presentation, &theme, s.scroll, &s.anki,
+                                        ) {
+                                            eprintln!("chibipop: repaint for adding failed: {e:#}");
                                         }
+                                        let url = anki_url.clone();
+                                        let deck = anki_deck.clone();
+                                        let model = anki_model.clone();
+                                        let tx = add_tx.clone();
+                                        thread::spawn(move || {
+                                            let err = anki::add_note(&url, &deck, &model, &fields)
+                                                .err()
+                                                .map(|e| format!("{e:#}"));
+                                            let _ = tx.send(AddNoteResult { expr, err });
+                                            // SAFETY: wakes the pump.
+                                            unsafe {
+                                                let _ = PostThreadMessageW(
+                                                    main_tid, WM_APP_ADD_NOTE,
+                                                    WPARAM(0), LPARAM(0),
+                                                );
+                                            }
+                                        });
                                     }
                                 }
                             }
@@ -910,6 +982,28 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
                         }
                     }
+                }
+            }
+        } else if msg.message == WM_APP_ADD_NOTE {
+            while let Ok(result) = add_rx.try_recv() {
+                if let Some(s) = shown.as_mut() {
+                    s.anki.adding = false;
+                    if let Some(e) = result.err {
+                        eprintln!("chibipop: add to Anki failed: {e}");
+                    } else {
+                        s.anki.added.insert(result.expr);
+                    }
+                    if let Err(e) = renderer.paint(
+                        &s.presentation, &theme, s.scroll, &s.anki,
+                    ) {
+                        eprintln!("chibipop: repaint after add failed: {e:#}");
+                    }
+                }
+            }
+        } else if msg.message == WM_APP_SETTINGS {
+            while let Ok(status) = settings_rx.try_recv() {
+                if let Some(w) = &settings {
+                    w.set_status(&status);
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
@@ -1235,6 +1329,7 @@ fn handle_worker_outcome(
                 dupes: HashSet::new(),
                 added: HashSet::new(),
                 enabled: anki_enabled,
+                adding: false,
             };
             match show_presentation(
                 popup,

@@ -51,6 +51,7 @@ pub struct AnkiPopupState {
     pub dupes: HashSet<String>,
     pub added: HashSet<String>,
     pub enabled: bool,
+    pub adding: bool,
 }
 
 impl AnkiPopupState {
@@ -60,6 +61,7 @@ impl AnkiPopupState {
             dupes: HashSet::new(),
             added: HashSet::new(),
             enabled: false,
+            adding: false,
         }
     }
 }
@@ -534,7 +536,9 @@ fn build_elements(p: &Presentation, theme: &Theme, anki: &AnkiPopupState) -> Vec
         let expr = p.top.as_ref().and_then(|c| {
             c.written.as_deref().or(c.reading.as_deref())
         }).unwrap_or("");
-        let (text, color) = if anki.added.contains(expr) {
+        let (text, color) = if anki.adding {
+            ("\u{2026} Adding\u{2026}", theme.dimmed_text)
+        } else if anki.added.contains(expr) {
             ("\u{2713} Added", theme.dimmed_text)
         } else if anki.dupes.contains(expr) {
             ("\u{2713} Already in Anki", theme.dimmed_text)
