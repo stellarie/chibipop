@@ -186,6 +186,12 @@ thread_local! {
 
     // Pending tab switch.
     static TAB: Cell<Option<(isize, u32)>> = const { Cell::new(None) };
+
+    // Trigger capture, by `HWND`.
+    static CAPTURING: Cell<Option<isize>> = const { Cell::new(None) };
+
+    // Button text before capture.
+    static CAPTURE_PREV: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -207,11 +213,46 @@ fn record_click(hwnd: HWND, click: SettingsClick) {
     CLICK.with(|c| c.set(Some((hwnd.0 as isize, click))));
 }
 
+/// Starts capture mode.
+unsafe fn begin_capture(hwnd: HWND) {
+    // SAFETY: `ID_TRIGGER_KEY` is a live child of `hwnd`, created in
+    // `build`; `window_text`/`SetWindowTextW` state their own contracts.
+    unsafe {
+        let Ok(btn) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) else { return };
+        let prev = window_text(btn);
+        CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, prev)));
+        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+        let _ = SetWindowTextW(btn, w!("Press a key..."));
+    }
+}
+
+/// Ends capture, unchanged.
+unsafe fn cancel_capture(hwnd: HWND) {
+    // SAFETY: `ID_TRIGGER_KEY` is a live child of `hwnd`, created in
+    // `build`; the stashed text was captured from this same control.
+    unsafe {
+        let mine = hwnd.0 as isize;
+        if CAPTURING.with(|c| c.get()) != Some(mine) {
+            return;
+        }
+        CAPTURING.with(|c| c.set(None));
+        let prev = CAPTURE_PREV
+            .with(|c| c.borrow_mut().take())
+            .and_then(|(h, s)| (h == mine).then_some(s));
+        let Some(text) = prev else { return };
+        if let Ok(btn) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
+            let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
+        }
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
             let notify = (wparam.0 >> 16) as u16;
+            // Any click cancels capture.
+            unsafe { cancel_capture(hwnd) };
             // Or Move buttons go stale.
             if (id == ID_DICTS || id == ID_FREQS) && notify == LBN_SELCHANGE as u16 {
                 unsafe { update_list_buttons(hwnd) };
@@ -236,6 +277,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         let _ = EnableWindow(c, id == ID_MODE_HOLD);
                     }
                 },
+                ID_TRIGGER_KEY => unsafe { begin_capture(hwnd) },
                 _ => {}
             }
             LRESULT(0)
@@ -619,12 +661,44 @@ fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
     v
 }
 
-/// Key names for the trigger combo.
+/// Key names the button offers.
 const TRIGGER_KEY_NAMES: &[&str] = &[
     "Shift", "Ctrl", "Alt",
     "F1", "F2", "F3", "F4", "F5", "F6",
     "F7", "F8", "F9", "F10", "F11", "F12",
 ];
+
+fn trigger_display_name(vk: u16) -> Option<&'static str> {
+    TRIGGER_KEY_NAMES.iter().copied().find(|n| crate::config::parse_trigger_key(n) == Some(vk))
+}
+
+/// `None` unless capturing.
+fn take_captured_key(hwnd: HWND, vk: u16) -> Option<String> {
+    let mine = hwnd.0 as isize;
+    if CAPTURING.with(|c| c.get()) != Some(mine) {
+        return None;
+    }
+    CAPTURING.with(|c| c.set(None));
+    let prev = CAPTURE_PREV
+        .with(|c| c.borrow_mut().take())
+        .and_then(|(h, s)| (h == mine).then_some(s));
+    Some(
+        trigger_display_name(vk)
+            .map(str::to_string)
+            .or(prev)
+            .unwrap_or_else(|| "Shift".to_string()),
+    )
+}
+
+/// A valid key, or fall back.
+fn resolved_trigger_key(button_text: &str, template: &str) -> String {
+    let lower = button_text.to_ascii_lowercase();
+    if crate::config::parse_trigger_key(&lower).is_some() {
+        lower
+    } else {
+        template.to_string()
+    }
+}
 
 pub struct SettingsWindow {
     hwnd: HWND,
@@ -835,6 +909,8 @@ impl SettingsWindow {
 
     /// Show one tab, hide the other.
     pub fn switch_tab(&self, tab: u32) {
+        // SAFETY: `self.hwnd` is live until `Drop`.
+        unsafe { cancel_capture(self.hwnd) };
         let (show, hide) = match tab {
             0 => (&self.general_ctrls, &self.anki_ctrls),
             1 => (&self.anki_ctrls, &self.general_ctrls),
@@ -850,6 +926,19 @@ impl SettingsWindow {
                 let _ = ShowWindow(c, SW_SHOW);
             }
         }
+    }
+
+    /// Captures `vk`; true if used.
+    pub fn handle_capture_key(&self, vk: u16) -> bool {
+        let Some(text) = take_captured_key(self.hwnd, vk) else { return false };
+        // SAFETY: `ID_TRIGGER_KEY` is a live child of `self.hwnd`, created
+        // in `build`; `SetWindowTextW` copies the string during the call.
+        unsafe {
+            if let Ok(btn) = GetDlgItem(Some(self.hwnd), ID_TRIGGER_KEY) {
+                let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
+            }
+        }
+        true
     }
 
     /// Fill the deck/model combos.
@@ -1057,22 +1146,16 @@ impl SettingsWindow {
                 Some(WPARAM(if is_live { 0 } else { 1 })), None);
             y += ROW_H + ROW_GAP;
             gen.push(label("Trigger key", y)?);
-            let key_combo = child(h, w!("COMBOBOX"), "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_TRIGGER_KEY, f)?;
-            gen.push(key_combo);
             let key_lower = form.trigger_key.to_ascii_lowercase();
-            for (i, name) in TRIGGER_KEY_NAMES.iter().enumerate() {
-                SendMessageW(key_combo, CB_ADDSTRING, None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)));
-                if name.to_ascii_lowercase() == key_lower {
-                    SendMessageW(key_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(key_combo, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(key_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
-            }
-            let _ = EnableWindow(key_combo, !is_live);
+            let key_name = TRIGGER_KEY_NAMES
+                .iter()
+                .find(|n| n.to_ascii_lowercase() == key_lower)
+                .copied()
+                .unwrap_or("Shift");
+            let key_btn = child(h, w!("BUTTON"), key_name, WS_TABSTOP,
+                FIELD_X, y, FIELD_W, ROW_H, ID_TRIGGER_KEY, f)?;
+            gen.push(key_btn);
+            let _ = EnableWindow(key_btn, !is_live);
             y += ROW_H + 18;
 
             // ---- Popup ----
@@ -1388,17 +1471,8 @@ impl SettingsWindow {
                 }
             };
 
-            let trigger_key = {
-                let i = combo_index(ID_TRIGGER_KEY);
-                if i < 0 {
-                    template.trigger_key.clone()
-                } else {
-                    TRIGGER_KEY_NAMES
-                        .get(i as usize)
-                        .map(|s| s.to_ascii_lowercase())
-                        .unwrap_or_else(|| template.trigger_key.clone())
-                }
-            };
+            let trigger_key =
+                resolved_trigger_key(&text_of(ID_TRIGGER_KEY), &template.trigger_key);
 
             SettingsForm {
                 mode: if checked(ID_MODE_HOLD) {
@@ -1473,6 +1547,17 @@ impl Drop for SettingsWindow {
         TAB.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
+            }
+        });
+        CAPTURING.with(|c| {
+            if c.get() == Some(self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        CAPTURE_PREV.with(|c| {
+            let mut slot = c.borrow_mut();
+            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
+                *slot = None;
             }
         });
         // SAFETY: the window is this struct's own, still live, and destroyed
@@ -1620,5 +1705,62 @@ mod tests {
         let families = japanese_font_families();
         assert!(!families.is_empty(), "no Japanese-capable font families found");
         assert!(!families.iter().any(|f| f.starts_with('@')), "got {families:?}");
+    }
+
+    // ---- trigger-key capture ----
+
+    #[test]
+    fn trigger_display_name_matches_known_vks() {
+        assert_eq!(Some("Shift"), trigger_display_name(0x10));
+        assert_eq!(Some("Ctrl"), trigger_display_name(0x11));
+        assert_eq!(Some("F12"), trigger_display_name(0x7B));
+    }
+
+    #[test]
+    fn trigger_display_name_rejects_an_unlisted_vk() {
+        assert_eq!(None, trigger_display_name(0x41)); // 'A'
+        assert_eq!(None, trigger_display_name(0x0D)); // Enter
+    }
+
+    #[test]
+    fn take_captured_key_is_none_when_not_capturing() {
+        let hwnd = HWND(6001 as *mut core::ffi::c_void);
+        assert_eq!(None, take_captured_key(hwnd, 0x10));
+    }
+
+    /// Ends capture with its name.
+    #[test]
+    fn take_captured_key_accepts_a_known_key() {
+        let hwnd = HWND(6002 as *mut core::ffi::c_void);
+        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+        CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, "Shift".to_string())));
+
+        let got = take_captured_key(hwnd, 0x11);
+
+        assert_eq!(Some("Ctrl".to_string()), got);
+        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
+    }
+
+    /// Reverts on an unknown key.
+    #[test]
+    fn take_captured_key_reverts_on_an_unknown_key() {
+        let hwnd = HWND(6003 as *mut core::ffi::c_void);
+        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+        CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, "F5".to_string())));
+
+        let got = take_captured_key(hwnd, 0x41); // 'A' is not offered.
+
+        assert_eq!(Some("F5".to_string()), got);
+    }
+
+    #[test]
+    fn resolved_trigger_key_accepts_a_valid_label() {
+        assert_eq!("ctrl", resolved_trigger_key("Ctrl", "shift"));
+    }
+
+    /// Never saves mid-capture.
+    #[test]
+    fn resolved_trigger_key_falls_back_mid_capture() {
+        assert_eq!("shift", resolved_trigger_key("Press a key...", "shift"));
     }
 }

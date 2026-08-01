@@ -41,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetCursorPos, GetMessageW, IsDialogMessageW, IsWindowVisible, KillTimer,
     PostQuitMessage,
     PostThreadMessageW, SetTimer, ShowWindow, TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE,
-    WM_APP, WM_TIMER,
+    WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
 /// Worker pushed a result.
@@ -205,6 +205,12 @@ pub fn settings_only(
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         // No hooks, nothing to disarm.
         window.pump(|| {});
+
+        if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
+            && window.handle_capture_key(msg.wParam.0 as u16)
+        {
+            continue;
+        }
 
         if msg.message == WM_APP_SETTINGS {
             while let Ok(status) = settings_rx.try_recv() {
@@ -757,6 +763,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 Hooks::set_click_armed(false);
                 drain_capture_guard();
             });
+
+            if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
+                && w.handle_capture_key(msg.wParam.0 as u16)
+            {
+                continue;
+            }
 
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
