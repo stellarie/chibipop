@@ -62,6 +62,9 @@ const WM_APP_SETTINGS: u32 = WM_APP + 6;
 /// Anki deck/model detect done.
 const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 
+/// Apply staging finished.
+const WM_APP_APPLY: u32 = WM_APP + 8;
+
 /// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -355,9 +358,19 @@ struct InFlight {
 /// Lock, update, build.
 fn start_rebuild(form: &SettingsForm, dir: &Path, out: &Path) -> Result<InFlight> {
     let lock = LibraryLock::acquire(dir)?;
+    let (pending, rx) = stage_and_spawn(form, dir, out)?;
+    Ok(InFlight { pending, rx, _lock: lock })
+}
+
+/// Stage, then start the build.
+fn stage_and_spawn(
+    form: &SettingsForm,
+    dir: &Path,
+    out: &Path,
+) -> Result<(Pending, mpsc::Receiver<Progress>)> {
     let pending = settings::stage_into_library(form, dir)?;
     match rebuild::spawn(dir, out) {
-        Ok(rx) => Ok(InFlight { pending, rx, _lock: lock }),
+        Ok(rx) => Ok((pending, rx)),
         Err(e) => {
             undo_apply_pending(&pending, &e);
             Err(e)
@@ -417,6 +430,12 @@ fn pump_rebuild(rx: &mpsc::Receiver<Progress>, w: &SettingsWindow) -> Option<Res
 fn begin_rebuild(w: &SettingsWindow) {
     w.set_busy(true);
     w.set_status("Rebuilding your dictionary. This can take a few minutes.");
+}
+
+/// Busy while files copy.
+fn begin_apply(w: &SettingsWindow) {
+    w.set_busy(true);
+    w.set_status("Applying your changes\u{2026}");
 }
 
 /// Say why Apply did nothing.
@@ -654,6 +673,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
     let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>)>();
+    let (apply_tx, apply_rx) =
+        mpsc::channel::<Result<(Pending, mpsc::Receiver<Progress>)>>();
     let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
@@ -671,6 +692,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let mut armed_ticks: u32 = 0;
     // A rebuild in flight.
     let mut rebuild: Option<InFlight> = None;
+    // Held while staging runs.
+    let mut staging_lock: Option<LibraryLock> = None;
     let mut pending_cfg: Option<Config> = None;
     let mut promote: Option<PathBuf> = None;
     // The swap can still fail.
@@ -874,7 +897,10 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             }
 
             if let Some(w) = &settings {
-                if rebuild.is_some() {
+                if staging_lock.is_some() {
+                    // Not while it copies files.
+                    let _ = w.take_outcome();
+                } else if rebuild.is_some() {
                     // Not while the child writes.
                     let _ = w.take_outcome();
                     // Taken only when finished.
@@ -920,12 +946,26 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             let updated = settings::apply_to(&edited, &cfg);
                             // Never half-apply.
                             if edited.has_staged() {
-                                match start_rebuild(&edited, &library, &staged_db) {
+                                match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
-                                    Ok(flight) => {
-                                        begin_rebuild(w);
+                                    Ok(lock) => {
+                                        begin_apply(w);
                                         pending_cfg = Some(updated);
-                                        rebuild = Some(flight);
+                                        staging_lock = Some(lock);
+                                        let dir = library.clone();
+                                        let out = staged_db.clone();
+                                        let tx = apply_tx.clone();
+                                        thread::spawn(move || {
+                                            let result = stage_and_spawn(&edited, &dir, &out);
+                                            let _ = tx.send(result);
+                                            // SAFETY: wakes the pump thread.
+                                            unsafe {
+                                                let _ = PostThreadMessageW(
+                                                    main_tid, WM_APP_APPLY,
+                                                    WPARAM(0), LPARAM(0),
+                                                );
+                                            }
+                                        });
                                     }
                                 }
                             } else if let Err(e) = updated.save(config_path) {
@@ -1070,6 +1110,22 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             while let Ok((decks, models)) = detect_rx.try_recv() {
                 if let Some(w) = &settings {
                     w.populate_combos(&decks, &models);
+                }
+            }
+        } else if msg.message == WM_APP_APPLY {
+            while let Ok(result) = apply_rx.try_recv() {
+                let Some(lock) = staging_lock.take() else { continue };
+                let Some(w) = &settings else { continue };
+                w.set_busy(false);
+                match result {
+                    Ok((pending, rx)) => {
+                        begin_rebuild(w);
+                        rebuild = Some(InFlight { pending, rx, _lock: lock });
+                    }
+                    Err(e) => {
+                        pending_cfg = None;
+                        refuse_apply(w, &e);
+                    }
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
