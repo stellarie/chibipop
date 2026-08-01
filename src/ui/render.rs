@@ -35,6 +35,8 @@ pub struct HitRect {
     pub y: f32,
     pub h: f32,
     pub action: HitAction,
+    /// Not offset by scroll.
+    pub fixed: bool,
 }
 
 /// What a click on a region does.
@@ -86,8 +88,6 @@ enum Elem {
     Separator { top_gap: f32 },
     /// A clickable collapsed row.
     Collapsed(usize, Line),
-    /// Clickable add-to-Anki row.
-    AddButton(Line),
 }
 
 /// Overflow past the view, or 0.
@@ -127,6 +127,8 @@ pub struct Renderer {
     formats: RefCell<FormatCache>,
     /// From the last paint pass.
     hit_rects: RefCell<Vec<HitRect>>,
+    /// Fixed bar, DIP. 0 if off.
+    btn_bar_h: f32,
 }
 
 /// One font's formats, by size.
@@ -190,6 +192,7 @@ impl Renderer {
             target: None,
             formats: RefCell::default(),
             hit_rects: RefCell::new(Vec::new()),
+            btn_bar_h: 0.0,
         })
     }
 
@@ -203,11 +206,13 @@ impl Renderer {
         let scale = self.dpi_scale();
         let y = y_phys as f32 / scale;
         let scroll = scroll_phys as f32 / scale;
-        let adjusted = y + scroll;
         self.hit_rects
             .borrow()
             .iter()
-            .find(|r| adjusted >= r.y && adjusted < r.y + r.h)
+            .find(|r| {
+                let t = if r.fixed { y } else { y + scroll };
+                t >= r.y && t < r.y + r.h
+            })
             .map(|r| r.action.clone())
     }
 
@@ -215,7 +220,7 @@ impl Renderer {
     ///
     /// All three in physical pixels.
     pub fn measure(
-        &self,
+        &mut self,
         p: &Presentation,
         theme: &Theme,
         max_w: i32,
@@ -240,13 +245,42 @@ impl Renderer {
             None,
         )
         .context("measuring popup content")?;
-        let content_h = used_h.ceil() + 2.0 * theme.padding as f32;
+        let scroll_h = used_h.ceil() + 2.0 * theme.padding as f32;
+
+        let btn_bar = self.measure_btn_bar(p, theme, anki, content_w)
+            .context("measuring the button bar")?;
+        self.btn_bar_h = btn_bar;
+
+        let content_h = scroll_h + btn_bar;
         let view_h = content_h.min(dip_h);
         Ok((
             max_w,
             (view_h * scale).ceil() as i32,
             (content_h * scale).ceil() as i32,
         ))
+    }
+
+    /// Fixed bar height in DIP.
+    fn measure_btn_bar(
+        &self,
+        p: &Presentation,
+        theme: &Theme,
+        anki: &AnkiPopupState,
+        content_w: f32,
+    ) -> Result<f32> {
+        let Some(line) = button_line(p, theme, anki)
+        else { return Ok(0.0); };
+        let (_, m) = build_text_layout(
+            &self.dwrite_factory,
+            &self.formats,
+            &theme.font_name,
+            &line,
+            content_w,
+        ).context("measuring button text")?;
+        Ok(SEPARATOR_THICKNESS
+            + CORNER_GAP
+            + m.height
+            + CORNER_GAP)
     }
 
     /// Paints into the client rect.
@@ -342,6 +376,7 @@ impl Renderer {
 
         let draw_result: windows::core::Result<()> = (|| {
             let elems = build_elements(p, theme, anki);
+            let btn = button_line(p, theme, anki);
 
             unsafe {
                 target.Clear(Some(&color_f(theme.background)));
@@ -360,7 +395,26 @@ impl Renderer {
 
             let content_w = (w - 2 * theme.padding).max(0) as f32;
             let origin = theme.padding as f32;
+            let bar = self.btn_bar_h;
+            let scroll_h = (h as f32 - bar).max(0.0);
+
             self.hit_rects.borrow_mut().clear();
+
+            // Clip to scroll region.
+            if bar > 0.0 {
+                unsafe {
+                    target.PushAxisAlignedClip(
+                        &D2D_RECT_F {
+                            left: 0.0,
+                            top: 0.0,
+                            right: w as f32,
+                            bottom: scroll_h,
+                        },
+                        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    );
+                }
+            }
+
             let used = layout_pass(
                 &self.dwrite_factory,
                 &self.formats,
@@ -374,9 +428,10 @@ impl Renderer {
                 Some(&self.hit_rects),
             )?;
 
-            let track_h = h - 2 * theme.padding;
+            let scroll_h_i = scroll_h as i32;
+            let track_h = scroll_h_i - 2 * theme.padding;
             let total = used.ceil() as i32 + 2 * theme.padding;
-            if let Some((top, thumb_h)) = scrollbar_thumb(track_h, total, h, scroll) {
+            if let Some((top, thumb_h)) = scrollbar_thumb(track_h, total, scroll_h_i, scroll) {
                 let brush =
                     unsafe { target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None) }?;
                 let x = (w - theme.padding / 2 - SCROLLBAR_W) as f32;
@@ -387,6 +442,52 @@ impl Renderer {
                     bottom: (theme.padding + top + thumb_h) as f32,
                 };
                 unsafe { target.FillRectangle(&rect, &brush) };
+            }
+
+            if bar > 0.0 {
+                unsafe { target.PopAxisAlignedClip() };
+            }
+
+            // Fixed button bar below.
+            if let Some(line) = btn {
+                let sep_y = scroll_h;
+                let sep_brush =
+                    unsafe { target.CreateSolidColorBrush(&color_f(theme.separator), None) }?;
+                let sep = D2D_RECT_F {
+                    left: origin,
+                    top: sep_y,
+                    right: origin + content_w,
+                    bottom: sep_y + SEPARATOR_THICKNESS,
+                };
+                unsafe { target.FillRectangle(&sep, &sep_brush) };
+
+                let (layout, m) = build_text_layout(
+                    &self.dwrite_factory,
+                    &self.formats,
+                    &theme.font_name,
+                    &line,
+                    content_w,
+                )?;
+                unsafe {
+                    layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                }
+                let btn_y = sep_y + SEPARATOR_THICKNESS + CORNER_GAP;
+                let brush =
+                    unsafe { target.CreateSolidColorBrush(&color_f(line.color), None) }?;
+                unsafe {
+                    target.DrawTextLayout(
+                        Vector2 { X: origin, Y: btn_y },
+                        &layout,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+                self.hit_rects.borrow_mut().push(HitRect {
+                    y: btn_y,
+                    h: m.height,
+                    action: HitAction::AddToAnki,
+                    fixed: true,
+                });
             }
             Ok(())
         })();
@@ -532,28 +633,34 @@ fn build_elements(p: &Presentation, theme: &Theme, anki: &AnkiPopupState) -> Vec
         }
     }
 
-    if anki.enabled {
-        let expr = p.top.as_ref().and_then(|c| {
-            c.written.as_deref().or(c.reading.as_deref())
-        }).unwrap_or("");
-        let (text, color) = if anki.adding {
-            ("\u{2026} Adding\u{2026}", theme.dimmed_text)
-        } else if anki.added.contains(expr) {
-            ("\u{2713} Added", theme.dimmed_text)
-        } else if anki.dupes.contains(expr) {
-            ("\u{2713} Already in Anki", theme.dimmed_text)
-        } else {
-            ("\u{ff0b} Add to Anki", theme.dict_label_text)
-        };
-        out.push(Elem::AddButton(Line {
-            text: text.to_string(),
-            color,
-            size: theme.collapsed_size,
-            top_gap: SECTION_GAP,
-        }));
-    }
-
     out
+}
+
+/// The fixed button's label.
+fn button_line(
+    p: &Presentation,
+    theme: &Theme,
+    anki: &AnkiPopupState,
+) -> Option<Line> {
+    if !anki.enabled { return None; }
+    let expr = p.top.as_ref()
+        .and_then(|c| c.written.as_deref().or(c.reading.as_deref()))
+        .unwrap_or("");
+    let (text, color) = if anki.adding {
+        ("\u{2026} Adding\u{2026}", theme.dimmed_text)
+    } else if anki.added.contains(expr) {
+        ("\u{2713} Added", theme.dimmed_text)
+    } else if anki.dupes.contains(expr) {
+        ("\u{2713} Already in Anki", theme.dimmed_text)
+    } else {
+        ("\u{ff0b} Add to Anki", theme.dict_label_text)
+    };
+    Some(Line {
+        text: text.to_string(),
+        color,
+        size: theme.collapsed_size,
+        top_gap: 0.0,
+    })
 }
 
 /// The shared layout walk.
@@ -641,33 +748,7 @@ fn layout_pass(
                         y: origin_y + y,
                         h,
                         action: HitAction::ExpandEntry(*idx),
-                    });
-                }
-                if let Some(t) = target {
-                    let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
-                    unsafe {
-                        t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
-                            &layout,
-                            &brush,
-                            D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        )
-                    };
-                }
-                h
-            }
-            Elem::AddButton(line) => {
-                let avail_w = (content_w - reserved_w).max(1.0);
-                reserved_w = 0.0;
-                let (layout, m) =
-                    build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
-                let h = m.height;
-                y += line.top_gap;
-                if let Some(hits) = hit_out {
-                    hits.borrow_mut().push(HitRect {
-                        y: origin_y + y,
-                        h,
-                        action: HitAction::AddToAnki,
+                        fixed: false,
                     });
                 }
                 if let Some(t) = target {

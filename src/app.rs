@@ -1078,8 +1078,27 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     if s.gen == result.gen {
                         s.anki.dupes = result.dupes;
-                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, &s.anki) {
-                            eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
+                        match show_presentation(
+                            &popup,
+                            &mut renderer,
+                            &theme,
+                            max_height_percent,
+                            max_width_percent,
+                            &s.presentation,
+                            s.anchor,
+                            s.scroll,
+                            &s.anki,
+                        ) {
+                            Ok((rect, content_h, view_h)) => {
+                                s.popup = rect;
+                                s.content_h = content_h;
+                                s.view_h = view_h;
+                                let m = max_scroll(s.content_h, s.view_h);
+                                if s.scroll > m { s.scroll = m; }
+                            }
+                            Err(e) => {
+                                eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
+                            }
                         }
                     }
                 }
@@ -1093,10 +1112,27 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     } else {
                         s.anki.added.insert(result.expr);
                     }
-                    if let Err(e) = renderer.paint(
-                        &s.presentation, &theme, s.scroll, &s.anki,
+                    match show_presentation(
+                        &popup,
+                        &mut renderer,
+                        &theme,
+                        max_height_percent,
+                        max_width_percent,
+                        &s.presentation,
+                        s.anchor,
+                        s.scroll,
+                        &s.anki,
                     ) {
-                        eprintln!("chibipop: repaint after add failed: {e:#}");
+                        Ok((rect, content_h, view_h)) => {
+                            s.popup = rect;
+                            s.content_h = content_h;
+                            s.view_h = view_h;
+                            let m = max_scroll(s.content_h, s.view_h);
+                            if s.scroll > m { s.scroll = m; }
+                        }
+                        Err(e) => {
+                            eprintln!("chibipop: repaint after add failed: {e:#}");
+                        }
                     }
                 }
             }
