@@ -10,19 +10,6 @@
 - **Your own dictionary files.** chibipop doesn't include any. See
   [Dictionaries](#dictionaries).
 
-Setup takes about five minutes, and you only do it once. Nothing else to
-install — no Python, no toolchain.
-
-**Check your Japanese support first.** Paste this into PowerShell:
-
-```powershell
-[Windows.Media.Ocr.OcrEngine,Windows.Media,ContentType=WindowsRuntime] | Out-Null; [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag }
-```
-
-If `ja` appears in the list, you're ready. If it doesn't, open **Settings →
-Time & language → Language & region**, add **日本語 (Japanese)**, and run the
-check again.
-
 ---
 
 ## Setting it up
