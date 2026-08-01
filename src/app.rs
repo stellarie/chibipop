@@ -59,6 +59,9 @@ const WM_APP_ADD_NOTE: u32 = WM_APP + 5;
 /// Settings op finished.
 const WM_APP_SETTINGS: u32 = WM_APP + 6;
 
+/// Anki deck/model detect done.
+const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
+
 /// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -189,6 +192,7 @@ pub fn settings_only(
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
+    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>)>();
     // SAFETY: no preconditions.
     let tid = unsafe { GetCurrentThreadId() };
 
@@ -205,6 +209,12 @@ pub fn settings_only(
             }
         }
 
+        if msg.message == WM_APP_ANKI_DETECT {
+            while let Ok((decks, models)) = detect_rx.try_recv() {
+                window.populate_combos(&decks, &models);
+            }
+        }
+
         // Dialog keys first, as in run.
         if !unsafe { IsDialogMessageW(window.hwnd(), &msg) }.as_bool() {
             unsafe {
@@ -213,6 +223,27 @@ pub fn settings_only(
             }
         }
         service_settings_click(&window, &settings_tx, tid);
+
+        // Tab switch -> detect.
+        if let Some(tab) = window.take_tab_change() {
+            window.switch_tab(tab);
+            if tab == 1 {
+                let url = window.anki_url();
+                let tx = detect_tx.clone();
+                thread::spawn(move || {
+                    let decks = anki::deck_names(&url).unwrap_or_default();
+                    let models = anki::model_names(&url).unwrap_or_default();
+                    let _ = tx.send((decks, models));
+                    // SAFETY: wakes the pump.
+                    unsafe {
+                        let _ = PostThreadMessageW(
+                            tid, WM_APP_ANKI_DETECT,
+                            WPARAM(0), LPARAM(0),
+                        );
+                    }
+                });
+            }
+        }
 
         if rebuild.is_some() {
             // Not while the child writes.
@@ -622,6 +653,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
+    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>)>();
     let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
@@ -704,6 +736,28 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             // dropped, and `msg` is this loop's own stack storage.
             let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
             service_settings_click(w, &settings_tx, main_tid);
+
+            // Tab switch -> detect.
+            if let Some(tab) = w.take_tab_change() {
+                w.switch_tab(tab);
+                if tab == 1 {
+                    let url = w.anki_url();
+                    let tx = detect_tx.clone();
+                    thread::spawn(move || {
+                        let decks = anki::deck_names(&url).unwrap_or_default();
+                        let models = anki::model_names(&url).unwrap_or_default();
+                        let _ = tx.send((decks, models));
+                        // SAFETY: wakes the pump.
+                        unsafe {
+                            let _ = PostThreadMessageW(
+                                main_tid, WM_APP_ANKI_DETECT,
+                                WPARAM(0), LPARAM(0),
+                            );
+                        }
+                    });
+                }
+            }
+
             if handled {
                 continue;
             }
@@ -1010,6 +1064,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             while let Ok(status) = settings_rx.try_recv() {
                 if let Some(w) = &settings {
                     w.set_status(&status);
+                }
+            }
+        } else if msg.message == WM_APP_ANKI_DETECT {
+            while let Ok((decks, models)) = detect_rx.try_recv() {
+                if let Some(w) = &settings {
+                    w.populate_combos(&decks, &models);
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {

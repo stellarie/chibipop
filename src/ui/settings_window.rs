@@ -14,6 +14,9 @@ use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, ReleaseDC, COLOR_BTNFACE,
     ENUMLOGFONTEXW, HFONT, LOGFONTW, SHIFTJIS_CHARSET, TEXTMETRICW,
 };
+use windows::Win32::UI::Controls::{
+    InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_TAB_CLASSES,
+};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
     OFN_NOCHANGEDIR, OPENFILENAMEW,
@@ -70,6 +73,36 @@ const ID_ANKI_URL: i32 = 126;
 const ID_ANKI_DECK: i32 = 127;
 const ID_ANKI_MODEL: i32 = 128;
 const ID_ANKI_TEST: i32 = 129;
+const ID_TAB: i32 = 130;
+
+// Win32 tab control messages
+const TCM_FIRST: u32 = 0x1300;
+const TCM_GETCURSEL_MSG: u32 = TCM_FIRST + 11;
+const TCM_INSERTITEMW_MSG: u32 = TCM_FIRST + 62;
+const TCIF_TEXT_VAL: u32 = 0x0001;
+// TCN_SELCHANGE = -551 as u32
+const TCN_SELCHANGE_CODE: u32 = (-551i32) as u32;
+const TAB_H: i32 = 28;
+
+/// Win32 NMHDR layout.
+#[repr(C)]
+struct NmhdrRaw {
+    hwnd_from: HWND,
+    id_from: usize,
+    code: u32,
+}
+
+/// Win32 TCITEMW layout.
+#[repr(C)]
+struct TcItemW {
+    mask: u32,
+    dw_state: u32,
+    dw_state_mask: u32,
+    psz_text: *mut u16,
+    cch_text_max: i32,
+    i_image: i32,
+    l_param: isize,
+}
 
 /// What a rebuild disables.
 const WHILE_BUSY: [i32; 12] = [
@@ -149,6 +182,9 @@ thread_local! {
 
     // Pending Anki/update click.
     static CLICK: Cell<Option<(isize, SettingsClick)>> = const { Cell::new(None) };
+
+    // Pending tab switch.
+    static TAB: Cell<Option<(isize, u32)>> = const { Cell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -195,6 +231,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_NOTIFY => {
+            // SAFETY: `lparam` is a pointer to an NMHDR (or a larger struct
+            // whose first member is NMHDR); the OS guarantees this for any
+            // WM_NOTIFY the system sends.
+            let nmhdr = unsafe { &*(lparam.0 as *const NmhdrRaw) };
+            if nmhdr.code == TCN_SELCHANGE_CODE && nmhdr.id_from == ID_TAB as usize {
+                let tab = unsafe {
+                    SendMessageW(nmhdr.hwnd_from, TCM_GETCURSEL_MSG, None, None).0 as u32
+                };
+                TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
             }
             LRESULT(0)
         }
@@ -576,6 +625,10 @@ pub struct SettingsWindow {
     fonts: Vec<String>,
     /// What Apply has yet to do.
     staged: RefCell<SettingsForm>,
+    /// General-tab-only controls.
+    general_ctrls: Vec<HWND>,
+    /// Anki-tab-only controls.
+    anki_ctrls: Vec<HWND>,
 }
 
 impl SettingsWindow {
@@ -620,6 +673,8 @@ impl SettingsWindow {
                 passes: Vec::new(),
                 fonts: Vec::new(),
                 staged: RefCell::new(form.clone()),
+                general_ctrls: Vec::new(),
+                anki_ctrls: Vec::new(),
             };
             // `build` reports where its layout actually ended; the window is
             // then sized to that rather than to a guess. The first version of
@@ -754,6 +809,65 @@ impl SettingsWindow {
         }
     }
 
+    /// Pending tab switch, if any.
+    pub fn take_tab_change(&self) -> Option<u32> {
+        TAB.with(|c| match c.get() {
+            Some((h, tab)) if h == self.hwnd.0 as isize => {
+                c.set(None);
+                Some(tab)
+            }
+            _ => None,
+        })
+    }
+
+    /// Show one tab, hide the other.
+    pub fn switch_tab(&self, tab: u32) {
+        let (show, hide) = match tab {
+            0 => (&self.general_ctrls, &self.anki_ctrls),
+            1 => (&self.anki_ctrls, &self.general_ctrls),
+            _ => return,
+        };
+        // SAFETY: every HWND in both vectors was created in `build` as a
+        // child of `self.hwnd` and lives until the window is destroyed.
+        unsafe {
+            for &c in hide {
+                let _ = ShowWindow(c, SW_HIDE);
+            }
+            for &c in show {
+                let _ = ShowWindow(c, SW_SHOW);
+            }
+        }
+    }
+
+    /// Fill the deck/model combos.
+    pub fn populate_combos(&self, decks: &[String], models: &[String]) {
+        // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live children of
+        // `self.hwnd`, created in `build`; each `SendMessageW` copies the
+        // string during the call.
+        unsafe {
+            if let Ok(deck) = GetDlgItem(Some(self.hwnd), ID_ANKI_DECK) {
+                let cur = window_text(deck);
+                SendMessageW(deck, CB_RESETCONTENT, None, None);
+                for name in decks {
+                    SendMessageW(deck, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(name).as_ptr() as isize)));
+                }
+                SendMessageW(deck, WM_SETTEXT, None,
+                    Some(LPARAM(wide(&cur).as_ptr() as isize)));
+            }
+            if let Ok(model) = GetDlgItem(Some(self.hwnd), ID_ANKI_MODEL) {
+                let cur = window_text(model);
+                SendMessageW(model, CB_RESETCONTENT, None, None);
+                for name in models {
+                    SendMessageW(model, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(name).as_ptr() as isize)));
+                }
+                SendMessageW(model, WM_SETTEXT, None,
+                    Some(LPARAM(wide(&cur).as_ptr() as isize)));
+            }
+        }
+    }
+
     /// Drop the selected row.
     unsafe fn remove_selected(&self, target: Target) {
         // SAFETY: `target.list_id()` names a live child of `self.hwnd`;
@@ -861,10 +975,43 @@ impl SettingsWindow {
         let f = self.font;
         let h = self.hwnd;
         let mut y = PAD;
+        let mut gen: Vec<HWND> = Vec::new();
+        let mut ank: Vec<HWND> = Vec::new();
 
         // SAFETY: `h` is the window just created by `open`; every control is
         // a child of it and lives until the window is destroyed.
         unsafe {
+            // Tabs need comctl init.
+            let icex = INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_TAB_CLASSES,
+            };
+            let _ = InitCommonControlsEx(&icex);
+
+            // ---- Tab control ----
+            let tab = child(h, w!("SysTabControl32"), "",
+                WS_TABSTOP | WS_CLIPSIBLINGS,
+                PAD - 6, y, WIN_W - 2 * PAD, TAB_H,
+                ID_TAB, f)?;
+            let mut t0 = wide("General");
+            let mut item = TcItemW {
+                mask: TCIF_TEXT_VAL,
+                dw_state: 0,
+                dw_state_mask: 0,
+                psz_text: t0.as_mut_ptr(),
+                cch_text_max: 0,
+                i_image: -1,
+                l_param: 0,
+            };
+            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(0)),
+                Some(LPARAM(&item as *const _ as isize)));
+            let mut t1 = wide("Anki");
+            item.psz_text = t1.as_mut_ptr();
+            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(1)),
+                Some(LPARAM(&item as *const _ as isize)));
+            y += TAB_H + 4;
+            let content_y = y;
+
             let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
                 child(h, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
                       PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
@@ -880,14 +1027,16 @@ impl SettingsWindow {
             };
 
             // ---- Trigger ----
-            group("Trigger", y, ROW_H + 26)?;
+            gen.push(group("Trigger", y, ROW_H + 26)?);
             y += 20;
             let live = child(h, w!("BUTTON"), "Live",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
                 PAD, y, 120, ROW_H, ID_MODE_LIVE, f)?;
+            gen.push(live);
             let hold = child(h, w!("BUTTON"), "Hold Shift",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
                 PAD + 130, y, 160, ROW_H, ID_MODE_HOLD, f)?;
+            gen.push(hold);
             let is_live = matches!(form.mode, crate::config::TriggerMode::Live);
             SendMessageW(live, BM_SETCHECK,
                 Some(WPARAM(if is_live { 1 } else { 0 })), None);
@@ -899,13 +1048,14 @@ impl SettingsWindow {
             // WS_GROUP terminates the radio group above. Without it the group
             // runs to the end of the window and arrow keys walk straight out
             // of Live/Hold Shift into the combos.
-            group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?;
+            gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?);
             y += 20;
 
-            label("Theme", y)?;
+            gen.push(label("Theme", y)?);
             let theme = child(h, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_THEME, f)?;
+            gen.push(theme);
             for (i, name) in ["dark", "light"].iter().enumerate() {
                 SendMessageW(theme, CB_ADDSTRING, None,
                     Some(LPARAM(wide(name).as_ptr() as isize)));
@@ -918,10 +1068,11 @@ impl SettingsWindow {
             }
             y += ROW_H + ROW_GAP;
 
-            label("Font", y)?;
+            gen.push(label("Font", y)?);
             let fonts_hwnd = child(h, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 260, ID_FONT, f)?;
+            gen.push(fonts_hwnd);
             let mut families = japanese_font_families();
             // Spec D4: an absent configured font is still offered and
             // selected, so opening Settings and applying cannot silently
@@ -943,46 +1094,49 @@ impl SettingsWindow {
             self.widths = numeric_choices(
                 MAX_WIDTH_RANGE.0 as i64, MAX_WIDTH_RANGE.1 as i64, 5,
                 form.max_width_percent as i64);
-            label("Max width (% of screen)", y)?;
+            gen.push(label("Max width (% of screen)", y)?);
             let mw = child(h, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_MAX_WIDTH, f)?;
+            gen.push(mw);
             fill_numeric(mw, &self.widths, form.max_width_percent as i64);
             y += ROW_H + ROW_GAP;
 
             self.heights = numeric_choices(
                 MAX_HEIGHT_RANGE.0 as i64, MAX_HEIGHT_RANGE.1 as i64, 5,
                 form.max_height_percent as i64);
-            label("Max height (% of screen)", y)?;
+            gen.push(label("Max height (% of screen)", y)?);
             let mh = child(h, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_MAX_HEIGHT, f)?;
+            gen.push(mh);
             fill_numeric(mh, &self.heights, form.max_height_percent as i64);
             y += ROW_H + ROW_GAP;
 
             self.summaries = numeric_choices(
                 SUMMARY_RANGE.0 as i64, SUMMARY_RANGE.1 as i64, 10,
                 form.summary_chars as i64);
-            label("Summary length (characters)", y)?;
+            gen.push(label("Summary length (characters)", y)?);
             let sm = child(h, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_SUMMARY, f)?;
+            gen.push(sm);
             fill_numeric(sm, &self.summaries, form.summary_chars as i64);
             y += ROW_H + ROW_GAP + 4;
 
-            let check = |text: &str, id: i32, on: bool, y: i32| -> WinResult<()> {
+            let check = |text: &str, id: i32, on: bool, y: i32| -> WinResult<HWND> {
                 let c = child(h, w!("BUTTON"), text,
                     WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                     PAD, y, WIN_W - 2 * PAD - 20, ROW_H, id, f)?;
                 SendMessageW(c, BM_SETCHECK, Some(WPARAM(if on { 1 } else { 0 })), None);
-                Ok(())
+                Ok(c)
             };
-            check("Box the word being defined", ID_HIGHLIGHT, form.highlight_match, y)?;
+            gen.push(check("Box the word being defined", ID_HIGHLIGHT, form.highlight_match, y)?);
             y += ROW_H;
-            check("Scroll long entries with the wheel", ID_SCROLL, form.scroll_popup, y)?;
+            gen.push(check("Scroll long entries with the wheel", ID_SCROLL, form.scroll_popup, y)?);
             y += ROW_H;
-            check("Hide the popup from screen capture", ID_EXCLUDE,
-                  form.exclude_from_capture, y)?;
+            gen.push(check("Hide the popup from screen capture", ID_EXCLUDE,
+                  form.exclude_from_capture, y)?);
             y += ROW_H + 18;
 
             // ---- Dictionaries ----
@@ -992,11 +1146,12 @@ impl SettingsWindow {
             // Four buttons set the height.
             let dict_span = 3 * BTN_PITCH + ROW_H;
             let dict_h = 20 + dict_span + ROW_GAP + hint_h + 8;
-            group("Dictionaries — topmost is shown first", y, dict_h)?;
+            gen.push(group("Dictionaries — topmost is shown first", y, dict_h)?);
             y += 20;
             let list = child(h, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                 PAD, y, list_w, dict_span, ID_DICTS, f)?;
+            gen.push(list);
             for name in &form.dict_names {
                 SendMessageW(list, LB_ADDSTRING, None,
                     Some(LPARAM(wide(name).as_ptr() as isize)));
@@ -1011,23 +1166,23 @@ impl SettingsWindow {
             .iter()
             .enumerate()
             {
-                child(h, w!("BUTTON"), text, WS_TABSTOP,
-                      bx, y + i as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?;
+                gen.push(child(h, w!("BUTTON"), text, WS_TABSTOP,
+                      bx, y + i as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?);
             }
             y += dict_span + ROW_GAP;
-            child(h, w!("STATIC"),
+            gen.push(child(h, w!("STATIC"),
                 "Order is matched by dictionary name. If you rebuild your \
                  dictionaries, check this list again.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, hint_h, 0, f)?;
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, hint_h, 0, f)?);
             y += hint_h + 8;
 
             // A rebuild is library-only.
             if form.library_empty && !form.dict_names.is_empty() {
-                child(h, w!("STATIC"),
+                gen.push(child(h, w!("STATIC"),
                     "chibipop is using a dictionary built outside the app. Adding or \
                      removing here rebuilds from this list only — import your original \
                      .zip files first.",
-                    WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 44, 0, f)?;
+                    WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 44, 0, f)?);
                 y += 48;
             }
 
@@ -1039,8 +1194,8 @@ impl SettingsWindow {
                      removed. Dictionaries it used to order are now sorted last.",
                     stale.join("\", \"")
                 );
-                child(h, w!("STATIC"), &msg, WINDOW_STYLE(0),
-                      PAD, y, WIN_W - 2 * PAD - 20, 32, 0, f)?;
+                gen.push(child(h, w!("STATIC"), &msg, WINDOW_STYLE(0),
+                      PAD, y, WIN_W - 2 * PAD - 20, 32, 0, f)?);
                 y += 36;
             }
             y += GROUP_GAP;
@@ -1049,76 +1204,85 @@ impl SettingsWindow {
             // WS_GROUP ends the last one.
             let freq_span = BTN_PITCH + ROW_H;
             let freq_h = 20 + freq_span + 8;
-            group_start("Frequency data — how common each word is", y, freq_h)?;
+            gen.push(group_start("Frequency data — how common each word is", y, freq_h)?);
             y += 20;
             let freqs = child(h, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                 PAD, y, list_w, freq_span, ID_FREQS, f)?;
+            gen.push(freqs);
             for name in &form.freq_names {
                 SendMessageW(freqs, LB_ADDSTRING, None,
                     Some(LPARAM(wide(name).as_ptr() as isize)));
             }
             SendMessageW(freqs, LB_SETCURSEL, Some(WPARAM(0)), None);
-            child(h, w!("BUTTON"), "Add…", WS_TABSTOP,
-                  bx, y, BTN_W, ROW_H, ID_FREQ_ADD, f)?;
-            child(h, w!("BUTTON"), "Remove", WS_TABSTOP,
-                  bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?;
+            gen.push(child(h, w!("BUTTON"), "Add…", WS_TABSTOP,
+                  bx, y, BTN_W, ROW_H, ID_FREQ_ADD, f)?);
+            gen.push(child(h, w!("BUTTON"), "Remove", WS_TABSTOP,
+                  bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?);
             y += freq_span + 8 + GROUP_GAP;
 
             // ---- Debug ----
-            group("Debug", y, 3 * ROW_H + 34)?;
+            gen.push(group("Debug", y, 3 * ROW_H + 34)?);
             y += 20;
             self.passes = numeric_choices(
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
                 form.max_ocr_passes as i64);
-            label("OCR passes per hover", y)?;
+            gen.push(label("OCR passes per hover", y)?);
             let ps = child(h, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_PASSES, f)?;
+            gen.push(ps);
             fill_numeric(ps, &self.passes, form.max_ocr_passes as i64);
             y += ROW_H;
-            child(h, w!("STATIC"),
+            gen.push(child(h, w!("STATIC"),
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?;
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
             let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
+            gen.push(scan);
             SendMessageW(scan, BM_SETCHECK,
                 Some(WPARAM(if form.show_scan_region { 1 } else { 0 })), None);
             y += ROW_H + 18;
+            let y_general = y;
 
-            // ---- Anki ----
-            group("Anki", y, 5 * ROW_H + 34)?;
+            // ---- Anki (own tab) ----
+            y = content_y;
+            ank.push(group("Anki", y, 5 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(h, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_ANKI_ENABLED, f)?;
+            ank.push(anki_chk);
             SendMessageW(anki_chk, BM_SETCHECK,
                 Some(WPARAM(if form.anki_enabled { 1 } else { 0 })), None);
             y += ROW_H;
-            label("AnkiConnect URL", y)?;
-            child(h, w!("EDIT"), &form.anki_url,
+            ank.push(label("AnkiConnect URL", y)?);
+            ank.push(child(h, w!("EDIT"), &form.anki_url,
                 WS_TABSTOP | WS_BORDER,
-                FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_URL, f)?;
+                FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_URL, f)?);
             y += ROW_H;
-            label("Deck", y)?;
+            ank.push(label("Deck", y)?);
             let deck = child(h, w!("COMBOBOX"), &form.anki_deck,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_ANKI_DECK, f)?;
+            ank.push(deck);
             SendMessageW(deck, WM_SETTEXT, None,
                 Some(LPARAM(wide(&form.anki_deck).as_ptr() as isize)));
             y += ROW_H;
-            label("Note type", y)?;
+            ank.push(label("Note type", y)?);
             let model = child(h, w!("COMBOBOX"), &form.anki_model,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_ANKI_MODEL, f)?;
+            ank.push(model);
             SendMessageW(model, WM_SETTEXT, None,
                 Some(LPARAM(wide(&form.anki_model).as_ptr() as isize)));
             y += ROW_H;
-            child(h, w!("BUTTON"), "Test connection", WS_TABSTOP,
-                  PAD, y, 116, ROW_H, ID_ANKI_TEST, f)?;
+            ank.push(child(h, w!("BUTTON"), "Test connection", WS_TABSTOP,
+                  PAD, y, 116, ROW_H, ID_ANKI_TEST, f)?);
             y += ROW_H + 8 + GROUP_GAP;
+            y = y_general.max(y);
 
             // ---- Updates ----
             group("Updates", y, ROW_H + 24)?;
@@ -1140,8 +1304,15 @@ impl SettingsWindow {
             child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
                   PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
 
+            // Start on General tab.
+            for &c in &ank {
+                let _ = ShowWindow(c, SW_HIDE);
+            }
+
             update_list_buttons(h);
         }
+        self.general_ctrls = gen;
+        self.anki_ctrls = ank;
         Ok(y + ROW_H + 8)
     }
 
@@ -1251,6 +1422,11 @@ impl Drop for SettingsWindow {
             }
         });
         CLICK.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        TAB.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
@@ -1382,6 +1558,15 @@ mod tests {
             vec![PathBuf::from(r"C:\辞書\大辞林　第四版.zip")],
             split_picked(&nul_run(&[r"C:\辞書", "大辞林　第四版.zip"]))
         );
+    }
+
+    #[test]
+    fn wm_notify_records_a_tab_change() {
+        let hwnd = HWND(5353 as *mut core::ffi::c_void);
+        TAB.with(|c| c.set(Some((hwnd.0 as isize, 1))));
+        let got = TAB.with(|c| c.get());
+        assert_eq!(Some((hwnd.0 as isize, 1)), got);
+        TAB.with(|c| c.set(None));
     }
 
     /// The vertical-writing duplicates Windows lists beside each family are
