@@ -1,13 +1,6 @@
 # chibipop
 
-**Hover over Japanese text anywhere on your screen and see what it means.**
-
-It works on any Japanese your screen can show — games, videos, subtitles,
-PDFs, images, screenshots. The text doesn't need to be selectable or
-copyable, because chibipop reads the pixels rather than the document.
-
-No browser extension, no copying and pasting, nothing installed into the app
-you're reading.
+<img width="2560" height="1080" alt="image" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
 ---
 
@@ -47,59 +40,7 @@ it doesn't write anything outside it.
 
 Start chibipop. The settings window opens by itself.
 
-In **Dictionaries**, press **Add…** and pick your Yomitan `.zip` files. Put
-word-frequency lists under **Frequency data** instead — they rank the results
-rather than define anything.
-
-Nothing happens to your files until you press **Apply**. Then chibipop copies
-each archive into a `library` folder beside `chibipop.exe` and builds
-`data\chibipop.sqlite` from it, which takes about a minute for a full set. The
-window shows which dictionary it's reading as it goes.
-
-chibipop closes once that first build finishes — start it again and you're
-ready. After that, applying from a running chibipop restarts it for you.
-
-You only do this again when you add or update a dictionary. **Remove** takes
-one out the same way — select it, press Remove, press Apply.
-
-*(The dictionaries can't be shipped for you: they're 232 MB and aren't ours to
-hand out. See [Dictionaries](#dictionaries).)*
-
----
-
-## Using it
-
-From a terminal opened **in the chibipop folder**, so it can find the
-dictionary you built:
-
-```bash
-chibipop.exe run
-```
-
-*(To start it with a double-click instead: right-click `chibipop.exe` → **Send
-to → Desktop (create shortcut)**, then right-click the new shortcut →
-**Properties**, and add a space and the word `run` to the end of the Target
-box.)*
-
-Then just **hover over Japanese text**. The definition appears beside it.
-
-A few things worth knowing:
-
-- **The settings window opens by itself** when chibipop starts. Close it or
-  press Cancel — hovering works normally underneath.
-- **You can move your mouse into the popup** to read it. It stays put while
-  you're inside it, and disappears when you move away.
-- **Long entries scroll.** A thin bar appears on the right when there's more
-  to read; the wheel scrolls it.
-- **Reading a whole word works.** Hovering any character of 振り向けた shows
-  one definition for the whole verb, not a different one per character.
-- **To quit**, press **Quit chibipop** in the settings window.
-
-To open settings again later without starting the popup:
-
-```bash
-chibipop.exe settings
-```
+### 3. Enjoy!
 
 ---
 
@@ -134,22 +75,13 @@ whole time, and stays in place untouched if the rebuild fails.
 
 ## If something doesn't work
 
-| What you're seeing | What's going on |
-|---|---|
-| **No popup appears at all** | Check `ja` shows up in the language check at the top. If chibipop won't start, it prints the reason — most often the dictionary hasn't been built yet. |
-| **Vertical text gives nonsense** | Vertical Japanese isn't supported yet. It can return a sentence stitched together from several unrelated columns. Being worked on. |
-| **Right-clicking the tray icon does nothing** | A known bug. Everything the menu offered is reachable anyway: settings open at startup, `chibipop settings` opens them any time, and Quit is a button in that window. |
-| **Text at the edge of a window won't read** | If the characters are physically cut off on screen, nothing can recover them. This is a limit, not a bug. |
-| **It defined a similar-looking word** | OCR occasionally misreads a character. Nudging the cursor a few pixels and hovering again usually fixes it. |
-| **The popup covers what I'm reading** | It's placed below and to the left of the word, flipping when it would run off screen. If it still gets in the way, lower **Max height**. |
-| **chibipop won't close** | Press **Quit chibipop** in the settings window. If that's gone, end the `chibipop` process in Task Manager. |
+Head over to [Issues](https://github.com/stellarie/chibipop/issues) ~
 
 ---
 
 ## Dictionaries
 
-chibipop ships **no dictionaries** — you supply your own, and they stay on
-your machine.
+Add your own dictionaries - as this does not include any dictionaries at all.
 
 The build these instructions were written against used:
 
