@@ -21,7 +21,7 @@ use crate::ui::render::{max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
-use crate::ui::window::{CaptureExclusion, Popup};
+use crate::ui::window::{CaptureExclusion, ClickCatcher, Popup};
 use crate::update;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -637,6 +637,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         capture_guard_active.store(true, Ordering::SeqCst);
     }
 
+    let click_catcher = if cfg.anki.enabled {
+        Some(ClickCatcher::create().context("creating the click catcher")?)
+    } else {
+        None
+    };
+
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
     let theme = theme_from_config(&cfg.popup);
@@ -678,6 +684,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let capture_guard_prev_visible = std::cell::Cell::new(false);
     // Overlay's own visibility.
     let overlay_prev_visible = std::cell::Cell::new(false);
+    // Click catcher visibility.
+    let catcher_prev_visible = std::cell::Cell::new(false);
     // What is on screen now.
     let mut shown: Option<Shown> = None;
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
@@ -718,6 +726,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 CaptureGuardMsg::Hide { ack } => {
                     capture_guard_prev_visible.set(popup.is_visible());
                     let _ = popup.hide();
+                    catcher_prev_visible.set(
+                        click_catcher.as_ref().is_some_and(|c| c.is_visible()),
+                    );
+                    if let Some(cc) = &click_catcher {
+                        cc.hide();
+                    }
                     if let Some(hwnd) = overlay_hwnd {
                         // SAFETY: `hwnd` is `Overlay::hwnd()`'s own handle;
                         // the `Overlay` that owns it lives in `run`'s local
@@ -734,6 +748,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 CaptureGuardMsg::Restore => {
                     if capture_guard_prev_visible.get() {
                         let _ = popup.show_without_activating();
+                    }
+                    if catcher_prev_visible.get() {
+                        if let Some(cc) = &click_catcher {
+                            cc.show_without_activating();
+                        }
                     }
                     if let Some(hwnd) = overlay_hwnd {
                         if overlay_prev_visible.get() {
@@ -862,6 +881,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                         s.scroll = 0;
                                         s.content_h = content_h;
                                         s.view_h = view_h;
+                                        if let Some(cc) = &click_catcher {
+                                            sync_catcher(cc, Some(rect), renderer.btn_bar_height_phys());
+                                        }
                                     }
                                     Err(e) => {
                                         eprintln!("chibipop: repaint after swap failed: {e:#}");
@@ -1008,8 +1030,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 // Restore would re-show it.
                 capture_guard_prev_visible.set(false);
                 overlay_prev_visible.set(false);
+                catcher_prev_visible.set(false);
                 if shown.is_some() {
                     let _ = popup.hide();
+                    if let Some(cc) = &click_catcher {
+                        cc.hide();
+                    }
                     if let Some(ov) = overlay.as_ref() {
                         ov.hide();
                     }
@@ -1050,6 +1076,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         cfg.debug.show_lookup_log,
                         anki_enabled,
                     );
+                    if let Some(cc) = &click_catcher {
+                        sync_catcher(
+                            cc,
+                            shown.as_ref().map(|s| s.popup),
+                            renderer.btn_bar_height_phys(),
+                        );
+                    }
                     if new_popup && anki_enabled {
                         popup_gen = popup_gen.wrapping_add(1);
                         let mut exprs: Vec<String> = Vec::new();
@@ -1112,6 +1145,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 s.view_h = view_h;
                                 let m = max_scroll(s.content_h, s.view_h);
                                 if s.scroll > m { s.scroll = m; }
+                                if let Some(cc) = &click_catcher {
+                                    sync_catcher(cc, Some(rect), renderer.btn_bar_height_phys());
+                                }
                             }
                             Err(e) => {
                                 eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
@@ -1146,6 +1182,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             s.view_h = view_h;
                             let m = max_scroll(s.content_h, s.view_h);
                             if s.scroll > m { s.scroll = m; }
+                            if let Some(cc) = &click_catcher {
+                                sync_catcher(cc, Some(rect), renderer.btn_bar_height_phys());
+                            }
                         }
                         Err(e) => {
                             eprintln!("chibipop: repaint after add failed: {e:#}");
@@ -1233,6 +1272,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             match req {
                 CaptureGuardMsg::Hide { ack } => {
                     let _ = popup.hide();
+                    if let Some(cc) = &click_catcher {
+                        cc.hide();
+                    }
                     // Mirrors the main drain above.
                     if let Some(ov) = &overlay {
                         ov.hide();
@@ -1662,6 +1704,26 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
             PhysRect { x: 0, y: 0, w: 1920, h: 1080 }
         }
     }
+}
+
+/// Positions or hides it.
+fn sync_catcher(
+    cc: &ClickCatcher,
+    popup: Option<PhysRect>,
+    bar_h: i32,
+) {
+    if bar_h > 0 {
+        if let Some(r) = popup {
+            let _ = cc.show_at(PhysRect {
+                x: r.x,
+                y: r.y + r.h - bar_h,
+                w: r.w,
+                h: bar_h,
+            });
+            return;
+        }
+    }
+    cc.hide();
 }
 
 /// Palette by name, font on top.

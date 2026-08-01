@@ -201,6 +201,12 @@ impl Renderer {
         if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
     }
 
+    /// Bar height in phys pixels.
+    pub fn btn_bar_height_phys(&self) -> i32 {
+        let s = self.dpi_scale();
+        (self.btn_bar_h * s).ceil() as i32
+    }
+
     /// Finds the action at `y_phys`.
     pub fn hit_test(&self, y_phys: i32, scroll_phys: i32) -> Option<HitAction> {
         let scale = self.dpi_scale();

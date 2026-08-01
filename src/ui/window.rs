@@ -203,3 +203,87 @@ impl Popup {
         self.capture_exclusion
     }
 }
+
+/// Click interception overlay.
+///
+/// Not `WS_EX_TRANSPARENT`: eats
+/// clicks so they never reach the
+/// app behind the popup's button.
+pub struct ClickCatcher {
+    hwnd: HWND,
+}
+
+impl ClickCatcher {
+    /// Invisible, click-eating.
+    pub fn create() -> Result<ClickCatcher> {
+        unsafe {
+            let hinstance: HINSTANCE = GetModuleHandleW(None)
+                .context("GetModuleHandleW(None)")?
+                .into();
+            register_class(hinstance)?;
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TOPMOST
+                    | WS_EX_TOOLWINDOW,
+                class_name(),
+                w!("chibipop-btn"),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(hinstance),
+                None,
+            )
+            .context("CreateWindowExW for click catcher")?;
+            // Alpha 1: invisible to the
+            // eye, opaque to hit-testing.
+            SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA)
+                .context("SetLayeredWindowAttributes for click catcher")?;
+            Ok(ClickCatcher { hwnd })
+        }
+    }
+
+    /// Moves and shows at `r`.
+    pub fn show_at(&self, r: PhysRect) -> Result<()> {
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+            .context("SetWindowPos for click catcher")?;
+        }
+        Ok(())
+    }
+
+    /// Hides without destroying.
+    pub fn hide(&self) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+    }
+
+    /// Re-shows after a guard hide.
+    pub fn show_without_activating(&self) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+
+    /// Asked fresh, never cached.
+    pub fn is_visible(&self) -> bool {
+        unsafe { IsWindowVisible(self.hwnd).as_bool() }
+    }
+
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+}
