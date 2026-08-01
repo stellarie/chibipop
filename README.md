@@ -37,9 +37,9 @@ a couple of seconds. Your settings live in `chibipop.toml` beside
 
 ---
 
-## If something doesn't work
+## If something doesn't work or if a game seems to be not compatible
 
-Head over to [Issues](https://github.com/stellarie/chibipop/issues)!
+Head over to [Issues](https://github.com/stellarie/chibipop/issues) or raise a PR!
 
 ---
 
