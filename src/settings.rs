@@ -25,6 +25,7 @@ pub struct SettingsForm {
     /// Live names, not substrings.
     pub dict_names: Vec<String>,
     pub max_ocr_passes: u8,
+    pub prefer_vertical: bool,
     pub show_scan_region: bool,
     pub freq_names: Vec<String>,
     pub staged_adds: Vec<StagedAdd>,
@@ -233,6 +234,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         exclude_from_capture: cfg.popup.exclude_from_capture,
         dict_names: ordered.iter().map(|d| d.name.clone()).collect(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
+        prefer_vertical: cfg.ocr.prefer_vertical,
         show_scan_region: cfg.debug.show_scan_region,
         freq_names: Vec::new(),
         staged_adds: Vec::new(),
@@ -262,6 +264,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup.scroll_popup = form.scroll_popup;
     out.popup.exclude_from_capture = form.exclude_from_capture;
     out.ocr.max_ocr_passes = form.max_ocr_passes.clamp(PASSES_RANGE.0, PASSES_RANGE.1);
+    out.ocr.prefer_vertical = form.prefer_vertical;
     out.debug.show_scan_region = form.show_scan_region;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
@@ -433,6 +436,7 @@ mod tests {
         cfg.popup.scroll_popup = false;
         cfg.popup.exclude_from_capture = true;
         cfg.ocr.max_ocr_passes = 3;
+        cfg.ocr.prefer_vertical = true;
         cfg.debug.show_scan_region = true;
         cfg.anki.enabled = true;
         cfg.anki.url = "http://localhost:9999".into();

@@ -75,6 +75,7 @@ const ID_ANKI_MODEL: i32 = 128;
 const ID_ANKI_TEST: i32 = 129;
 const ID_TAB: i32 = 130;
 const ID_TRIGGER_KEY: i32 = 131;
+const ID_PREFER_VERT: i32 = 132;
 
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
@@ -1327,8 +1328,8 @@ impl SettingsWindow {
                   bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?);
             y += freq_span + 8 + GROUP_GAP;
 
-            // ---- Debug ----
-            gen.push(group("Debug", y, 3 * ROW_H + 34)?);
+            // ---- OCR / Debug ----
+            gen.push(group("OCR / Debug", y, 4 * ROW_H + 34)?);
             y += 20;
             self.passes = numeric_choices(
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
@@ -1344,6 +1345,9 @@ impl SettingsWindow {
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
+            gen.push(check("Prefer vertical text (manga, VN)",
+                ID_PREFER_VERT, form.prefer_vertical, y)?);
+            y += ROW_H;
             let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
@@ -1486,6 +1490,7 @@ impl SettingsWindow {
                 dict_names,
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
                                      template.max_ocr_passes as i64) as u8,
+                prefer_vertical: checked(ID_PREFER_VERT),
                 show_scan_region: checked(ID_SHOW_SCAN),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),

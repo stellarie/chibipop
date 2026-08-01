@@ -545,6 +545,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let main_tid = unsafe { GetCurrentThreadId() };
     let present_cfg = cfg.present_config();
     let max_ocr_passes = cfg.ocr.max_ocr_passes;
+    let prefer_vertical = cfg.ocr.prefer_vertical;
     let scan_display = ScanDisplay {
         captures: cfg.debug.show_scan_region,
         highlight: cfg.popup.highlight_match,
@@ -558,6 +559,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             rules_path,
             present_cfg,
             max_ocr_passes,
+            prefer_vertical,
             scan_display,
             main_tid,
             trigger_rx,
@@ -1284,6 +1286,7 @@ fn worker_main(
     rules_path: PathBuf,
     present_cfg: PresentConfig,
     max_ocr_passes: u8,
+    prefer_vertical: bool,
     scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
@@ -1293,7 +1296,7 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
-    let ocr = match OcrTextSource::new(max_ocr_passes).context("creating the OCR text source") {
+    let ocr = match OcrTextSource::new(max_ocr_passes, prefer_vertical).context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
             let _ = startup_tx.send(Err(e));

@@ -99,11 +99,12 @@ fn monitor_bounds_containing(p: PhysPoint) -> PhysRect {
 pub struct OcrTextSource {
     engine: OcrEngine,
     max_passes: u8,
+    prefer_vertical: bool,
 }
 
 impl OcrTextSource {
     /// Inits WinRT + engine once.
-    pub fn new(max_passes: u8) -> Result<Self> {
+    pub fn new(max_passes: u8, prefer_vertical: bool) -> Result<Self> {
         init_dpi_awareness()?;
         // Else CO_E_NOTINITIALIZED.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
@@ -112,7 +113,7 @@ impl OcrTextSource {
             "no Japanese OCR recogniser available - add Japanese under \
              Windows Settings, Time & language, Language & region",
         )?;
-        Ok(OcrTextSource { engine, max_passes })
+        Ok(OcrTextSource { engine, max_passes, prefer_vertical })
     }
 
     /// The engine from `new`.
@@ -125,7 +126,7 @@ impl OcrTextSource {
         &self,
         cursor: PhysPoint,
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        self.resolve_in_region(cursor, region_around(cursor))
+        self.resolve_in_region(cursor, region_around(cursor, self.prefer_vertical))
     }
 
     /// As above, explicit box.
@@ -174,7 +175,7 @@ impl OcrTextSource {
         let mut scan = Vec::new();
         let Some(first) = resolved else { return Ok((None, scan)) };
         if collect {
-            scan.push(ScanRect { rect: region_around(cursor), kind: ScanKind::Pass1 });
+            scan.push(ScanRect { rect: region_around(cursor, self.prefer_vertical), kind: ScanKind::Pass1 });
         }
         if self.max_passes <= 1 {
             if collect {

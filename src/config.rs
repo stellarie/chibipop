@@ -158,6 +158,9 @@ pub struct OcrConfig {
     /// 1 = no tiling, the default.
     #[serde(default = "default_max_ocr_passes")]
     pub max_ocr_passes: u8,
+    /// Tall capture for manga/VN.
+    #[serde(default)]
+    pub prefer_vertical: bool,
 }
 
 /// 1: tiling is off by default.
@@ -167,7 +170,10 @@ fn default_max_ocr_passes() -> u8 {
 
 impl Default for OcrConfig {
     fn default() -> OcrConfig {
-        OcrConfig { max_ocr_passes: default_max_ocr_passes() }
+        OcrConfig {
+            max_ocr_passes: default_max_ocr_passes(),
+            prefer_vertical: false,
+        }
     }
 }
 
@@ -416,6 +422,11 @@ mod tests {
         assert_eq!(1, Config::default().ocr.max_ocr_passes);
     }
 
+    #[test]
+    fn prefer_vertical_defaults_to_false() {
+        assert!(!Config::default().ocr.prefer_vertical);
+    }
+
     /// Re-enabled by one TOML line.
     #[test]
     fn a_multi_pass_round_trips() {
@@ -425,6 +436,17 @@ mod tests {
         c.ocr.max_ocr_passes = 3;
         c.save(&p).unwrap();
         assert_eq!(3, load_or_create(&p).unwrap().ocr.max_ocr_passes);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn prefer_vertical_round_trips() {
+        let p = tmp("prefer_vert");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.ocr.prefer_vertical = true;
+        c.save(&p).unwrap();
+        assert!(load_or_create(&p).unwrap().ocr.prefer_vertical);
         let _ = std::fs::remove_file(&p);
     }
 

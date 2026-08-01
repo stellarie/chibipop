@@ -271,12 +271,17 @@ pub fn union_chars(geom: &[TextGeom], from: usize, len: usize, pad: i32) -> Opti
     acc.map(|r| PhysRect { x: r.x - pad, y: r.y - pad, w: r.w + 2 * pad, h: r.h + 2 * pad })
 }
 
-pub fn region_around(cursor: PhysPoint) -> PhysRect {
+pub fn region_around(cursor: PhysPoint, prefer_vertical: bool) -> PhysRect {
+    let (w, h) = if prefer_vertical {
+        (REGION_H, REGION_W)
+    } else {
+        (REGION_W, REGION_H)
+    };
     PhysRect {
-        x: cursor.x - REGION_W / 2,
-        y: cursor.y - REGION_H / 2,
-        w: REGION_W,
-        h: REGION_H,
+        x: cursor.x - w / 2,
+        y: cursor.y - h / 2,
+        w,
+        h,
     }
 }
 
@@ -552,11 +557,23 @@ mod tests {
     /// Centring is the contract.
     #[test]
     fn the_region_is_centred_on_the_cursor() {
-        let r = region_around(p(1000, 500));
+        let r = region_around(p(1000, 500), false);
         assert_eq!(REGION_W, r.w);
         assert_eq!(REGION_H, r.h);
         assert_eq!(1000 - REGION_W / 2, r.x);
         assert_eq!(500 - REGION_H / 2, r.y);
+    }
+
+    #[test]
+    fn region_around_horizontal_is_wider_than_tall() {
+        let r = region_around(p(500, 500), false);
+        assert!(r.w > r.h);
+    }
+
+    #[test]
+    fn region_around_vertical_is_taller_than_wide() {
+        let r = region_around(p(500, 500), true);
+        assert!(r.h > r.w);
     }
 
     /// Must out-reach hit_scan.

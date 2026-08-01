@@ -125,10 +125,10 @@ fn main() -> Result<()> {
                 y: ys.trim().parse().context("Y in --at is not an integer")?,
             };
 
-            let source = chibipop::text::ocr::OcrTextSource::new(tiles)?;
+            let source = chibipop::text::ocr::OcrTextSource::new(tiles, false)?;
             let region_was_default = region.is_none();
             let region = match region {
-                None => chibipop::text::layout::region_around(cursor),
+                None => chibipop::text::layout::region_around(cursor, false),
                 Some(spec) => {
                     let (ws, hs) = spec
                         .split_once(',')
@@ -254,7 +254,7 @@ fn main() -> Result<()> {
         Command::Watch { dict, rules, tiles } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
-            let source = chibipop::text::ocr::OcrTextSource::new(tiles)?;
+            let source = chibipop::text::ocr::OcrTextSource::new(tiles, false)?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
 
