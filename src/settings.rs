@@ -13,6 +13,7 @@ pub use crate::config::{MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsForm {
     pub mode: TriggerMode,
+    pub trigger_key: String,
     pub theme: String,
     pub font: String,
     pub max_width_percent: u8,
@@ -221,6 +222,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
 
     SettingsForm {
         mode: cfg.trigger.mode,
+        trigger_key: cfg.trigger.trigger_key.clone(),
         theme: cfg.popup.theme.clone(),
         font: cfg.popup.font.clone(),
         max_width_percent: cfg.popup.max_width_percent,
@@ -248,6 +250,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
     out.trigger.mode = form.mode;
+    out.trigger.trigger_key = form.trigger_key.clone();
     out.popup.theme = form.theme.clone();
     out.popup.font = form.font.clone();
     out.popup.max_width_percent =
@@ -420,7 +423,7 @@ mod tests {
     #[test]
     fn every_setting_survives_the_round_trip() {
         let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
-        cfg.trigger.mode = TriggerMode::HoldShift;
+        cfg.trigger.mode = TriggerMode::HoldKey;
         cfg.popup.theme = "light".into();
         cfg.popup.font = "Noto Sans JP".into();
         cfg.popup.max_width_percent = 35;

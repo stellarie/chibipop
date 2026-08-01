@@ -74,6 +74,7 @@ const ID_ANKI_DECK: i32 = 127;
 const ID_ANKI_MODEL: i32 = 128;
 const ID_ANKI_TEST: i32 = 129;
 const ID_TAB: i32 = 130;
+const ID_TRIGGER_KEY: i32 = 131;
 
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
@@ -230,6 +231,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
+                ID_MODE_LIVE | ID_MODE_HOLD => unsafe {
+                    if let Ok(c) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
+                        let _ = EnableWindow(c, id == ID_MODE_HOLD);
+                    }
+                },
                 _ => {}
             }
             LRESULT(0)
@@ -612,6 +618,13 @@ fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
     }
     v
 }
+
+/// Key names for the trigger combo.
+const TRIGGER_KEY_NAMES: &[&str] = &[
+    "Shift", "Ctrl", "Alt",
+    "F1", "F2", "F3", "F4", "F5", "F6",
+    "F7", "F8", "F9", "F10", "F11", "F12",
+];
 
 pub struct SettingsWindow {
     hwnd: HWND,
@@ -1027,21 +1040,39 @@ impl SettingsWindow {
             };
 
             // ---- Trigger ----
-            gen.push(group("Trigger", y, ROW_H + 26)?);
+            gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
             y += 20;
             let live = child(h, w!("BUTTON"), "Live",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
                 PAD, y, 120, ROW_H, ID_MODE_LIVE, f)?;
             gen.push(live);
-            let hold = child(h, w!("BUTTON"), "Hold Shift",
+            let hold = child(h, w!("BUTTON"), "Hold key",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
-                PAD + 130, y, 160, ROW_H, ID_MODE_HOLD, f)?;
+                PAD + 130, y, 120, ROW_H, ID_MODE_HOLD, f)?;
             gen.push(hold);
             let is_live = matches!(form.mode, crate::config::TriggerMode::Live);
             SendMessageW(live, BM_SETCHECK,
                 Some(WPARAM(if is_live { 1 } else { 0 })), None);
             SendMessageW(hold, BM_SETCHECK,
                 Some(WPARAM(if is_live { 0 } else { 1 })), None);
+            y += ROW_H + ROW_GAP;
+            gen.push(label("Trigger key", y)?);
+            let key_combo = child(h, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_TRIGGER_KEY, f)?;
+            gen.push(key_combo);
+            let key_lower = form.trigger_key.to_ascii_lowercase();
+            for (i, name) in TRIGGER_KEY_NAMES.iter().enumerate() {
+                SendMessageW(key_combo, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(name).as_ptr() as isize)));
+                if name.to_ascii_lowercase() == key_lower {
+                    SendMessageW(key_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(key_combo, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(key_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            let _ = EnableWindow(key_combo, !is_live);
             y += ROW_H + 18;
 
             // ---- Popup ----
@@ -1357,12 +1388,25 @@ impl SettingsWindow {
                 }
             };
 
+            let trigger_key = {
+                let i = combo_index(ID_TRIGGER_KEY);
+                if i < 0 {
+                    template.trigger_key.clone()
+                } else {
+                    TRIGGER_KEY_NAMES
+                        .get(i as usize)
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_else(|| template.trigger_key.clone())
+                }
+            };
+
             SettingsForm {
                 mode: if checked(ID_MODE_HOLD) {
-                    crate::config::TriggerMode::HoldShift
+                    crate::config::TriggerMode::HoldKey
                 } else {
                     crate::config::TriggerMode::Live
                 },
+                trigger_key,
                 theme: theme.to_string(),
                 font,
                 max_width_percent: pick(&self.widths, ID_MAX_WIDTH,

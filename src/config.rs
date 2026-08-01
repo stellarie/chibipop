@@ -33,6 +33,14 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerConfig {
     pub mode: TriggerMode,
+    /// Which key gates popups.
+    #[serde(default = "default_trigger_key")]
+    pub trigger_key: String,
+}
+
+/// `"shift"` for backwards compat.
+fn default_trigger_key() -> String {
+    "shift".to_string()
 }
 
 /// `kebab-case` for the TOML.
@@ -40,7 +48,55 @@ pub struct TriggerConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum TriggerMode {
     Live,
+    /// Popup while a key is held.
+    HoldKey,
+    /// Legacy; maps to `HoldKey`.
+    #[serde(rename = "hold-shift")]
     HoldShift,
+}
+
+/// VK code from a key name.
+pub fn parse_trigger_key(name: &str) -> Option<u16> {
+    match name.to_ascii_lowercase().as_str() {
+        "shift" => Some(0x10),
+        "ctrl" | "control" => Some(0x11),
+        "alt" => Some(0x12),
+        "f1" => Some(0x70),
+        "f2" => Some(0x71),
+        "f3" => Some(0x72),
+        "f4" => Some(0x73),
+        "f5" => Some(0x74),
+        "f6" => Some(0x75),
+        "f7" => Some(0x76),
+        "f8" => Some(0x77),
+        "f9" => Some(0x78),
+        "f10" => Some(0x79),
+        "f11" => Some(0x7A),
+        "f12" => Some(0x7B),
+        _ => None,
+    }
+}
+
+/// Display name from a VK code.
+pub fn trigger_key_name(vk: u16) -> &'static str {
+    match vk {
+        0x10 => "shift",
+        0x11 => "ctrl",
+        0x12 => "alt",
+        0x70 => "f1",
+        0x71 => "f2",
+        0x72 => "f3",
+        0x73 => "f4",
+        0x74 => "f5",
+        0x75 => "f6",
+        0x76 => "f7",
+        0x77 => "f8",
+        0x78 => "f9",
+        0x79 => "f10",
+        0x7A => "f11",
+        0x7B => "f12",
+        _ => "shift",
+    }
 }
 
 /// `[popup]`.
@@ -167,7 +223,10 @@ impl Default for Config {
     /// Spec §4.3's shipped values.
     fn default() -> Config {
         Config {
-            trigger: TriggerConfig { mode: TriggerMode::Live },
+            trigger: TriggerConfig {
+                mode: TriggerMode::Live,
+                trigger_key: default_trigger_key(),
+            },
             popup: PopupConfig {
                 theme: "dark".to_string(),
                 exclude_from_capture: false,
@@ -268,6 +327,11 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
         Ok(text) => {
             let mut config: Config = toml::from_str(&text)
                 .with_context(|| format!("parsing config from {}", path.display()))?;
+            // Migrate legacy hold-shift.
+            if config.trigger.mode == TriggerMode::HoldShift {
+                config.trigger.mode = TriggerMode::HoldKey;
+                config.trigger.trigger_key = "shift".to_string();
+            }
             config.clamp_ranges(path);
             Ok(config)
         }
@@ -326,10 +390,10 @@ mod tests {
         let p = tmp("roundtrip");
         let _ = std::fs::remove_file(&p);
         let mut c = Config::default();
-        c.trigger.mode = TriggerMode::HoldShift;
+        c.trigger.mode = TriggerMode::HoldKey;
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
-        assert_eq!(TriggerMode::HoldShift, back.trigger.mode);
+        assert_eq!(TriggerMode::HoldKey, back.trigger.mode);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -621,6 +685,109 @@ mod tests {
         let c = load_or_create(&p).expect("a pre-anki config must load");
         assert!(!c.anki.enabled);
         assert_eq!("http://localhost:8765", c.anki.url);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // ---- trigger key ----
+
+    #[test]
+    fn parse_trigger_key_shift() {
+        assert_eq!(Some(0x10), parse_trigger_key("shift"));
+    }
+
+    #[test]
+    fn parse_trigger_key_case_insensitive() {
+        assert_eq!(Some(0x10), parse_trigger_key("SHIFT"));
+        assert_eq!(Some(0x10), parse_trigger_key("Shift"));
+    }
+
+    #[test]
+    fn parse_trigger_key_ctrl() {
+        assert_eq!(Some(0x11), parse_trigger_key("ctrl"));
+        assert_eq!(Some(0x11), parse_trigger_key("control"));
+    }
+
+    #[test]
+    fn parse_trigger_key_alt() {
+        assert_eq!(Some(0x12), parse_trigger_key("alt"));
+    }
+
+    #[test]
+    fn parse_trigger_key_f1() {
+        assert_eq!(Some(0x70), parse_trigger_key("f1"));
+    }
+
+    #[test]
+    fn parse_trigger_key_f12() {
+        assert_eq!(Some(0x7B), parse_trigger_key("f12"));
+    }
+
+    #[test]
+    fn parse_trigger_key_garbage() {
+        assert_eq!(None, parse_trigger_key("garbage"));
+    }
+
+    #[test]
+    fn trigger_key_name_round_trips() {
+        for name in &[
+            "shift", "ctrl", "alt",
+            "f1", "f2", "f3", "f4", "f5", "f6",
+            "f7", "f8", "f9", "f10", "f11", "f12",
+        ] {
+            let vk = parse_trigger_key(name).unwrap();
+            assert_eq!(*name, trigger_key_name(vk));
+        }
+    }
+
+    #[test]
+    fn trigger_key_round_trips_in_config() {
+        let p = tmp("trigger_key_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.trigger.mode = TriggerMode::HoldKey;
+        c.trigger.trigger_key = "ctrl".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(TriggerMode::HoldKey, back.trigger.mode);
+        assert_eq!("ctrl", back.trigger.trigger_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn old_hold_shift_config_migrates() {
+        let p = tmp("legacy_hold_shift");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"hold-shift\"\n\n",
+            "[popup]\ntheme = \"dark\"\n",
+            "exclude_from_capture = false\n",
+            "max_height_percent = 45\n",
+            "summary_chars = 40\n",
+            "font = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\n",
+            "display_order = [\"大辞林\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        assert_eq!(TriggerMode::HoldKey, c.trigger.mode);
+        assert_eq!("shift", c.trigger.trigger_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn trigger_key_defaults_to_shift() {
+        let p = tmp("no_trigger_key");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"hold-key\"\n\n",
+            "[popup]\ntheme = \"dark\"\n",
+            "exclude_from_capture = false\n",
+            "max_height_percent = 45\n",
+            "summary_chars = 40\n",
+            "font = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\n",
+            "display_order = [\"大辞林\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        assert_eq!(TriggerMode::HoldKey, c.trigger.mode);
+        assert_eq!("shift", c.trigger.trigger_key);
         let _ = std::fs::remove_file(&p);
     }
 }

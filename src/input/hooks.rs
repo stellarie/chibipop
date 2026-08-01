@@ -9,10 +9,9 @@ use crate::config::TriggerMode;
 use crate::geom::PhysPoint;
 use anyhow::{Context, Result};
 use std::panic::catch_unwind;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU8, Ordering};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LSHIFT, VK_RSHIFT, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Movement gate, physical px.
@@ -27,13 +26,13 @@ static LAST_ACCEPTED: AtomicI64 = AtomicI64::new(NO_POINT);
 /// The one candidate, if any.
 static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
 
-/// Whether Shift is held.
-static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+/// The configured trigger vkcode.
+static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x10);
 
-/// Left and right, bits 0 and 1.
-static SHIFT_SIDES: AtomicU8 = AtomicU8::new(0);
+/// Whether the trigger key is held.
+static KEY_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// Shift went up: drop the popup.
+/// Key went up: drop the popup.
 static HIDE_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Stuck true kills every wheel.
@@ -68,19 +67,41 @@ fn unpack(v: i64) -> PhysPoint {
 fn mode_to_u8(m: TriggerMode) -> u8 {
     match m {
         TriggerMode::Live => 0,
-        TriggerMode::HoldShift => 1,
+        TriggerMode::HoldKey | TriggerMode::HoldShift => 1,
     }
 }
 
 fn u8_to_mode(v: u8) -> TriggerMode {
-    if v == 1 { TriggerMode::HoldShift } else { TriggerMode::Live }
+    if v == 1 { TriggerMode::HoldKey } else { TriggerMode::Live }
 }
 
 /// Whether a move may count now.
 fn mode_currently_eligible() -> bool {
     match u8_to_mode(MODE.load(Ordering::SeqCst)) {
         TriggerMode::Live => true,
-        TriggerMode::HoldShift => SHIFT_DOWN.load(Ordering::SeqCst),
+        _ => KEY_DOWN.load(Ordering::SeqCst),
+    }
+}
+
+/// Left/right VK for a modifier.
+fn modifier_variants(vk: u16) -> Option<(u16, u16)> {
+    match vk {
+        0x10 => Some((0xA0, 0xA1)),
+        0x11 => Some((0xA2, 0xA3)),
+        0x12 => Some((0xA4, 0xA5)),
+        _ => None,
+    }
+}
+
+/// Does this event match the key?
+fn matches_trigger(vk: u16, target: u16) -> bool {
+    if vk == target {
+        return true;
+    }
+    if let Some((l, r)) = modifier_variants(target) {
+        vk == l || vk == r
+    } else {
+        false
     }
 }
 
@@ -115,46 +136,43 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     PENDING.store(packed, Ordering::SeqCst);
 }
 
-/// Reads Shift, never the key.
+/// Tracks the configured key.
 ///
 /// From the event, not the state.
-unsafe fn record_shift_state(wparam: WPARAM, lparam: LPARAM) {
+unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     // SAFETY: keyboard_hook_proc only calls this with code >= 0, the
     // WH_KEYBOARD_LL contract under which `lparam` is a live
     // KBDLLHOOKSTRUCT owned by the OS for the duration of this call.
     let vk = unsafe { (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode } as u16;
-    // Its own bit: it is injected.
-    let bit: u8 = match vk {
-        v if v == VK_LSHIFT.0 => 1,
-        v if v == VK_RSHIFT.0 => 2,
-        v if v == VK_SHIFT.0 => 4,
-        _ => return,
-    };
-    let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
-    let before = SHIFT_SIDES
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |s| Some(next_sides(s, bit, down)))
-        .unwrap_or(0);
-    let (now, released) = shift_transition(before, bit, down);
-    SHIFT_DOWN.store(now != 0, Ordering::SeqCst);
-    // Live retracts on movement.
-    let hold = matches!(u8_to_mode(MODE.load(Ordering::SeqCst)), TriggerMode::HoldShift);
-    if released && hold {
-        LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
-        // Or it re-shows after the hide.
-        PENDING.store(NO_POINT, Ordering::SeqCst);
-        HIDE_PENDING.store(true, Ordering::SeqCst);
+    let target = TRIGGER_VK.load(Ordering::SeqCst);
+    if !matches_trigger(vk, target) {
+        return;
     }
-}
-
-/// The mask after this event.
-fn next_sides(sides: u8, bit: u8, down: bool) -> u8 {
-    if down { sides | bit } else { sides & !bit }
-}
-
-/// Mask, and did the last leave.
-fn shift_transition(sides: u8, bit: u8, down: bool) -> (u8, bool) {
-    let now = next_sides(sides, bit, down);
-    (now, sides != 0 && now == 0)
+    let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+    if down {
+        KEY_DOWN.store(true, Ordering::SeqCst);
+    } else {
+        // For modifiers with L/R variants,
+        // only hide when both sides up.
+        let still_held = modifier_variants(target)
+            .is_some_and(|(l, r)| {
+                // The hook fires before state.
+                let other = if vk == l { r } else if vk == r { l } else { return false };
+                // SAFETY: no preconditions.
+                (unsafe {
+                    windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(other as i32)
+                } as u16 & 0x8000) != 0
+            });
+        if !still_held {
+            KEY_DOWN.store(false, Ordering::SeqCst);
+            let hold = u8_to_mode(MODE.load(Ordering::SeqCst)) != TriggerMode::Live;
+            if hold {
+                LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
+                PENDING.store(NO_POINT, Ordering::SeqCst);
+                HIDE_PENDING.store(true, Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 /// Stores the click's screen pt.
@@ -212,7 +230,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
 /// `WH_KEYBOARD_LL` callback.
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
-        let _ = catch_unwind(|| unsafe { record_shift_state(wparam, lparam) });
+        let _ = catch_unwind(|| unsafe { record_key_state(wparam, lparam) });
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
@@ -263,12 +281,17 @@ impl Hooks {
         SCROLL_ARMED.load(Ordering::SeqCst)
     }
 
-    /// Did Shift just come up?
+    /// Did the trigger key come up?
     ///
     /// Hold mode gates moves off, so
     /// no move can retract the popup.
     pub fn take_hide() -> bool {
         HIDE_PENDING.swap(false, Ordering::SeqCst)
+    }
+
+    /// Sets the trigger vkcode.
+    pub fn set_trigger_key(vk: u16) {
+        TRIGGER_VK.store(vk, Ordering::SeqCst);
     }
 
     /// Takes whole notches only.
@@ -423,49 +446,45 @@ mod tests {
     }
 
     #[test]
-    fn releasing_the_last_shift_asks_for_a_hide() {
-        // Left down, then left up.
-        let (m, hide) = shift_transition(0, 1, true);
-        assert_eq!((1, false), (m, hide));
-        let (m, hide) = shift_transition(m, 1, false);
-        assert_eq!((0, true), (m, hide), "the popup must be retracted");
+    fn matches_trigger_exact_vk() {
+        assert!(matches_trigger(0x10, 0x10));
+        assert!(matches_trigger(0x70, 0x70));
     }
 
     #[test]
-    fn one_shift_up_while_the_other_is_held_does_not_hide() {
-        let (m, _) = shift_transition(0, 1, true);
-        let (m, _) = shift_transition(m, 2, true);
-        assert_eq!(3, m);
-
-        let (m, hide) = shift_transition(m, 1, false);
-
-        assert_eq!(2, m, "the right one is still down");
-        assert!(!hide, "still held, so nothing is retracted");
+    fn matches_trigger_shift_variants() {
+        // VK_LSHIFT and VK_RSHIFT.
+        assert!(matches_trigger(0xA0, 0x10));
+        assert!(matches_trigger(0xA1, 0x10));
     }
 
     #[test]
-    fn a_repeated_key_down_does_not_ask_for_a_hide() {
-        let (m, _) = shift_transition(0, 1, true);
-        let (m, hide) = shift_transition(m, 1, true);
-        assert_eq!(1, m);
-        assert!(!hide);
+    fn matches_trigger_ctrl_variants() {
+        assert!(matches_trigger(0xA2, 0x11));
+        assert!(matches_trigger(0xA3, 0x11));
     }
 
     #[test]
-    fn an_up_with_nothing_held_asks_for_nothing() {
-        assert_eq!((0, false), shift_transition(0, 1, false));
+    fn matches_trigger_alt_variants() {
+        assert!(matches_trigger(0xA4, 0x12));
+        assert!(matches_trigger(0xA5, 0x12));
     }
 
     #[test]
-    fn an_injected_vk_shift_does_not_strand_a_side_bit() {
-        // VK_SHIFT down, LShift up.
-        let (m, _) = shift_transition(0, 4, true);
-        let (m, hide) = shift_transition(m, 1, false);
-        assert!(!hide, "the injected key is still down");
+    fn matches_trigger_unrelated_vk() {
+        assert!(!matches_trigger(0x41, 0x10));
+        assert!(!matches_trigger(0x70, 0x10));
+    }
 
-        let (m, hide) = shift_transition(m, 4, false);
+    #[test]
+    fn modifier_variants_known() {
+        assert_eq!(Some((0xA0, 0xA1)), modifier_variants(0x10));
+        assert_eq!(Some((0xA2, 0xA3)), modifier_variants(0x11));
+        assert_eq!(Some((0xA4, 0xA5)), modifier_variants(0x12));
+    }
 
-        assert_eq!(0, m, "no phantom bit may survive");
-        assert!(hide, "the popup must be retracted");
+    #[test]
+    fn modifier_variants_f_key_has_none() {
+        assert_eq!(None, modifier_variants(0x70));
     }
 }

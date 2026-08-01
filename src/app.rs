@@ -646,6 +646,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
     let hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
+    if let Some(vk) = crate::config::parse_trigger_key(&cfg.trigger.trigger_key) {
+        Hooks::set_trigger_key(vk);
+    }
 
     // No tray means no control.
     let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
