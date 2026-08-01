@@ -29,6 +29,7 @@ static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
 /// The configured trigger vkcode.
 static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x10);
 
+
 /// Whether the trigger key is held.
 static KEY_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -123,14 +124,12 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     let last = LAST_ACCEPTED.load(Ordering::SeqCst);
     let gate_open = last == NO_POINT || {
         let lp = unpack(last);
-        // i64 so the diff cannot wrap.
         (p.x as i64 - lp.x as i64).abs() > MOVEMENT_GATE_PX
             || (p.y as i64 - lp.y as i64).abs() > MOVEMENT_GATE_PX
     };
     if !gate_open {
         return;
     }
-
     let packed = pack(p);
     LAST_ACCEPTED.store(packed, Ordering::SeqCst);
     PENDING.store(packed, Ordering::SeqCst);
@@ -339,6 +338,24 @@ impl Hooks {
         } else {
             Some(unpack(v))
         }
+    }
+
+    /// Polled fallback for the gate.
+    pub fn poll_gate(p: PhysPoint) -> bool {
+        if !mode_currently_eligible() {
+            return false;
+        }
+        let last = LAST_ACCEPTED.load(Ordering::SeqCst);
+        let open = last == NO_POINT || {
+            let lp = unpack(last);
+            (p.x as i64 - lp.x as i64).abs() > MOVEMENT_GATE_PX
+                || (p.y as i64 - lp.y as i64).abs() > MOVEMENT_GATE_PX
+        };
+        if open {
+            let packed = pack(p);
+            LAST_ACCEPTED.store(packed, Ordering::SeqCst);
+        }
+        open
     }
 }
 

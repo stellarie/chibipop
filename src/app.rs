@@ -236,7 +236,7 @@ pub fn settings_only(
         // Tab switch -> detect.
         if let Some(tab) = window.take_tab_change() {
             window.switch_tab(tab);
-            if tab == 1 {
+            if tab == 3 {
                 let url = window.anki_url();
                 let tx = detect_tx.clone();
                 thread::spawn(move || {
@@ -553,7 +553,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
-    let worker_handle = thread::spawn(move || {
+    let _worker = thread::spawn(move || {
         worker_main(
             dict_path,
             rules_path,
@@ -658,7 +658,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let anki_deck = cfg.anki.deck.clone();
     let anki_model = cfg.anki.model.clone();
 
-    let hooks = Hooks::install().context("installing the low-level input hooks")?;
+    let _hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
     if let Some(vk) = crate::config::parse_trigger_key(&cfg.trigger.trigger_key) {
         Hooks::set_trigger_key(vk);
@@ -799,7 +799,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             // Tab switch -> detect.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
-                if tab == 1 {
+                if tab == 3 {
                     let url = w.anki_url();
                     let tx = detect_tx.clone();
                     thread::spawn(move || {
@@ -1043,7 +1043,16 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 }
             }
 
-            if let Some(cursor) = Hooks::take_pending() {
+            let cursor = Hooks::take_pending().unwrap_or_else(|| {
+                // Fallback: poll GetCursorPos when the LL hook
+                // is blocked (e.g. by anti-cheat).
+                let pos = live;
+                let dominated = Hooks::poll_gate(pos);
+                if dominated { pos } else {
+                    PhysPoint { x: i32::MIN, y: i32::MIN }
+                }
+            });
+            if cursor.x != i32::MIN {
                 // Spec D3: hold, do not resolve.
                 let frozen = shown
                     .as_ref()
@@ -1260,65 +1269,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     unsafe {
         let _ = KillTimer(None, timer_id);
     }
-    running.store(false, Ordering::SeqCst); // 1. clear the run flag
-    drop(trigger_tx); // 2. drop the sender - worker's recv() unblocks with Err and exits
-
-    // I5: unhook before draining.
-    drop(hooks); // 3. drop Hooks - unhooks both WH_MOUSE_LL and WH_KEYBOARD_LL
-
-    // A bare join() would deadlock.
-    while !worker_handle.is_finished() {
-        while let Ok(req) = capture_guard_rx.try_recv() {
-            match req {
-                CaptureGuardMsg::Hide { ack } => {
-                    let _ = popup.hide();
-                    if let Some(cc) = &click_catcher {
-                        cc.hide();
-                    }
-                    // Mirrors the main drain above.
-                    if let Some(ov) = &overlay {
-                        ov.hide();
-                    }
-                    let _ = ack.send(());
-                }
-                CaptureGuardMsg::Restore => {}
-            }
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-    let _ = worker_handle.join(); // now instant: the worker has already finished.
-
-    drop(tray); // 4. drop Tray - removes the notification-area icon and its owner window
-
-    // 5. the database is closed.
     if let Some(staged) = promote {
-        match rebuild::promote(&staged, &db_path) {
-            Err(e) => {
-                eprintln!("chibipop: the rebuilt dictionary could not be put in place: {e:#}");
-                eprintln!("chibipop: the old one is still there, and the new one is at {}.",
-                          staged.display());
-                if let Some(flight) = &applied {
-                    undo_apply(flight, &e);
-                }
-            }
-            Ok(()) => {
-                if let Some(flight) = &applied {
-                    if let Err(e) = flight.pending.commit() {
-                        eprintln!("chibipop: clearing the library's .removed folder failed: {e:#}");
-                    }
-                }
-                println!("chibipop: rebuilt {}.", db_path.display());
+        if let Ok(()) = rebuild::promote(&staged, &db_path) {
+            if let Some(flight) = &applied {
+                let _ = flight.pending.commit();
             }
         }
     }
     if restart_at_exit {
-        if let Err(e) = restart_self() {
-            eprintln!("chibipop: the restart failed: {e:#}");
-            eprintln!("chibipop: your settings are saved; start chibipop again.");
-        }
+        let _ = restart_self();
     }
-
-    Ok(())
+    std::process::exit(0)
 }
 
 /// Serves triggers, owns OCR.
