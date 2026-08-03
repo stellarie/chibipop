@@ -56,6 +56,15 @@ const WHEEL_DELTA_UNITS: i32 = 120;
 /// Trigger mode, packed as u8.
 static MODE: AtomicU8 = AtomicU8::new(0);
 
+/// Add-to-Anki hotkey vkcode.
+static ANKI_ADD_VK: AtomicU16 = AtomicU16::new(0x41);
+
+/// Set when popup+Anki are up.
+static ANKI_ADD_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// One hotkey press, banked.
+static PENDING_ADD: AtomicBool = AtomicBool::new(false);
+
 /// One word: reads never tear.
 fn pack(p: PhysPoint) -> i64 {
     ((p.x as i64) << 32) | (p.y as u32 as i64)
@@ -92,6 +101,13 @@ fn modifier_variants(vk: u16) -> Option<(u16, u16)> {
         0x12 => Some((0xA4, 0xA5)),
         _ => None,
     }
+}
+
+/// True if this event fires add.
+fn add_hotkey_hit(down: bool, vk: u16) -> bool {
+    down
+        && vk == ANKI_ADD_VK.load(Ordering::SeqCst)
+        && ANKI_ADD_ARMED.load(Ordering::SeqCst)
 }
 
 /// Does this event match the key?
@@ -143,11 +159,15 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     // WH_KEYBOARD_LL contract under which `lparam` is a live
     // KBDLLHOOKSTRUCT owned by the OS for the duration of this call.
     let vk = unsafe { (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode } as u16;
+    let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+    if add_hotkey_hit(down, vk) {
+        PENDING_ADD.store(true, Ordering::SeqCst);
+    }
+
     let target = TRIGGER_VK.load(Ordering::SeqCst);
     if !matches_trigger(vk, target) {
         return;
     }
-    let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
     if down {
         KEY_DOWN.store(true, Ordering::SeqCst);
     } else {
@@ -293,6 +313,21 @@ impl Hooks {
         TRIGGER_VK.store(vk, Ordering::SeqCst);
     }
 
+    /// Sets the add-to-Anki vkcode.
+    pub fn set_add_hotkey(vk: u16) {
+        ANKI_ADD_VK.store(vk, Ordering::SeqCst);
+    }
+
+    /// Arms/disarms the add hotkey.
+    pub fn set_add_armed(armed: bool) {
+        ANKI_ADD_ARMED.store(armed, Ordering::SeqCst);
+    }
+
+    /// Takes the pending add, once.
+    pub fn take_add_hotkey() -> bool {
+        PENDING_ADD.swap(false, Ordering::SeqCst)
+    }
+
     /// Takes whole notches only.
     ///
     /// Sub-notch rest stays banked.
@@ -365,6 +400,7 @@ impl Drop for Hooks {
         // Redundant; unhook restores.
         SCROLL_ARMED.store(false, Ordering::SeqCst);
         CLICK_ARMED.store(false, Ordering::SeqCst);
+        ANKI_ADD_ARMED.store(false, Ordering::SeqCst);
         unsafe {
             let _ = UnhookWindowsHookEx(self.mouse);
             let _ = UnhookWindowsHookEx(self.keyboard);
@@ -509,5 +545,85 @@ mod tests {
     #[test]
     fn modifier_variants_f_key_has_none() {
         assert_eq!(None, modifier_variants(0x70));
+    }
+
+    // ---- add-to-anki hotkey ----
+
+    /// Hotkey statics are shared.
+    static ADD_HOTKEY_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn add_hotkey_guard() -> std::sync::MutexGuard<'static, ()> {
+        ADD_HOTKEY_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn add_hotkey_hit_requires_a_keydown() {
+        let _g = add_hotkey_guard();
+        Hooks::set_add_hotkey(0x41);
+        Hooks::set_add_armed(true);
+        assert!(!add_hotkey_hit(false, 0x41), "a keyup must not fire");
+        Hooks::set_add_armed(false);
+    }
+
+    #[test]
+    fn add_hotkey_hit_requires_the_configured_vk() {
+        let _g = add_hotkey_guard();
+        Hooks::set_add_hotkey(0x41);
+        Hooks::set_add_armed(true);
+        assert!(!add_hotkey_hit(true, 0x42), "the wrong key must not fire");
+        assert!(add_hotkey_hit(true, 0x41));
+        Hooks::set_add_armed(false);
+    }
+
+    #[test]
+    fn add_hotkey_hit_requires_arming() {
+        let _g = add_hotkey_guard();
+        Hooks::set_add_hotkey(0x41);
+        Hooks::set_add_armed(false);
+        assert!(!add_hotkey_hit(true, 0x41), "disarmed must not fire");
+    }
+
+    #[test]
+    fn take_add_hotkey_is_a_one_shot_swap() {
+        let _g = add_hotkey_guard();
+        PENDING_ADD.store(true, Ordering::SeqCst);
+        assert!(Hooks::take_add_hotkey());
+        assert!(!Hooks::take_add_hotkey(), "a second take sees it cleared");
+    }
+
+    /// Exercises the real struct.
+    #[test]
+    fn record_key_state_arms_pending_for_the_add_key() {
+        let _g = add_hotkey_guard();
+        Hooks::set_add_hotkey(0x41);
+        Hooks::set_add_armed(true);
+        let _ = Hooks::take_add_hotkey();
+
+        let data = KBDLLHOOKSTRUCT { vkCode: 0x41, ..Default::default() };
+        let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
+        // SAFETY: `data` is a live, aligned KBDLLHOOKSTRUCT on this
+        // frame's stack for the whole call - the exact contract
+        // record_key_state relies on from the real WH_KEYBOARD_LL hook.
+        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
+
+        assert!(Hooks::take_add_hotkey());
+        Hooks::set_add_armed(false);
+    }
+
+    /// Wrong key must not arm it.
+    #[test]
+    fn record_key_state_ignores_an_unrelated_key() {
+        let _g = add_hotkey_guard();
+        Hooks::set_add_hotkey(0x41);
+        Hooks::set_add_armed(true);
+        let _ = Hooks::take_add_hotkey();
+
+        let data = KBDLLHOOKSTRUCT { vkCode: 0x42, ..Default::default() };
+        let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
+        // SAFETY: same contract as the test above.
+        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
+
+        assert!(!Hooks::take_add_hotkey(), "a different key must not arm it");
+        Hooks::set_add_armed(false);
     }
 }

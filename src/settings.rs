@@ -39,6 +39,7 @@ pub struct SettingsForm {
     pub anki_url: String,
     pub anki_deck: String,
     pub anki_model: String,
+    pub anki_add_key: String,
 }
 
 /// An import waiting for Apply.
@@ -245,6 +246,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_url: cfg.anki.url.clone(),
         anki_deck: cfg.anki.deck.clone(),
         anki_model: cfg.anki.model.clone(),
+        anki_add_key: cfg.anki.add_key.clone(),
     }
 }
 
@@ -270,6 +272,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.url = form.anki_url.clone();
     out.anki.deck = form.anki_deck.clone();
     out.anki.model = form.anki_model.clone();
+    out.anki.add_key = form.anki_add_key.clone();
     out.dictionaries.display_order = form
         .dict_names
         .iter()
@@ -442,8 +445,18 @@ mod tests {
         cfg.anki.url = "http://localhost:9999".into();
         cfg.anki.deck = "Mining".into();
         cfg.anki.model = "Custom".into();
+        cfg.anki.add_key = "f2".into();
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
+    }
+
+    #[test]
+    fn anki_add_key_round_trips_through_the_form() {
+        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        cfg.anki.add_key = "f2".into();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("f2", form.anki_add_key);
+        assert_eq!("f2", apply_to(&form, &cfg).anki.add_key);
     }
 
     #[test]

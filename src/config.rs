@@ -57,7 +57,8 @@ pub enum TriggerMode {
 
 /// VK code from a key name.
 pub fn parse_trigger_key(name: &str) -> Option<u16> {
-    let named = match name.to_ascii_lowercase().as_str() {
+    let lower = name.to_ascii_lowercase();
+    let named = match lower.as_str() {
         "shift" => Some(0x10),
         "ctrl" | "control" => Some(0x11),
         "alt" => Some(0x12),
@@ -73,9 +74,23 @@ pub fn parse_trigger_key(name: &str) -> Option<u16> {
         "f10" => Some(0x79),
         "f11" => Some(0x7A),
         "f12" => Some(0x7B),
-        _ => None,
+        _ => single_char_vk(&lower),
     };
     named.or_else(|| parse_vk_number(name))
+}
+
+/// A lone letter or digit key.
+fn single_char_vk(lower: &str) -> Option<u16> {
+    let mut chars = lower.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    match c {
+        'a'..='z' => Some(0x41 + (c as u16 - 'a' as u16)),
+        '0'..='9' => Some(0x30 + (c as u16 - '0' as u16)),
+        _ => None,
+    }
 }
 
 /// Hex or decimal VK number.
@@ -201,6 +216,9 @@ pub struct AnkiConfig {
     pub deck: String,
     #[serde(default = "default_anki_model")]
     pub model: String,
+    /// Shortcut: add the top card.
+    #[serde(default = "default_anki_add_key")]
+    pub add_key: String,
 }
 
 /// Default Anki URL.
@@ -218,6 +236,11 @@ fn default_anki_model() -> String {
     "Lapis".to_string()
 }
 
+/// Default Anki add key.
+fn default_anki_add_key() -> String {
+    "a".to_string()
+}
+
 impl Default for AnkiConfig {
     fn default() -> AnkiConfig {
         AnkiConfig {
@@ -225,6 +248,7 @@ impl Default for AnkiConfig {
             url: default_anki_url(),
             deck: default_anki_deck(),
             model: default_anki_model(),
+            add_key: default_anki_add_key(),
         }
     }
 }
@@ -690,12 +714,14 @@ mod tests {
         let mut c = Config::default();
         c.anki.enabled = true;
         c.anki.deck = "Mining".to_string();
+        c.anki.add_key = "f2".to_string();
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
         assert!(back.anki.enabled);
         assert_eq!("Mining", back.anki.deck);
         assert_eq!("http://localhost:8765", back.anki.url);
         assert_eq!("Lapis", back.anki.model);
+        assert_eq!("f2", back.anki.add_key);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -711,6 +737,36 @@ mod tests {
         let c = load_or_create(&p).expect("a pre-anki config must load");
         assert!(!c.anki.enabled);
         assert_eq!("http://localhost:8765", c.anki.url);
+        assert_eq!("a", c.anki.add_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn anki_add_key_defaults_to_a() {
+        assert_eq!("a", Config::default().anki.add_key);
+    }
+
+    /// Guards the shipped default.
+    #[test]
+    fn anki_add_key_default_parses_to_vk_a() {
+        let vk = parse_trigger_key(&Config::default().anki.add_key);
+        assert_eq!(Some(0x41), vk);
+    }
+
+    /// The bare-serde-default trap.
+    #[test]
+    fn an_anki_section_without_add_key_still_defaults_to_a() {
+        let p = tmp("anki_no_add_key");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nenabled = true\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-add_key config must load");
+        assert!(c.anki.enabled, "the rest of the section must still apply");
+        assert_eq!("a", c.anki.add_key, "a missing key takes the field default");
         let _ = std::fs::remove_file(&p);
     }
 
@@ -746,6 +802,34 @@ mod tests {
     #[test]
     fn parse_trigger_key_f12() {
         assert_eq!(Some(0x7B), parse_trigger_key("f12"));
+    }
+
+    #[test]
+    fn parse_trigger_key_lowercase_letter() {
+        assert_eq!(Some(0x41), parse_trigger_key("a"));
+    }
+
+    #[test]
+    fn parse_trigger_key_uppercase_letter() {
+        assert_eq!(Some(0x41), parse_trigger_key("A"));
+    }
+
+    #[test]
+    fn parse_trigger_key_digit_key() {
+        assert_eq!(Some(0x35), parse_trigger_key("5"));
+    }
+
+    /// Agrees with the display name.
+    #[test]
+    fn parse_trigger_key_single_char_matches_trigger_key_name() {
+        for c in 'a'..='z' {
+            let vk = parse_trigger_key(&c.to_string()).unwrap();
+            assert_eq!(c.to_ascii_uppercase().to_string(), trigger_key_name(vk));
+        }
+        for c in '0'..='9' {
+            let vk = parse_trigger_key(&c.to_string()).unwrap();
+            assert_eq!(c.to_string(), trigger_key_name(vk));
+        }
     }
 
     #[test]

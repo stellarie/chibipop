@@ -663,6 +663,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     if let Some(vk) = crate::config::parse_trigger_key(&cfg.trigger.trigger_key) {
         Hooks::set_trigger_key(vk);
     }
+    if let Some(vk) = crate::config::parse_trigger_key(&cfg.anki.add_key) {
+        Hooks::set_add_hotkey(vk);
+    }
 
     // No tray means no control.
     let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
@@ -831,6 +834,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 && shown.as_ref().is_some_and(|s| s.content_h > s.view_h);
             Hooks::set_scroll_armed(armed);
             Hooks::set_click_armed(over_popup);
+            Hooks::set_add_armed(shown.is_some() && anki_enabled);
 
             armed_ticks = if armed { armed_ticks + 1 } else { 0 };
             if armed_ticks == ARM_WARN_TICKS {
@@ -890,48 +894,23 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                     }
                                 }
                             }
-                            HitAction::AddToAnki => {
-                                let info = s.presentation.top.as_ref().map(|card| {
-                                    let expr = card.written.as_deref()
-                                        .or(card.reading.as_deref())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let fields = anki::fields_from_card(card, &card.blocks);
-                                    (expr, fields)
-                                });
-                                if let Some((expr, fields)) = info {
-                                    if !s.anki.adding
-                                        && !s.anki.added.contains(&expr)
-                                        && !s.anki.dupes.contains(&expr)
-                                    {
-                                        s.anki.adding = true;
-                                        if let Err(e) = renderer.paint(
-                                            &s.presentation, &theme, s.scroll, &s.anki,
-                                        ) {
-                                            eprintln!("chibipop: repaint for adding failed: {e:#}");
-                                        }
-                                        let url = anki_url.clone();
-                                        let deck = anki_deck.clone();
-                                        let model = anki_model.clone();
-                                        let tx = add_tx.clone();
-                                        thread::spawn(move || {
-                                            let err = anki::add_note(&url, &deck, &model, &fields)
-                                                .err()
-                                                .map(|e| format!("{e:#}"));
-                                            let _ = tx.send(AddNoteResult { expr, err });
-                                            // SAFETY: wakes the pump.
-                                            unsafe {
-                                                let _ = PostThreadMessageW(
-                                                    main_tid, WM_APP_ADD_NOTE,
-                                                    WPARAM(0), LPARAM(0),
-                                                );
-                                            }
-                                        });
-                                    }
-                                }
-                            }
+                            HitAction::AddToAnki => start_add_to_anki(
+                                s, &mut renderer, &theme,
+                                &anki_url, &anki_deck, &anki_model,
+                                &add_tx, main_tid,
+                            ),
                         }
                     }
+                }
+            }
+
+            if Hooks::take_add_hotkey() {
+                if let Some(s) = shown.as_mut() {
+                    start_add_to_anki(
+                        s, &mut renderer, &theme,
+                        &anki_url, &anki_deck, &anki_model,
+                        &add_tx, main_tid,
+                    );
                 }
             }
 
@@ -1583,6 +1562,50 @@ fn show_presentation(
     popup.show_at(rect).context("moving/showing the popup")?;
     renderer.paint(presentation, theme, scroll, anki).context("painting the popup")?;
     Ok((rect, content_h, view_h))
+}
+
+/// Same guard as the click path.
+#[allow(clippy::too_many_arguments)]
+fn start_add_to_anki(
+    s: &mut Shown,
+    renderer: &mut Renderer,
+    theme: &Theme,
+    anki_url: &str,
+    anki_deck: &str,
+    anki_model: &str,
+    add_tx: &mpsc::Sender<AddNoteResult>,
+    main_tid: u32,
+) {
+    let info = s.presentation.top.as_ref().map(|card| {
+        let expr = card.written.as_deref()
+            .or(card.reading.as_deref())
+            .unwrap_or("")
+            .to_string();
+        let fields = anki::fields_from_card(card, &card.blocks);
+        (expr, fields)
+    });
+    let Some((expr, fields)) = info else { return };
+    if s.anki.adding || s.anki.added.contains(&expr) || s.anki.dupes.contains(&expr) {
+        return;
+    }
+    s.anki.adding = true;
+    if let Err(e) = renderer.paint(&s.presentation, theme, s.scroll, &s.anki) {
+        eprintln!("chibipop: repaint for adding failed: {e:#}");
+    }
+    let url = anki_url.to_string();
+    let deck = anki_deck.to_string();
+    let model = anki_model.to_string();
+    let tx = add_tx.clone();
+    thread::spawn(move || {
+        let err = anki::add_note(&url, &deck, &model, &fields)
+            .err()
+            .map(|e| format!("{e:#}"));
+        let _ = tx.send(AddNoteResult { expr, err });
+        // SAFETY: wakes the pump.
+        unsafe {
+            let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 /// Would it redraw the same?

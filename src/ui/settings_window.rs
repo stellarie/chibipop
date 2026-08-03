@@ -76,6 +76,7 @@ const ID_ANKI_TEST: i32 = 129;
 const ID_TAB: i32 = 130;
 const ID_TRIGGER_KEY: i32 = 131;
 const ID_PREFER_VERT: i32 = 132;
+const ID_ANKI_ADD_KEY: i32 = 133;
 
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
@@ -188,14 +189,17 @@ thread_local! {
     // Pending tab switch.
     static TAB: Cell<Option<(isize, u32)>> = const { Cell::new(None) };
 
-    // Trigger capture, by `HWND`.
-    static CAPTURING: Cell<Option<isize>> = const { Cell::new(None) };
+    // Key capture: hwnd + ctrl id.
+    static CAPTURING: Cell<Option<(isize, i32)>> = const { Cell::new(None) };
 
     // Button text before capture.
     static CAPTURE_PREV: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
 
     // Captured vkcode, by `HWND`.
     static CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+
+    // Anki add-key vk, by `HWND`.
+    static ANKI_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -218,33 +222,34 @@ fn record_click(hwnd: HWND, click: SettingsClick) {
 }
 
 /// Starts capture mode.
-unsafe fn begin_capture(hwnd: HWND) {
-    // SAFETY: `ID_TRIGGER_KEY` is a live child of `hwnd`, created in
-    // `build`; `window_text`/`SetWindowTextW` state their own contracts.
+unsafe fn begin_capture(hwnd: HWND, id: i32) {
+    // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
+    // children of `hwnd`, created in `build`; `window_text` and
+    // `SetWindowTextW` state their own contracts.
     unsafe {
-        let Ok(btn) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) else { return };
+        let Ok(btn) = GetDlgItem(Some(hwnd), id) else { return };
         let prev = window_text(btn);
         CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, prev)));
-        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, id))));
         let _ = SetWindowTextW(btn, w!("Press a key..."));
     }
 }
 
 /// Ends capture, unchanged.
 unsafe fn cancel_capture(hwnd: HWND) {
-    // SAFETY: `ID_TRIGGER_KEY` is a live child of `hwnd`, created in
-    // `build`; the stashed text was captured from this same control.
+    // SAFETY: `id` came from `CAPTURING`, only ever set by
+    // `begin_capture` to a live child of `hwnd`; the stashed text
+    // was captured from that same control.
     unsafe {
         let mine = hwnd.0 as isize;
-        if CAPTURING.with(|c| c.get()) != Some(mine) {
-            return;
-        }
+        let captured = CAPTURING.with(|c| c.get()).and_then(|(h, id)| (h == mine).then_some(id));
+        let Some(id) = captured else { return };
         CAPTURING.with(|c| c.set(None));
         let prev = CAPTURE_PREV
             .with(|c| c.borrow_mut().take())
             .and_then(|(h, s)| (h == mine).then_some(s));
         let Some(text) = prev else { return };
-        if let Ok(btn) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
+        if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
             let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
         }
     }
@@ -281,7 +286,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         let _ = EnableWindow(c, id == ID_MODE_HOLD);
                     }
                 },
-                ID_TRIGGER_KEY => unsafe { begin_capture(hwnd) },
+                ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
+                ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
                 _ => {}
             }
             LRESULT(0)
@@ -666,23 +672,35 @@ fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
 }
 
 /// `None` unless capturing.
-fn take_captured_key(hwnd: HWND, vk: u16) -> Option<String> {
+fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
-    if CAPTURING.with(|c| c.get()) != Some(mine) {
-        return None;
-    }
+    let id = CAPTURING.with(|c| c.get()).and_then(|(h, id)| (h == mine).then_some(id))?;
     CAPTURING.with(|c| c.set(None));
-    CAPTURED_VK.with(|c| c.set(Some((mine, vk))));
-    Some(crate::config::trigger_key_name(vk))
+    let cell = if id == ID_TRIGGER_KEY { &CAPTURED_VK } else { &ANKI_CAPTURED_VK };
+    cell.with(|c| c.set(Some((mine, vk))));
+    Some((id, crate::config::trigger_key_name(vk)))
+}
+
+/// A captured key, or template.
+fn resolved_captured_key(
+    cell: &'static std::thread::LocalKey<Cell<Option<(isize, u16)>>>,
+    hwnd: HWND,
+    template: &str,
+) -> String {
+    cell.with(|c| c.get())
+        .and_then(|(h, vk)| (h == hwnd.0 as isize).then_some(vk))
+        .or_else(|| crate::config::parse_trigger_key(template))
+        .map_or_else(|| template.to_string(), stored_trigger_key)
 }
 
 /// What `read()` persists.
 fn resolved_trigger_key(hwnd: HWND, template: &str) -> String {
-    CAPTURED_VK
-        .with(|c| c.get())
-        .and_then(|(h, vk)| (h == hwnd.0 as isize).then_some(vk))
-        .or_else(|| crate::config::parse_trigger_key(template))
-        .map_or_else(|| template.to_string(), stored_trigger_key)
+    resolved_captured_key(&CAPTURED_VK, hwnd, template)
+}
+
+/// Same, for the Anki add key.
+fn resolved_anki_add_key(hwnd: HWND, template: &str) -> String {
+    resolved_captured_key(&ANKI_CAPTURED_VK, hwnd, template)
 }
 
 /// Parseable form of `vk`.
@@ -937,11 +955,12 @@ impl SettingsWindow {
 
     /// Captures `vk`; true if used.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
-        let Some(text) = take_captured_key(self.hwnd, vk) else { return false };
-        // SAFETY: `ID_TRIGGER_KEY` is a live child of `self.hwnd`, created
-        // in `build`; `SetWindowTextW` copies the string during the call.
+        let Some((id, text)) = take_captured_key(self.hwnd, vk) else { return false };
+        // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
+        // children of `self.hwnd`, created in `build`; `SetWindowTextW`
+        // copies the string during the call.
         unsafe {
-            if let Ok(btn) = GetDlgItem(Some(self.hwnd), ID_TRIGGER_KEY) {
+            if let Ok(btn) = GetDlgItem(Some(self.hwnd), id) {
                 let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
             }
         }
@@ -1384,7 +1403,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = content_y;
-            ank.push(group("Anki", y, 5 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 6 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(h, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
@@ -1413,6 +1432,13 @@ impl SettingsWindow {
             ank.push(model);
             SendMessageW(model, WM_SETTEXT, None,
                 Some(LPARAM(wide(&form.anki_model).as_ptr() as isize)));
+            y += ROW_H;
+            ank.push(label("Shortcut key", y)?);
+            let add_vk = crate::config::parse_trigger_key(&form.anki_add_key).unwrap_or(0x41);
+            ANKI_CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, add_vk))));
+            let add_name = crate::config::trigger_key_name(add_vk);
+            ank.push(child(h, w!("BUTTON"), &add_name, WS_TABSTOP,
+                FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_ADD_KEY, f)?);
             y += ROW_H;
             ank.push(child(h, w!("BUTTON"), "Test connection", WS_TABSTOP,
                   PAD, y, 116, ROW_H, ID_ANKI_TEST, f)?);
@@ -1495,6 +1521,7 @@ impl SettingsWindow {
             };
 
             let trigger_key = resolved_trigger_key(h, &template.trigger_key);
+            let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
 
             SettingsForm {
                 mode: if checked(ID_MODE_HOLD) {
@@ -1528,6 +1555,7 @@ impl SettingsWindow {
                 anki_url: text_of(ID_ANKI_URL),
                 anki_deck: text_of(ID_ANKI_DECK),
                 anki_model: text_of(ID_ANKI_MODEL),
+                anki_add_key,
             }
         }
     }
@@ -1573,11 +1601,16 @@ impl Drop for SettingsWindow {
             }
         });
         CAPTURING.with(|c| {
-            if c.get() == Some(self.hwnd.0 as isize) {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
         });
         CAPTURED_VK.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        ANKI_CAPTURED_VK.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
@@ -1747,36 +1780,69 @@ mod tests {
     #[test]
     fn take_captured_key_accepts_a_named_key() {
         let hwnd = HWND(6002 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_TRIGGER_KEY))));
 
         let got = take_captured_key(hwnd, 0x11);
 
-        assert_eq!(Some("Ctrl".to_string()), got);
+        assert_eq!(Some((ID_TRIGGER_KEY, "Ctrl".to_string())), got);
         assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
+        CAPTURED_VK.with(|c| c.set(None));
     }
 
     /// Any vk is now valid.
     #[test]
     fn take_captured_key_accepts_a_previously_unlisted_key() {
         let hwnd = HWND(6003 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_TRIGGER_KEY))));
 
         let got = take_captured_key(hwnd, 0x41); // 'A'
 
-        assert_eq!(Some("A".to_string()), got);
+        assert_eq!(Some((ID_TRIGGER_KEY, "A".to_string())), got);
         assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
+        CAPTURED_VK.with(|c| c.set(None));
     }
 
     /// Stashed so `read()` can see it later.
     #[test]
     fn take_captured_key_records_the_vk_for_read() {
         let hwnd = HWND(6007 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some(hwnd.0 as isize)));
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_TRIGGER_KEY))));
 
         take_captured_key(hwnd, 0x41);
 
         assert_eq!("0x41", resolved_trigger_key(hwnd, "shift"));
         CAPTURED_VK.with(|c| c.set(None));
+    }
+
+    /// A second capturable control.
+    #[test]
+    fn take_captured_key_routes_the_anki_add_key_to_its_own_id() {
+        let hwnd = HWND(6008 as *mut core::ffi::c_void);
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_ANKI_ADD_KEY))));
+
+        let got = take_captured_key(hwnd, 0x41);
+
+        assert_eq!(Some((ID_ANKI_ADD_KEY, "A".to_string())), got);
+        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
+        ANKI_CAPTURED_VK.with(|c| c.set(None));
+    }
+
+    /// The two cells stay apart.
+    #[test]
+    fn take_captured_key_does_not_disturb_the_trigger_key_cell() {
+        let hwnd = HWND(6009 as *mut core::ffi::c_void);
+        CAPTURED_VK.with(|c| c.set(Some((hwnd.0 as isize, 0x10))));
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_ANKI_ADD_KEY))));
+
+        take_captured_key(hwnd, 0x42);
+
+        assert_eq!(
+            Some((hwnd.0 as isize, 0x10)),
+            CAPTURED_VK.with(|c| c.get()),
+            "the trigger key's own capture must be untouched"
+        );
+        CAPTURED_VK.with(|c| c.set(None));
+        ANKI_CAPTURED_VK.with(|c| c.set(None));
     }
 
     #[test]
@@ -1793,6 +1859,34 @@ mod tests {
         CAPTURED_VK.with(|c| c.set(None));
 
         assert_eq!("garbage", resolved_trigger_key(hwnd, "garbage"));
+    }
+
+    // ---- anki add-key capture ----
+
+    #[test]
+    fn resolved_anki_add_key_falls_back_to_the_template_when_uncaptured() {
+        let hwnd = HWND(6010 as *mut core::ffi::c_void);
+        ANKI_CAPTURED_VK.with(|c| c.set(None));
+
+        assert_eq!("ctrl", resolved_anki_add_key(hwnd, "ctrl"));
+    }
+
+    /// The default normalizes.
+    #[test]
+    fn resolved_anki_add_key_normalizes_the_default_letter() {
+        let hwnd = HWND(6013 as *mut core::ffi::c_void);
+        ANKI_CAPTURED_VK.with(|c| c.set(None));
+
+        assert_eq!("0x41", resolved_anki_add_key(hwnd, "a"));
+    }
+
+    #[test]
+    fn resolved_anki_add_key_uses_the_freshly_captured_vk() {
+        let hwnd = HWND(6011 as *mut core::ffi::c_void);
+        ANKI_CAPTURED_VK.with(|c| c.set(Some((hwnd.0 as isize, 0x73))));
+
+        assert_eq!("f4", resolved_anki_add_key(hwnd, "a"));
+        ANKI_CAPTURED_VK.with(|c| c.set(None));
     }
 
     #[test]
