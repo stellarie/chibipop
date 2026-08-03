@@ -17,11 +17,11 @@ use crate::settings::{self, SettingsForm};
 use crate::text::layout::Orientation;
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
-use crate::ui::render::{max_scroll, AnkiPopupState, HitAction, Renderer};
+use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
-use crate::ui::window::{CaptureExclusion, ClickCatcher, Popup};
+use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -630,18 +630,31 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         eprintln!("chibipop: ============================================================");
     }
 
-    // Default stays false - D5.
-    if popup.capture_exclusion().needs_capture_guard()
-        || overlay.as_ref().is_some_and(|ov| ov.capture_exclusion().needs_capture_guard())
-    {
-        capture_guard_active.store(true, Ordering::SeqCst);
-    }
-
-    let click_catcher = if cfg.anki.enabled {
-        Some(ClickCatcher::create().context("creating the click catcher")?)
+    let anki_button = if cfg.anki.enabled {
+        Some(
+            AnkiButton::create(cfg.popup.exclude_from_capture)
+                .context("creating the Anki button window")?,
+        )
     } else {
         None
     };
+
+    if let Some(CaptureExclusion::AttemptFailed) =
+        anki_button.as_ref().map(AnkiButton::capture_exclusion)
+    {
+        eprintln!(
+            "chibipop: capture exclusion is NOT active for the Anki button window - the \
+             capture guard will hide it during captures instead"
+        );
+    }
+
+    // Default stays false - D5.
+    if popup.capture_exclusion().needs_capture_guard()
+        || overlay.as_ref().is_some_and(|ov| ov.capture_exclusion().needs_capture_guard())
+        || anki_button.as_ref().is_some_and(|b| b.capture_exclusion().needs_capture_guard())
+    {
+        capture_guard_active.store(true, Ordering::SeqCst);
+    }
 
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
@@ -687,8 +700,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let capture_guard_prev_visible = std::cell::Cell::new(false);
     // Overlay's own visibility.
     let overlay_prev_visible = std::cell::Cell::new(false);
-    // Click catcher visibility.
-    let catcher_prev_visible = std::cell::Cell::new(false);
+    // Anki button visibility.
+    let btn_prev_visible = std::cell::Cell::new(false);
     // What is on screen now.
     let mut shown: Option<Shown> = None;
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
@@ -729,11 +742,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 CaptureGuardMsg::Hide { ack } => {
                     capture_guard_prev_visible.set(popup.is_visible());
                     let _ = popup.hide();
-                    catcher_prev_visible.set(
-                        click_catcher.as_ref().is_some_and(|c| c.is_visible()),
+                    btn_prev_visible.set(
+                        anki_button.as_ref().is_some_and(|b| b.is_visible()),
                     );
-                    if let Some(cc) = &click_catcher {
-                        cc.hide();
+                    if let Some(b) = &anki_button {
+                        b.hide();
                     }
                     if let Some(hwnd) = overlay_hwnd {
                         // SAFETY: `hwnd` is `Overlay::hwnd()`'s own handle;
@@ -752,9 +765,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if capture_guard_prev_visible.get() {
                         let _ = popup.show_without_activating();
                     }
-                    if catcher_prev_visible.get() {
-                        if let Some(cc) = &click_catcher {
-                            cc.show_without_activating();
+                    if btn_prev_visible.get() {
+                        if let Some(b) = &anki_button {
+                            b.show_without_activating();
                         }
                     }
                     if let Some(hwnd) = overlay_hwnd {
@@ -885,22 +898,26 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                         s.scroll = 0;
                                         s.content_h = content_h;
                                         s.view_h = view_h;
-                                        if let Some(cc) = &click_catcher {
-                                            sync_catcher(cc, Some(rect), renderer.btn_bar_height_phys());
-                                        }
+                                        sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                                     }
                                     Err(e) => {
                                         eprintln!("chibipop: repaint after swap failed: {e:#}");
                                     }
                                 }
                             }
-                            HitAction::AddToAnki => start_add_to_anki(
-                                s, &mut renderer, &theme,
-                                &anki_url, &anki_deck, &anki_model,
-                                &add_tx, main_tid,
-                            ),
                         }
                     }
+                }
+            }
+
+            if anki_button.as_ref().is_some_and(|b| b.take_click()) {
+                if let Some(s) = shown.as_mut() {
+                    start_add_to_anki(
+                        s, &mut renderer, &theme,
+                        &anki_url, &anki_deck, &anki_model,
+                        &add_tx, main_tid,
+                    );
+                    sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
             }
 
@@ -911,6 +928,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &anki_url, &anki_deck, &anki_model,
                         &add_tx, main_tid,
                     );
+                    sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
             }
 
@@ -1009,11 +1027,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 // Restore would re-show it.
                 capture_guard_prev_visible.set(false);
                 overlay_prev_visible.set(false);
-                catcher_prev_visible.set(false);
+                btn_prev_visible.set(false);
                 if shown.is_some() {
                     let _ = popup.hide();
-                    if let Some(cc) = &click_catcher {
-                        cc.hide();
+                    if let Some(b) = &anki_button {
+                        b.hide();
                     }
                     if let Some(ov) = overlay.as_ref() {
                         ov.hide();
@@ -1064,13 +1082,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         cfg.debug.show_lookup_log,
                         anki_enabled,
                     );
-                    if let Some(cc) = &click_catcher {
-                        sync_catcher(
-                            cc,
-                            shown.as_ref().map(|s| s.popup),
-                            renderer.btn_bar_height_phys(),
-                        );
-                    }
+                    sync_anki_button(anki_button.as_ref(), shown.as_ref(), &theme);
                     if new_popup && anki_enabled {
                         popup_gen = popup_gen.wrapping_add(1);
                         let mut exprs: Vec<String> = Vec::new();
@@ -1133,9 +1145,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 s.view_h = view_h;
                                 let m = max_scroll(s.content_h, s.view_h);
                                 if s.scroll > m { s.scroll = m; }
-                                if let Some(cc) = &click_catcher {
-                                    sync_catcher(cc, Some(rect), renderer.btn_bar_height_phys());
-                                }
+                                sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                             }
                             Err(e) => {
                                 eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
@@ -1170,9 +1180,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             s.view_h = view_h;
                             let m = max_scroll(s.content_h, s.view_h);
                             if s.scroll > m { s.scroll = m; }
-                            if let Some(cc) = &click_catcher {
-                                sync_catcher(cc, Some(rect), renderer.btn_bar_height_phys());
-                            }
+                            sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                         }
                         Err(e) => {
                             eprintln!("chibipop: repaint after add failed: {e:#}");
@@ -1690,24 +1698,31 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     }
 }
 
-/// Positions or hides it.
-fn sync_catcher(
-    cc: &ClickCatcher,
-    popup: Option<PhysRect>,
-    bar_h: i32,
-) {
-    if bar_h > 0 {
-        if let Some(r) = popup {
-            let _ = cc.show_at(PhysRect {
-                x: r.x,
-                y: r.y + r.h - bar_h,
-                w: r.w,
-                h: bar_h,
-            });
-            return;
-        }
+/// Places, paints, or hides it.
+///
+/// Sits below the popup, flush
+/// with its left/right edges.
+fn sync_anki_button(btn: Option<&AnkiButton>, shown: Option<&Shown>, theme: &Theme) {
+    let Some(btn) = btn else { return };
+    let Some(s) = shown else {
+        btn.hide();
+        return;
+    };
+    let Some((text, color)) = anki_button_label(&s.presentation, theme, &s.anki) else {
+        btn.hide();
+        return;
+    };
+    let r = PhysRect {
+        x: s.popup.x,
+        y: s.popup.y + s.popup.h,
+        w: s.popup.w,
+        h: btn.height_phys(),
+    };
+    if let Err(e) = btn.show_at(r) {
+        eprintln!("chibipop: positioning the Anki button failed: {e:#}");
+        return;
     }
-    cc.hide();
+    btn.render(&text, color, theme);
 }
 
 /// Palette by name, font on top.
