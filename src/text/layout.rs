@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn a_word_touching_the_trailing_edge_is_dropped_and_becomes_the_next_start() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
-        let words = vec![hword("あ", 10, 40), hword("い", 60, 40), hword("う", 470, 40)];
+        let words = [hword("あ", 10, 40), hword("い", 60, 40), hword("う", 470, 40)];
         let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
         assert_eq!(470, next, "the clipped word's leading edge starts the next tile");
@@ -825,7 +825,7 @@ mod tests {
     #[test]
     fn with_nothing_clipped_the_next_start_is_the_tiles_own_edge() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
-        let words = vec![hword("あ", 10, 40), hword("い", 60, 40)];
+        let words = [hword("あ", 10, 40), hword("い", 60, 40)];
         let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert_eq!(2, kept.len());
         assert_eq!(500, next);
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn trailing_edge_exactly_at_the_margin_boundary_is_kept() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
-        let words = vec![hword("あ", 456, 40)]; // trail = 456+40 = 496
+        let words = [hword("あ", 456, 40)]; // trail = 456+40 = 496
         let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert_eq!(1, kept.len(), "496 must not be treated as clipped");
         assert_eq!(500, next);
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn trailing_edge_one_pixel_past_the_margin_boundary_is_discarded() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
-        let words = vec![hword("あ", 457, 40)]; // trail = 457+40 = 497
+        let words = [hword("あ", 457, 40)]; // trail = 457+40 = 497
         let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert!(kept.is_empty());
         assert_eq!(457, next, "must return the clipped word's own leading edge");
@@ -855,7 +855,7 @@ mod tests {
     #[test]
     fn a_first_word_already_clipped_keeps_nothing_and_does_not_advance() {
         let tile = PhysRect { x: 400, y: 90, w: 100, h: 60 };
-        let words = vec![hword("あ", 400, 120)];
+        let words = [hword("あ", 400, 120)];
         let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert!(kept.is_empty());
         assert_eq!(400, next, "must not advance past the tile's own start");
@@ -865,7 +865,7 @@ mod tests {
     #[test]
     fn a_clipped_first_word_starting_mid_tile_returns_its_own_leading_edge() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
-        let words = vec![hword("あ", 200, 400)];
+        let words = [hword("あ", 200, 400)];
         let (kept, next) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert!(kept.is_empty());
         assert_eq!(200, next);
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn the_split_reads_top_to_bottom_for_vertical_text() {
         let tile = PhysRect { x: 90, y: 0, w: 60, h: 500 };
-        let words = vec![
+        let words = [
             OcrWord { text: "上".into(), rect: PhysRect { x: 100, y: 10, w: 40, h: 40 } },
             OcrWord { text: "下".into(), rect: PhysRect { x: 100, y: 470, w: 40, h: 40 } },
         ];
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn words_arriving_out_of_order_are_sorted_before_splitting() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
-        let words = vec![hword("い", 60, 40), hword("あ", 10, 40)];
+        let words = [hword("い", 60, 40), hword("あ", 10, 40)];
         let (kept, _) = split_at_clipped(&words, tile, Orientation::Horizontal);
         assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
     }
@@ -1122,7 +1122,7 @@ mod tests {
 
     #[test]
     fn merge_single_word_unchanged() {
-        let words = vec![w("食", 100, 100, 20, 20)];
+        let words = [w("食", 100, 100, 20, 20)];
         let r: Vec<&OcrWord> = words.iter().collect();
         let m = merge_spaced_words(&r, Orientation::Horizontal);
         assert_eq!(1, m.len());
@@ -1132,7 +1132,7 @@ mod tests {
     /// gap = 0: no merge needed.
     #[test]
     fn merge_touching_chars_stay_separate() {
-        let words = vec![
+        let words = [
             w("可", 100, 100, 30, 40),
             w("哀", 130, 100, 30, 40),
         ];
@@ -1144,7 +1144,7 @@ mod tests {
     /// gap = 1.5x: merge.
     #[test]
     fn merge_spaced_chars_are_joined() {
-        let words = vec![
+        let words = [
             w("食", 100, 100, 20, 20),
             w("べ", 150, 100, 20, 20),
             w("物", 200, 100, 20, 20),
@@ -1158,7 +1158,7 @@ mod tests {
     /// gap = 4x: no merge.
     #[test]
     fn merge_far_apart_chars_stay_separate() {
-        let words = vec![
+        let words = [
             w("左", 100, 100, 20, 20),
             w("右", 200, 100, 20, 20),
         ];
@@ -1170,7 +1170,7 @@ mod tests {
     /// Multi-char blocks merging.
     #[test]
     fn merge_skips_multi_char_words() {
-        let words = vec![
+        let words = [
             w("食", 100, 100, 20, 20),
             w("ab", 150, 100, 40, 20),
             w("物", 220, 100, 20, 20),
@@ -1183,7 +1183,7 @@ mod tests {
     /// Cross-axis offset blocks it.
     #[test]
     fn merge_different_y_stays_separate() {
-        let words = vec![
+        let words = [
             w("上", 100, 100, 20, 20),
             w("下", 150, 200, 20, 20),
         ];
@@ -1195,7 +1195,7 @@ mod tests {
     /// Vertical spaced chars merge.
     #[test]
     fn merge_vertical_spaced_chars() {
-        let words = vec![
+        let words = [
             w("食", 100, 100, 20, 20),
             w("べ", 100, 150, 20, 20),
             w("物", 100, 200, 20, 20),
@@ -1209,7 +1209,7 @@ mod tests {
     /// Union rect spans the gap.
     #[test]
     fn merge_rect_covers_the_gap() {
-        let words = vec![
+        let words = [
             w("食", 100, 100, 20, 20),
             w("物", 150, 100, 20, 20),
         ];
@@ -1222,7 +1222,7 @@ mod tests {
     /// Large gap breaks the chain.
     #[test]
     fn merge_chain_broken_by_large_gap() {
-        let words = vec![
+        let words = [
             w("食", 100, 100, 20, 20),
             w("べ", 150, 100, 20, 20),
             w("物", 300, 100, 20, 20),
