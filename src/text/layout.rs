@@ -340,6 +340,59 @@ pub fn merge_spaced_words(words: &[&OcrWord], ori: Orientation) -> Vec<OcrWord> 
     out
 }
 
+/// Text wraps onto next line?
+fn continues_on_next_line(current: &OcrLine, next: &OcrLine, orientation: Orientation) -> bool {
+    if current.words.is_empty() || next.words.is_empty() {
+        return false;
+    }
+
+    let axis = |p: PhysPoint| match orientation {
+        Orientation::Horizontal => p.y,
+        Orientation::Vertical => p.x,
+    };
+    let (cross, edge): (AxisEdge, AxisEdge) = match orientation {
+        Orientation::Horizontal => (|r| r.h, |r| r.x),
+        Orientation::Vertical => (|r| r.w, |r| r.y),
+    };
+
+    let perp = |l: &OcrLine| -> i32 {
+        let sum: i32 = l.words.iter().map(|w| axis(w.rect.center())).sum();
+        sum / l.words.len() as i32
+    };
+    let thick = |l: &OcrLine| -> i32 {
+        let sum: i32 = l.words.iter().map(|w| cross(&w.rect)).sum();
+        sum / l.words.len() as i32
+    };
+    let start = |l: &OcrLine| l.words.iter().map(|w| edge(&w.rect)).min().unwrap_or(0);
+
+    let line_h = thick(current).max(thick(next));
+    if line_h <= 0 {
+        return false;
+    }
+
+    // Rows go down; cols go left.
+    let gap = match orientation {
+        Orientation::Horizontal => perp(next) - perp(current),
+        Orientation::Vertical => perp(current) - perp(next),
+    };
+    if gap <= 0 || gap > line_h * 3 / 2 {
+        return false;
+    }
+
+    start(next) <= start(current) + line_h / 2
+}
+
+/// The line this wraps onto.
+fn find_continuation(lines: &[OcrLine], li: usize, orientation: Orientation) -> Option<&OcrLine> {
+    let current = &lines[li];
+    for (i, candidate) in lines.iter().enumerate() {
+        if i != li && continues_on_next_line(current, candidate, orientation) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Resolve a hover.
 pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
     let (li, wi) = hit_scan(lines, cursor)?;
@@ -361,6 +414,19 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
             cursor_byte_offset = text.len();
         }
         text.push_str(&w.text);
+    }
+
+    // The wrapped tail, if any.
+    if let Some(next_line) = find_continuation(lines, li, orientation) {
+        let mut tail: Vec<&OcrWord> = next_line.words.iter().collect();
+        match orientation {
+            Orientation::Horizontal => tail.sort_by_key(|w| w.rect.x),
+            Orientation::Vertical => tail.sort_by_key(|w| w.rect.y),
+        }
+        for w in &tail {
+            text.push_str(&w.text);
+        }
+        ordered.extend(tail);
     }
 
     // Geom from merged words.
@@ -1294,5 +1360,174 @@ mod tests {
         };
         let got = resolve(&[line], p(145, 120)).unwrap();
         assert_eq!(3, got.span.geom.len());
+    }
+
+    // -- line wrap continuation --
+
+    #[test]
+    fn wrap_within_one_line_height_continues() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 100, 156, 40, 40)] };
+        assert!(continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    /// 1.5x thickness, inclusive.
+    #[test]
+    fn wrap_gap_exactly_at_the_ceiling_is_accepted() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 100, 160, 40, 40)] };
+        assert!(continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    /// 61px: one over the ceiling.
+    #[test]
+    fn wrap_gap_one_past_the_ceiling_is_rejected() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 100, 161, 40, 40)] };
+        assert!(!continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    #[test]
+    fn wrap_does_not_look_backward_to_the_previous_line() {
+        let upper = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let lower = OcrLine { words: vec![w("b", 100, 156, 40, 40)] };
+        assert!(!continues_on_next_line(&lower, &upper, Orientation::Horizontal));
+    }
+
+    /// Half a line of slack.
+    #[test]
+    fn wrap_start_within_tolerance_of_the_margin_continues() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 120, 156, 40, 40)] };
+        assert!(continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    /// 121: one past the tolerance.
+    #[test]
+    fn wrap_start_one_past_the_margin_tolerance_is_rejected() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 121, 156, 40, 40)] };
+        assert!(!continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    #[test]
+    fn wrap_far_from_the_margin_reads_as_a_column_not_a_wrap() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 300, 156, 40, 40)] };
+        assert!(!continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    #[test]
+    fn vertical_wrap_continues_into_the_column_on_the_left() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 44, 100, 40, 40)] };
+        assert!(continues_on_next_line(&current, &next, Orientation::Vertical));
+    }
+
+    #[test]
+    fn vertical_wrap_does_not_look_to_the_column_on_the_right() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![w("b", 156, 100, 40, 40)] };
+        assert!(!continues_on_next_line(&current, &next, Orientation::Vertical));
+    }
+
+    #[test]
+    fn wrap_with_an_empty_current_line_is_false() {
+        let current = OcrLine { words: vec![] };
+        let next = OcrLine { words: vec![w("b", 100, 156, 40, 40)] };
+        assert!(!continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    #[test]
+    fn wrap_with_an_empty_next_line_is_false() {
+        let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
+        let next = OcrLine { words: vec![] };
+        assert!(!continues_on_next_line(&current, &next, Orientation::Horizontal));
+    }
+
+    // -- resolve across a wrap --
+
+    /// The reported wrap bug.
+    fn wrapped_lines() -> Vec<OcrLine> {
+        vec![
+            OcrLine {
+                words: vec![
+                    w("新", 100, 100, 40, 40),
+                    w("し", 140, 100, 40, 40),
+                    w("い", 180, 100, 40, 40),
+                    w("冒", 220, 100, 40, 40),
+                    w("険", 260, 100, 40, 40),
+                    w("が", 300, 100, 40, 40),
+                ],
+            },
+            OcrLine {
+                words: vec![
+                    w("始", 100, 156, 40, 40),
+                    w("ま", 140, 156, 40, 40),
+                    w("る", 180, 156, 40, 40),
+                ],
+            },
+        ]
+    }
+
+    #[test]
+    fn resolve_appends_the_wrapped_next_line() {
+        let got = resolve(&wrapped_lines(), p(190, 110)).unwrap();
+        assert_eq!("新しい冒険が始まる", got.span.text);
+    }
+
+    /// 3rd char; two before it.
+    #[test]
+    fn resolve_wrap_keeps_the_hit_words_own_cursor_offset() {
+        let got = resolve(&wrapped_lines(), p(190, 110)).unwrap();
+        assert_eq!(6, got.span.cursor_byte_offset);
+        assert!(got.span.text[6..].starts_with('い'));
+    }
+
+    #[test]
+    fn resolve_geom_spans_both_lines_of_a_wrap() {
+        let got = resolve(&wrapped_lines(), p(190, 110)).unwrap();
+        assert_eq!(9, got.span.geom.len(), "one entry per touching char");
+        let chars: usize = got.span.geom.iter().map(|g| g.char_count).sum();
+        assert_eq!(got.span.text.chars().count(), chars);
+    }
+
+    #[test]
+    fn resolve_does_not_merge_a_distant_second_line() {
+        let lines = vec![
+            OcrLine { words: vec![w("上", 100, 100, 40, 40)] },
+            OcrLine { words: vec![w("下", 100, 400, 40, 40)] },
+        ];
+        let got = resolve(&lines, p(110, 110)).unwrap();
+        assert_eq!("上", got.span.text);
+    }
+
+    #[test]
+    fn resolve_only_looks_forward_not_backward_for_a_wrap() {
+        let got = resolve(&wrapped_lines(), p(110, 166)).unwrap();
+        assert_eq!("始まる", got.span.text);
+    }
+
+    #[test]
+    fn resolve_does_not_recursively_merge_a_third_line() {
+        let mut lines = wrapped_lines();
+        lines.push(OcrLine { words: vec![w("末", 100, 212, 40, 40)] });
+        let got = resolve(&lines, p(190, 110)).unwrap();
+        assert_eq!("新しい冒険が始まる", got.span.text);
+    }
+
+    #[test]
+    fn resolve_merges_a_vertical_wrap_into_the_next_column() {
+        let lines = vec![
+            OcrLine {
+                words: vec![w("上", 200, 100, 40, 40), w("下", 200, 140, 40, 40)],
+            },
+            OcrLine {
+                words: vec![w("左", 144, 100, 40, 40), w("右", 144, 140, 40, 40)],
+            },
+        ];
+        let got = resolve(&lines, p(210, 110)).unwrap();
+        assert_eq!(Orientation::Vertical, got.orientation);
+        assert_eq!("上下左右", got.span.text);
     }
 }
