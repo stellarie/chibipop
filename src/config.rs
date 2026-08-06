@@ -205,6 +205,13 @@ pub struct DebugConfig {
     pub show_lookup_log: bool,
 }
 
+/// Maps one field to Anki.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldMapping {
+    pub anki_field: String,
+    pub source: String,
+}
+
 /// `[anki]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnkiConfig {
@@ -219,6 +226,9 @@ pub struct AnkiConfig {
     /// Shortcut: add the top card.
     #[serde(default = "default_anki_add_key")]
     pub add_key: String,
+    /// Which fields go where.
+    #[serde(default = "default_field_map")]
+    pub field_map: Vec<FieldMapping>,
 }
 
 /// Default Anki URL.
@@ -241,6 +251,17 @@ fn default_anki_add_key() -> String {
     "a".to_string()
 }
 
+/// The Lapis field mapping.
+fn default_field_map() -> Vec<FieldMapping> {
+    vec![
+        FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
+        FieldMapping { anki_field: "ExpressionReading".into(), source: "reading".into() },
+        FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
+        FieldMapping { anki_field: "Frequency".into(), source: "frequency".into() },
+        FieldMapping { anki_field: "FreqSort".into(), source: "frequency".into() },
+    ]
+}
+
 impl Default for AnkiConfig {
     fn default() -> AnkiConfig {
         AnkiConfig {
@@ -249,6 +270,7 @@ impl Default for AnkiConfig {
             deck: default_anki_deck(),
             model: default_anki_model(),
             add_key: default_anki_add_key(),
+            field_map: default_field_map(),
         }
     }
 }
@@ -767,6 +789,67 @@ mod tests {
         let c = load_or_create(&p).expect("a pre-add_key config must load");
         assert!(c.anki.enabled, "the rest of the section must still apply");
         assert_eq!("a", c.anki.add_key, "a missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn default_field_map_matches_lapis() {
+        let want = vec![
+            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
+            FieldMapping { anki_field: "ExpressionReading".into(), source: "reading".into() },
+            FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
+            FieldMapping { anki_field: "Frequency".into(), source: "frequency".into() },
+            FieldMapping { anki_field: "FreqSort".into(), source: "frequency".into() },
+        ];
+        assert_eq!(want, Config::default().anki.field_map);
+    }
+
+    #[test]
+    fn anki_field_map_round_trips() {
+        let p = tmp("field_map_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.field_map = vec![
+            FieldMapping { anki_field: "Front".into(), source: "expression".into() },
+            FieldMapping { anki_field: "Back".into(), source: "glossary".into() },
+        ];
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(c.anki.field_map, back.anki.field_map);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_config_without_anki_section_defaults_field_map() {
+        let p = tmp("no_anki_field_map");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-anki config must load");
+        assert_eq!(Config::default().anki.field_map, c.anki.field_map);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The bare-serde-default trap.
+    #[test]
+    fn an_anki_section_without_field_map_still_defaults_to_lapis() {
+        let p = tmp("anki_no_field_map");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nenabled = true\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-field_map config must load");
+        assert!(c.anki.enabled, "the rest of the section must still apply");
+        assert_eq!(
+            Config::default().anki.field_map, c.anki.field_map,
+            "a missing key takes the field default"
+        );
         let _ = std::fs::remove_file(&p);
     }
 

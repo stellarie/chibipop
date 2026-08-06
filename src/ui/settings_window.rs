@@ -851,6 +851,17 @@ impl SettingsWindow {
         }
     }
 
+    /// The Anki model field's text.
+    pub fn anki_model(&self) -> String {
+        // SAFETY: `ID_ANKI_MODEL` is a live child of
+        // `self.hwnd`, created in `build`.
+        unsafe {
+            GetDlgItem(Some(self.hwnd), ID_ANKI_MODEL)
+                .map(|c| window_text(c))
+                .unwrap_or_default()
+        }
+    }
+
     /// Run a pending button.
     ///
     /// Callback precedes a picker.

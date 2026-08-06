@@ -1,19 +1,11 @@
 //! AnkiConnect v6 client.
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION: u8 = 6;
-
-/// Fields sent to AnkiConnect.
-pub struct AnkiFields {
-    pub expression: String,
-    pub reading: String,
-    pub glossary: String,
-    pub frequency: Option<String>,
-}
 
 fn post(url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
     let mut resp = ureq::post(url)
@@ -140,17 +132,28 @@ fn quote_search(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// Adds a note, returns its id.
-pub fn add_note(url: &str, deck: &str, model: &str, fields: &AnkiFields) -> Result<i64> {
-    let mut field_map = serde_json::json!({
-        "Expression": fields.expression,
-        "ExpressionReading": fields.reading,
-        "Glossary": fields.glossary,
-    });
-    if let Some(freq) = &fields.frequency {
-        field_map["Frequency"] = serde_json::json!(freq);
-        field_map["FreqSort"] = serde_json::json!(freq);
+/// Maps sources to Anki fields.
+fn mapped_fields(
+    fields: &HashMap<String, String>,
+    field_map: &[crate::config::FieldMapping],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    for mapping in field_map {
+        if let Some(value) = fields.get(&mapping.source) {
+            out.insert(mapping.anki_field.clone(), serde_json::json!(value));
+        }
     }
+    out
+}
+
+/// Adds a note, returns its id.
+pub fn add_note(
+    url: &str,
+    deck: &str,
+    model: &str,
+    fields: &HashMap<String, String>,
+    field_map: &[crate::config::FieldMapping],
+) -> Result<i64> {
     let body = serde_json::json!({
         "action": "addNote",
         "version": VERSION,
@@ -158,7 +161,7 @@ pub fn add_note(url: &str, deck: &str, model: &str, fields: &AnkiFields) -> Resu
             "note": {
                 "deckName": deck,
                 "modelName": model,
-                "fields": field_map,
+                "fields": mapped_fields(fields, field_map),
                 "options": {
                     "allowDuplicate": false,
                 },
@@ -175,7 +178,7 @@ pub fn add_note(url: &str, deck: &str, model: &str, fields: &AnkiFields) -> Resu
 pub fn fields_from_card(
     card: &crate::present::Card,
     blocks: &[crate::present::GlossBlock],
-) -> AnkiFields {
+) -> HashMap<String, String> {
     let expression = card.written.as_deref()
         .or(card.reading.as_deref())
         .unwrap_or("")
@@ -190,8 +193,15 @@ pub fn fields_from_card(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let frequency = card.freq.map(|f| f.to_string());
-    AnkiFields { expression, reading, glossary, frequency }
+    let mut fields = HashMap::from([
+        ("expression".to_string(), expression),
+        ("reading".to_string(), reading),
+        ("glossary".to_string(), glossary),
+    ]);
+    if let Some(freq) = card.freq {
+        fields.insert("frequency".to_string(), freq.to_string());
+    }
+    fields
 }
 
 #[cfg(test)]
@@ -219,10 +229,13 @@ mod tests {
             },
         ];
         let f = fields_from_card(&card, &blocks);
-        assert_eq!("猫", f.expression);
-        assert_eq!("ねこ", f.reading);
-        assert_eq!("大辞林: ネコ科の哺乳類。\nJitendex: cat; feline", f.glossary);
-        assert_eq!(Some("42".into()), f.frequency);
+        assert_eq!(Some(&"猫".to_string()), f.get("expression"));
+        assert_eq!(Some(&"ねこ".to_string()), f.get("reading"));
+        assert_eq!(
+            Some(&"大辞林: ネコ科の哺乳類。\nJitendex: cat; feline".to_string()),
+            f.get("glossary"),
+        );
+        assert_eq!(Some(&"42".to_string()), f.get("frequency"));
     }
 
     #[test]
@@ -236,8 +249,8 @@ mod tests {
             match_len: 1,
         };
         let f = fields_from_card(&card, &[]);
-        assert_eq!("ねこ", f.expression);
-        assert_eq!(None, f.frequency);
+        assert_eq!(Some(&"ねこ".to_string()), f.get("expression"));
+        assert_eq!(None, f.get("frequency"));
     }
 
     #[test]
@@ -308,5 +321,46 @@ mod tests {
         let resp = vec![json!(false)];
         let got = collect_dupes(&exprs, &resp);
         assert_eq!(HashSet::from(["食べる".into()]), got);
+    }
+
+    #[test]
+    fn mapped_fields_uses_the_configured_anki_field_name() {
+        let fields = HashMap::from([("expression".to_string(), "猫".to_string())]);
+        let map = vec![crate::config::FieldMapping {
+            anki_field: "Front".into(),
+            source: "expression".into(),
+        }];
+        let out = mapped_fields(&fields, &map);
+        assert_eq!(Some(&serde_json::json!("猫")), out.get("Front"));
+    }
+
+    #[test]
+    fn mapped_fields_skips_a_source_the_card_did_not_have() {
+        let fields = HashMap::new();
+        let map = vec![crate::config::FieldMapping {
+            anki_field: "Frequency".into(),
+            source: "frequency".into(),
+        }];
+        let out = mapped_fields(&fields, &map);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn mapped_fields_can_send_one_source_to_two_anki_fields() {
+        let fields = HashMap::from([("frequency".to_string(), "42".to_string())]);
+        let map = vec![
+            crate::config::FieldMapping { anki_field: "Frequency".into(), source: "frequency".into() },
+            crate::config::FieldMapping { anki_field: "FreqSort".into(), source: "frequency".into() },
+        ];
+        let out = mapped_fields(&fields, &map);
+        assert_eq!(Some(&serde_json::json!("42")), out.get("Frequency"));
+        assert_eq!(Some(&serde_json::json!("42")), out.get("FreqSort"));
+    }
+
+    #[test]
+    fn mapped_fields_with_an_empty_map_sends_nothing() {
+        let fields = HashMap::from([("expression".to_string(), "猫".to_string())]);
+        let out = mapped_fields(&fields, &[]);
+        assert!(out.is_empty());
     }
 }

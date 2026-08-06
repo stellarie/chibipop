@@ -457,6 +457,17 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
+/// Reachable text + fields.
+fn reachable_message(url: &str, model: &str) -> String {
+    match anki::model_field_names(url, model) {
+        Ok(fields) => format!(
+            "AnkiConnect is reachable. \"{model}\" fields: {}",
+            fields.join(", "),
+        ),
+        Err(_) => "AnkiConnect is reachable.".into(),
+    }
+}
+
 /// Spawns the Anki/update op.
 fn service_settings_click(
     w: &SettingsWindow,
@@ -467,10 +478,11 @@ fn service_settings_click(
         Some(SettingsClick::AnkiTest) => {
             w.set_status("Testing\u{2026}");
             let url = w.anki_url();
+            let model = w.anki_model();
             let tx = tx.clone();
             thread::spawn(move || {
                 let msg = match anki::check_connection(&url) {
-                    Ok(true) => "AnkiConnect is reachable.".into(),
+                    Ok(true) => reachable_message(&url, &model),
                     Ok(false) => "AnkiConnect did not respond.".into(),
                     Err(e) => format!("Anki test failed: {e:#}"),
                 };
@@ -670,6 +682,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let anki_url = cfg.anki.url.clone();
     let anki_deck = cfg.anki.deck.clone();
     let anki_model = cfg.anki.model.clone();
+    let anki_field_map = cfg.anki.field_map.clone();
 
     let _hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
@@ -923,7 +936,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
                         s, &mut renderer, &theme,
-                        &anki_url, &anki_deck, &anki_model,
+                        &anki_url, &anki_deck, &anki_model, &anki_field_map,
                         &add_tx, main_tid,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
@@ -934,7 +947,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
                         s, &mut renderer, &theme,
-                        &anki_url, &anki_deck, &anki_model,
+                        &anki_url, &anki_deck, &anki_model, &anki_field_map,
                         &add_tx, main_tid,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
@@ -1599,6 +1612,7 @@ fn start_add_to_anki(
     anki_url: &str,
     anki_deck: &str,
     anki_model: &str,
+    anki_field_map: &[crate::config::FieldMapping],
     add_tx: &mpsc::Sender<AddNoteResult>,
     main_tid: u32,
 ) {
@@ -1621,9 +1635,10 @@ fn start_add_to_anki(
     let url = anki_url.to_string();
     let deck = anki_deck.to_string();
     let model = anki_model.to_string();
+    let field_map = anki_field_map.to_vec();
     let tx = add_tx.clone();
     thread::spawn(move || {
-        let err = anki::add_note(&url, &deck, &model, &fields)
+        let err = anki::add_note(&url, &deck, &model, &fields, &field_map)
             .err()
             .map(|e| format!("{e:#}"));
         let _ = tx.send(AddNoteResult { expr, err });
