@@ -1117,11 +1117,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         }
                         if !exprs.is_empty() {
                             let url = anki_url.clone();
+                            let deck = anki_deck.clone();
+                            let model = anki_model.clone();
                             let gen = popup_gen;
                             let tx = anki_tx.clone();
                             thread::spawn(move || {
                                 let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                match anki::find_duplicates(&url, &refs) {
+                                match anki::find_duplicates(&url, &deck, &model, &refs) {
                                     Ok(dupes) => {
                                         let _ = tx.send(AnkiDupeResult { gen, dupes });
                                         unsafe {

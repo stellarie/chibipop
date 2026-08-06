@@ -80,50 +80,63 @@ pub fn model_field_names(url: &str, model: &str) -> Result<Vec<String>> {
 }
 
 /// Expressions already in Anki.
-pub fn find_duplicates(url: &str, expressions: &[&str]) -> Result<HashSet<String>> {
-    find_duplicates_with(expressions, |expr| {
-        let query = format!("Expression:{}", quote_search(expr));
-        let body = serde_json::json!({
-            "action": "findNotes",
-            "version": VERSION,
-            "params": { "query": query },
-        });
-        let resp = post(url, &body)?;
-        Ok(resp.get("result")
-            .and_then(|r| r.as_array())
-            .is_some_and(|a| !a.is_empty()))
-    })
-}
-
-/// Testable without network.
-fn find_duplicates_with(
+pub fn find_duplicates(
+    url: &str,
+    deck: &str,
+    model: &str,
     expressions: &[&str],
-    mut check: impl FnMut(&str) -> Result<bool>,
 ) -> Result<HashSet<String>> {
-    let mut found = HashSet::new();
-    let mut last_err = None;
-    let mut any_ok = false;
-    for expr in expressions {
-        match check(expr) {
-            Ok(true) => {
-                any_ok = true;
-                found.insert(expr.to_string());
-            }
-            Ok(false) => any_ok = true,
-            // Skip one bad expr, keep rest.
-            Err(e) => last_err = Some(e),
-        }
+    if expressions.is_empty() {
+        return Ok(HashSet::new());
     }
-    match last_err {
-        // All failed: a real error.
-        Some(e) if !any_ok => Err(e),
-        _ => Ok(found),
-    }
+    let notes: Vec<_> = expressions
+        .iter()
+        .map(|&e| {
+            serde_json::json!({
+                "deckName": deck,
+                "modelName": model,
+                "fields": { "Expression": e },
+                "options": {
+                    "allowDuplicate": false,
+                },
+            })
+        })
+        .collect();
+    let body = serde_json::json!({
+        "action": "canAddNotes",
+        "version": VERSION,
+        "params": { "notes": notes },
+    });
+    let resp = post(url, &body)?;
+    let arr = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .context("canAddNotes: no result")?;
+    Ok(collect_dupes(expressions, arr))
 }
 
+/// Inverts canAddNotes booleans.
+fn collect_dupes(
+    expressions: &[&str],
+    can_add: &[serde_json::Value],
+) -> HashSet<String> {
+    expressions
+        .iter()
+        .zip(can_add)
+        .filter(|(_, v)| {
+            !v.as_bool().unwrap_or(true)
+        })
+        .map(|(&e, _)| e.to_string())
+        .collect()
+}
+
+#[cfg(test)]
 /// Escapes for Anki search.
 fn quote_search(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('*', "\\*");
     format!("\"{escaped}\"")
 }
 
@@ -249,44 +262,51 @@ mod tests {
     }
 
     #[test]
-    fn find_duplicates_with_reports_the_matching_expr() {
-        let exprs = ["食べる", "猫"];
-        let got = find_duplicates_with(&exprs, |e| Ok(e == "食べる")).unwrap();
-        assert_eq!(HashSet::from(["食べる".to_string()]), got);
+    fn quote_search_escapes_wildcard() {
+        assert_eq!("\"a\\*b\"", quote_search("a*b"));
     }
 
     #[test]
-    fn find_duplicates_with_finds_none() {
+    fn collect_dupes_picks_existing() {
+        use serde_json::json;
+        let exprs = ["食べる", "猫", "犬"];
+        let resp = vec![json!(false), json!(true), json!(false)];
+        let got = collect_dupes(&exprs, &resp);
+        let want = HashSet::from(["食べる".into(), "犬".into()]);
+        assert_eq!(want, got);
+    }
+
+    #[test]
+    fn collect_dupes_all_new() {
+        use serde_json::json;
         let exprs = ["食べる", "猫"];
-        let got = find_duplicates_with(&exprs, |_| Ok(false)).unwrap();
+        let resp = vec![json!(true), json!(true)];
+        assert!(collect_dupes(&exprs, &resp).is_empty());
+    }
+
+    #[test]
+    fn collect_dupes_all_existing() {
+        use serde_json::json;
+        let exprs = ["食べる", "猫"];
+        let resp = vec![json!(false), json!(false)];
+        let got = collect_dupes(&exprs, &resp);
+        let want = HashSet::from(["食べる".into(), "猫".into()]);
+        assert_eq!(want, got);
+    }
+
+    #[test]
+    fn collect_dupes_empty_input() {
+        let got = collect_dupes(&[], &[]);
         assert!(got.is_empty());
     }
 
-    /// A bad query won't blank all.
+    /// Shorter response: extras safe.
     #[test]
-    fn find_duplicates_with_survives_one_bad_expr() {
-        let exprs = ["AT & T", "食べる"];
-        let got = find_duplicates_with(&exprs, |e| {
-            if e == "AT & T" {
-                anyhow::bail!("invalid search")
-            }
-            Ok(e == "食べる")
-        })
-        .unwrap();
-        assert_eq!(HashSet::from(["食べる".to_string()]), got);
-    }
-
-    /// Full outage must not hide.
-    #[test]
-    fn find_duplicates_with_errors_when_every_expr_fails() {
-        let exprs = ["食べる", "猫"];
-        let got = find_duplicates_with(&exprs, |_| anyhow::bail!("connection refused"));
-        assert!(got.is_err());
-    }
-
-    #[test]
-    fn find_duplicates_with_on_no_expressions_is_empty() {
-        let got = find_duplicates_with(&[], |_| Ok(true)).unwrap();
-        assert!(got.is_empty());
+    fn collect_dupes_short_response() {
+        use serde_json::json;
+        let exprs = ["食べる", "猫", "犬"];
+        let resp = vec![json!(false)];
+        let got = collect_dupes(&exprs, &resp);
+        assert_eq!(HashSet::from(["食べる".into()]), got);
     }
 }
