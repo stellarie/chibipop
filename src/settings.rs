@@ -1,6 +1,6 @@
 //! The settings window's model.
 
-use crate::config::{Config, TriggerMode};
+use crate::config::{Config, FieldMapping, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
@@ -40,6 +40,7 @@ pub struct SettingsForm {
     pub anki_deck: String,
     pub anki_model: String,
     pub anki_add_key: String,
+    pub field_map: Vec<FieldMapping>,
 }
 
 /// An import waiting for Apply.
@@ -247,6 +248,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_deck: cfg.anki.deck.clone(),
         anki_model: cfg.anki.model.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
+        field_map: cfg.anki.field_map.clone(),
     }
 }
 
@@ -273,6 +275,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.deck = form.anki_deck.clone();
     out.anki.model = form.anki_model.clone();
     out.anki.add_key = form.anki_add_key.clone();
+    out.anki.field_map = form.field_map.clone();
     out.dictionaries.display_order = form
         .dict_names
         .iter()
@@ -457,6 +460,26 @@ mod tests {
         let form = from_config(&cfg, &dicts());
         assert_eq!("f2", form.anki_add_key);
         assert_eq!("f2", apply_to(&form, &cfg).anki.add_key);
+    }
+
+    #[test]
+    fn field_map_round_trips_through_the_form() {
+        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        cfg.anki.field_map = vec![FieldMapping {
+            anki_field: "Front".into(),
+            source: "expression".into(),
+        }];
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(cfg.anki.field_map, form.field_map);
+        assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
+    }
+
+    /// Untouched must not reset it.
+    #[test]
+    fn an_untouched_field_map_survives_apply() {
+        let cfg = cfg_with(&[]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
     }
 
     #[test]

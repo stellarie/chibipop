@@ -203,7 +203,8 @@ pub fn settings_only(
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>)>();
+    let (detect_tx, detect_rx) =
+        mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     // SAFETY: no preconditions.
     let tid = unsafe { GetCurrentThreadId() };
 
@@ -227,8 +228,8 @@ pub fn settings_only(
         }
 
         if msg.message == WM_APP_ANKI_DETECT {
-            while let Ok((decks, models)) = detect_rx.try_recv() {
-                window.populate_combos(&decks, &models);
+            while let Ok((decks, models, fields)) = detect_rx.try_recv() {
+                window.populate_combos(&decks, &models, &fields);
             }
         }
 
@@ -239,26 +240,16 @@ pub fn settings_only(
                 DispatchMessageW(&msg);
             }
         }
-        service_settings_click(&window, &settings_tx, tid);
+        service_settings_click(&window, &settings_tx, &detect_tx, tid);
 
         // Tab switch -> detect.
         if let Some(tab) = window.take_tab_change() {
             window.switch_tab(tab);
             if tab == 3 {
-                let url = window.anki_url();
-                let tx = detect_tx.clone();
-                thread::spawn(move || {
-                    let decks = anki::deck_names(&url).unwrap_or_default();
-                    let models = anki::model_names(&url).unwrap_or_default();
-                    let _ = tx.send((decks, models));
-                    // SAFETY: wakes the pump.
-                    unsafe {
-                        let _ = PostThreadMessageW(
-                            tid, WM_APP_ANKI_DETECT,
-                            WPARAM(0), LPARAM(0),
-                        );
-                    }
-                });
+                spawn_detect(
+                    window.anki_url(), window.anki_model(),
+                    detect_tx.clone(), tid,
+                );
             }
         }
 
@@ -466,20 +457,46 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
 }
 
 /// Reachable text + fields.
-fn reachable_message(url: &str, model: &str) -> String {
+fn reachable_message(url: &str, model: &str) -> (String, Vec<String>) {
     match anki::model_field_names(url, model) {
-        Ok(fields) => format!(
-            "AnkiConnect is reachable. \"{model}\" fields: {}",
-            fields.join(", "),
-        ),
-        Err(_) => "AnkiConnect is reachable.".into(),
+        Ok(fields) => {
+            let msg = format!(
+                "AnkiConnect is reachable. \"{model}\" fields: {}",
+                fields.join(", "),
+            );
+            (msg, fields)
+        }
+        Err(_) => ("AnkiConnect is reachable.".into(), Vec::new()),
     }
+}
+
+/// Deck/model/field names, off-thread.
+fn spawn_detect(
+    url: String,
+    model: String,
+    tx: mpsc::Sender<(Vec<String>, Vec<String>, Vec<String>)>,
+    tid: u32,
+) {
+    thread::spawn(move || {
+        let decks = anki::deck_names(&url).unwrap_or_default();
+        let models = anki::model_names(&url).unwrap_or_default();
+        let fields = anki::model_field_names(&url, &model).unwrap_or_default();
+        let _ = tx.send((decks, models, fields));
+        // SAFETY: wakes the pump.
+        unsafe {
+            let _ = PostThreadMessageW(
+                tid, WM_APP_ANKI_DETECT,
+                WPARAM(0), LPARAM(0),
+            );
+        }
+    });
 }
 
 /// Spawns the Anki/update op.
 fn service_settings_click(
     w: &SettingsWindow,
     tx: &mpsc::Sender<String>,
+    detect_tx: &mpsc::Sender<(Vec<String>, Vec<String>, Vec<String>)>,
     tid: u32,
 ) {
     match w.take_click() {
@@ -488,13 +505,27 @@ fn service_settings_click(
             let url = w.anki_url();
             let model = w.anki_model();
             let tx = tx.clone();
+            let detect_tx = detect_tx.clone();
             thread::spawn(move || {
-                let msg = match anki::check_connection(&url) {
+                let status = anki::check_connection(&url);
+                let (msg, fields) = match &status {
                     Ok(true) => reachable_message(&url, &model),
-                    Ok(false) => "AnkiConnect did not respond.".into(),
-                    Err(e) => format!("Anki test failed: {e:#}"),
+                    Ok(false) => ("AnkiConnect did not respond.".into(), Vec::new()),
+                    Err(e) => (format!("Anki test failed: {e:#}"), Vec::new()),
                 };
                 let _ = tx.send(msg);
+                if matches!(status, Ok(true)) {
+                    let decks = anki::deck_names(&url).unwrap_or_default();
+                    let models = anki::model_names(&url).unwrap_or_default();
+                    let _ = detect_tx.send((decks, models, fields));
+                    // SAFETY: wakes the pump thread.
+                    unsafe {
+                        let _ = PostThreadMessageW(
+                            tid, WM_APP_ANKI_DETECT,
+                            WPARAM(0), LPARAM(0),
+                        );
+                    }
+                }
                 // SAFETY: wakes the pump thread.
                 unsafe {
                     let _ = PostThreadMessageW(
@@ -728,7 +759,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>)>();
+    let (detect_tx, detect_rx) =
+        mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     let (apply_tx, apply_rx) =
         mpsc::channel::<Result<(Pending, mpsc::Receiver<Progress>)>>();
     let mut popup_gen: u64 = 0;
@@ -831,26 +863,16 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
             let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
-            service_settings_click(w, &settings_tx, main_tid);
+            service_settings_click(w, &settings_tx, &detect_tx, main_tid);
 
             // Tab switch -> detect.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
                 if tab == 3 {
-                    let url = w.anki_url();
-                    let tx = detect_tx.clone();
-                    thread::spawn(move || {
-                        let decks = anki::deck_names(&url).unwrap_or_default();
-                        let models = anki::model_names(&url).unwrap_or_default();
-                        let _ = tx.send((decks, models));
-                        // SAFETY: wakes the pump.
-                        unsafe {
-                            let _ = PostThreadMessageW(
-                                main_tid, WM_APP_ANKI_DETECT,
-                                WPARAM(0), LPARAM(0),
-                            );
-                        }
-                    });
+                    spawn_detect(
+                        w.anki_url(), w.anki_model(),
+                        detect_tx.clone(), main_tid,
+                    );
                 }
             }
 
@@ -1314,9 +1336,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 }
             }
         } else if msg.message == WM_APP_ANKI_DETECT {
-            while let Ok((decks, models)) = detect_rx.try_recv() {
+            while let Ok((decks, models, fields)) = detect_rx.try_recv() {
                 if let Some(w) = &settings {
-                    w.populate_combos(&decks, &models);
+                    w.populate_combos(&decks, &models, &fields);
                 }
             }
         } else if msg.message == WM_APP_APPLY {

@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, ReleaseDC, COLOR_BTNFACE,
-    ENUMLOGFONTEXW, HFONT, LOGFONTW, SHIFTJIS_CHARSET, TEXTMETRICW,
+    CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, GetMonitorInfoW,
+    MonitorFromWindow, ReleaseDC, COLOR_BTNFACE, ENUMLOGFONTEXW, HFONT, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET, TEXTMETRICW,
 };
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_TAB_CLASSES,
@@ -78,6 +79,13 @@ const ID_TRIGGER_KEY: i32 = 131;
 const ID_PREFER_VERT: i32 = 132;
 const ID_ANKI_ADD_KEY: i32 = 133;
 
+/// First field-map combo id.
+const ID_FIELD_MAP_BASE: i32 = 200;
+
+/// Field-map combo choices.
+const FIELD_MAP_SOURCES: [&str; 5] =
+    ["(none)", "expression", "reading", "glossary", "frequency"];
+
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
 const TCM_GETCURSEL_MSG: u32 = TCM_FIRST + 11;
@@ -135,6 +143,8 @@ const BTN_PITCH: i32 = ROW_H + 4;
 const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
+/// ~3 lines of status text.
+const STATUS_H: i32 = 58;
 
 /// Which list a button acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +184,23 @@ fn dpi_scale(hwnd: HWND, v: i32) -> i32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     let dpi = if dpi == 0 { 96 } else { dpi };
     (v as i64 * dpi as i64 / 96) as i32
+}
+
+/// Monitor work-area height.
+///
+/// Physical px; None if unknown.
+fn work_area_height(hwnd: HWND) -> Option<i32> {
+    // SAFETY: `hwnd` need not be valid - MonitorFromWindow falls back
+    // to the nearest monitor either way, and `mi` is sized by its own
+    // `cbSize`, which is the contract GetMonitorInfoW checks.
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(hmon, &mut mi).as_bool().then(|| mi.rcWork.bottom - mi.rcWork.top)
+    }
 }
 
 thread_local! {
@@ -671,6 +698,28 @@ fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
     v
 }
 
+/// Config's choice for field.
+fn default_source<'a>(existing: &'a [crate::config::FieldMapping], field: &str) -> &'a str {
+    existing
+        .iter()
+        .find(|m| m.anki_field == field)
+        .map(|m| m.source.as_str())
+        .unwrap_or("(none)")
+}
+
+/// True if rows match fields.
+fn field_names_match(rows: &[(String, HWND)], fields: &[String]) -> bool {
+    rows.len() == fields.len() && rows.iter().zip(fields).all(|((n, _), f)| n == f)
+}
+
+/// A mapping, or none.
+fn row_mapping(anki_field: &str, source: &str) -> Option<crate::config::FieldMapping> {
+    (source != "(none)").then(|| crate::config::FieldMapping {
+        anki_field: anki_field.to_string(),
+        source: source.to_string(),
+    })
+}
+
 /// `None` unless capturing.
 fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
@@ -734,6 +783,20 @@ pub struct SettingsWindow {
     ocr_ctrls: Vec<HWND>,
     /// Anki-tab-only controls.
     anki_ctrls: Vec<HWND>,
+    /// Anki field name -> its combo.
+    field_map_rows: RefCell<Vec<(String, HWND)>>,
+    /// Field-map labels + group box.
+    field_map_extra: RefCell<Vec<HWND>>,
+    /// Where Anki's static rows end.
+    anki_static_bottom: i32,
+    /// hwnd, x, y (96-dpi) to shift.
+    bottom_ctrls: Vec<(HWND, i32, i32)>,
+    /// Bottom bar's original y.
+    bottom_y0: i32,
+    /// Bottom bar's own height.
+    bottom_tail: i32,
+    /// Which tab is showing.
+    current_tab: Cell<u32>,
 }
 
 impl SettingsWindow {
@@ -782,6 +845,13 @@ impl SettingsWindow {
                 dict_ctrls: Vec::new(),
                 ocr_ctrls: Vec::new(),
                 anki_ctrls: Vec::new(),
+                field_map_rows: RefCell::new(Vec::new()),
+                field_map_extra: RefCell::new(Vec::new()),
+                anki_static_bottom: 0,
+                bottom_ctrls: Vec::new(),
+                bottom_y0: 0,
+                bottom_tail: 0,
+                current_tab: Cell::new(0),
             };
             // `build` reports where its layout actually ended; the window is
             // then sized to that rather than to a guess. The first version of
@@ -951,6 +1021,7 @@ impl SettingsWindow {
         if tab as usize >= groups.len() {
             return;
         }
+        self.current_tab.set(tab);
         // SAFETY: every HWND in every group was created in
         // `build` as a child of `self.hwnd` and lives until
         // the window is destroyed.
@@ -960,6 +1031,13 @@ impl SettingsWindow {
                 for &c in *ctrls {
                     let _ = ShowWindow(c, cmd);
                 }
+            }
+            let cmd = if tab == 3 { SW_SHOW } else { SW_HIDE };
+            for &c in self.field_map_extra.borrow().iter() {
+                let _ = ShowWindow(c, cmd);
+            }
+            for &(_, c) in self.field_map_rows.borrow().iter() {
+                let _ = ShowWindow(c, cmd);
             }
         }
     }
@@ -978,8 +1056,8 @@ impl SettingsWindow {
         true
     }
 
-    /// Fill the deck/model combos.
-    pub fn populate_combos(&self, decks: &[String], models: &[String]) {
+    /// Fills deck/model + map rows.
+    pub fn populate_combos(&self, decks: &[String], models: &[String], fields: &[String]) {
         // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live children of
         // `self.hwnd`, created in `build`; each `SendMessageW` copies the
         // string during the call.
@@ -1005,6 +1083,120 @@ impl SettingsWindow {
                     Some(LPARAM(wide(&cur).as_ptr() as isize)));
             }
         }
+        self.populate_field_map(fields);
+    }
+
+    /// Rebuilds the field-map rows.
+    ///
+    /// No-op if empty or unchanged.
+    fn populate_field_map(&self, fields: &[String]) {
+        if fields.is_empty() || self.field_map_unchanged(fields) {
+            return;
+        }
+        // SAFETY: every hwnd in `field_map_extra`/`field_map_rows` was
+        // created by this same function as a child of `self.hwnd`, and
+        // is destroyed here exactly once before its slot is reused.
+        unsafe {
+            for hwnd in self.field_map_extra.borrow_mut().drain(..) {
+                let _ = DestroyWindow(hwnd);
+            }
+            for (_, hwnd) in self.field_map_rows.borrow_mut().drain(..) {
+                let _ = DestroyWindow(hwnd);
+            }
+        }
+        let existing = self.staged.borrow().field_map.clone();
+        let (extra, rows) = self.build_field_map_rows(fields, &existing);
+        let cmd = if self.current_tab.get() == 3 { SW_SHOW } else { SW_HIDE };
+        // SAFETY: every hwnd was just created as a child of `self.hwnd`.
+        unsafe {
+            for &c in extra.iter().chain(rows.iter().map(|(_, c)| c)) {
+                let _ = ShowWindow(c, cmd);
+            }
+        }
+        *self.field_map_extra.borrow_mut() = extra;
+        *self.field_map_rows.borrow_mut() = rows;
+        self.ensure_room_for(self.anki_static_bottom + 20 + fields.len() as i32 * ROW_H + 8);
+    }
+
+    /// Builds the box + field rows.
+    fn build_field_map_rows(
+        &self,
+        fields: &[String],
+        existing: &[crate::config::FieldMapping],
+    ) -> (Vec<HWND>, Vec<(String, HWND)>) {
+        let f = self.font;
+        let h = self.hwnd;
+        let mut y = self.anki_static_bottom;
+        let map_h = 20 + fields.len() as i32 * ROW_H + 8;
+        let mut extra = Vec::new();
+        let mut rows = Vec::new();
+        // SAFETY: `h` is `self.hwnd`, live for the caller's duration;
+        // every control created is its child and outlives this call.
+        unsafe {
+            if let Ok(g) = child(h, w!("BUTTON"), "Field mapping",
+                WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
+                PAD - 6, y, WIN_W - 2 * PAD, map_h, 0, f)
+            {
+                extra.push(g);
+            }
+            y += 20;
+            for (i, name) in fields.iter().enumerate() {
+                if let Ok(l) = child(h, w!("STATIC"), name, WINDOW_STYLE(0),
+                    PAD, y + 4, LABEL_W, ROW_H, 0, f)
+                {
+                    extra.push(l);
+                }
+                let id = ID_FIELD_MAP_BASE + i as i32;
+                if let Ok(combo) = child(h, w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    FIELD_X, y, FIELD_W, 140, id, f)
+                {
+                    let want = default_source(existing, name);
+                    for (j, src) in FIELD_MAP_SOURCES.iter().enumerate() {
+                        SendMessageW(combo, CB_ADDSTRING, None,
+                            Some(LPARAM(wide(src).as_ptr() as isize)));
+                        if *src == want {
+                            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(j)), None);
+                        }
+                    }
+                    if SendMessageW(combo, CB_GETCURSEL, None, None).0 < 0 {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+                    }
+                    rows.push((name.clone(), combo));
+                }
+                y += ROW_H;
+            }
+        }
+        (extra, rows)
+    }
+
+    /// True if rows match fields.
+    fn field_map_unchanged(&self, fields: &[String]) -> bool {
+        let rows = self.field_map_rows.borrow();
+        field_names_match(&rows, fields)
+    }
+
+    /// Fits the window to content.
+    ///
+    /// Never below build's own size.
+    fn ensure_room_for(&self, needed_bottom: i32) {
+        let new_y0 = needed_bottom.max(self.bottom_y0);
+        let dy = new_y0 - self.bottom_y0;
+        // SAFETY: every hwnd in `bottom_ctrls` is a live child of
+        // `self.hwnd`, created once in `build` and never destroyed
+        // before `self.hwnd` itself.
+        unsafe {
+            for &(hwnd, x, y) in &self.bottom_ctrls {
+                let _ = SetWindowPos(
+                    hwnd, None,
+                    dpi_scale(self.hwnd, x), dpi_scale(self.hwnd, y + dy),
+                    0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER,
+                );
+            }
+        }
+        // Unconditional: shrink too.
+        self.fit_to(WIN_W, new_y0 + self.bottom_tail + PAD);
     }
 
     /// Drop the selected row.
@@ -1087,13 +1279,17 @@ impl SettingsWindow {
             let style = WINDOW_STYLE(GetWindowLongW(self.hwnd, GWL_STYLE) as u32);
             let ex = WINDOW_EX_STYLE(GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32);
             if AdjustWindowRectEx(&mut rc, style, false, ex).is_ok() {
+                let mut outer_h = rc.bottom - rc.top;
+                if let Some(cap) = work_area_height(self.hwnd) {
+                    outer_h = outer_h.min(cap);
+                }
                 let _ = SetWindowPos(
                     self.hwnd,
                     None,
                     0,
                     0,
                     rc.right - rc.left,
-                    rc.bottom - rc.top,
+                    outer_h,
                     // SWP_SHOWWINDOW, not a separate `ShowWindow` call: the
                     // FIRST ShowWindow in a process ignores its nCmdShow and
                     // uses STARTUPINFO.wShowWindow instead. A chibipop
@@ -1454,27 +1650,41 @@ impl SettingsWindow {
             ank.push(child(h, w!("BUTTON"), "Test connection", WS_TABSTOP,
                   PAD, y, 116, ROW_H, ID_ANKI_TEST, f)?);
             y += ROW_H + 8 + GROUP_GAP;
-            y = y_general.max(y_dict).max(y_ocr).max(y);
+            let y_ank = y;
+            y = y_general.max(y_dict).max(y_ocr).max(y_ank);
+            let bottom_y0 = y;
+            let mut bottom: Vec<(HWND, i32, i32)> = Vec::new();
 
             // ---- Updates ----
-            group("Updates", y, ROW_H + 24)?;
+            let updates_group = group("Updates", y, ROW_H + 24)?;
+            bottom.push((updates_group, PAD - 6, y));
             y += 20;
-            child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
+            let update_btn = child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
                   PAD, y, 136, ROW_H, ID_CHECK_UPDATE, f)?;
+            bottom.push((update_btn, PAD, y));
             y += ROW_H + 8 + GROUP_GAP;
 
             // ---- Apply / Cancel ----
             // Also the progress line.
-            child(h, w!("STATIC"),
+            let status = child(h, w!("EDIT"),
                 "Applying saves your settings and restarts chibipop.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 16, ROW_H, ID_STATUS, f)?;
-            y += ROW_H + 2;
-            child(h, w!("BUTTON"), "Apply && Restart",
+                WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
+                PAD, y, WIN_W - 2 * PAD - 16, STATUS_H, ID_STATUS, f)?;
+            bottom.push((status, PAD, y));
+            y += STATUS_H + 2;
+            let apply_btn = child(h, w!("BUTTON"), "Apply && Restart",
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                   WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
+            bottom.push((apply_btn, WIN_W - PAD - 144, y));
             // Far left: not beside Apply.
-            child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
+            let quit_btn = child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
                   PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
+            bottom.push((quit_btn, PAD, y));
+
+            self.anki_static_bottom = y_ank;
+            self.bottom_y0 = bottom_y0;
+            self.bottom_tail = y + ROW_H + 8 - bottom_y0;
+            self.bottom_ctrls = bottom;
 
             // Start on General tab.
             for &c in dict.iter().chain(&ocr).chain(&ank) {
@@ -1534,6 +1744,20 @@ impl SettingsWindow {
             let trigger_key = resolved_trigger_key(h, &template.trigger_key);
             let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
 
+            // Empty is not missing.
+            let rows = self.field_map_rows.borrow();
+            let field_map = if rows.is_empty() {
+                template.field_map.clone()
+            } else {
+                rows.iter()
+                    .filter_map(|(name, combo)| {
+                        let i = SendMessageW(*combo, CB_GETCURSEL, None, None).0.max(0);
+                        let src = FIELD_MAP_SOURCES.get(i as usize).copied().unwrap_or("(none)");
+                        row_mapping(name, src)
+                    })
+                    .collect()
+            };
+
             SettingsForm {
                 mode: if checked(ID_MODE_HOLD) {
                     crate::config::TriggerMode::HoldKey
@@ -1567,6 +1791,7 @@ impl SettingsWindow {
                 anki_deck: text_of(ID_ANKI_DECK),
                 anki_model: text_of(ID_ANKI_MODEL),
                 anki_add_key,
+                field_map,
             }
         }
     }
@@ -1660,6 +1885,81 @@ mod tests {
     #[test]
     fn numeric_choices_step_the_range() {
         assert_eq!(vec![10, 15, 20], numeric_choices(10, 20, 5, 10));
+    }
+
+    // ---- field mapping ----
+
+    fn mapping(anki_field: &str, source: &str) -> crate::config::FieldMapping {
+        crate::config::FieldMapping { anki_field: anki_field.into(), source: source.into() }
+    }
+
+    #[test]
+    fn default_source_finds_a_matching_field() {
+        let existing = vec![mapping("Expression", "expression")];
+        assert_eq!("expression", default_source(&existing, "Expression"));
+    }
+
+    #[test]
+    fn default_source_falls_back_to_none_for_an_unmapped_field() {
+        let existing = vec![mapping("Expression", "expression")];
+        assert_eq!("(none)", default_source(&existing, "ExpressionAudio"));
+    }
+
+    #[test]
+    fn default_source_falls_back_to_none_with_no_config_at_all() {
+        assert_eq!("(none)", default_source(&[], "Expression"));
+    }
+
+    #[test]
+    fn row_mapping_builds_a_real_mapping() {
+        assert_eq!(
+            Some(mapping("Front", "expression")),
+            row_mapping("Front", "expression"),
+        );
+    }
+
+    /// "(none)" maps nothing.
+    #[test]
+    fn row_mapping_is_none_for_the_none_source() {
+        assert_eq!(None, row_mapping("Front", "(none)"));
+    }
+
+    fn dummy_hwnd(n: isize) -> HWND {
+        HWND(n as *mut core::ffi::c_void)
+    }
+
+    #[test]
+    fn field_names_match_true_for_identical_names_in_order() {
+        let rows = vec![
+            ("Expression".to_string(), dummy_hwnd(1)),
+            ("Glossary".to_string(), dummy_hwnd(2)),
+        ];
+        let fields = vec!["Expression".to_string(), "Glossary".to_string()];
+        assert!(field_names_match(&rows, &fields));
+    }
+
+    #[test]
+    fn field_names_match_false_for_a_different_model() {
+        let rows = vec![("Expression".to_string(), dummy_hwnd(1))];
+        let fields = vec!["Front".to_string()];
+        assert!(!field_names_match(&rows, &fields));
+    }
+
+    #[test]
+    fn field_names_match_false_for_a_different_count() {
+        let rows = vec![("Expression".to_string(), dummy_hwnd(1))];
+        let fields = vec!["Expression".to_string(), "Glossary".to_string()];
+        assert!(!field_names_match(&rows, &fields));
+    }
+
+    #[test]
+    fn field_names_match_is_order_sensitive() {
+        let rows = vec![
+            ("Expression".to_string(), dummy_hwnd(1)),
+            ("Glossary".to_string(), dummy_hwnd(2)),
+        ];
+        let fields = vec!["Glossary".to_string(), "Expression".to_string()];
+        assert!(!field_names_match(&rows, &fields));
     }
 
     /// The window must be sized from its own content, never from a guessed
