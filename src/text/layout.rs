@@ -194,6 +194,19 @@ pub fn split_at_clipped(
     (kept, end)
 }
 
+/// Drops words before `start`.
+pub fn drop_leading(words: &[OcrWord], start: i32, orientation: Orientation) -> Vec<OcrWord> {
+    let lead: AxisEdge = match orientation {
+        Orientation::Horizontal => |r| r.x,
+        Orientation::Vertical => |r| r.y,
+    };
+    words
+        .iter()
+        .filter(|w| lead(&w.rect) >= start - EDGE_MARGIN)
+        .cloned()
+        .collect()
+}
+
 /// Reads forward in tiles.
 pub fn tile_forward<F>(
     band: PhysRect,
@@ -219,6 +232,7 @@ where
             break;
         };
         let words = read(tile);
+        let words = drop_leading(&words, start, orientation);
         if words.is_empty() {
             break;
         }
@@ -338,6 +352,34 @@ pub fn merge_spaced_words(words: &[&OcrWord], ori: Orientation) -> Vec<OcrWord> 
     }
     out.push(OcrWord { text, rect });
     out
+}
+
+/// Pass 1's own tail, edge-trimmed.
+pub fn head_and_tail(
+    lines: &[OcrLine],
+    cursor: PhysPoint,
+    region: PhysRect,
+) -> Option<(String, i32, Orientation)> {
+    let (li, wi) = hit_scan(lines, cursor)?;
+    let line = &lines[li];
+    let orientation = orientation_of(line);
+
+    let mut ordered: Vec<&OcrWord> = line.words.iter().collect();
+    match orientation {
+        Orientation::Horizontal => ordered.sort_by_key(|w| w.rect.x),
+        Orientation::Vertical => ordered.sort_by_key(|w| w.rect.y),
+    }
+
+    let hit = &line.words[wi];
+    let hit_pos = ordered.iter().position(|w| std::ptr::eq(*w, hit))?;
+    let tail_words: Vec<OcrWord> = ordered[hit_pos..].iter().map(|w| (**w).clone()).collect();
+
+    let (kept, next) = split_at_clipped(&tail_words, region, orientation);
+    let mut text = String::new();
+    for w in &kept {
+        text.push_str(&w.text);
+    }
+    Some((text, next, orientation))
 }
 
 /// Resolve a hover.
@@ -893,6 +935,43 @@ mod tests {
         assert_eq!(vec!["あ", "い"], kept.iter().map(|k| k.text.as_str()).collect::<Vec<_>>());
     }
 
+    // -- drop_leading --
+
+    #[test]
+    fn drop_leading_keeps_words_at_or_after_start() {
+        let words = [hword("あ", 100, 40), hword("い", 150, 40)];
+        let kept = drop_leading(&words, 100, Orientation::Horizontal);
+        assert_eq!(2, kept.len());
+    }
+
+    /// Load-bearing: keeps a deferred glyph.
+    #[test]
+    fn drop_leading_keeps_a_word_exactly_at_the_margin_boundary() {
+        let words = [hword("あ", 96, 40)]; // start=100, margin=4 -> 96
+        let kept = drop_leading(&words, 100, Orientation::Horizontal);
+        assert_eq!(1, kept.len(), "96 must not be treated as spillover");
+    }
+
+    /// One pixel further back: 95.
+    #[test]
+    fn drop_leading_discards_a_word_one_pixel_past_the_margin_boundary() {
+        let words = [hword("あ", 95, 40)];
+        let kept = drop_leading(&words, 100, Orientation::Horizontal);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn drop_leading_reads_the_perpendicular_axis_for_vertical_text() {
+        let words = [OcrWord { text: "上".into(), rect: PhysRect { x: 100, y: 96, w: 40, h: 40 } }];
+        let kept = drop_leading(&words, 100, Orientation::Vertical);
+        assert_eq!(1, kept.len());
+    }
+
+    #[test]
+    fn drop_leading_empty_input_returns_empty() {
+        assert!(drop_leading(&[], 100, Orientation::Horizontal).is_empty());
+    }
+
     #[test]
     fn tiling_concatenates_successive_tiles() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
@@ -1028,6 +1107,16 @@ mod tests {
         });
         assert_eq!(vec![TILE_LEN, 20], heights, "tile 2 is clamped to what the monitor has left");
         assert_eq!("上上", text);
+    }
+
+    /// A tile must not prepend spillover.
+    #[test]
+    fn tile_forward_drops_a_tiles_own_leading_spillover() {
+        let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
+        let text = tile_forward(band, 500, Orientation::Horizontal, 1, 25, unbounded(), |tile| {
+            vec![hword("よ", tile.x - 20, 40), hword("あ", tile.x + 10, 40)]
+        });
+        assert_eq!("あ", text, "よ starts before the tile and must be dropped");
     }
 
     fn g(n: usize, x: i32, w: i32) -> TextGeom {
@@ -1294,5 +1383,70 @@ mod tests {
         };
         let got = resolve(&[line], p(145, 120)).unwrap();
         assert_eq!(3, got.span.geom.len());
+    }
+
+    // -- head_and_tail --
+
+    #[test]
+    fn head_and_tail_keeps_the_hit_word_and_what_follows() {
+        let line = OcrLine {
+            words: vec![
+                w("そ", 100, 100, 20, 20),
+                w("の", 130, 100, 20, 20),
+                w("感", 160, 100, 20, 20),
+                w("想", 190, 100, 20, 20),
+            ],
+        };
+        let region = PhysRect { x: 50, y: 80, w: 500, h: 60 };
+        let (head, next, ori) = head_and_tail(&[line], p(165, 105), region).unwrap();
+        assert_eq!("感想", head, "text before the hit word is not head");
+        assert_eq!(Orientation::Horizontal, ori);
+        assert_eq!(550, next, "region's own trailing edge: 50+500");
+    }
+
+    /// The last kept word's edge, not pass 1's edge.
+    #[test]
+    fn head_and_tail_excludes_a_word_clipped_at_the_regions_edge() {
+        let line = OcrLine {
+            words: vec![
+                w("感", 460, 100, 20, 20),
+                w("想", 490, 100, 20, 20), // trail = 510, region ends at 500
+            ],
+        };
+        let region = PhysRect { x: 0, y: 80, w: 500, h: 60 };
+        let (head, next, _) = head_and_tail(&[line], p(465, 105), region).unwrap();
+        assert_eq!("感", head, "想 is clipped by the region's own edge");
+        assert_eq!(490, next, "tiling resumes at the clipped word's own edge");
+    }
+
+    /// Pass 1 may distrust its own hit.
+    #[test]
+    fn head_and_tail_empty_head_when_the_hit_word_itself_is_clipped() {
+        let line = OcrLine { words: vec![w("想", 490, 100, 20, 20)] }; // trail=510
+        let region = PhysRect { x: 0, y: 80, w: 500, h: 60 }; // end=500
+        let (head, next, _) = head_and_tail(&[line], p(495, 105), region).unwrap();
+        assert_eq!("", head, "even the hit word is clipped by the region edge");
+        assert_eq!(490, next, "falls back to the hit word's own leading edge");
+    }
+
+    #[test]
+    fn head_and_tail_returns_none_when_nothing_is_hit() {
+        let line = OcrLine { words: vec![w("食", 100, 100, 20, 20)] };
+        let region = PhysRect { x: 0, y: 0, w: 500, h: 100 };
+        assert_eq!(None, head_and_tail(&[line], p(900, 900), region));
+    }
+
+    #[test]
+    fn head_and_tail_mirrors_for_vertical_text() {
+        let line = OcrLine {
+            words: vec![
+                w("上", 100, 100, 20, 20),
+                w("下", 100, 130, 20, 20),
+            ],
+        };
+        let region = PhysRect { x: 80, y: 50, w: 60, h: 500 };
+        let (head, _, ori) = head_and_tail(&[line], p(105, 105), region).unwrap();
+        assert_eq!("上下", head);
+        assert_eq!(Orientation::Vertical, ori);
     }
 }

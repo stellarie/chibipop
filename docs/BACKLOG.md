@@ -19,29 +19,41 @@ Tasks 3–4 and 6 §2.1. Those working notes are not published with the repo.
 
 - `text::layout::TextGeom` and `union_chars` — landed `17e18b0`.
 - `TextSpan::geom`, populated by `resolve` on the single-pass path — landed `17e18b0`.
+- **`drop_leading(words, start, orientation)`** in `text/layout.rs` — the mirror of
+  `split_at_clipped`'s trailing rule, carrying the same `EDGE_MARGIN` tolerance, wired into
+  `tile_forward` right after `read(tile)`. Five unit tests, including the load-bearing "a word
+  just inside the margin is kept" boundary case, plus one `tile_forward`-level integration test
+  proving a tile that returns a word before its own `start` no longer prepends it.
+- **Head + tail assembly**, as `head_and_tail(lines, cursor, region)` in `text/layout.rs` (pure,
+  screen-independent) plus the orchestration in `resolve_at_tiled_scanned`
+  (`text/ocr.rs`). Pass 1's own tail — from the hovered word through its last word not clipped by
+  pass 1's own region edge — becomes the stitched text's head, verbatim, never re-read. Tile 1
+  then opens at that last kept word's own trailing edge (`head_and_tail`'s own `split_at_clipped`
+  call gives this directly), not at pass 1's region edge or the hovered word's own leading edge —
+  closing exactly the gap the 2026-08-07 revision named. `MAX_LOOKUP_CHARS` is split between head
+  and tail so the combined text still respects the existing budget. Five unit tests on
+  `head_and_tail` (including the case where pass 1 distrusts even its own hit, at the region's own
+  edge) plus the full existing suite, unchanged.
 
 ### What is left
 
-1. **`drop_leading(words, start, orientation)`** in `text/layout.rs` — the mirror of
-   `split_at_clipped`'s trailing rule, carrying the **same `EDGE_MARGIN` tolerance**. Without the
-   margin it deletes exactly the glyph the previous tile deliberately deferred. The plan has the
-   implementation and its four tests written out verbatim, including the load-bearing
-   *"a word just inside the margin is kept"* case and the instruction to prove it by deleting the
-   margin and watching that test fail.
-2. **Head + tail assembly in `text/ocr.rs`** (plan Task 4 Step 2). Pass 1 keeps its text from the
-   hovered word to its last unclipped word; tiles supply only the tail. Three details that are
-   easy to get wrong are enumerated in the plan; the sharpest is that **tile 1 must start at the
-   last kept word's trailing edge, not at pass 1's region edge.**
+1. ~~`drop_leading`~~ — **done**, see above.
+2. ~~Head + tail assembly~~ — **done**, see above.
 3. **Carry `geom` through the seam.** `tile_forward` returns a `String` and drops the boxes, so a
    stitched span has empty `geom` and **the match highlight does not draw on the tiled path**.
    It is absent rather than wrong (`union_chars` returns `None` on empty geometry), and
    `resolve_at_tiled_scanned`'s doc comment says so — but it is a real gap the moment tiling
-   comes back on.
+   comes back on. Still not built; head+tail assembly did not need it (lookup correctness,
+   not highlight geometry, was in scope).
 4. **Acceptance:** plan Task 6 §2.1 — nine hovers, ground truth transcribed by eye *first*, and
    all three of: 9/9 resolved character, no duplicated/spurious run, no omitted character. Count
-   only **seam-local** defects; ordinary OCR misreads are not failures of this criterion.
+   only **seam-local** defects; ordinary OCR misreads are not failures of this criterion. **Not
+   run** — items 1–2 above were built and unit-verified from a non-interactive environment with no
+   real screen or Japanese on-screen text to hover; §2.1 needs a human at the keyboard.
 
-**Do not re-enable `max_ocr_passes = 2+` by default until §2.1 passes.**
+**Do not re-enable `max_ocr_passes = 2+` by default until §2.1 passes.** Unchanged by this round:
+the code-level bugs §2.1 would have measured are now fixed, but the sweep itself has not been
+re-run, so the gate stays closed until someone does.
 
 ---
 
