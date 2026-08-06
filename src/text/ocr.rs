@@ -4,8 +4,8 @@ use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::capture::{capture_upscaled, cursor_position, init_dpi_awareness, UPSCALE};
 use crate::text::layout::{
-    band_of, map_from_upscaled, nearest_line, region_around, resolve, tile_forward, OcrLine,
-    OcrWord, Orientation, Resolved,
+    band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
+    tile_forward, OcrLine, OcrWord, Orientation, Resolved,
 };
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
@@ -171,7 +171,7 @@ impl OcrTextSource {
         cursor: PhysPoint,
         collect: bool,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
-        let (_, resolved) = self.resolve_at_verbose(cursor)?;
+        let (lines, resolved) = self.resolve_at_verbose(cursor)?;
         let mut scan = Vec::new();
         let Some(first) = resolved else { return Ok((None, scan)) };
         if collect {
@@ -184,34 +184,41 @@ impl OcrTextSource {
             return Ok((Some(first), scan));
         }
 
-        let band = band_of(first.span.anchor, first.orientation);
-        let start = match first.orientation {
-            Orientation::Horizontal => first.span.anchor.x,
-            Orientation::Vertical => first.span.anchor.y,
+        // Pass 1's own kept tail; no re-read.
+        let region = region_around(cursor, self.prefer_vertical);
+        let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region) else {
+            if collect {
+                scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
+            }
+            return Ok((Some(first), scan));
         };
-        let perpendicular_centre = match first.orientation {
-            Orientation::Horizontal => first.span.anchor.center().y,
-            Orientation::Vertical => first.span.anchor.center().x,
+        let head_chars = head.chars().count();
+
+        let anchor = first.span.anchor;
+        let band = band_of(anchor, orientation);
+        let perpendicular_centre = match orientation {
+            Orientation::Horizontal => anchor.center().y,
+            Orientation::Vertical => anchor.center().x,
         };
-        let line_tolerance = match first.orientation {
-            Orientation::Horizontal => first.span.anchor.h / 2,
-            Orientation::Vertical => first.span.anchor.w / 2,
+        let line_tolerance = match orientation {
+            Orientation::Horizontal => anchor.h / 2,
+            Orientation::Vertical => anchor.w / 2,
         };
         let bounds = monitor_bounds_containing(band.center());
 
         let mut failed = false;
-        let text = tile_forward(
+        let tail = tile_forward(
             band,
-            start,
-            first.orientation,
+            tail_start,
+            orientation,
             usize::from(self.max_passes - 1),
-            MAX_LOOKUP_CHARS,
+            MAX_LOOKUP_CHARS.saturating_sub(head_chars),
             bounds,
             |tile| {
                 if collect {
                     scan.push(ScanRect { rect: tile, kind: ScanKind::Tile });
                 }
-                match self.words_in(tile, perpendicular_centre, first.orientation, line_tolerance) {
+                match self.words_in(tile, perpendicular_centre, orientation, line_tolerance) {
                     Ok(words) => words,
                     Err(e) => {
                         if !failed {
@@ -225,9 +232,10 @@ impl OcrTextSource {
         );
 
         if collect {
-            scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
+            scan.push(ScanRect { rect: anchor, kind: ScanKind::Anchor });
         }
 
+        let text = normalise(&format!("{head}{tail}"));
         if text.is_empty() {
             return Ok((Some(first), scan));
         }
@@ -237,10 +245,10 @@ impl OcrTextSource {
                 span: TextSpan {
                     text,
                     cursor_byte_offset: 0,
-                    anchor: first.span.anchor,
+                    anchor,
                     geom: Vec::new(),
                 },
-                orientation: first.orientation,
+                orientation,
             }),
             scan,
         ))

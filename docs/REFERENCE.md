@@ -244,8 +244,12 @@ already selectable) and **M5** (DPI and Magpie polish) are not started.
   sentence spliced out of unrelated ones. Measured 2/6 correct hovers; a
   transposed 100×500 probe scores 6/6. The fix has its own round.
 - **Forward tiling is off** (`max_ocr_passes = 1`) because it sometimes
-  resolved a different character than the one under the cursor. The rework is
-  designed and reviewed, not built — see [`BACKLOG.md`](BACKLOG.md).
+  resolved a different character than the one under the cursor. Both
+  code-level causes (re-reading the hovered word, leading-edge spillover at a
+  tile seam) are now fixed and unit-tested — see [`BACKLOG.md`](BACKLOG.md)
+  §1. The default has **not** been changed: the fix has not been through a
+  live, human-verified acceptance sweep, only `cargo test` in a
+  non-interactive environment with no screen to hover.
 - **Text clipped by a window edge cannot be read** at any capture shape. The
   glyphs are physically incomplete on screen; a ceiling, not a bug.
 - **Right-clicking the tray icon does not open its menu.** A real bug with two
