@@ -841,12 +841,21 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             // Spec D7: the popup's own rect.
             let live = cursor_now();
-            let over_popup = shown.as_ref().is_some_and(|s| s.popup.contains(live));
+            let over_popup = shown.as_ref().is_some_and(|s| {
+                s.popup.contains(live)
+            });
+            let over_popup_or_btn = shown.as_ref().is_some_and(|s| {
+                let btn_h = anki_button.as_ref()
+                    .filter(|b| b.is_visible())
+                    .map_or(0, |b| b.height_phys());
+                let full = PhysRect { h: s.popup.h + btn_h, ..s.popup };
+                full.contains(live)
+            });
             let armed = scroll_popup
                 && over_popup
                 && shown.as_ref().is_some_and(|s| s.content_h > s.view_h);
             Hooks::set_scroll_armed(armed);
-            Hooks::set_click_armed(over_popup);
+            Hooks::set_click_armed(over_popup_or_btn);
             Hooks::set_add_armed(shown.is_some() && anki_enabled);
 
             armed_ticks = if armed { armed_ticks + 1 } else { 0 };
@@ -1051,9 +1060,16 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             });
             if cursor.x != i32::MIN {
                 // Spec D3: hold, do not resolve.
-                let frozen = shown
-                    .as_ref()
-                    .is_some_and(|s| in_sticky(cursor, s.hold, s.popup));
+                let frozen = shown.as_ref().is_some_and(|s| {
+                    let btn_h = anki_button.as_ref()
+                        .filter(|b| b.is_visible())
+                        .map_or(0, |b| b.height_phys());
+                    let sticky_rect = PhysRect {
+                        h: s.popup.h + btn_h,
+                        ..s.popup
+                    };
+                    in_sticky(cursor, s.hold, sticky_rect)
+                });
                 if !frozen {
                     next_id += 1;
                     latest_dispatched = RequestId(next_id);
