@@ -65,6 +65,15 @@ static ANKI_ADD_ARMED: AtomicBool = AtomicBool::new(false);
 /// One hotkey press, banked.
 static PENDING_ADD: AtomicBool = AtomicBool::new(false);
 
+/// Set when history is non-empty.
+static BACK_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// One Escape press, banked.
+static PENDING_BACK: AtomicBool = AtomicBool::new(false);
+
+/// VK_ESCAPE.
+const VK_ESCAPE: u16 = 0x1B;
+
 /// One word: reads never tear.
 fn pack(p: PhysPoint) -> i64 {
     ((p.x as i64) << 32) | (p.y as u32 as i64)
@@ -162,6 +171,9 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
     if add_hotkey_hit(down, vk) {
         PENDING_ADD.store(true, Ordering::SeqCst);
+    }
+    if down && vk == VK_ESCAPE && BACK_ARMED.load(Ordering::SeqCst) {
+        PENDING_BACK.store(true, Ordering::SeqCst);
     }
 
     let target = TRIGGER_VK.load(Ordering::SeqCst);
@@ -373,6 +385,16 @@ impl Hooks {
         } else {
             Some(unpack(v))
         }
+    }
+
+    /// Arms/disarms back (Escape).
+    pub fn set_back_armed(armed: bool) {
+        BACK_ARMED.store(armed, Ordering::SeqCst);
+    }
+
+    /// Takes the pending back, once.
+    pub fn take_back() -> bool {
+        PENDING_BACK.swap(false, Ordering::SeqCst)
     }
 
     /// Polled fallback for the gate.
@@ -625,5 +647,58 @@ mod tests {
 
         assert!(!Hooks::take_add_hotkey(), "a different key must not arm it");
         Hooks::set_add_armed(false);
+    }
+
+    // ---- back (Escape) ----
+
+    static BACK_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn back_guard() -> std::sync::MutexGuard<'static, ()> {
+        BACK_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn back_requires_arming() {
+        let _g = back_guard();
+        Hooks::set_back_armed(false);
+        let _ = Hooks::take_back();
+
+        let data = KBDLLHOOKSTRUCT { vkCode: VK_ESCAPE as u32, ..Default::default() };
+        let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
+        // SAFETY: same contract as add-hotkey tests.
+        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
+
+        assert!(!Hooks::take_back());
+    }
+
+    #[test]
+    fn back_fires_on_escape_when_armed() {
+        let _g = back_guard();
+        Hooks::set_back_armed(true);
+        let _ = Hooks::take_back();
+
+        let data = KBDLLHOOKSTRUCT { vkCode: VK_ESCAPE as u32, ..Default::default() };
+        let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
+        // SAFETY: same contract as add-hotkey tests.
+        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
+
+        assert!(Hooks::take_back());
+        assert!(!Hooks::take_back());
+        Hooks::set_back_armed(false);
+    }
+
+    #[test]
+    fn back_ignores_non_escape_keys() {
+        let _g = back_guard();
+        Hooks::set_back_armed(true);
+        let _ = Hooks::take_back();
+
+        let data = KBDLLHOOKSTRUCT { vkCode: 0x41, ..Default::default() };
+        let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
+        // SAFETY: same contract as add-hotkey tests.
+        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
+
+        assert!(!Hooks::take_back());
+        Hooks::set_back_armed(false);
     }
 }

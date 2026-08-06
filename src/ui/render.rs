@@ -32,7 +32,9 @@ const SEPARATOR_THICKNESS: f32 = 1.0;
 /// Clickable region in the popup.
 #[derive(Debug, Clone)]
 pub struct HitRect {
+    pub x: Option<f32>,
     pub y: f32,
+    pub w: Option<f32>,
     pub h: f32,
     pub action: HitAction,
 }
@@ -42,9 +44,23 @@ pub struct HitRect {
 pub enum HitAction {
     /// Expand collapsed row `i`.
     ExpandEntry(usize),
+    /// Look up a single character.
+    DrillDown(String),
+    /// Navigate back in history.
+    Back,
+}
+
+/// CJK ideograph check.
+fn is_kanji(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{F900}'..='\u{FAFF}'
+    )
 }
 
 /// Anki state for this popup.
+#[derive(Clone)]
 pub struct AnkiPopupState {
     pub dupes: HashSet<String>,
     pub added: HashSet<String>,
@@ -84,6 +100,14 @@ enum Elem {
     Separator { top_gap: f32 },
     /// A clickable collapsed row.
     Collapsed(usize, Line),
+    /// Per-char click targets.
+    Headword {
+        headword: String,
+        prefix_u16: usize,
+        line: Line,
+    },
+    /// Navigate back in history.
+    BackButton(Line),
 }
 
 /// Overflow past the view, or 0.
@@ -194,14 +218,22 @@ impl Renderer {
         if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
     }
 
-    /// Finds the action at `y_phys`.
-    pub fn hit_test(&self, y_phys: i32, scroll_phys: i32) -> Option<HitAction> {
+    /// Finds the action at (x, y).
+    pub fn hit_test(&self, x_phys: i32, y_phys: i32, scroll_phys: i32) -> Option<HitAction> {
         let scale = self.dpi_scale();
+        let x = x_phys as f32 / scale;
         let y = y_phys as f32 / scale + scroll_phys as f32 / scale;
         self.hit_rects
             .borrow()
             .iter()
-            .find(|r| y >= r.y && y < r.y + r.h)
+            .find(|r| {
+                let y_hit = y >= r.y && y < r.y + r.h;
+                let x_hit = match (r.x, r.w) {
+                    (Some(rx), Some(rw)) => x >= rx && x < rx + rw,
+                    _ => true,
+                };
+                x_hit && y_hit
+            })
             .map(|r| r.action.clone())
     }
 
@@ -215,11 +247,12 @@ impl Renderer {
         max_w: i32,
         max_h: i32,
         anki: &AnkiPopupState,
+        show_back: bool,
     ) -> Result<(i32, i32, i32)> {
         let scale = self.dpi_scale();
         let dip_w = max_w as f32 / scale;
         let dip_h = max_h as f32 / scale;
-        let elems = build_elements(p, theme, anki);
+        let elems = build_elements(p, theme, anki, show_back);
         let content_w = (dip_w - 2.0 * theme.padding as f32).max(0.0);
         let used_h = layout_pass(
             &self.dwrite_factory,
@@ -252,16 +285,17 @@ impl Renderer {
         theme: &Theme,
         scroll: i32,
         anki: &AnkiPopupState,
+        show_back: bool,
     ) -> Result<()> {
         let (w, h) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(w, h).context("preparing the D2D render target")?;
 
-        if let Err(e) = self.paint_once(p, theme, w, h, scroll, anki) {
+        if let Err(e) = self.paint_once(p, theme, w, h, scroll, anki, show_back) {
             if e.code() == D2DERR_RECREATE_TARGET {
                 self.target = None;
                 self.ensure_target(w, h)
                     .context("recreating the D2D render target after device loss")?;
-                self.paint_once(p, theme, w, h, scroll, anki)
+                self.paint_once(p, theme, w, h, scroll, anki, show_back)
                     .context("repainting after device-lost recovery")?;
             } else {
                 return Err(e).context("D2D paint failed");
@@ -312,6 +346,7 @@ impl Renderer {
     /// One BeginDraw/EndDraw cycle.
     ///
     /// Raw error; paint matches it.
+    #[allow(clippy::too_many_arguments)]
     fn paint_once(
         &self,
         p: &Presentation,
@@ -320,6 +355,7 @@ impl Renderer {
         h: i32,
         scroll: i32,
         anki: &AnkiPopupState,
+        show_back: bool,
     ) -> windows::core::Result<()> {
         let target = self
             .target
@@ -335,7 +371,7 @@ impl Renderer {
         let scope = DrawScope { target: Some(target) };
 
         let draw_result: windows::core::Result<()> = (|| {
-            let elems = build_elements(p, theme, anki);
+            let elems = build_elements(p, theme, anki, show_back);
 
             unsafe {
                 target.Clear(Some(&color_f(theme.background)));
@@ -428,8 +464,22 @@ fn color_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
 /// `p`'s content, in draw order.
 ///
 /// Pure: no factory, no target.
-fn build_elements(p: &Presentation, theme: &Theme, anki: &AnkiPopupState) -> Vec<Elem> {
+fn build_elements(
+    p: &Presentation,
+    theme: &Theme,
+    anki: &AnkiPopupState,
+    show_back: bool,
+) -> Vec<Elem> {
     let mut out = Vec::new();
+
+    if show_back {
+        out.push(Elem::BackButton(Line {
+            text: "\u{2190} Back".to_string(),
+            color: theme.dict_label_text,
+            size: theme.collapsed_size,
+            top_gap: 0.0,
+        }));
+    }
 
     if let Some(card) = &p.top {
         // Before the headword: same y.
@@ -451,17 +501,19 @@ fn build_elements(p: &Presentation, theme: &Theme, anki: &AnkiPopupState) -> Vec
         let known = anki.dupes.contains(expr)
             || anki.added.contains(expr);
         if !headword.is_empty() {
-            let text = if known {
-                format!("\u{2713} {headword}")
-            } else {
-                headword
-            };
-            out.push(Elem::Text(Line {
-                text,
-                color: theme.headword_text,
-                size: theme.headword_size,
-                top_gap: 0.0,
-            }));
+            let prefix = if known { "\u{2713} " } else { "" };
+            let text = format!("{prefix}{headword}");
+            let prefix_u16 = prefix.encode_utf16().count();
+            out.push(Elem::Headword {
+                headword: headword.clone(),
+                prefix_u16,
+                line: Line {
+                    text,
+                    color: theme.headword_text,
+                    size: theme.headword_size,
+                    top_gap: if show_back { LINE_GAP } else { 0.0 },
+                },
+            });
         }
 
         // Only if the headword differs.
@@ -638,9 +690,90 @@ fn layout_pass(
                 y += line.top_gap;
                 if let Some(hits) = hit_out {
                     hits.borrow_mut().push(HitRect {
+                        x: None,
                         y: origin_y + y,
+                        w: None,
                         h,
                         action: HitAction::ExpandEntry(*idx),
+                    });
+                }
+                if let Some(t) = target {
+                    let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
+                    unsafe {
+                        t.DrawTextLayout(
+                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            &layout,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        )
+                    };
+                }
+                h
+            }
+            Elem::Headword { ref headword, prefix_u16, ref line } => {
+                let avail_w = (content_w - reserved_w).max(1.0);
+                reserved_w = 0.0;
+                let (layout, m) =
+                    build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
+                let h = m.height;
+                y += line.top_gap;
+                if let Some(hits) = hit_out {
+                    let mut u16_pos = *prefix_u16 as u32;
+                    for ch in headword.chars() {
+                        if is_kanji(ch) {
+                            let mut px = 0.0f32;
+                            let mut py = 0.0f32;
+                            let mut hm = DWRITE_HIT_TEST_METRICS::default();
+                            // SAFETY: u16_pos is a
+                            // valid index into the
+                            // layout's UTF-16 text.
+                            unsafe {
+                                layout.HitTestTextPosition(
+                                    u16_pos,
+                                    false,
+                                    &mut px,
+                                    &mut py,
+                                    &mut hm,
+                                )?;
+                            }
+                            hits.borrow_mut().push(HitRect {
+                                x: Some(origin_x + hm.left),
+                                y: origin_y + y + hm.top,
+                                w: Some(hm.width),
+                                h: hm.height,
+                                action: HitAction::DrillDown(
+                                    ch.to_string(),
+                                ),
+                            });
+                        }
+                        u16_pos += ch.len_utf16() as u32;
+                    }
+                }
+                if let Some(t) = target {
+                    let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
+                    unsafe {
+                        t.DrawTextLayout(
+                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            &layout,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        )
+                    };
+                }
+                h
+            }
+            Elem::BackButton(line) => {
+                let (layout, m) =
+                    build_text_layout(dwrite, formats, &theme.font_name, line, content_w)?;
+                let h = m.height;
+                y += line.top_gap;
+                if let Some(hits) = hit_out {
+                    hits.borrow_mut().push(HitRect {
+                        x: None,
+                        y: origin_y + y,
+                        w: None,
+                        h,
+                        action: HitAction::Back,
                     });
                 }
                 if let Some(t) = target {
@@ -708,7 +841,7 @@ mod tests {
     #[test]
     fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
         let theme = Theme::dark();
-        let elems = build_elements(&one_card(&[], Some(7671)), &theme, &AnkiPopupState::disabled());
+        let elems = build_elements(&one_card(&[], Some(7671)), &theme, &AnkiPopupState::disabled(), false);
         match &elems[0] {
             Elem::Corner(line) => {
                 assert_eq!("freq 7671", line.text);
@@ -720,14 +853,14 @@ mod tests {
 
     #[test]
     fn an_unranked_entry_draws_no_corner() {
-        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled());
+        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
         assert!(!elems.iter().any(|e| matches!(e, Elem::Corner(_))));
     }
 
     #[test]
     fn part_of_speech_is_dimmed_metadata_not_body_text() {
         let theme = Theme::dark();
-        let elems = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, &AnkiPopupState::disabled());
+        let elems = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, &AnkiPopupState::disabled(), false);
         let pos = elems
             .iter()
             .find_map(|e| match e {
@@ -744,10 +877,64 @@ mod tests {
     /// 大辞林 has no POS markup.
     #[test]
     fn an_entry_without_part_of_speech_draws_no_pos_line() {
-        let elems = build_elements(&one_card(&[], Some(1)), &Theme::dark(), &AnkiPopupState::disabled());
+        let elems = build_elements(&one_card(&[], Some(1)), &Theme::dark(), &AnkiPopupState::disabled(), false);
         assert!(!elems
             .iter()
             .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
+    }
+
+    // -- headword / drill-down --
+
+    #[test]
+    fn the_headword_is_a_headword_element_not_text() {
+        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        assert!(
+            elems.iter().any(|e| matches!(e, Elem::Headword { .. })),
+            "expected a Headword element for the headword"
+        );
+    }
+
+    #[test]
+    fn headword_prefix_u16_is_zero_without_anki_marks() {
+        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        let hw = elems.iter().find_map(|e| match e {
+            Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
+            _ => None,
+        });
+        assert_eq!(Some(0), hw);
+    }
+
+    #[test]
+    fn headword_prefix_u16_accounts_for_the_check_mark() {
+        let mut anki = AnkiPopupState { enabled: true, ..AnkiPopupState::disabled() };
+        anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
+        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &anki, false);
+        let hw = elems.iter().find_map(|e| match e {
+            Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
+            _ => None,
+        });
+        assert_eq!(Some(2), hw);
+    }
+
+    #[test]
+    fn show_back_adds_a_back_button_element() {
+        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), true);
+        assert!(matches!(&elems[0], Elem::BackButton(_)));
+    }
+
+    #[test]
+    fn no_back_button_without_show_back() {
+        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        assert!(!elems.iter().any(|e| matches!(e, Elem::BackButton(_))));
+    }
+
+    #[test]
+    fn is_kanji_covers_cjk_unified() {
+        assert!(is_kanji('\u{98DF}'));
+        assert!(is_kanji('\u{4E00}'));
+        assert!(is_kanji('\u{9FFF}'));
+        assert!(!is_kanji('\u{3042}'));
+        assert!(!is_kanji('a'));
     }
 
     // -- anki_button_label --
