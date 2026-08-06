@@ -432,12 +432,29 @@ impl AnkiButton {
         }
     }
 
-    /// Moves and shows at `r`.
+    /// Moves, shapes, and shows.
     pub fn show_at(&self, r: PhysRect) -> Result<()> {
-        // SAFETY: `self.hwnd` was created by `create` and lives for
-        // the lifetime of `&self`; `SetWindowPos`'s result is checked
-        // via `?`, mirroring `Popup::show_at`.
+        // SAFETY: mirrors `Popup::show_at` — `self.hwnd` was created
+        // by `create` and lives for `&self`'s lifetime; the GDI region
+        // is consumed by a successful `SetWindowRgn` (which then owns
+        // it — deleted only on failure); `SetWindowPos`'s result is
+        // checked via `?`.
         unsafe {
+            let rgn = CreateRoundRectRgn(
+                0, 0, r.w, r.h,
+                CORNER_RADIUS, CORNER_RADIUS,
+            );
+            if rgn.is_invalid() {
+                anyhow::bail!(
+                    "CreateRoundRectRgn({}, {}) returned a null region",
+                    r.w, r.h,
+                );
+            }
+            if SetWindowRgn(self.hwnd, Some(rgn), true) == 0 {
+                let _ = DeleteObject(rgn.into());
+                anyhow::bail!("SetWindowRgn failed for the Anki button");
+            }
+
             SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
