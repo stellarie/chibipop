@@ -253,6 +253,9 @@ pub fn settings_only(
                 );
             }
         }
+        if window.take_field_map_toggle() {
+            window.toggle_field_map();
+        }
 
         if rebuild.is_some() {
             // Not while the child writes.
@@ -880,6 +883,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         detect_tx.clone(), main_tid,
                     );
                 }
+            }
+            if w.take_field_map_toggle() {
+                w.toggle_field_map();
             }
 
             if handled {

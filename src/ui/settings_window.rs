@@ -79,6 +79,7 @@ const ID_TRIGGER_KEY: i32 = 131;
 const ID_PREFER_VERT: i32 = 132;
 const ID_ANKI_ADD_KEY: i32 = 133;
 const ID_SIDE_PANEL: i32 = 134;
+const ID_FIELD_MAP_TOGGLE: i32 = 135;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -146,6 +147,17 @@ const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 /// ~3 lines of status text.
 const STATUS_H: i32 = 58;
+
+// ---- field-map columns ----
+
+const COL_GAP: i32 = 10;
+const COL_AREA_W: i32 = WIN_W - 2 * PAD - 20;
+const COL_W: i32 = (COL_AREA_W - 2 * COL_GAP) / 3;
+const COL_LABEL_W: i32 = 78;
+const COL_LABEL_GAP: i32 = 4;
+const COL_COMBO_W: i32 = COL_W - COL_LABEL_W - COL_LABEL_GAP;
+const COL_DROPPED_W: i32 = 150;
+const COL_LABEL_MAX_CHARS: usize = 11;
 
 /// Which list a button acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +240,9 @@ thread_local! {
 
     // Anki add-key vk, by `HWND`.
     static ANKI_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+
+    // Field-map toggle click, by `HWND`.
+    static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -247,6 +262,10 @@ fn record_action(hwnd: HWND, action: Action) {
 
 fn record_click(hwnd: HWND, click: SettingsClick) {
     CLICK.with(|c| c.set(Some((hwnd.0 as isize, click))));
+}
+
+fn record_field_map_toggle(hwnd: HWND) {
+    FIELD_MAP_TOGGLE.with(|c| c.set(Some(hwnd.0 as isize)));
 }
 
 /// Starts capture mode.
@@ -309,6 +328,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
+                ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
                 ID_MODE_LIVE | ID_MODE_HOLD => unsafe {
                     if let Ok(c) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
                         let _ = EnableWindow(c, id == ID_MODE_HOLD);
@@ -721,6 +741,21 @@ fn row_mapping(anki_field: &str, source: &str) -> Option<crate::config::FieldMap
     })
 }
 
+/// Rows per field-map column.
+fn field_map_rows_needed(n: usize) -> i32 {
+    n.div_ceil(3).max(1) as i32
+}
+
+/// Truncated for a column.
+fn column_label(name: &str) -> &str {
+    name.char_indices().nth(COL_LABEL_MAX_CHARS).map_or(name, |(i, _)| &name[..i])
+}
+
+/// Toggle glyph for fold state.
+fn field_map_toggle_label(collapsed: bool) -> &'static str {
+    if collapsed { "Field mapping \u{25B6}" } else { "Field mapping \u{25BC}" }
+}
+
 /// `None` unless capturing.
 fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
@@ -788,6 +823,8 @@ pub struct SettingsWindow {
     field_map_rows: RefCell<Vec<(String, HWND)>>,
     /// Field-map labels + group box.
     field_map_extra: RefCell<Vec<HWND>>,
+    /// True while collapsed.
+    field_map_collapsed: Cell<bool>,
     /// Where Anki's static rows end.
     anki_static_bottom: i32,
     /// hwnd, x, y (96-dpi) to shift.
@@ -848,6 +885,7 @@ impl SettingsWindow {
                 anki_ctrls: Vec::new(),
                 field_map_rows: RefCell::new(Vec::new()),
                 field_map_extra: RefCell::new(Vec::new()),
+                field_map_collapsed: Cell::new(true),
                 anki_static_bottom: 0,
                 bottom_ctrls: Vec::new(),
                 bottom_y0: 0,
@@ -1009,6 +1047,17 @@ impl SettingsWindow {
         })
     }
 
+    /// Pending fold toggle, if any.
+    pub fn take_field_map_toggle(&self) -> bool {
+        FIELD_MAP_TOGGLE.with(|c| match c.get() {
+            Some(h) if h == self.hwnd.0 as isize => {
+                c.set(None);
+                true
+            }
+            _ => false,
+        })
+    }
+
     /// Show one tab, hide the rest.
     pub fn switch_tab(&self, tab: u32) {
         // SAFETY: `self.hwnd` is live until `Drop`.
@@ -1033,14 +1082,25 @@ impl SettingsWindow {
                     let _ = ShowWindow(c, cmd);
                 }
             }
-            let cmd = if tab == 3 { SW_SHOW } else { SW_HIDE };
-            for &c in self.field_map_extra.borrow().iter() {
-                let _ = ShowWindow(c, cmd);
-            }
-            for &(_, c) in self.field_map_rows.borrow().iter() {
-                let _ = ShowWindow(c, cmd);
+            self.apply_field_map_visibility();
+        }
+    }
+
+    /// Flips the fold and resizes.
+    pub fn toggle_field_map(&self) {
+        let collapsed = !self.field_map_collapsed.get();
+        self.field_map_collapsed.set(collapsed);
+        // SAFETY: `self.hwnd` is live until `Drop`; `ID_FIELD_MAP_TOGGLE`
+        // and every hwnd `apply_field_map_visibility` touches are its
+        // children, created in `build`/`build_field_map_rows`.
+        unsafe {
+            self.apply_field_map_visibility();
+            if let Ok(btn) = GetDlgItem(Some(self.hwnd), ID_FIELD_MAP_TOGGLE) {
+                let text = field_map_toggle_label(collapsed);
+                let _ = SetWindowTextW(btn, PCWSTR(wide(text).as_ptr()));
             }
         }
+        self.ensure_room_for(self.field_map_bottom());
     }
 
     /// Captures `vk`; true if used.
@@ -1107,16 +1167,37 @@ impl SettingsWindow {
         }
         let existing = self.staged.borrow().field_map.clone();
         let (extra, rows) = self.build_field_map_rows(fields, &existing);
-        let cmd = if self.current_tab.get() == 3 { SW_SHOW } else { SW_HIDE };
+        *self.field_map_extra.borrow_mut() = extra;
+        *self.field_map_rows.borrow_mut() = rows;
         // SAFETY: every hwnd was just created as a child of `self.hwnd`.
+        unsafe { self.apply_field_map_visibility() };
+        self.ensure_room_for(self.field_map_bottom());
+    }
+
+    /// Shows/hides field-map rows.
+    unsafe fn apply_field_map_visibility(&self) {
+        let visible = self.current_tab.get() == 3 && !self.field_map_collapsed.get();
+        let cmd = if visible { SW_SHOW } else { SW_HIDE };
+        // SAFETY: every hwnd here is a live child of `self.hwnd`,
+        // created in `build_field_map_rows`.
         unsafe {
-            for &c in extra.iter().chain(rows.iter().map(|(_, c)| c)) {
+            for &c in self.field_map_extra.borrow().iter() {
+                let _ = ShowWindow(c, cmd);
+            }
+            for &(_, c) in self.field_map_rows.borrow().iter() {
                 let _ = ShowWindow(c, cmd);
             }
         }
-        *self.field_map_extra.borrow_mut() = extra;
-        *self.field_map_rows.borrow_mut() = rows;
-        self.ensure_room_for(self.anki_static_bottom + 20 + fields.len() as i32 * ROW_H + 8);
+    }
+
+    /// Field-map area's bottom.
+    fn field_map_bottom(&self) -> i32 {
+        let n = self.field_map_rows.borrow().len();
+        if n == 0 || self.field_map_collapsed.get() {
+            self.anki_static_bottom
+        } else {
+            self.anki_static_bottom + 20 + field_map_rows_needed(n) * ROW_H + 8
+        }
     }
 
     /// Builds the box + field rows.
@@ -1127,30 +1208,36 @@ impl SettingsWindow {
     ) -> (Vec<HWND>, Vec<(String, HWND)>) {
         let f = self.font;
         let h = self.hwnd;
-        let mut y = self.anki_static_bottom;
-        let map_h = 20 + fields.len() as i32 * ROW_H + 8;
+        let y0 = self.anki_static_bottom;
+        let rows_n = field_map_rows_needed(fields.len());
+        let map_h = 20 + rows_n * ROW_H + 8;
         let mut extra = Vec::new();
         let mut rows = Vec::new();
         // SAFETY: `h` is `self.hwnd`, live for the caller's duration;
         // every control created is its child and outlives this call.
         unsafe {
-            if let Ok(g) = child(h, w!("BUTTON"), "Field mapping",
+            if let Ok(g) = child(h, w!("BUTTON"), "",
                 WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
-                PAD - 6, y, WIN_W - 2 * PAD, map_h, 0, f)
+                PAD - 6, y0, WIN_W - 2 * PAD, map_h, 0, f)
             {
                 extra.push(g);
             }
-            y += 20;
-            for (i, name) in fields.iter().enumerate() {
-                if let Ok(l) = child(h, w!("STATIC"), name, WINDOW_STYLE(0),
-                    PAD, y + 4, LABEL_W, ROW_H, 0, f)
+            for (idx, name) in fields.iter().enumerate() {
+                let idx = idx as i32;
+                let col = idx / rows_n;
+                let row = idx % rows_n;
+                let x = PAD + col * (COL_W + COL_GAP);
+                let y = y0 + 20 + row * ROW_H;
+                if let Ok(l) = child(h, w!("STATIC"), column_label(name),
+                    WINDOW_STYLE(0), x, y + 4, COL_LABEL_W, ROW_H, 0, f)
                 {
                     extra.push(l);
                 }
-                let id = ID_FIELD_MAP_BASE + i as i32;
+                let id = ID_FIELD_MAP_BASE + idx;
+                let combo_x = x + COL_LABEL_W + COL_LABEL_GAP;
                 if let Ok(combo) = child(h, w!("COMBOBOX"), "",
                     WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                    FIELD_X, y, FIELD_W, 140, id, f)
+                    combo_x, y, COL_COMBO_W, 140, id, f)
                 {
                     let want = default_source(existing, name);
                     for (j, src) in FIELD_MAP_SOURCES.iter().enumerate() {
@@ -1163,9 +1250,10 @@ impl SettingsWindow {
                     if SendMessageW(combo, CB_GETCURSEL, None, None).0 < 0 {
                         SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
                     }
+                    SendMessageW(combo, CB_SETDROPPEDWIDTH,
+                        Some(WPARAM(dpi_scale(h, COL_DROPPED_W) as usize)), None);
                     rows.push((name.clone(), combo));
                 }
-                y += ROW_H;
             }
         }
         (extra, rows)
@@ -1656,6 +1744,13 @@ impl SettingsWindow {
                 "Click to load decks and field mappings from Anki",
                 WINDOW_STYLE(0), PAD + 88, y + 2, WIN_W - 2 * PAD - 96, ROW_H, 0, f)?;
             y += ROW_H + 8 + GROUP_GAP;
+
+            // ---- Field-map toggle ----
+            let toggle_text = field_map_toggle_label(self.field_map_collapsed.get());
+            ank.push(child(h, w!("BUTTON"), toggle_text, WS_TABSTOP,
+                  PAD, y, 160, ROW_H, ID_FIELD_MAP_TOGGLE, f)?);
+            y += ROW_H + 8;
+
             let y_ank = y;
             y = y_general.max(y_dict).max(y_ocr).max(y_ank);
             let bottom_y0 = y;
@@ -1843,6 +1938,11 @@ impl Drop for SettingsWindow {
                 c.set(None);
             }
         });
+        FIELD_MAP_TOGGLE.with(|c| {
+            if c.get().is_some_and(|h| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
         CAPTURING.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
@@ -1967,6 +2067,53 @@ mod tests {
         ];
         let fields = vec!["Glossary".to_string(), "Expression".to_string()];
         assert!(!field_names_match(&rows, &fields));
+    }
+
+    // ---- field-map columns ----
+
+    #[test]
+    fn field_map_rows_needed_ceils_by_three() {
+        assert_eq!(1, field_map_rows_needed(1));
+        assert_eq!(1, field_map_rows_needed(3));
+        assert_eq!(2, field_map_rows_needed(4));
+        assert_eq!(8, field_map_rows_needed(23));
+    }
+
+    /// Never zero, even for an empty list.
+    #[test]
+    fn field_map_rows_needed_floors_at_one() {
+        assert_eq!(1, field_map_rows_needed(0));
+    }
+
+    #[test]
+    fn column_label_keeps_a_short_name_whole() {
+        assert_eq!("Glossary", column_label("Glossary"));
+    }
+
+    /// Boundary: exactly the max stays whole.
+    #[test]
+    fn column_label_keeps_a_max_length_name_whole() {
+        let name = "ABCDEFGHIJK"; // 11 chars
+        assert_eq!(name, column_label(name));
+    }
+
+    #[test]
+    fn column_label_truncates_a_long_name() {
+        assert_eq!("ExpressionR", column_label("ExpressionReading"));
+    }
+
+    /// Truncation must land on a char boundary.
+    #[test]
+    fn column_label_is_char_boundary_safe() {
+        let name = "日本語日本語日本語日本語";
+        let got = column_label(name);
+        assert_eq!(11, got.chars().count());
+    }
+
+    #[test]
+    fn field_map_toggle_label_shows_the_fold_direction() {
+        assert!(field_map_toggle_label(true).ends_with('\u{25B6}'));
+        assert!(field_map_toggle_label(false).ends_with('\u{25BC}'));
     }
 
     /// The window must be sized from its own content, never from a guessed
