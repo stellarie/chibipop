@@ -1740,9 +1740,9 @@ impl SettingsWindow {
             y += ROW_H;
             ank.push(child(h, w!("BUTTON"), "Refresh", WS_TABSTOP,
                   PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
-            child(h, w!("STATIC"),
+            ank.push(child(h, w!("STATIC"),
                 "Click to load decks and field mappings from Anki",
-                WINDOW_STYLE(0), PAD + 88, y + 2, WIN_W - 2 * PAD - 96, ROW_H, 0, f)?;
+                WINDOW_STYLE(0), PAD + 88, y + 2, WIN_W - 2 * PAD - 96, ROW_H, 0, f)?);
             y += ROW_H + 8 + GROUP_GAP;
 
             // ---- Field-map toggle ----
