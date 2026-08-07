@@ -131,7 +131,8 @@ enum WorkerOutcome {
 /// One dupe check's answer.
 struct AnkiDupeResult {
     gen: u64,
-    dupes: HashSet<String>,
+    /// `None` = connection failed.
+    dupes: Option<HashSet<String>>,
 }
 
 /// One add-note's answer.
@@ -722,7 +723,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let anki_url = cfg.anki.url.clone();
     let anki_deck = cfg.anki.deck.clone();
     let anki_model = cfg.anki.model.clone();
-    let anki_field_map = cfg.anki.field_map.clone();
+    let anki_field_map = if cfg.anki.field_map.is_empty() {
+        crate::config::AnkiConfig::default().field_map
+    } else {
+        cfg.anki.field_map.clone()
+    };
 
     let _hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
@@ -935,7 +940,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if next != s.scroll {
                         s.scroll = next;
                         let back = !s.history.is_empty();
-                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, &s.anki, back, side_panel) {
+                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, back, side_panel) {
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
                         }
                     }
@@ -960,7 +965,6 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                     &s.presentation,
                                     s.anchor,
                                     0,
-                                    &s.anki,
                                     has_history,
                                     side_panel,
                                 ) {
@@ -992,10 +996,19 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 );
                             }
                         }
+                    } else if click_y >= s.popup.h && anki_button.is_some() {
+                        // Below popup = button area.
+                        start_add_to_anki(
+                            s, &mut renderer, &theme,
+                            &anki_url, &anki_deck, &anki_model, &anki_field_map,
+                            &add_tx, main_tid, side_panel,
+                        );
+                        sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                     }
                 }
             }
 
+            // Fallback: direct WM_LBUTTONDOWN.
             if anki_button.as_ref().is_some_and(|b| b.take_click()) {
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
@@ -1202,18 +1215,19 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 let tx = anki_tx.clone();
                                 thread::spawn(move || {
                                     let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                    match anki::find_duplicates(&url, &deck, &model, &refs) {
-                                        Ok(dupes) => {
-                                            let _ = tx.send(AnkiDupeResult { gen, dupes });
-                                            unsafe {
-                                                let _ = PostThreadMessageW(
-                                                    main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
-                                                );
-                                            }
-                                        }
+                                    let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
+                                        Ok(d) => Some(d),
                                         Err(e) => {
                                             eprintln!("chibipop: dupe check failed: {e:#}");
+                                            None
                                         }
+                                    };
+                                    let _ = tx.send(AnkiDupeResult { gen, dupes });
+                                    // SAFETY: wakes the pump.
+                                    unsafe {
+                                        let _ = PostThreadMessageW(
+                                            main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
+                                        );
                                     }
                                 });
                             }
@@ -1258,18 +1272,19 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             let tx = anki_tx.clone();
                             thread::spawn(move || {
                                 let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                match anki::find_duplicates(&url, &deck, &model, &refs) {
-                                    Ok(dupes) => {
-                                        let _ = tx.send(AnkiDupeResult { gen, dupes });
-                                        unsafe {
-                                            let _ = PostThreadMessageW(
-                                                main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
-                                            );
-                                        }
-                                    }
+                                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
+                                    Ok(d) => Some(d),
                                     Err(e) => {
                                         eprintln!("chibipop: dupe check failed: {e:#}");
+                                        None
                                     }
+                                };
+                                let _ = tx.send(AnkiDupeResult { gen, dupes });
+                                // SAFETY: wakes the pump.
+                                unsafe {
+                                    let _ = PostThreadMessageW(
+                                        main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
+                                    );
                                 }
                             });
                         }
@@ -1280,7 +1295,16 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             while let Ok(result) = anki_rx.try_recv() {
                 if let Some(s) = shown.as_mut() {
                     if s.gen == result.gen {
-                        s.anki.dupes = result.dupes;
+                        s.anki.checking = false;
+                        match result.dupes {
+                            Some(dupes) => {
+                                s.anki.connected = true;
+                                s.anki.dupes = dupes;
+                            }
+                            None => {
+                                s.anki.connected = false;
+                            }
+                        }
                         let back = !s.history.is_empty();
                         match show_presentation(
                             &popup,
@@ -1291,7 +1315,6 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             &s.presentation,
                             s.anchor,
                             s.scroll,
-                            &s.anki,
                             back,
                             side_panel,
                         ) {
@@ -1316,6 +1339,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     s.anki.adding = false;
                     if let Some(e) = result.err {
                         eprintln!("chibipop: add to Anki failed: {e}");
+                        s.anki.failed = true;
                     } else {
                         s.anki.added.insert(result.expr);
                     }
@@ -1329,7 +1353,6 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &s.presentation,
                         s.anchor,
                         s.scroll,
-                        &s.anki,
                         back,
                         side_panel,
                     ) {
@@ -1692,6 +1715,9 @@ fn handle_worker_outcome(
                 added: HashSet::new(),
                 enabled: anki_enabled,
                 adding: false,
+                checking: anki_enabled,
+                connected: anki_enabled,
+                failed: false,
             };
             match show_presentation(
                 popup,
@@ -1702,7 +1728,6 @@ fn handle_worker_outcome(
                 &presentation,
                 anchor,
                 0,
-                &anki,
                 false,
                 side_panel,
             ) {
@@ -1755,7 +1780,6 @@ fn show_presentation(
     presentation: &Presentation,
     anchor: PhysRect,
     scroll: i32,
-    anki: &AnkiPopupState,
     show_back: bool,
     side_panel: bool,
 ) -> Result<(PhysRect, i32, i32)> {
@@ -1765,12 +1789,12 @@ fn show_presentation(
 
     // view_h, not content_h, below.
     let (w, view_h, content_h) = renderer
-        .measure(presentation, theme, max_w, max_h, anki, show_back, side_panel)
+        .measure(presentation, theme, max_w, max_h, show_back, side_panel)
         .context("measuring popup content")?;
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
-    renderer.paint(presentation, theme, scroll, anki, show_back, side_panel)
+    renderer.paint(presentation, theme, scroll, show_back, side_panel)
         .context("painting the popup")?;
     Ok((rect, content_h, view_h))
 }
@@ -1798,12 +1822,13 @@ fn start_add_to_anki(
         (expr, fields)
     });
     let Some((expr, fields)) = info else { return };
-    if s.anki.adding || s.anki.added.contains(&expr) || s.anki.dupes.contains(&expr) {
+    if s.anki.adding || s.anki.added.contains(&expr) {
         return;
     }
     s.anki.adding = true;
+    s.anki.failed = false;
     let back = !s.history.is_empty();
-    if let Err(e) = renderer.paint(&s.presentation, theme, s.scroll, &s.anki, back, side_panel) {
+    if let Err(e) = renderer.paint(&s.presentation, theme, s.scroll, back, side_panel) {
         eprintln!("chibipop: repaint for adding failed: {e:#}");
     }
     let url = anki_url.to_string();
@@ -1955,13 +1980,16 @@ fn push_drilldown(
         added: HashSet::new(),
         enabled: anki_enabled,
         adding: false,
+        checking: anki_enabled,
+        connected: anki_enabled,
+        failed: false,
     };
     s.scroll = 0;
     match show_presentation(
         popup, renderer, theme,
         max_h_pct, max_w_pct,
         &s.presentation, s.anchor,
-        0, &s.anki, true, side_panel,
+        0, true, side_panel,
     ) {
         Ok((rect, content_h, view_h)) => {
             s.popup = rect;
@@ -1995,7 +2023,7 @@ fn pop_history(
         popup, renderer, theme,
         max_h_pct, max_w_pct,
         &s.presentation, s.anchor,
-        0, &s.anki, back, side_panel,
+        0, back, side_panel,
     ) {
         Ok((rect, content_h, view_h)) => {
             s.popup = rect;

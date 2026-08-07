@@ -278,7 +278,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.deck = form.anki_deck.clone();
     out.anki.model = form.anki_model.clone();
     out.anki.add_key = form.anki_add_key.clone();
-    out.anki.field_map = form.field_map.clone();
+    if !form.field_map.is_empty() {
+        out.anki.field_map = form.field_map.clone();
+    }
     out.dictionaries.display_order = form
         .dict_names
         .iter()

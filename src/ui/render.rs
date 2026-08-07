@@ -70,6 +70,12 @@ pub struct AnkiPopupState {
     pub added: HashSet<String>,
     pub enabled: bool,
     pub adding: bool,
+    /// Dupe check in flight.
+    pub checking: bool,
+    /// AnkiConnect reachable.
+    pub connected: bool,
+    /// Last add-note failed.
+    pub failed: bool,
 }
 
 impl AnkiPopupState {
@@ -80,6 +86,9 @@ impl AnkiPopupState {
             added: HashSet::new(),
             enabled: false,
             adding: false,
+            checking: false,
+            connected: false,
+            failed: false,
         }
     }
 }
@@ -251,21 +260,19 @@ impl Renderer {
     /// `(width, view_h, content_h)`.
     ///
     /// All three in physical pixels.
-    #[allow(clippy::too_many_arguments)]
     pub fn measure(
         &mut self,
         p: &Presentation,
         theme: &Theme,
         max_w: i32,
         max_h: i32,
-        anki: &AnkiPopupState,
         show_back: bool,
         side_panel: bool,
     ) -> Result<(i32, i32, i32)> {
         let scale = self.dpi_scale();
         let dip_w = max_w as f32 / scale;
         let dip_h = max_h as f32 / scale;
-        let (elems, side) = build_elements(p, theme, anki, show_back, side_panel);
+        let (elems, side) = build_elements(p, theme, show_back, side_panel);
         let has_side = !side.is_empty();
         let side_extra = if has_side {
             SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
@@ -316,25 +323,23 @@ impl Renderer {
     /// Paints into the client rect.
     ///
     /// Device loss retries once.
-    #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &mut self,
         p: &Presentation,
         theme: &Theme,
         scroll: i32,
-        anki: &AnkiPopupState,
         show_back: bool,
         side_panel: bool,
     ) -> Result<()> {
         let (w, h) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(w, h).context("preparing the D2D render target")?;
 
-        if let Err(e) = self.paint_once(p, theme, w, h, scroll, anki, show_back, side_panel) {
+        if let Err(e) = self.paint_once(p, theme, w, h, scroll, show_back, side_panel) {
             if e.code() == D2DERR_RECREATE_TARGET {
                 self.target = None;
                 self.ensure_target(w, h)
                     .context("recreating the D2D render target after device loss")?;
-                self.paint_once(p, theme, w, h, scroll, anki, show_back, side_panel)
+                self.paint_once(p, theme, w, h, scroll, show_back, side_panel)
                     .context("repainting after device-lost recovery")?;
             } else {
                 return Err(e).context("D2D paint failed");
@@ -393,7 +398,6 @@ impl Renderer {
         w: i32,
         h: i32,
         scroll: i32,
-        anki: &AnkiPopupState,
         show_back: bool,
         side_panel: bool,
     ) -> windows::core::Result<()> {
@@ -411,7 +415,7 @@ impl Renderer {
         let scope = DrawScope { target: Some(target) };
 
         let draw_result: windows::core::Result<()> = (|| {
-            let (elems, side) = build_elements(p, theme, anki, show_back, side_panel);
+            let (elems, side) = build_elements(p, theme, show_back, side_panel);
             let has_side = !side.is_empty();
             let side_extra = if has_side {
                 SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
@@ -541,7 +545,6 @@ fn color_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
 fn build_elements(
     p: &Presentation,
     theme: &Theme,
-    anki: &AnkiPopupState,
     show_back: bool,
     side_panel: bool,
 ) -> (Vec<Elem>, Vec<SideEntry>) {
@@ -570,20 +573,12 @@ fn build_elements(
         let headword = card.written.clone()
             .or_else(|| card.reading.clone())
             .unwrap_or_default();
-        let expr = card.written.as_deref()
-            .or(card.reading.as_deref())
-            .unwrap_or("");
-        let known = anki.dupes.contains(expr)
-            || anki.added.contains(expr);
         if !headword.is_empty() {
-            let prefix = if known { "\u{2713} " } else { "" };
-            let text = format!("{prefix}{headword}");
-            let prefix_u16 = prefix.encode_utf16().count();
             out.push(Elem::Headword {
                 headword: headword.clone(),
-                prefix_u16,
+                prefix_u16: 0,
                 line: Line {
-                    text,
+                    text: headword.clone(),
                     color: theme.headword_text,
                     size: theme.headword_size,
                     top_gap: if show_back { LINE_GAP } else { 0.0 },
@@ -639,15 +634,9 @@ fn build_elements(
                     .or_else(|| row.reading.clone())
                     .unwrap_or_default();
                 if head.is_empty() { continue; }
-                let expr = row.written.as_deref()
-                    .or(row.reading.as_deref())
-                    .unwrap_or("");
-                let known = anki.dupes.contains(expr)
-                    || anki.added.contains(expr);
-                let mark = if known { "\u{2713} " } else { "" };
                 side.push(SideEntry {
                     idx: i,
-                    text: format!("{mark}{head}"),
+                    text: head,
                     color: theme.collapsed_text,
                 });
             }
@@ -657,16 +646,10 @@ fn build_elements(
                 let head = row.written.clone()
                     .or_else(|| row.reading.clone())
                     .unwrap_or_default();
-                let expr = row.written.as_deref()
-                    .or(row.reading.as_deref())
-                    .unwrap_or("");
-                let known = anki.dupes.contains(expr)
-                    || anki.added.contains(expr);
-                let mark = if known { "\u{2713} " } else { "" };
                 let text = if head.is_empty() {
-                    format!("{mark}{}", row.summary)
+                    row.summary.clone()
                 } else {
-                    format!("{mark}{head} \u{2014} {}", row.summary)
+                    format!("{head} \u{2014} {}", row.summary)
                 };
                 out.push(Elem::Collapsed(i, Line {
                     text,
@@ -690,15 +673,20 @@ pub(crate) fn anki_button_label(
     anki: &AnkiPopupState,
 ) -> Option<(String, (u8, u8, u8))> {
     if !anki.enabled { return None; }
+    if !anki.connected { return None; }
     let expr = p.top.as_ref()
         .and_then(|c| c.written.as_deref().or(c.reading.as_deref()))
         .unwrap_or("");
-    let (text, color) = if anki.adding {
-        ("\u{2026} Adding\u{2026}", theme.dimmed_text)
+    let (text, color) = if anki.checking {
+        ("Checking\u{2026}", theme.dimmed_text)
+    } else if anki.adding {
+        ("Adding\u{2026}", theme.dimmed_text)
+    } else if anki.failed {
+        ("\u{2717} Failed to add", theme.dimmed_text)
     } else if anki.added.contains(expr) {
         ("\u{2713} Added", theme.dimmed_text)
     } else if anki.dupes.contains(expr) {
-        ("\u{2713} Already in Anki", theme.dimmed_text)
+        ("\u{ff0b} Add to Anki (duplicate)", theme.dict_label_text)
     } else {
         ("\u{ff0b} Add to Anki", theme.dict_label_text)
     };
@@ -1033,7 +1021,7 @@ mod tests {
     #[test]
     fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
         let theme = Theme::dark();
-        let (elems, _) = build_elements(&one_card(&[], Some(7671)), &theme, &AnkiPopupState::disabled(), false, false);
+        let (elems, _) = build_elements(&one_card(&[], Some(7671)), &theme, false, false);
         match &elems[0] {
             Elem::Corner(line) => {
                 assert_eq!("freq 7671", line.text);
@@ -1045,14 +1033,14 @@ mod tests {
 
     #[test]
     fn an_unranked_entry_draws_no_corner() {
-        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
         assert!(!elems.iter().any(|e| matches!(e, Elem::Corner(_))));
     }
 
     #[test]
     fn part_of_speech_is_dimmed_metadata_not_body_text() {
         let theme = Theme::dark();
-        let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, &AnkiPopupState::disabled(), false, false);
+        let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, false, false);
         let pos = elems
             .iter()
             .find_map(|e| match e {
@@ -1069,7 +1057,7 @@ mod tests {
     /// 大辞林 has no POS markup.
     #[test]
     fn an_entry_without_part_of_speech_draws_no_pos_line() {
-        let (elems, _) = build_elements(&one_card(&[], Some(1)), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
+        let (elems, _) = build_elements(&one_card(&[], Some(1)), &Theme::dark(), false, false);
         assert!(!elems
             .iter()
             .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
@@ -1079,7 +1067,7 @@ mod tests {
 
     #[test]
     fn the_headword_is_a_headword_element_not_text() {
-        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
         assert!(
             elems.iter().any(|e| matches!(e, Elem::Headword { .. })),
             "expected a Headword element for the headword"
@@ -1088,7 +1076,18 @@ mod tests {
 
     #[test]
     fn headword_prefix_u16_is_zero_without_anki_marks() {
-        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
+        let hw = elems.iter().find_map(|e| match e {
+            Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
+            _ => None,
+        });
+        assert_eq!(Some(0), hw);
+    }
+
+    /// Dupes no longer mark headwords.
+    #[test]
+    fn headword_has_no_prefix_even_for_dupes() {
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
         let hw = elems.iter().find_map(|e| match e {
             Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
             _ => None,
@@ -1097,26 +1096,14 @@ mod tests {
     }
 
     #[test]
-    fn headword_prefix_u16_accounts_for_the_check_mark() {
-        let mut anki = AnkiPopupState { enabled: true, ..AnkiPopupState::disabled() };
-        anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
-        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &anki, false, false);
-        let hw = elems.iter().find_map(|e| match e {
-            Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
-            _ => None,
-        });
-        assert_eq!(Some(2), hw);
-    }
-
-    #[test]
     fn show_back_adds_a_back_button_element() {
-        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), true, false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), true, false);
         assert!(matches!(&elems[0], Elem::BackButton(_)));
     }
 
     #[test]
     fn no_back_button_without_show_back() {
-        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
         assert!(!elems.iter().any(|e| matches!(e, Elem::BackButton(_))));
     }
 
@@ -1140,7 +1127,7 @@ mod tests {
     #[test]
     fn anki_button_label_shows_add_by_default() {
         let theme = Theme::dark();
-        let anki = AnkiPopupState { enabled: true, ..AnkiPopupState::disabled() };
+        let anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
         assert_eq!("\u{ff0b} Add to Anki", text);
         assert_eq!(theme.dict_label_text, color);
@@ -1149,27 +1136,27 @@ mod tests {
     #[test]
     fn anki_button_label_shows_adding_while_in_flight() {
         let theme = Theme::dark();
-        let anki = AnkiPopupState { enabled: true, adding: true, ..AnkiPopupState::disabled() };
+        let anki = AnkiPopupState { enabled: true, connected: true, adding: true, ..AnkiPopupState::disabled() };
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
-        assert_eq!("\u{2026} Adding\u{2026}", text);
+        assert_eq!("Adding\u{2026}", text);
         assert_eq!(theme.dimmed_text, color);
     }
 
     #[test]
     fn anki_button_label_flags_a_known_dupe() {
         let theme = Theme::dark();
-        let mut anki = AnkiPopupState { enabled: true, ..AnkiPopupState::disabled() };
-        anki.dupes.insert("雑談".to_string());
+        let mut anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+        anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
-        assert_eq!("\u{2713} Already in Anki", text);
-        assert_eq!(theme.dimmed_text, color);
+        assert_eq!("\u{ff0b} Add to Anki (duplicate)", text);
+        assert_eq!(theme.dict_label_text, color);
     }
 
     #[test]
     fn anki_button_label_shows_added_after_success() {
         let theme = Theme::dark();
-        let mut anki = AnkiPopupState { enabled: true, ..AnkiPopupState::disabled() };
-        anki.added.insert("雑談".to_string());
+        let mut anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+        anki.added.insert("\u{96D1}\u{8AC7}".to_string());
         let (text, _) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
         assert_eq!("\u{2713} Added", text);
     }
@@ -1180,13 +1167,62 @@ mod tests {
         let theme = Theme::dark();
         let mut anki = AnkiPopupState {
             enabled: true,
+            connected: true,
             adding: true,
             ..AnkiPopupState::disabled()
         };
-        anki.dupes.insert("雑談".to_string());
-        anki.added.insert("雑談".to_string());
+        anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
+        anki.added.insert("\u{96D1}\u{8AC7}".to_string());
         let (text, _) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
-        assert_eq!("\u{2026} Adding\u{2026}", text);
+        assert_eq!("Adding\u{2026}", text);
+    }
+
+    /// Checking outranks the add label.
+    #[test]
+    fn anki_button_label_shows_checking() {
+        let theme = Theme::dark();
+        let anki = AnkiPopupState {
+            enabled: true, connected: true, checking: true,
+            ..AnkiPopupState::disabled()
+        };
+        let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
+        assert_eq!("Checking\u{2026}", text);
+        assert_eq!(theme.dimmed_text, color);
+    }
+
+    #[test]
+    fn anki_button_label_shows_failed() {
+        let theme = Theme::dark();
+        let anki = AnkiPopupState {
+            enabled: true, connected: true, failed: true,
+            ..AnkiPopupState::disabled()
+        };
+        let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
+        assert_eq!("\u{2717} Failed to add", text);
+        assert_eq!(theme.dimmed_text, color);
+    }
+
+    /// Disconnected hides the button.
+    #[test]
+    fn anki_button_label_is_none_when_disconnected() {
+        let anki = AnkiPopupState {
+            enabled: true, connected: false,
+            ..AnkiPopupState::disabled()
+        };
+        assert!(anki_button_label(&one_card(&[], None), &Theme::dark(), &anki).is_none());
+    }
+
+    /// No marks on collapsed rows.
+    #[test]
+    fn collapsed_rows_carry_no_dupe_marks() {
+        let (elems, _) = build_elements(
+            &with_collapsed(), &Theme::dark(), false, false,
+        );
+        for e in &elems {
+            if let Elem::Collapsed(_, line) = e {
+                assert!(!line.text.starts_with('\u{2713}'), "no check marks on collapsed rows");
+            }
+        }
     }
 
     #[test]
@@ -1285,8 +1321,7 @@ mod tests {
     #[test]
     fn side_panel_false_keeps_collapsed_rows_inline() {
         let (elems, side) = build_elements(
-            &with_collapsed(), &Theme::dark(),
-            &AnkiPopupState::disabled(), false, false,
+            &with_collapsed(), &Theme::dark(), false, false,
         );
         assert!(side.is_empty());
         assert!(elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
@@ -1295,8 +1330,7 @@ mod tests {
     #[test]
     fn side_panel_true_moves_collapsed_rows_to_side() {
         let (elems, side) = build_elements(
-            &with_collapsed(), &Theme::dark(),
-            &AnkiPopupState::disabled(), false, true,
+            &with_collapsed(), &Theme::dark(), false, true,
         );
         assert!(!elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
         assert_eq!(2, side.len());
@@ -1306,8 +1340,7 @@ mod tests {
     #[test]
     fn side_entries_carry_expand_indices() {
         let (_, side) = build_elements(
-            &with_collapsed(), &Theme::dark(),
-            &AnkiPopupState::disabled(), false, true,
+            &with_collapsed(), &Theme::dark(), false, true,
         );
         assert_eq!(0, side[0].idx);
         assert_eq!(1, side[1].idx);
@@ -1316,8 +1349,7 @@ mod tests {
     #[test]
     fn side_entries_show_headword_only() {
         let (_, side) = build_elements(
-            &with_collapsed(), &Theme::dark(),
-            &AnkiPopupState::disabled(), false, true,
+            &with_collapsed(), &Theme::dark(), false, true,
         );
         assert!(!side[0].text.contains("noise"));
         assert!(!side[1].text.contains("magazine"));
