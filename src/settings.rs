@@ -21,6 +21,7 @@ pub struct SettingsForm {
     pub summary_chars: usize,
     pub highlight_match: bool,
     pub scroll_popup: bool,
+    pub side_panel: bool,
     pub exclude_from_capture: bool,
     /// Live names, not substrings.
     pub dict_names: Vec<String>,
@@ -233,6 +234,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         summary_chars: cfg.popup.summary_chars,
         highlight_match: cfg.popup.highlight_match,
         scroll_popup: cfg.popup.scroll_popup,
+        side_panel: cfg.popup.side_panel,
         exclude_from_capture: cfg.popup.exclude_from_capture,
         dict_names: ordered.iter().map(|d| d.name.clone()).collect(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
@@ -266,6 +268,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup.summary_chars = form.summary_chars.clamp(SUMMARY_RANGE.0, SUMMARY_RANGE.1);
     out.popup.highlight_match = form.highlight_match;
     out.popup.scroll_popup = form.scroll_popup;
+    out.popup.side_panel = form.side_panel;
     out.popup.exclude_from_capture = form.exclude_from_capture;
     out.ocr.max_ocr_passes = form.max_ocr_passes.clamp(PASSES_RANGE.0, PASSES_RANGE.1);
     out.ocr.prefer_vertical = form.prefer_vertical;
@@ -440,6 +443,7 @@ mod tests {
         cfg.popup.summary_chars = 25;
         cfg.popup.highlight_match = false;
         cfg.popup.scroll_popup = false;
+        cfg.popup.side_panel = true;
         cfg.popup.exclude_from_capture = true;
         cfg.ocr.max_ocr_passes = 3;
         cfg.ocr.prefer_vertical = true;

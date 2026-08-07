@@ -38,10 +38,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetCursorPos, GetMessageW, IsDialogMessageW, IsWindowVisible, KillTimer,
-    PostQuitMessage,
-    PostThreadMessageW, SetTimer, ShowWindow, TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE,
-    WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
+    DispatchMessageW, GetCursorPos, GetMessageW, IDC_HAND, IsDialogMessageW, IsWindowVisible,
+    KillTimer, LoadCursorW, PostQuitMessage, PostThreadMessageW, SetCursor, SetTimer, ShowWindow,
+    TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
+    WM_TIMER,
 };
 
 /// Worker pushed a result.
@@ -716,6 +716,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let max_height_percent = i32::from(cfg.popup.max_height_percent);
     let max_width_percent = i32::from(cfg.popup.max_width_percent);
     let scroll_popup = cfg.popup.scroll_popup;
+    let side_panel = cfg.popup.side_panel;
     let summary_chars = cfg.popup.summary_chars;
     let anki_enabled = cfg.anki.enabled;
     let anki_url = cfg.anki.url.clone();
@@ -901,6 +902,19 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             Hooks::set_click_armed(over_popup_or_btn);
             Hooks::set_add_armed(shown.is_some() && anki_enabled);
 
+            if over_popup {
+                if let Some(s) = shown.as_ref() {
+                    let lx = live.x - s.popup.x;
+                    let ly = live.y - s.popup.y;
+                    let clickable = renderer.hit_test(lx, ly, s.scroll).is_some();
+                    if clickable {
+                        if let Ok(cur) = unsafe { LoadCursorW(None, IDC_HAND) } {
+                            unsafe { SetCursor(Some(cur)) };
+                        }
+                    }
+                }
+            }
+
             armed_ticks = if armed { armed_ticks + 1 } else { 0 };
             if armed_ticks == ARM_WARN_TICKS {
                 eprintln!(
@@ -921,7 +935,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if next != s.scroll {
                         s.scroll = next;
                         let back = !s.history.is_empty();
-                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, &s.anki, back) {
+                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, &s.anki, back, side_panel) {
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
                         }
                     }
@@ -948,6 +962,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                     0,
                                     &s.anki,
                                     has_history,
+                                    side_panel,
                                 ) {
                                     Ok((rect, content_h, view_h)) => {
                                         s.popup = rect;
@@ -973,7 +988,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 pop_history(
                                     s, &popup, &mut renderer, &theme,
                                     max_height_percent, max_width_percent,
-                                    anki_button.as_ref(),
+                                    anki_button.as_ref(), side_panel,
                                 );
                             }
                         }
@@ -986,7 +1001,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     start_add_to_anki(
                         s, &mut renderer, &theme,
                         &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                        &add_tx, main_tid,
+                        &add_tx, main_tid, side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -997,7 +1012,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     start_add_to_anki(
                         s, &mut renderer, &theme,
                         &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                        &add_tx, main_tid,
+                        &add_tx, main_tid, side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -1010,7 +1025,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     pop_history(
                         s, &popup, &mut renderer, &theme,
                         max_height_percent, max_width_percent,
-                        anki_button.as_ref(),
+                        anki_button.as_ref(), side_panel,
                     );
                 }
             }
@@ -1167,7 +1182,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         push_drilldown(
                             s, *pres, &popup, &mut renderer, &theme,
                             max_height_percent, max_width_percent,
-                            anki_enabled,
+                            anki_enabled, side_panel,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                         if anki_enabled {
@@ -1216,6 +1231,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         result.outcome,
                         cfg.debug.show_lookup_log,
                         anki_enabled,
+                        side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), shown.as_ref(), &theme);
                     if new_popup && anki_enabled {
@@ -1277,6 +1293,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             s.scroll,
                             &s.anki,
                             back,
+                            side_panel,
                         ) {
                             Ok((rect, content_h, view_h)) => {
                                 s.popup = rect;
@@ -1314,6 +1331,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         s.scroll,
                         &s.anki,
                         back,
+                        side_panel,
                     ) {
                         Ok((rect, content_h, view_h)) => {
                             s.popup = rect;
@@ -1637,6 +1655,7 @@ fn handle_worker_outcome(
     outcome: WorkerOutcome,
     log: bool,
     anki_enabled: bool,
+    side_panel: bool,
 ) -> bool {
     match outcome {
         WorkerOutcome::Hide => {
@@ -1685,6 +1704,7 @@ fn handle_worker_outcome(
                 0,
                 &anki,
                 false,
+                side_panel,
             ) {
                 Err(e) => {
                     eprintln!("chibipop: showing the popup failed: {e:#}");
@@ -1737,6 +1757,7 @@ fn show_presentation(
     scroll: i32,
     anki: &AnkiPopupState,
     show_back: bool,
+    side_panel: bool,
 ) -> Result<(PhysRect, i32, i32)> {
     let monitor = monitor_rect_for(anchor);
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
@@ -1744,12 +1765,13 @@ fn show_presentation(
 
     // view_h, not content_h, below.
     let (w, view_h, content_h) = renderer
-        .measure(presentation, theme, max_w, max_h, anki, show_back)
+        .measure(presentation, theme, max_w, max_h, anki, show_back, side_panel)
         .context("measuring popup content")?;
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
-    renderer.paint(presentation, theme, scroll, anki, show_back).context("painting the popup")?;
+    renderer.paint(presentation, theme, scroll, anki, show_back, side_panel)
+        .context("painting the popup")?;
     Ok((rect, content_h, view_h))
 }
 
@@ -1765,6 +1787,7 @@ fn start_add_to_anki(
     anki_field_map: &[crate::config::FieldMapping],
     add_tx: &mpsc::Sender<AddNoteResult>,
     main_tid: u32,
+    side_panel: bool,
 ) {
     let info = s.presentation.top.as_ref().map(|card| {
         let expr = card.written.as_deref()
@@ -1780,7 +1803,7 @@ fn start_add_to_anki(
     }
     s.anki.adding = true;
     let back = !s.history.is_empty();
-    if let Err(e) = renderer.paint(&s.presentation, theme, s.scroll, &s.anki, back) {
+    if let Err(e) = renderer.paint(&s.presentation, theme, s.scroll, &s.anki, back, side_panel) {
         eprintln!("chibipop: repaint for adding failed: {e:#}");
     }
     let url = anki_url.to_string();
@@ -1920,6 +1943,7 @@ fn push_drilldown(
     max_h_pct: i32,
     max_w_pct: i32,
     anki_enabled: bool,
+    side_panel: bool,
 ) {
     s.history.push(HistoryEntry {
         presentation: s.presentation.clone(),
@@ -1937,7 +1961,7 @@ fn push_drilldown(
         popup, renderer, theme,
         max_h_pct, max_w_pct,
         &s.presentation, s.anchor,
-        0, &s.anki, true,
+        0, &s.anki, true, side_panel,
     ) {
         Ok((rect, content_h, view_h)) => {
             s.popup = rect;
@@ -1960,6 +1984,7 @@ fn pop_history(
     max_h_pct: i32,
     max_w_pct: i32,
     anki_button: Option<&AnkiButton>,
+    side_panel: bool,
 ) {
     let Some(entry) = s.history.pop() else { return };
     s.presentation = entry.presentation;
@@ -1970,7 +1995,7 @@ fn pop_history(
         popup, renderer, theme,
         max_h_pct, max_w_pct,
         &s.presentation, s.anchor,
-        0, &s.anki, back,
+        0, &s.anki, back, side_panel,
     ) {
         Ok((rect, content_h, view_h)) => {
             s.popup = rect;
@@ -2010,6 +2035,7 @@ mod tests {
             font: font.to_string(),
             highlight_match: true,
             scroll_popup: true,
+            side_panel: false,
         }
     }
 

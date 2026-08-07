@@ -78,6 +78,7 @@ const ID_TAB: i32 = 130;
 const ID_TRIGGER_KEY: i32 = 131;
 const ID_PREFER_VERT: i32 = 132;
 const ID_ANKI_ADD_KEY: i32 = 133;
+const ID_SIDE_PANEL: i32 = 134;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -1489,6 +1490,8 @@ impl SettingsWindow {
             y += ROW_H;
             gen.push(check("Scroll long entries with the wheel", ID_SCROLL, form.scroll_popup, y)?);
             y += ROW_H;
+            gen.push(check("Show related words beside the popup", ID_SIDE_PANEL, form.side_panel, y)?);
+            y += ROW_H;
             gen.push(check("Hide the popup from screen capture", ID_EXCLUDE,
                   form.exclude_from_capture, y)?);
             y += ROW_H + 18;
@@ -1647,8 +1650,11 @@ impl SettingsWindow {
             ank.push(child(h, w!("BUTTON"), &add_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_ADD_KEY, f)?);
             y += ROW_H;
-            ank.push(child(h, w!("BUTTON"), "Test connection", WS_TABSTOP,
-                  PAD, y, 116, ROW_H, ID_ANKI_TEST, f)?);
+            ank.push(child(h, w!("BUTTON"), "Refresh", WS_TABSTOP,
+                  PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
+            child(h, w!("STATIC"),
+                "Click to load decks and field mappings from Anki",
+                WINDOW_STYLE(0), PAD + 88, y + 2, WIN_W - 2 * PAD - 96, ROW_H, 0, f)?;
             y += ROW_H + 8 + GROUP_GAP;
             let y_ank = y;
             y = y_general.max(y_dict).max(y_ocr).max(y_ank);
@@ -1775,6 +1781,7 @@ impl SettingsWindow {
                                     template.summary_chars as i64) as usize,
                 highlight_match: checked(ID_HIGHLIGHT),
                 scroll_popup: checked(ID_SCROLL),
+                side_panel: checked(ID_SIDE_PANEL),
                 exclude_from_capture: checked(ID_EXCLUDE),
                 dict_names,
                 max_ocr_passes: pick(&self.passes, ID_PASSES,

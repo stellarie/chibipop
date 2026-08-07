@@ -141,6 +141,9 @@ pub struct PopupConfig {
     /// Wheel-scroll a long popup.
     #[serde(default = "default_scroll_popup")]
     pub scroll_popup: bool,
+    /// Collapsed rows beside, not below.
+    #[serde(default)]
+    pub side_panel: bool,
 }
 
 /// 25% of the monitor.
@@ -292,6 +295,7 @@ impl Default for Config {
                 font: "Yu Gothic UI".to_string(),
                 highlight_match: default_highlight_match(),
                 scroll_popup: default_scroll_popup(),
+                side_panel: false,
             },
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
@@ -616,6 +620,36 @@ mod tests {
         c.popup.scroll_popup = false;
         c.save(&p).unwrap();
         assert!(!load_or_create(&p).unwrap().popup.scroll_popup);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn side_panel_defaults_off() {
+        assert!(!Config::default().popup.side_panel);
+    }
+
+    #[test]
+    fn enabled_side_panel_round_trips() {
+        let p = tmp("side_on");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.popup.side_panel = true;
+        c.save(&p).unwrap();
+        assert!(load_or_create(&p).unwrap().popup.side_panel);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_config_without_side_panel_loads_with_it_off() {
+        let p = tmp("no_side_panel");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-side_panel config must load");
+        assert!(!c.popup.side_panel);
         let _ = std::fs::remove_file(&p);
     }
 

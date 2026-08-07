@@ -28,6 +28,10 @@ const CORNER_GAP: f32 = 8.0;
 /// Gap around the rule.
 const SEPARATOR_MARGIN: f32 = 10.0;
 const SEPARATOR_THICKNESS: f32 = 1.0;
+/// Fixed "See also" column width.
+const SIDE_PANEL_W: f32 = 110.0;
+/// Gap before the side panel.
+const SIDE_GAP: f32 = 12.0;
 
 /// Clickable region in the popup.
 #[derive(Debug, Clone)]
@@ -108,6 +112,13 @@ enum Elem {
     },
     /// Navigate back in history.
     BackButton(Line),
+}
+
+/// One "See also" headword.
+struct SideEntry {
+    idx: usize,
+    text: String,
+    color: (u8, u8, u8),
 }
 
 /// Overflow past the view, or 0.
@@ -240,6 +251,7 @@ impl Renderer {
     /// `(width, view_h, content_h)`.
     ///
     /// All three in physical pixels.
+    #[allow(clippy::too_many_arguments)]
     pub fn measure(
         &mut self,
         p: &Presentation,
@@ -248,12 +260,19 @@ impl Renderer {
         max_h: i32,
         anki: &AnkiPopupState,
         show_back: bool,
+        side_panel: bool,
     ) -> Result<(i32, i32, i32)> {
         let scale = self.dpi_scale();
         let dip_w = max_w as f32 / scale;
         let dip_h = max_h as f32 / scale;
-        let elems = build_elements(p, theme, anki, show_back);
-        let content_w = (dip_w - 2.0 * theme.padding as f32).max(0.0);
+        let (elems, side) = build_elements(p, theme, anki, show_back, side_panel);
+        let has_side = !side.is_empty();
+        let side_extra = if has_side {
+            SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
+        } else {
+            0.0
+        };
+        let content_w = (dip_w - 2.0 * theme.padding as f32 - side_extra).max(0.0);
         let used_h = layout_pass(
             &self.dwrite_factory,
             &self.formats,
@@ -267,10 +286,28 @@ impl Renderer {
             None,
         )
         .context("measuring popup content")?;
-        let content_h = used_h.ceil() + 2.0 * theme.padding as f32;
+        let side_h = if has_side {
+            side_measure(
+                &self.dwrite_factory,
+                &self.formats,
+                &theme.font_name,
+                theme.collapsed_size,
+                &side,
+                SIDE_PANEL_W,
+            )?
+        } else {
+            0.0
+        };
+        let body_h = used_h.max(side_h);
+        let content_h = body_h.ceil() + 2.0 * theme.padding as f32;
         let view_h = content_h.min(dip_h);
+        let total_w = if has_side {
+            ((content_w + side_extra + 2.0 * theme.padding as f32) * scale).ceil() as i32
+        } else {
+            max_w
+        };
         Ok((
-            max_w,
+            total_w,
             (view_h * scale).ceil() as i32,
             (content_h * scale).ceil() as i32,
         ))
@@ -279,6 +316,7 @@ impl Renderer {
     /// Paints into the client rect.
     ///
     /// Device loss retries once.
+    #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &mut self,
         p: &Presentation,
@@ -286,16 +324,17 @@ impl Renderer {
         scroll: i32,
         anki: &AnkiPopupState,
         show_back: bool,
+        side_panel: bool,
     ) -> Result<()> {
         let (w, h) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(w, h).context("preparing the D2D render target")?;
 
-        if let Err(e) = self.paint_once(p, theme, w, h, scroll, anki, show_back) {
+        if let Err(e) = self.paint_once(p, theme, w, h, scroll, anki, show_back, side_panel) {
             if e.code() == D2DERR_RECREATE_TARGET {
                 self.target = None;
                 self.ensure_target(w, h)
                     .context("recreating the D2D render target after device loss")?;
-                self.paint_once(p, theme, w, h, scroll, anki, show_back)
+                self.paint_once(p, theme, w, h, scroll, anki, show_back, side_panel)
                     .context("repainting after device-lost recovery")?;
             } else {
                 return Err(e).context("D2D paint failed");
@@ -356,6 +395,7 @@ impl Renderer {
         scroll: i32,
         anki: &AnkiPopupState,
         show_back: bool,
+        side_panel: bool,
     ) -> windows::core::Result<()> {
         let target = self
             .target
@@ -371,7 +411,13 @@ impl Renderer {
         let scope = DrawScope { target: Some(target) };
 
         let draw_result: windows::core::Result<()> = (|| {
-            let elems = build_elements(p, theme, anki, show_back);
+            let (elems, side) = build_elements(p, theme, anki, show_back, side_panel);
+            let has_side = !side.is_empty();
+            let side_extra = if has_side {
+                SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
+            } else {
+                0.0
+            };
 
             unsafe {
                 target.Clear(Some(&color_f(theme.background)));
@@ -388,7 +434,7 @@ impl Renderer {
                 target.DrawRoundedRectangle(&panel, &border_brush, 1.0, None);
             }
 
-            let content_w = (w - 2 * theme.padding).max(0) as f32;
+            let main_w = (w as f32 - 2.0 * theme.padding as f32 - side_extra).max(0.0);
             let origin = theme.padding as f32;
 
             self.hit_rects.borrow_mut().clear();
@@ -401,10 +447,38 @@ impl Renderer {
                 theme,
                 origin,
                 origin,
-                content_w,
+                main_w,
                 scroll as f32,
                 Some(&self.hit_rects),
             )?;
+
+            if has_side {
+                let sep_x = origin + main_w + SIDE_GAP;
+                let sep_brush =
+                    unsafe { target.CreateSolidColorBrush(&color_f(theme.separator), None) }?;
+                let sep = D2D_RECT_F {
+                    left: sep_x,
+                    top: origin,
+                    right: sep_x + SEPARATOR_THICKNESS,
+                    bottom: (h - theme.padding) as f32,
+                };
+                unsafe { target.FillRectangle(&sep, &sep_brush) };
+
+                let col_x = sep_x + SEPARATOR_THICKNESS + SIDE_GAP;
+                side_paint(
+                    &self.dwrite_factory,
+                    &self.formats,
+                    target,
+                    &theme.font_name,
+                    theme,
+                    &side,
+                    col_x,
+                    origin,
+                    SIDE_PANEL_W,
+                    scroll as f32,
+                    &self.hit_rects,
+                )?;
+            }
 
             let track_h = h - 2 * theme.padding;
             let total = used.ceil() as i32 + 2 * theme.padding;
@@ -469,7 +543,8 @@ fn build_elements(
     theme: &Theme,
     anki: &AnkiPopupState,
     show_back: bool,
-) -> Vec<Elem> {
+    side_panel: bool,
+) -> (Vec<Elem>, Vec<SideEntry>) {
     let mut out = Vec::new();
 
     if show_back {
@@ -555,33 +630,55 @@ fn build_elements(
         }
     }
 
+    let mut side = Vec::new();
+
     if !p.collapsed.is_empty() {
-        out.push(Elem::Separator { top_gap: SEPARATOR_MARGIN });
-        for (i, row) in p.collapsed.iter().enumerate() {
-            let head = row.written.clone()
-                .or_else(|| row.reading.clone())
-                .unwrap_or_default();
-            let expr = row.written.as_deref()
-                .or(row.reading.as_deref())
-                .unwrap_or("");
-            let known = anki.dupes.contains(expr)
-                || anki.added.contains(expr);
-            let mark = if known { "\u{2713} " } else { "" };
-            let text = if head.is_empty() {
-                format!("{mark}{}", row.summary)
-            } else {
-                format!("{mark}{head} \u{2014} {}", row.summary)
-            };
-            out.push(Elem::Collapsed(i, Line {
-                text,
-                color: theme.collapsed_text,
-                size: theme.collapsed_size,
-                top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
-            }));
+        if side_panel {
+            for (i, row) in p.collapsed.iter().enumerate() {
+                let head = row.written.clone()
+                    .or_else(|| row.reading.clone())
+                    .unwrap_or_default();
+                if head.is_empty() { continue; }
+                let expr = row.written.as_deref()
+                    .or(row.reading.as_deref())
+                    .unwrap_or("");
+                let known = anki.dupes.contains(expr)
+                    || anki.added.contains(expr);
+                let mark = if known { "\u{2713} " } else { "" };
+                side.push(SideEntry {
+                    idx: i,
+                    text: format!("{mark}{head}"),
+                    color: theme.collapsed_text,
+                });
+            }
+        } else {
+            out.push(Elem::Separator { top_gap: SEPARATOR_MARGIN });
+            for (i, row) in p.collapsed.iter().enumerate() {
+                let head = row.written.clone()
+                    .or_else(|| row.reading.clone())
+                    .unwrap_or_default();
+                let expr = row.written.as_deref()
+                    .or(row.reading.as_deref())
+                    .unwrap_or("");
+                let known = anki.dupes.contains(expr)
+                    || anki.added.contains(expr);
+                let mark = if known { "\u{2713} " } else { "" };
+                let text = if head.is_empty() {
+                    format!("{mark}{}", row.summary)
+                } else {
+                    format!("{mark}{head} \u{2014} {}", row.summary)
+                };
+                out.push(Elem::Collapsed(i, Line {
+                    text,
+                    color: theme.collapsed_text,
+                    size: theme.collapsed_size,
+                    top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
+                }));
+            }
         }
     }
 
-    out
+    (out, side)
 }
 
 /// The Anki button's label.
@@ -812,6 +909,101 @@ fn build_text_layout(
     Ok((layout, metrics))
 }
 
+/// Height of the side column.
+fn side_measure(
+    dwrite: &IDWriteFactory,
+    formats: &RefCell<FormatCache>,
+    font: &str,
+    size: f32,
+    entries: &[SideEntry],
+    col_w: f32,
+) -> windows::core::Result<f32> {
+    let format = text_format(dwrite, formats, font, size)?;
+    let heading: Vec<u16> = "See also".encode_utf16().collect();
+    let layout = unsafe {
+        dwrite.CreateTextLayout(&heading, &format, col_w.max(1.0), f32::MAX)
+    }?;
+    let mut m = DWRITE_TEXT_METRICS::default();
+    unsafe { layout.GetMetrics(&mut m) }?;
+    let mut y = m.height + LINE_GAP;
+
+    for entry in entries {
+        let wide: Vec<u16> = entry.text.encode_utf16().collect();
+        let layout = unsafe {
+            dwrite.CreateTextLayout(&wide, &format, col_w.max(1.0), f32::MAX)
+        }?;
+        let mut em = DWRITE_TEXT_METRICS::default();
+        unsafe { layout.GetMetrics(&mut em) }?;
+        y += LINE_GAP + em.height;
+    }
+    Ok(y)
+}
+
+/// Draws the "See also" column.
+#[allow(clippy::too_many_arguments)]
+fn side_paint(
+    dwrite: &IDWriteFactory,
+    formats: &RefCell<FormatCache>,
+    target: &ID2D1HwndRenderTarget,
+    font: &str,
+    theme: &Theme,
+    entries: &[SideEntry],
+    x: f32,
+    origin_y: f32,
+    col_w: f32,
+    scroll: f32,
+    hit_out: &RefCell<Vec<HitRect>>,
+) -> windows::core::Result<()> {
+    let format = text_format(dwrite, formats, font, theme.collapsed_size)?;
+    let dim_brush = unsafe {
+        target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None)
+    }?;
+
+    let heading: Vec<u16> = "See also".encode_utf16().collect();
+    let layout = unsafe {
+        dwrite.CreateTextLayout(&heading, &format, col_w.max(1.0), f32::MAX)
+    }?;
+    let mut m = DWRITE_TEXT_METRICS::default();
+    unsafe { layout.GetMetrics(&mut m) }?;
+    let mut y = 0.0f32;
+    unsafe {
+        target.DrawTextLayout(
+            Vector2 { X: x, Y: origin_y + y - scroll },
+            &layout, &dim_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+    }
+    y += m.height + LINE_GAP;
+
+    for entry in entries {
+        let brush = unsafe {
+            target.CreateSolidColorBrush(&color_f(entry.color), None)
+        }?;
+        let wide: Vec<u16> = entry.text.encode_utf16().collect();
+        let layout = unsafe {
+            dwrite.CreateTextLayout(&wide, &format, col_w.max(1.0), f32::MAX)
+        }?;
+        let mut em = DWRITE_TEXT_METRICS::default();
+        unsafe { layout.GetMetrics(&mut em) }?;
+        hit_out.borrow_mut().push(HitRect {
+            x: Some(x),
+            y: origin_y + y,
+            w: Some(col_w),
+            h: em.height,
+            action: HitAction::ExpandEntry(entry.idx),
+        });
+        unsafe {
+            target.DrawTextLayout(
+                Vector2 { X: x, Y: origin_y + y - scroll },
+                &layout, &brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
+        y += LINE_GAP + em.height;
+    }
+    Ok(())
+}
+
 /// Covers `build_elements` only.
 #[cfg(test)]
 mod tests {
@@ -841,7 +1033,7 @@ mod tests {
     #[test]
     fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
         let theme = Theme::dark();
-        let elems = build_elements(&one_card(&[], Some(7671)), &theme, &AnkiPopupState::disabled(), false);
+        let (elems, _) = build_elements(&one_card(&[], Some(7671)), &theme, &AnkiPopupState::disabled(), false, false);
         match &elems[0] {
             Elem::Corner(line) => {
                 assert_eq!("freq 7671", line.text);
@@ -853,14 +1045,14 @@ mod tests {
 
     #[test]
     fn an_unranked_entry_draws_no_corner() {
-        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
         assert!(!elems.iter().any(|e| matches!(e, Elem::Corner(_))));
     }
 
     #[test]
     fn part_of_speech_is_dimmed_metadata_not_body_text() {
         let theme = Theme::dark();
-        let elems = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, &AnkiPopupState::disabled(), false);
+        let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, &AnkiPopupState::disabled(), false, false);
         let pos = elems
             .iter()
             .find_map(|e| match e {
@@ -877,7 +1069,7 @@ mod tests {
     /// 大辞林 has no POS markup.
     #[test]
     fn an_entry_without_part_of_speech_draws_no_pos_line() {
-        let elems = build_elements(&one_card(&[], Some(1)), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        let (elems, _) = build_elements(&one_card(&[], Some(1)), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
         assert!(!elems
             .iter()
             .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
@@ -887,7 +1079,7 @@ mod tests {
 
     #[test]
     fn the_headword_is_a_headword_element_not_text() {
-        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
         assert!(
             elems.iter().any(|e| matches!(e, Elem::Headword { .. })),
             "expected a Headword element for the headword"
@@ -896,7 +1088,7 @@ mod tests {
 
     #[test]
     fn headword_prefix_u16_is_zero_without_anki_marks() {
-        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
         let hw = elems.iter().find_map(|e| match e {
             Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
             _ => None,
@@ -908,7 +1100,7 @@ mod tests {
     fn headword_prefix_u16_accounts_for_the_check_mark() {
         let mut anki = AnkiPopupState { enabled: true, ..AnkiPopupState::disabled() };
         anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
-        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &anki, false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &anki, false, false);
         let hw = elems.iter().find_map(|e| match e {
             Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
             _ => None,
@@ -918,13 +1110,13 @@ mod tests {
 
     #[test]
     fn show_back_adds_a_back_button_element() {
-        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), true);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), true, false);
         assert!(matches!(&elems[0], Elem::BackButton(_)));
     }
 
     #[test]
     fn no_back_button_without_show_back() {
-        let elems = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false);
+        let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), &AnkiPopupState::disabled(), false, false);
         assert!(!elems.iter().any(|e| matches!(e, Elem::BackButton(_))));
     }
 
@@ -1057,5 +1249,77 @@ mod tests {
         let (top, h) = scrollbar_thumb(10, 600, 300, 0).unwrap();
         assert!(h <= 10, "thumb {h} in a 10px track");
         assert!(top + h <= 10);
+    }
+
+    fn with_collapsed() -> Presentation {
+        use crate::present::CollapsedRow;
+        let card = Card {
+            written: Some("\u{96D1}\u{8AC7}".into()),
+            reading: Some("\u{3056}\u{3064}\u{3060}\u{3093}".into()),
+            pos: vec![],
+            freq: None,
+            blocks: vec![GlossBlock {
+                dict_name: "Jitendex".into(),
+                glosses: vec!["chatting".into()],
+            }],
+            match_len: 2,
+        };
+        Presentation {
+            top: Some(card.clone()),
+            collapsed: vec![
+                CollapsedRow {
+                    written: Some("\u{96D1}\u{97F3}".into()),
+                    reading: Some("\u{3056}\u{3064}\u{304A}\u{3093}".into()),
+                    summary: "noise".into(),
+                },
+                CollapsedRow {
+                    written: Some("\u{96D1}\u{8A8C}".into()),
+                    reading: Some("\u{3056}\u{3063}\u{3057}".into()),
+                    summary: "magazine".into(),
+                },
+            ],
+            all_cards: vec![card],
+        }
+    }
+
+    #[test]
+    fn side_panel_false_keeps_collapsed_rows_inline() {
+        let (elems, side) = build_elements(
+            &with_collapsed(), &Theme::dark(),
+            &AnkiPopupState::disabled(), false, false,
+        );
+        assert!(side.is_empty());
+        assert!(elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
+    }
+
+    #[test]
+    fn side_panel_true_moves_collapsed_rows_to_side() {
+        let (elems, side) = build_elements(
+            &with_collapsed(), &Theme::dark(),
+            &AnkiPopupState::disabled(), false, true,
+        );
+        assert!(!elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
+        assert_eq!(2, side.len());
+        assert!(side[0].text.contains('\u{96D1}'));
+    }
+
+    #[test]
+    fn side_entries_carry_expand_indices() {
+        let (_, side) = build_elements(
+            &with_collapsed(), &Theme::dark(),
+            &AnkiPopupState::disabled(), false, true,
+        );
+        assert_eq!(0, side[0].idx);
+        assert_eq!(1, side[1].idx);
+    }
+
+    #[test]
+    fn side_entries_show_headword_only() {
+        let (_, side) = build_elements(
+            &with_collapsed(), &Theme::dark(),
+            &AnkiPopupState::disabled(), false, true,
+        );
+        assert!(!side[0].text.contains("noise"));
+        assert!(!side[1].text.contains("magazine"));
     }
 }

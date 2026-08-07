@@ -336,6 +336,13 @@ unsafe extern "system" fn btn_wndproc(
             BTN_CLICKED.store(true, Ordering::SeqCst);
             LRESULT(0)
         }
+        WM_SETCURSOR => {
+            // SAFETY: system cursor, always valid.
+            if let Ok(cur) = unsafe { LoadCursorW(None, IDC_HAND) } {
+                unsafe { SetCursor(Some(cur)) };
+            }
+            LRESULT(1)
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
