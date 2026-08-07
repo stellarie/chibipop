@@ -150,14 +150,14 @@ const STATUS_H: i32 = 58;
 
 // ---- field-map columns ----
 
-const COL_GAP: i32 = 10;
+const COL_GAP: i32 = 12;
 const COL_AREA_W: i32 = WIN_W - 2 * PAD - 20;
-const COL_W: i32 = (COL_AREA_W - 2 * COL_GAP) / 3;
-const COL_LABEL_W: i32 = 78;
+const COL_W: i32 = (COL_AREA_W - COL_GAP) / 2;
+const COL_LABEL_W: i32 = 120;
 const COL_LABEL_GAP: i32 = 4;
 const COL_COMBO_W: i32 = COL_W - COL_LABEL_W - COL_LABEL_GAP;
 const COL_DROPPED_W: i32 = 150;
-const COL_LABEL_MAX_CHARS: usize = 11;
+const COL_LABEL_MAX_CHARS: usize = 18;
 
 /// Which list a button acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -743,7 +743,7 @@ fn row_mapping(anki_field: &str, source: &str) -> Option<crate::config::FieldMap
 
 /// Rows per field-map column.
 fn field_map_rows_needed(n: usize) -> i32 {
-    n.div_ceil(3).max(1) as i32
+    n.div_ceil(2).max(1) as i32
 }
 
 /// Truncated for a column.
@@ -2072,11 +2072,11 @@ mod tests {
     // ---- field-map columns ----
 
     #[test]
-    fn field_map_rows_needed_ceils_by_three() {
+    fn field_map_rows_needed_ceils_by_two() {
         assert_eq!(1, field_map_rows_needed(1));
-        assert_eq!(1, field_map_rows_needed(3));
-        assert_eq!(2, field_map_rows_needed(4));
-        assert_eq!(8, field_map_rows_needed(23));
+        assert_eq!(1, field_map_rows_needed(2));
+        assert_eq!(2, field_map_rows_needed(3));
+        assert_eq!(12, field_map_rows_needed(23));
     }
 
     /// Never zero, even for an empty list.
@@ -2093,21 +2093,23 @@ mod tests {
     /// Boundary: exactly the max stays whole.
     #[test]
     fn column_label_keeps_a_max_length_name_whole() {
-        let name = "ABCDEFGHIJK"; // 11 chars
+        let name = "ABCDEFGHIJKLMNOPQR"; // 18 chars
         assert_eq!(name, column_label(name));
     }
 
     #[test]
     fn column_label_truncates_a_long_name() {
-        assert_eq!("ExpressionR", column_label("ExpressionReading"));
+        assert_eq!("ExpressionReading", column_label("ExpressionReading"));
+        assert_eq!("ExpressionFurigana", column_label("ExpressionFurigana"));
+        assert_eq!("IsWordAndSentenceC", column_label("IsWordAndSentenceCard"));
     }
 
     /// Truncation must land on a char boundary.
     #[test]
     fn column_label_is_char_boundary_safe() {
-        let name = "日本語日本語日本語日本語";
+        let name = "日本語日本語日本語日本語日本語日本語日本語";
         let got = column_label(name);
-        assert_eq!(11, got.chars().count());
+        assert_eq!(18, got.chars().count());
     }
 
     #[test]
