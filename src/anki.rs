@@ -146,6 +146,11 @@ fn mapped_fields(
     out
 }
 
+/// True if some row sends source
+fn field_map_routes(field_map: &[crate::config::FieldMapping], source: &str) -> bool {
+    field_map.iter().any(|m| m.source == source)
+}
+
 /// Adds a note, returns its id.
 pub fn add_note(
     url: &str,
@@ -154,6 +159,13 @@ pub fn add_note(
     fields: &HashMap<String, String>,
     field_map: &[crate::config::FieldMapping],
 ) -> Result<i64> {
+    if !field_map_routes(field_map, "expression") {
+        anyhow::bail!(
+            "field_map has no entry mapping the \"expression\" source, so the \
+             looked-up word would never reach Anki - fix the mapping in \
+             Settings, Anki tab"
+        );
+    }
     let body = serde_json::json!({
         "action": "addNote",
         "version": VERSION,
@@ -362,5 +374,44 @@ mod tests {
         let fields = HashMap::from([("expression".to_string(), "猫".to_string())]);
         let out = mapped_fields(&fields, &[]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn field_map_routes_finds_a_matching_source() {
+        let map = vec![crate::config::FieldMapping {
+            anki_field: "Expression".into(),
+            source: "expression".into(),
+        }];
+        assert!(field_map_routes(&map, "expression"));
+    }
+
+    #[test]
+    fn field_map_routes_is_false_without_a_match() {
+        // Mirrors the live-config bug.
+        let map = vec![crate::config::FieldMapping {
+            anki_field: "Expression".into(),
+            source: "frequency".into(),
+        }];
+        assert!(!field_map_routes(&map, "expression"));
+    }
+
+    #[test]
+    fn field_map_routes_is_false_for_an_empty_map() {
+        assert!(!field_map_routes(&[], "expression"));
+    }
+
+    /// No network before the check.
+    #[test]
+    fn add_note_rejects_a_field_map_that_drops_the_word() {
+        let fields = HashMap::from([
+            ("expression".to_string(), "猫".to_string()),
+            ("reading".to_string(), "ねこ".to_string()),
+        ]);
+        let field_map = vec![
+            crate::config::FieldMapping { anki_field: "Expression".into(), source: "frequency".into() },
+            crate::config::FieldMapping { anki_field: "ExpressionReading".into(), source: "reading".into() },
+        ];
+        let err = add_note("not-a-url", "Default", "Lapis", &fields, &field_map).unwrap_err();
+        assert!(format!("{err:#}").contains("expression"));
     }
 }
