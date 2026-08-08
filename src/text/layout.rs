@@ -354,10 +354,10 @@ pub fn merge_spaced_words(words: &[&OcrWord], ori: Orientation) -> Vec<OcrWord> 
     out
 }
 
-/// Text wraps onto next line?
-fn continues_on_next_line(current: &OcrLine, next: &OcrLine, orientation: Orientation) -> bool {
+/// Gap if `next` continues `current`.
+fn continuation_gap(current: &OcrLine, next: &OcrLine, orientation: Orientation) -> Option<i32> {
     if current.words.is_empty() || next.words.is_empty() {
-        return false;
+        return None;
     }
 
     let axis = |p: PhysPoint| match orientation {
@@ -381,7 +381,7 @@ fn continues_on_next_line(current: &OcrLine, next: &OcrLine, orientation: Orient
 
     let line_h = thick(current).max(thick(next));
     if line_h <= 0 {
-        return false;
+        return None;
     }
 
     let gap = match orientation {
@@ -389,21 +389,32 @@ fn continues_on_next_line(current: &OcrLine, next: &OcrLine, orientation: Orient
         Orientation::Vertical => perp(current) - perp(next),
     };
     if gap <= 0 || gap > line_h * 3 / 2 {
-        return false;
+        return None;
     }
-
-    start(next) <= start(current) + line_h / 2
+    if start(next) > start(current) + line_h / 2 {
+        return None;
+    }
+    Some(gap)
 }
 
-/// The line this wraps onto.
+/// Text wraps onto next line?
+#[cfg(test)]
+fn continues_on_next_line(current: &OcrLine, next: &OcrLine, orientation: Orientation) -> bool {
+    continuation_gap(current, next, orientation).is_some()
+}
+
+/// The line this wraps onto: nearest valid match.
 fn find_continuation(lines: &[OcrLine], li: usize, orientation: Orientation) -> Option<&OcrLine> {
     let current = &lines[li];
-    for (i, candidate) in lines.iter().enumerate() {
-        if i != li && continues_on_next_line(current, candidate, orientation) {
-            return Some(candidate);
-        }
-    }
-    None
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != li)
+        .filter_map(|(_, candidate)| {
+            continuation_gap(current, candidate, orientation).map(|gap| (gap, candidate))
+        })
+        .min_by_key(|(gap, _)| *gap)
+        .map(|(_, candidate)| candidate)
 }
 
 /// Pass 1's own tail, edge-trimmed.
@@ -1602,6 +1613,23 @@ mod tests {
         lines.push(OcrLine { words: vec![w("末", 100, 212, 40, 40)] });
         let got = resolve(&lines, p(190, 110)).unwrap();
         assert_eq!("新しい冒険が始まる", got.span.text);
+    }
+
+    /// A farther valid line, listed first, must not win.
+    #[test]
+    fn resolve_picks_the_nearest_continuation_not_the_first_in_vec_order() {
+        let lines = vec![
+            OcrLine { words: vec![w("新", 100, 100, 40, 80)] },
+            // Decoy: gap 110, listed before the true wrap.
+            OcrLine { words: vec![w("夏", 100, 210, 40, 80)] },
+            // True wrap: gap 60, nearer, listed second.
+            OcrLine { words: vec![w("始", 100, 160, 40, 80)] },
+        ];
+        let got = resolve(&lines, p(110, 130)).unwrap();
+        assert_eq!(
+            "新始", got.span.text,
+            "the nearer line must win regardless of Vec order"
+        );
     }
 
     #[test]
