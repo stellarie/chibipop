@@ -100,16 +100,16 @@ pub const TILE_LEN: i32 = 500;
 /// Room for ascenders, drift.
 pub const BAND_FACTOR: f32 = 3.0;
 
-/// Floored at `REGION_H`.
-pub fn band_of(word: PhysRect, orientation: Orientation) -> PhysRect {
+/// Floored at the short axis.
+pub fn band_of(word: PhysRect, orientation: Orientation, short_floor: i32) -> PhysRect {
     let c = word.center();
     match orientation {
         Orientation::Horizontal => {
-            let h = (((word.h as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
+            let h = (((word.h as f32) * BAND_FACTOR).round() as i32).max(short_floor);
             PhysRect { x: word.x, y: c.y - h / 2, w: word.w, h }
         }
         Orientation::Vertical => {
-            let w = (((word.w as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
+            let w = (((word.w as f32) * BAND_FACTOR).round() as i32).max(short_floor);
             PhysRect { x: c.x - w / 2, y: word.y, w, h: word.h }
         }
     }
@@ -285,11 +285,11 @@ pub fn union_chars(geom: &[TextGeom], from: usize, len: usize, pad: i32) -> Opti
     acc.map(|r| PhysRect { x: r.x - pad, y: r.y - pad, w: r.w + 2 * pad, h: r.h + 2 * pad })
 }
 
-pub fn region_around(cursor: PhysPoint, prefer_vertical: bool) -> PhysRect {
+pub fn region_around(cursor: PhysPoint, prefer_vertical: bool, size: CaptureSize) -> PhysRect {
     let (w, h) = if prefer_vertical {
-        (REGION_H, REGION_W)
+        (size.h, size.w)
     } else {
-        (REGION_W, REGION_H)
+        (size.w, size.h)
     };
     PhysRect {
         x: cursor.x - w / 2,
@@ -504,6 +504,26 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
         },
         orientation,
     })
+}
+
+/// The capture box, in pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CaptureSize {
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Default for CaptureSize {
+    fn default() -> Self {
+        CaptureSize { w: REGION_W, h: REGION_H }
+    }
+}
+
+impl CaptureSize {
+    /// The perpendicular extent.
+    pub fn short(self) -> i32 {
+        self.w.min(self.h)
+    }
 }
 
 #[cfg(test)]
@@ -738,7 +758,7 @@ mod tests {
     /// Centring is the contract.
     #[test]
     fn the_region_is_centred_on_the_cursor() {
-        let r = region_around(p(1000, 500), false);
+        let r = region_around(p(1000, 500), false, CaptureSize::default());
         assert_eq!(REGION_W, r.w);
         assert_eq!(REGION_H, r.h);
         assert_eq!(1000 - REGION_W / 2, r.x);
@@ -747,33 +767,50 @@ mod tests {
 
     #[test]
     fn region_around_horizontal_is_wider_than_tall() {
-        let r = region_around(p(500, 500), false);
+        let r = region_around(p(500, 500), false, CaptureSize::default());
         assert!(r.w > r.h);
     }
 
     #[test]
     fn region_around_vertical_is_taller_than_wide() {
-        let r = region_around(p(500, 500), true);
+        let r = region_around(p(500, 500), true, CaptureSize::default());
         assert!(r.h > r.w);
+    }
+
+    #[test]
+    fn region_around_uses_the_configured_size() {
+        let size = CaptureSize { w: 800, h: 120 };
+        let r = region_around(p(1000, 500), false, size);
+        assert_eq!(800, r.w);
+        assert_eq!(120, r.h);
+        assert_eq!(1000 - 400, r.x);
+        assert_eq!(500 - 60, r.y);
+    }
+
+    #[test]
+    fn prefer_vertical_transposes_the_configured_size() {
+        let size = CaptureSize { w: 800, h: 120 };
+        let r = region_around(p(1000, 500), true, size);
+        assert_eq!(120, r.w, "vertical swaps the two numbers");
+        assert_eq!(800, r.h);
     }
 
     /// Must out-reach hit_scan.
     #[test]
-    fn the_region_is_taller_than_a_resolvable_hover_can_be_off_by() {
+    fn the_capture_floor_covers_hit_scan_slack() {
         let typical_word_h = 40;
-        let worst_offset = typical_word_h / 2;
-        let needed = worst_offset + typical_word_h / 2;
+        let needed = typical_word_h / 2 + typical_word_h / 2;
         assert!(
-            REGION_H / 2 >= needed,
-            "REGION_H/2 = {} must cover {needed}px of hit-scan slack plus half a glyph",
-            REGION_H / 2
+            crate::config::CAPTURE_H_RANGE.0 / 2 >= needed,
+            "CAPTURE_H_RANGE.0/2 = {} must cover {needed}px",
+            crate::config::CAPTURE_H_RANGE.0 / 2
         );
     }
 
     #[test]
     fn band_expands_perpendicular_and_keeps_the_word_centred() {
         let word = PhysRect { x: 1499, y: 870, w: 35, h: 34 };
-        let b = band_of(word, Orientation::Horizontal);
+        let b = band_of(word, Orientation::Horizontal, REGION_H);
         assert_eq!(102, b.h, "max(3.0x the word height, REGION_H)");
         assert_eq!(word.center().y, b.center().y, "same centre line");
         assert_eq!(word.x, b.x, "parallel axis untouched");
@@ -782,7 +819,7 @@ mod tests {
     #[test]
     fn band_swaps_axes_for_vertical_text() {
         let word = PhysRect { x: 1438, y: 344, w: 64, h: 70 };
-        let b = band_of(word, Orientation::Vertical);
+        let b = band_of(word, Orientation::Vertical, REGION_H);
         assert_eq!(192, b.w, "max(3.0x the word width, REGION_H)");
         assert_eq!(word.center().x, b.center().x);
         assert_eq!(word.y, b.y, "parallel axis untouched");
@@ -792,7 +829,7 @@ mod tests {
     #[test]
     fn band_floors_small_text_at_region_h() {
         let word = PhysRect { x: 1499, y: 870, w: 20, h: 22 };
-        let b = band_of(word, Orientation::Horizontal);
+        let b = band_of(word, Orientation::Horizontal, REGION_H);
         assert_eq!(REGION_H, b.h, "3.0x22=66 must be floored to REGION_H");
         assert_eq!(word.center().y, b.center().y, "same centre line");
     }
@@ -800,9 +837,16 @@ mod tests {
     #[test]
     fn band_factor_still_applies_above_the_floor() {
         let word = PhysRect { x: 1499, y: 870, w: 20, h: 60 };
-        let b = band_of(word, Orientation::Horizontal);
+        let b = band_of(word, Orientation::Horizontal, REGION_H);
         assert_eq!(180, b.h, "3.0x60=180 must not be clamped down to REGION_H");
         assert_eq!(word.center().y, b.center().y, "same centre line");
+    }
+
+    #[test]
+    fn band_of_floors_on_the_configured_short_axis() {
+        let word = PhysRect { x: 1499, y: 870, w: 35, h: 34 };
+        let b = band_of(word, Orientation::Horizontal, 200);
+        assert_eq!(200, b.h, "floored by the configured short axis");
     }
 
     #[test]

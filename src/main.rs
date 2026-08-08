@@ -138,7 +138,11 @@ fn main() -> Result<()> {
             let source = chibipop::text::ocr::OcrTextSource::new(tiles, false)?;
             let region_was_default = region.is_none();
             let region = match region {
-                None => chibipop::text::layout::region_around(cursor, false),
+                None => chibipop::text::layout::region_around(
+                    cursor,
+                    false,
+                    chibipop::text::layout::CaptureSize::default(),
+                ),
                 Some(spec) => {
                     let (ws, hs) = spec
                         .split_once(',')

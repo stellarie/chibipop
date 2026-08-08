@@ -7,7 +7,7 @@ use crate::text::capture::{
 };
 use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
-    tile_forward, OcrLine, OcrWord, Orientation, Resolved,
+    tile_forward, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
 };
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
@@ -190,7 +190,10 @@ impl OcrTextSource {
         &self,
         cursor: PhysPoint,
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        let read = self.resolve_in_region(cursor, region_around(cursor, self.prefer_vertical))?;
+        let read = self.resolve_in_region(
+            cursor,
+            region_around(cursor, self.prefer_vertical, CaptureSize::default()),
+        )?;
         Ok((read.lines, read.resolved))
     }
 
@@ -264,7 +267,10 @@ impl OcrTextSource {
         let mut scan = Vec::new();
         let Some(first) = resolved else { return Ok((None, scan)) };
         if collect {
-            scan.push(ScanRect { rect: region_around(cursor, self.prefer_vertical), kind: ScanKind::Pass1 });
+            scan.push(ScanRect {
+                rect: region_around(cursor, self.prefer_vertical, CaptureSize::default()),
+                kind: ScanKind::Pass1,
+            });
         }
         if self.max_passes <= 1 {
             if collect {
@@ -274,7 +280,7 @@ impl OcrTextSource {
         }
 
         // Pass 1's own kept tail; no re-read.
-        let region = region_around(cursor, self.prefer_vertical);
+        let region = region_around(cursor, self.prefer_vertical, CaptureSize::default());
         let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region) else {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
@@ -284,7 +290,7 @@ impl OcrTextSource {
         let head_chars = head.chars().count();
 
         let anchor = first.span.anchor;
-        let band = band_of(anchor, orientation);
+        let band = band_of(anchor, orientation, CaptureSize::default().short());
         let perpendicular_centre = match orientation {
             Orientation::Horizontal => anchor.center().y,
             Orientation::Vertical => anchor.center().x,
