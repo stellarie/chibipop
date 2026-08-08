@@ -25,7 +25,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **416** total across **6** targets |
+| Rust tests | **all green**, **626** total across **6** targets (was 416; re-measured 2026-08-08) |
 | Clippy | **exactly 4** accepted errors (was 5; the comment sweep retired `doc list item`) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -168,6 +168,23 @@ every application.
 
 *(An agent can drive this: `mcp__Windows-MCP__Scroll` injects real wheel input. `SendInput` from a
 tool shell returns 0 and cannot.)*
+
+### 1.7a Outlined glyphs still read at about half
+
+```bash
+./target/release/chibipop.exe probe --at <x>,<y> --region 820,60 --upscale 1
+```
+
+On **outlined** text — a thin dark contour around a white interior — expect roughly **50-55%**
+of characters, and misreads that look confident. On ordinary solid text at the same size expect
+**exact**. Measured 2026-08-08: 53.8% outlined vs 100.0% on the identical sentence in a solid
+font. BACKLOG 8 carries the evidence and the two refuted fixes.
+
+Score `ocr line 0:`, not `line:` — `line:` prints only when hit-scan resolves, so scoring off it
+reports 0% for reads that succeeded.
+
+**This is a known ceiling, not a defect.** If it ever starts reading exact, something changed —
+find out what before celebrating.
 
 ### 1.8 Resources
 

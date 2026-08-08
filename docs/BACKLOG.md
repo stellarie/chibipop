@@ -251,3 +251,57 @@ unexpected hwnd (the `menu_owner` mismatch), or `WM_CONTEXTMENU` arrives and is 
 
 **Lesson worth keeping:** "I made the feature happen" is not "the user's action makes the feature
 happen". Posting the message bypassed precisely the layer that was broken.
+
+---
+
+## 8. Outlined ("hollow") glyphs read at about half
+
+**Measured 2026-08-08. Accepted as a limitation by oniichan, not built.** This is a ceiling of
+the recogniser on one glyph *style*, not a defect in the capture or layout path — the control
+below is what makes that a finding rather than an excuse.
+
+Same sentence, same capture path, same engine, one variable changed:
+
+| Source | Recall vs ground truth |
+|---|---|
+| Solid font, rendered on screen (Yu Gothic UI Bold 20pt) | **100.0%** at 1x, 96.2% at 2x |
+| The reported image, outlined glyphs at 28-31px | **53.8%** at 1x, 46.2% at 2x |
+
+Ground truth `すっかり気が抜け、ただの苦水と化した液体が喉を焼く。` (26 chars); best real
+output `すっかり一け。ただの曹水と化した一候を《.`. The solid control returns the sentence
+character-exact, so everything from capture through hit-scan is sound.
+
+The glyphs are a thin dark contour around a white interior, on a white page. There is almost no
+ink, and what there is encloses background rather than forming strokes.
+
+**Two preprocessing ideas were tried and are REFUTED — do not re-try them blind:**
+
+- 3x3 min filter, to grow the outline inward until strokes close: **23.1%**. Dense kanji merge
+  into blobs; it destroys more than it fills.
+- Downscale-average then upscale, to blend outline and interior into one stroke: **34.6%**.
+  Washes out the little contrast there was.
+
+Both variants were re-displayed and re-captured, so they carry one screen round trip the raw
+number does not. Directionally clear; not a clean comparison.
+
+**Reproduce** (portrait secondary, text on screen, `--region` wide enough for the whole line):
+
+```bash
+./target/release/chibipop.exe probe --at <x>,<y> --region 820,60 --upscale 1
+./target/release/chibipop.exe probe --at <x>,<y> --region 820,60 --upscale 2
+```
+
+Score the `ocr line 0:` string against a ground truth transcribed **by eye first** — recall by
+longest common subsequence, not "did more characters appear". Read `ocr line 0:` rather than
+`line:`: `line:` only prints when hit-scan resolves, and scoring off it silently reports 0% for
+a read that in fact succeeded. That cost a round.
+
+**If picked up:** edge-aware fill of *enclosed* interiors (flood from the page border, keep what
+it cannot reach), not blunt morphology. And gather a real sample of outlined-text images first —
+one screenshot is not a sample, and this style is common in games and subtitles, which is
+exactly chibipop's use case.
+
+**Adjacent and unbuilt:** upscale 1 beat upscale 2 on **both** texts (53.8 vs 46.2 outlined,
+100.0 vs 96.2 solid). `UPSCALE = 2` may simply be wrong once glyphs are already ~28px or larger.
+It is one constant, but moving a global default on the evidence of one image is overfitting;
+measure across several glyph sizes before touching it.

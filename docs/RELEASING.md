@@ -44,11 +44,11 @@ every push to `main` and every pull request:
 
 - `cargo test` **three times** — the wheel accumulator's process-global
   statics produced an intermittent red once that a single run missed.
-- Clippy, asserting the accepted-error **count is exactly 5**. The repo
-  carries five accepted errors on purpose, so `-D warnings` always exits
-  non-zero; a sixth is the regression to catch, and an exit code cannot see
+- Clippy, asserting the accepted-error **count is exactly 4**. The repo
+  carries four accepted errors on purpose, so `-D warnings` always exits
+  non-zero; a fifth is the regression to catch, and an exit code cannot see
   the difference.
-- Clippy again with those five suppressed, asserting **zero** other findings.
+- Clippy again with those suppressed, asserting **zero** other findings.
 - `cargo build --release`.
 
 The release workflow additionally refuses to build if the tag disagrees with
