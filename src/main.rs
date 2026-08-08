@@ -9,6 +9,7 @@ use chibipop::lookup::engine::LookupEngine;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
+use chibipop::text::capture::UPSCALE;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,15 @@ enum Command {
         /// Draw boxes for N seconds.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "3")]
         show_region: Option<u64>,
+        /// Override the OCR upscale factor.
+        #[arg(long)]
+        upscale: Option<i32>,
+        /// Write the OCR'd pixels to a BMP.
+        #[arg(long)]
+        dump: Option<PathBuf>,
+        /// Time N reads in this one process.
+        #[arg(long)]
+        repeat: Option<u32>,
     },
     /// Open the settings window.
     Settings {
@@ -114,7 +124,7 @@ fn main() -> Result<()> {
             print_hits(&hits);
             Ok(())
         }
-        Command::Probe { at, region, tiles, dict, rules, show_region } => {
+        Command::Probe { at, region, tiles, dict, rules, show_region, upscale, dump, repeat } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
             let (xs, ys) = at
@@ -140,8 +150,45 @@ fn main() -> Result<()> {
             };
             println!("cursor:  ({}, {})", cursor.x, cursor.y);
             println!("region:  x={} y={} w={} h={}", region.x, region.y, region.w, region.h);
+            if let Some(f) = upscale {
+                println!("upscale: {f} (overridden, no adaptive retry)");
+            }
 
-            let (lines, resolved) = source.resolve_in_region(cursor, region)?;
+            if let Some(n) = repeat {
+                for i in 1..=n {
+                    let t = std::time::Instant::now();
+                    let read = source.resolve_in_region(cursor, region)?;
+                    println!(
+                        "read {i}: {:>4} ms  via {}  lines={}",
+                        t.elapsed().as_millis(),
+                        read.source.as_str(),
+                        read.lines.len()
+                    );
+                }
+                return Ok(());
+            }
+
+            // One pass, so the dump is what OCR read.
+            let single = upscale.or(dump.as_ref().map(|_| UPSCALE));
+            let (lines, resolved, source_used, dxgi_error) = match single {
+                Some(factor) => {
+                    let (lines, cap) = source.recognise_at_capture(region, factor)?;
+                    if let Some(path) = &dump {
+                        dump_bmp(path, &cap.buf, cap.w, cap.h)?;
+                        println!("dump:    wrote {}x{} to {}", cap.w, cap.h, path.display());
+                    }
+                    let resolved = chibipop::text::layout::resolve(&lines, cursor);
+                    (lines, resolved, cap.source, cap.dxgi_error)
+                }
+                None => {
+                    let read = source.resolve_in_region(cursor, region)?;
+                    (read.lines, read.resolved, read.source, read.dxgi_error)
+                }
+            };
+            match &dxgi_error {
+                Some(why) => println!("capture: {}  (dxgi: {why})", source_used.as_str()),
+                None => println!("capture: {}", source_used.as_str()),
+            }
 
             println!();
             if lines.is_empty() {
@@ -377,6 +424,35 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Debug: raw BGRA to an uncompressed BMP.
+fn dump_bmp(path: &Path, buf: &[u8], w: i32, h: i32) -> Result<()> {
+    use std::io::Write;
+    let row_bytes = w as u32 * 4;
+    let pixel_bytes = row_bytes * h as u32;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(b"BM")?;
+    f.write_all(&(14 + 40 + pixel_bytes).to_le_bytes())?;
+    f.write_all(&0u32.to_le_bytes())?;
+    f.write_all(&(14u32 + 40u32).to_le_bytes())?;
+    f.write_all(&40u32.to_le_bytes())?;
+    f.write_all(&w.to_le_bytes())?;
+    f.write_all(&h.to_le_bytes())?; // positive: bottom-up
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&32u16.to_le_bytes())?;
+    f.write_all(&0u32.to_le_bytes())?;
+    f.write_all(&pixel_bytes.to_le_bytes())?;
+    f.write_all(&2835i32.to_le_bytes())?;
+    f.write_all(&2835i32.to_le_bytes())?;
+    f.write_all(&0u32.to_le_bytes())?;
+    f.write_all(&0u32.to_le_bytes())?;
+    // buf is top-down; BMP with positive height is bottom-up.
+    for row in (0..h as usize).rev() {
+        let start = row * w as usize * 4;
+        f.write_all(&buf[start..start + w as usize * 4])?;
+    }
+    Ok(())
 }
 
 /// --dict, or the default.

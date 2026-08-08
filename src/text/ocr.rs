@@ -2,7 +2,9 @@
 
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
-use crate::text::capture::{capture_upscaled, cursor_position, init_dpi_awareness, UPSCALE};
+use crate::text::capture::{
+    capture_upscaled_by, cursor_position, init_dpi_awareness, Capture, CaptureSource, UPSCALE,
+};
 use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
     tile_forward, OcrLine, OcrWord, Orientation, Resolved,
@@ -41,6 +43,60 @@ where
 
 /// Bound on one OCR call.
 const OCR_TIMEOUT: Duration = Duration::from_secs(5);
+
+// MAINTAINER NOTE - adaptive upscale retry, disabled 2026-08-08.
+// (Deliberately longer than the 30-char house rule: this records a
+// method and a retraction, and Stella asked for it to live here.)
+//
+// What it does: after the first pass at UPSCALE, if the tallest word
+// recognised is under SMALL_GLYPH_PX, capture and OCR the same region
+// again at RETRY_UPSCALE and prefer that result when it is non-empty.
+//
+// Why it is off: it was added on the observation that a line of text
+// vanished at 2x and reappeared at 4x. That evidence is void. It was
+// gathered while DXGI Desktop Duplication was silently returning
+// all-black frames (see capture.rs), so "2x found nothing" was often
+// a dead capture rather than a scale problem, and which pass got a
+// live frame was luck. Re-measured on the repaired pipeline it cost
+// ~36 ms of the ~141 ms round trip - two captures and two OCR passes,
+// the second over 4x the pixels - and it was not reliably better:
+//
+//   line 3, 28-31px glyphs, ground truth すっかり気が抜け、...
+//     retry on : すっかーけ。ただ水と化
+//     single 2x: すっかり一け。ただ水と化   <- more accurate
+//
+// It also fires on ordinary body text: 28-31px is comfortably legible
+// yet sits under the 32px threshold, so the cost was paid constantly.
+//
+// How to re-enable honestly: flip ADAPTIVE_RETRY, then measure with
+//   probe --at X,Y --repeat N            (warm timings, one process)
+//   probe --at X,Y --upscale 2|4         (single pass, no retry)
+// against text whose true string is known, and compare transcription
+// accuracy, not just whether more characters appeared. Keep it only
+// if it wins on accuracy at a cost you can defend. Re-tuning
+// SMALL_GLYPH_PX downward (~22px) is the cheaper alternative: it
+// would limit the retry to genuinely tiny text.
+
+/// Retry small text at a bigger scale.
+const ADAPTIVE_RETRY: bool = false;
+
+/// Below this, retry at RETRY_UPSCALE.
+const SMALL_GLYPH_PX: i32 = 32;
+
+/// Upscale used on a small-glyph retry.
+const RETRY_UPSCALE: i32 = 4;
+
+/// True if the tallest word looks tiny.
+///
+/// Empty is not small: nothing to retry for.
+fn glyphs_look_small(lines: &[OcrLine]) -> bool {
+    lines
+        .iter()
+        .flat_map(|l| l.words.iter())
+        .map(|w| w.rect.h)
+        .max()
+        .is_some_and(|max_h| max_h < SMALL_GLYPH_PX)
+}
 
 /// Coords are upscaled-image.
 pub fn recognise(engine: &OcrEngine, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
@@ -96,6 +152,14 @@ fn monitor_bounds_containing(p: PhysPoint) -> PhysRect {
     }
 }
 
+/// One region read, with provenance.
+pub struct RegionRead {
+    pub lines: Vec<OcrLine>,
+    pub resolved: Option<Resolved>,
+    pub source: CaptureSource,
+    pub dxgi_error: Option<String>,
+}
+
 pub struct OcrTextSource {
     engine: OcrEngine,
     max_passes: u8,
@@ -126,33 +190,58 @@ impl OcrTextSource {
         &self,
         cursor: PhysPoint,
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        self.resolve_in_region(cursor, region_around(cursor, self.prefer_vertical))
+        let read = self.resolve_in_region(cursor, region_around(cursor, self.prefer_vertical))?;
+        Ok((read.lines, read.resolved))
     }
 
     /// As above, explicit box.
-    pub fn resolve_in_region(
+    pub fn resolve_in_region(&self, cursor: PhysPoint, region: PhysRect) -> Result<RegionRead> {
+        let (lines, cap) = self.recognise_at_capture(region, UPSCALE)?;
+        let (lines, cap) = if ADAPTIVE_RETRY && glyphs_look_small(&lines) {
+            match self.recognise_at_capture(region, RETRY_UPSCALE) {
+                Ok((bigger, big_cap)) if !bigger.is_empty() => (bigger, big_cap),
+                _ => (lines, cap),
+            }
+        } else {
+            (lines, cap)
+        };
+        let resolved = resolve(&lines, cursor);
+        Ok(RegionRead {
+            lines,
+            resolved,
+            source: cap.source,
+            dxgi_error: cap.dxgi_error,
+        })
+    }
+
+    /// Capture + recognise at `factor`, mapped to physical.
+    pub fn recognise_at(&self, region: PhysRect, factor: i32) -> Result<Vec<OcrLine>> {
+        Ok(self.recognise_at_capture(region, factor)?.0)
+    }
+
+    /// As above, keeping the pixels read.
+    pub fn recognise_at_capture(
         &self,
-        cursor: PhysPoint,
         region: PhysRect,
-    ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        let (buf, w, h) = capture_upscaled(region)?;
-        let raw = recognise(&self.engine, &buf, w, h)?;
+        factor: i32,
+    ) -> Result<(Vec<OcrLine>, Capture)> {
+        let cap = capture_upscaled_by(region, factor)?;
+        let raw = recognise(&self.engine, &cap.buf, cap.w, cap.h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
-        let lines: Vec<OcrLine> = raw
+        let lines = raw
             .into_iter()
             .map(|l| OcrLine {
                 words: l
                     .words
                     .into_iter()
                     .map(|word| OcrWord {
-                        rect: map_from_upscaled(word.rect, origin, UPSCALE),
+                        rect: map_from_upscaled(word.rect, origin, factor),
                         text: word.text,
                     })
                     .collect(),
             })
             .collect();
-        let resolved = resolve(&lines, cursor);
-        Ok((lines, resolved))
+        Ok((lines, cap))
     }
 
     /// Span plus orientation.
@@ -262,9 +351,9 @@ impl OcrTextSource {
         orientation: Orientation,
         tolerance: i32,
     ) -> Result<Vec<OcrWord>> {
-        let (buf, w, h) = capture_upscaled(tile)?;
+        let cap = capture_upscaled_by(tile, UPSCALE)?;
         let origin = PhysPoint { x: tile.x, y: tile.y };
-        let lines: Vec<OcrLine> = recognise(&self.engine, &buf, w, h)?
+        let lines: Vec<OcrLine> = recognise(&self.engine, &cap.buf, cap.w, cap.h)?
             .into_iter()
             .map(|l| OcrLine {
                 words: l
@@ -291,5 +380,57 @@ impl OcrTextSource {
 impl TextSource for OcrTextSource {
     fn at(&self, p: PhysPoint) -> Result<Option<TextSpan>> {
         Ok(self.resolve_at(p)?.map(|r| r.span))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(text: &str, h: i32) -> OcrWord {
+        OcrWord { text: text.to_string(), rect: PhysRect { x: 0, y: 0, w: h, h } }
+    }
+
+    fn line(words: Vec<OcrWord>) -> OcrLine {
+        OcrLine { words }
+    }
+
+    #[test]
+    fn empty_lines_are_not_small() {
+        assert!(!glyphs_look_small(&[]));
+    }
+
+    #[test]
+    fn a_line_of_only_short_words_is_small() {
+        let lines = [line(vec![word("し", 27), word("な", 29)])];
+        assert!(glyphs_look_small(&lines));
+    }
+
+    #[test]
+    fn the_ceiling_itself_is_not_small() {
+        let lines = [line(vec![word("大", SMALL_GLYPH_PX)])];
+        assert!(!glyphs_look_small(&lines));
+    }
+
+    #[test]
+    fn one_past_the_ceiling_is_not_small() {
+        let lines = [line(vec![word("大", SMALL_GLYPH_PX + 1)])];
+        assert!(!glyphs_look_small(&lines));
+    }
+
+    #[test]
+    fn one_under_the_ceiling_is_small() {
+        let lines = [line(vec![word("大", SMALL_GLYPH_PX - 1)])];
+        assert!(glyphs_look_small(&lines));
+    }
+
+    /// One tall word rescues the whole region.
+    #[test]
+    fn a_single_tall_word_among_small_ones_is_not_small() {
+        let lines = [
+            line(vec![word("し", 27), word("な", 29)]),
+            line(vec![word("大", 40)]),
+        ];
+        assert!(!glyphs_look_small(&lines));
     }
 }
