@@ -425,8 +425,9 @@ pub fn head_and_tail(
     lines: &[OcrLine],
     cursor: PhysPoint,
     region: PhysRect,
+    scan_alnum: bool,
 ) -> Option<(String, i32, Orientation)> {
-    let (li, wi) = hit_scan(lines, cursor, true)?;
+    let (li, wi) = hit_scan(lines, cursor, scan_alnum)?;
     let line = &lines[li];
     let orientation = orientation_of(line);
 
@@ -1721,7 +1722,7 @@ mod tests {
             ],
         };
         let region = PhysRect { x: 50, y: 80, w: 500, h: 60 };
-        let (head, next, ori) = head_and_tail(&[line], p(165, 105), region).unwrap();
+        let (head, next, ori) = head_and_tail(&[line], p(165, 105), region, true).unwrap();
         assert_eq!("感想", head, "text before the hit word is not head");
         assert_eq!(Orientation::Horizontal, ori);
         assert_eq!(550, next, "region's own trailing edge: 50+500");
@@ -1736,7 +1737,7 @@ mod tests {
             ],
         };
         let region = PhysRect { x: 0, y: 80, w: 500, h: 60 };
-        let (head, next, _) = head_and_tail(&[line], p(465, 105), region).unwrap();
+        let (head, next, _) = head_and_tail(&[line], p(465, 105), region, true).unwrap();
         assert_eq!("感", head, "想 is clipped by the region's own edge");
         assert_eq!(490, next, "tiling resumes at the clipped word's own edge");
     }
@@ -1745,7 +1746,7 @@ mod tests {
     fn head_and_tail_empty_head_when_the_hit_word_itself_is_clipped() {
         let line = OcrLine { words: vec![w("想", 490, 100, 20, 20)] };
         let region = PhysRect { x: 0, y: 80, w: 500, h: 60 };
-        let (head, next, _) = head_and_tail(&[line], p(495, 105), region).unwrap();
+        let (head, next, _) = head_and_tail(&[line], p(495, 105), region, true).unwrap();
         assert_eq!("", head, "even the hit word is clipped by the region edge");
         assert_eq!(490, next, "falls back to the hit word's own leading edge");
     }
@@ -1754,7 +1755,7 @@ mod tests {
     fn head_and_tail_returns_none_when_nothing_is_hit() {
         let line = OcrLine { words: vec![w("食", 100, 100, 20, 20)] };
         let region = PhysRect { x: 0, y: 0, w: 500, h: 100 };
-        assert_eq!(None, head_and_tail(&[line], p(900, 900), region));
+        assert_eq!(None, head_and_tail(&[line], p(900, 900), region, true));
     }
 
     #[test]
@@ -1766,9 +1767,21 @@ mod tests {
             ],
         };
         let region = PhysRect { x: 80, y: 50, w: 60, h: 500 };
-        let (head, _, ori) = head_and_tail(&[line], p(105, 105), region).unwrap();
+        let (head, _, ori) = head_and_tail(&[line], p(105, 105), region, true).unwrap();
         assert_eq!("上下", head);
         assert_eq!(Orientation::Vertical, ori);
+    }
+
+    /// Flag reaches hit_scan.
+    #[test]
+    fn head_and_tail_skips_latin_words_when_alnum_is_off() {
+        let line = OcrLine {
+            words: vec![w("Edit", 100, 100, 40, 20), w("語", 150, 100, 20, 20)],
+        };
+        let region = PhysRect { x: 50, y: 80, w: 500, h: 60 };
+        let lines = std::slice::from_ref(&line);
+        assert!(head_and_tail(lines, p(110, 105), region, true).is_some());
+        assert_eq!(None, head_and_tail(lines, p(110, 105), region, false));
     }
 
     // -- hit-scan eligibility --

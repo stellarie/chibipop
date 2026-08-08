@@ -281,7 +281,7 @@ impl OcrTextSource {
 
         // Pass 1's own kept tail; no re-read.
         let region = region_around(cursor, self.prefer_vertical, CaptureSize::default());
-        let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region) else {
+        let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region, true) else {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
