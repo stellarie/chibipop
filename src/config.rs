@@ -14,6 +14,13 @@ pub const MAX_HEIGHT_RANGE: (u8, u8) = (10, 90);
 pub const SUMMARY_RANGE: (usize, usize) = (10, 200);
 /// OCR captures per hover.
 pub const PASSES_RANGE: (u8, u8) = (1, 5);
+/// Capture width bounds, px.
+pub const CAPTURE_W_RANGE: (i32, i32) = (100, 1600);
+
+/// Capture height bounds, px.
+///
+/// Floor: hit-scan's reach.
+pub const CAPTURE_H_RANGE: (i32, i32) = (80, 600);
 
 /// Root of the TOML file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +186,15 @@ pub struct OcrConfig {
     /// Tall capture for manga/VN.
     #[serde(default)]
     pub prefer_vertical: bool,
+    /// Capture box width, px.
+    #[serde(default = "default_capture_width")]
+    pub capture_width: i32,
+    /// Capture box height, px.
+    #[serde(default = "default_capture_height")]
+    pub capture_height: i32,
+    /// Resolve Latin-only words?
+    #[serde(default = "default_scan_alphanumeric")]
+    pub scan_alphanumeric: bool,
 }
 
 /// 1: tiling is off by default.
@@ -186,11 +202,26 @@ fn default_max_ocr_passes() -> u8 {
     1
 }
 
+fn default_capture_width() -> i32 {
+    500
+}
+
+fn default_capture_height() -> i32 {
+    100
+}
+
+fn default_scan_alphanumeric() -> bool {
+    true
+}
+
 impl Default for OcrConfig {
     fn default() -> OcrConfig {
         OcrConfig {
             max_ocr_passes: default_max_ocr_passes(),
             prefer_vertical: false,
+            capture_width: default_capture_width(),
+            capture_height: default_capture_height(),
+            scan_alphanumeric: default_scan_alphanumeric(),
         }
     }
 }
@@ -353,6 +384,20 @@ impl Config {
             self.ocr.max_ocr_passes,
             PASSES_RANGE.0,
             PASSES_RANGE.1,
+        );
+        self.ocr.capture_width = clamped(
+            path,
+            "ocr.capture_width",
+            self.ocr.capture_width,
+            CAPTURE_W_RANGE.0,
+            CAPTURE_W_RANGE.1,
+        );
+        self.ocr.capture_height = clamped(
+            path,
+            "ocr.capture_height",
+            self.ocr.capture_height,
+            CAPTURE_H_RANGE.0,
+            CAPTURE_H_RANGE.1,
         );
     }
 
@@ -1065,5 +1110,60 @@ mod tests {
         assert_eq!(TriggerMode::HoldKey, c.trigger.mode);
         assert_eq!("shift", c.trigger.trigger_key);
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn capture_defaults_match_the_old_constants() {
+        let c = Config::default();
+        assert_eq!(500, c.ocr.capture_width);
+        assert_eq!(100, c.ocr.capture_height);
+        assert!(c.ocr.scan_alphanumeric);
+    }
+
+    #[test]
+    fn a_missing_capture_section_uses_the_defaults() {
+        let p = tmp("no_capture_fields");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n\n",
+            "[ocr]\nmax_ocr_passes = 1\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        assert_eq!(500, c.ocr.capture_width);
+        assert_eq!(100, c.ocr.capture_height);
+        assert!(c.ocr.scan_alphanumeric);
+    }
+
+    #[test]
+    fn capture_values_below_the_floor_are_clamped_up() {
+        let mut c = Config::default();
+        c.ocr.capture_width = 1;
+        c.ocr.capture_height = 1;
+        c.clamp_ranges(Path::new("test.toml"));
+        assert_eq!(CAPTURE_W_RANGE.0, c.ocr.capture_width);
+        assert_eq!(CAPTURE_H_RANGE.0, c.ocr.capture_height);
+    }
+
+    #[test]
+    fn capture_values_above_the_ceiling_are_clamped_down() {
+        let mut c = Config::default();
+        c.ocr.capture_width = 99_999;
+        c.ocr.capture_height = 99_999;
+        c.clamp_ranges(Path::new("test.toml"));
+        assert_eq!(CAPTURE_W_RANGE.1, c.ocr.capture_width);
+        assert_eq!(CAPTURE_H_RANGE.1, c.ocr.capture_height);
+    }
+
+    /// Bounds themselves are legal.
+    #[test]
+    fn capture_values_exactly_on_the_bounds_are_untouched() {
+        let mut c = Config::default();
+        c.ocr.capture_width = CAPTURE_W_RANGE.0;
+        c.ocr.capture_height = CAPTURE_H_RANGE.1;
+        c.clamp_ranges(Path::new("test.toml"));
+        assert_eq!(CAPTURE_W_RANGE.0, c.ocr.capture_width);
+        assert_eq!(CAPTURE_H_RANGE.1, c.ocr.capture_height);
     }
 }
