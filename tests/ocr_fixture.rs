@@ -53,7 +53,7 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
     // Pointing at the centre of the first recognised character must resolve to
     // that same character.
     let first = &lines[0].words[0];
-    let hit = resolve(&lines, first.rect.center()).expect("centre of a word must resolve");
+    let hit = resolve(&lines, first.rect.center(), true).expect("centre of a word must resolve");
     assert!(
         hit.span.text[hit.span.cursor_byte_offset..].starts_with(&first.text),
         "expected the span to start at {:?}, got {:?}",
@@ -76,7 +76,7 @@ fn mapping_and_resolution_compose_correctly() {
             ),
         }],
     };
-    let got = resolve(&[mapped], PhysPoint { x: 1110, y: 560 }).expect("must resolve");
+    let got = resolve(&[mapped], PhysPoint { x: 1110, y: 560 }, true).expect("must resolve");
     assert_eq!("食", got.span.text);
     assert_eq!(0, got.span.cursor_byte_offset);
     assert_eq!(1100, got.span.anchor.x);

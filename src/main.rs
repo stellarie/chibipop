@@ -181,7 +181,7 @@ fn main() -> Result<()> {
                         dump_bmp(path, &cap.buf, cap.w, cap.h)?;
                         println!("dump:    wrote {}x{} to {}", cap.w, cap.h, path.display());
                     }
-                    let resolved = chibipop::text::layout::resolve(&lines, cursor);
+                    let resolved = chibipop::text::layout::resolve(&lines, cursor, true);
                     (lines, resolved, cap.source, cap.dxgi_error)
                 }
                 None => {

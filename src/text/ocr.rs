@@ -208,7 +208,7 @@ impl OcrTextSource {
         } else {
             (lines, cap)
         };
-        let resolved = resolve(&lines, cursor);
+        let resolved = resolve(&lines, cursor, true);
         Ok(RegionRead {
             lines,
             resolved,
