@@ -1055,6 +1055,22 @@ impl SettingsWindow {
         }
     }
 
+    /// Show what was really applied.
+    pub fn set_capture_fields(&self, ocr: &crate::config::OcrConfig) {
+        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are live children of
+        // `self.hwnd`, created in `build`; each `GetDlgItem` result is
+        // checked, and `SetWindowTextW` copies the string during the call,
+        // so each temporary outlives its only use.
+        unsafe {
+            for (id, px) in [(ID_CAPTURE_W, ocr.capture_width), (ID_CAPTURE_H, ocr.capture_height)]
+            {
+                if let Ok(c) = GetDlgItem(Some(self.hwnd), id) {
+                    let _ = SetWindowTextW(c, PCWSTR(wide(&px.to_string()).as_ptr()));
+                }
+            }
+        }
+    }
+
     /// Re-word Apply after staging.
     fn refresh_apply(&self) {
         let staged = self.staged.borrow().has_staged();

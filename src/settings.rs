@@ -302,6 +302,32 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out
 }
 
+/// What `apply_to` had to move.
+pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
+    let mut parts = Vec::new();
+    if form.capture_width != applied.ocr.capture_width {
+        parts.push(axis_notice("width", form.capture_width, applied.ocr.capture_width));
+    }
+    if form.capture_height != applied.ocr.capture_height {
+        parts.push(axis_notice("height", form.capture_height, applied.ocr.capture_height));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+/// Spec §7's exact sentence.
+fn axis_notice(axis: &str, asked: i32, got: i32) -> String {
+    let (verb, bound) = if got > asked {
+        ("raised", "minimum")
+    } else {
+        ("lowered", "maximum")
+    };
+    format!("Capture {axis} {verb} to the {got}px {bound}.")
+}
+
 /// Keeps a matching entry.
 fn order_key(name: &str, existing: &[String]) -> String {
     let lower = name.to_lowercase();
@@ -527,6 +553,50 @@ mod tests {
         let out = apply_to(&form, &cfg);
         assert_eq!(CAPTURE_W_RANGE.1, out.ocr.capture_width);
         assert_eq!(CAPTURE_H_RANGE.0, out.ocr.capture_height);
+    }
+
+    #[test]
+    fn a_clamped_height_is_named_in_the_notice() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_height = 1;
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            Some("Capture height raised to the 80px minimum.".to_string()),
+            clamp_notice(&form, &out)
+        );
+    }
+
+    #[test]
+    fn a_clamped_width_is_named_with_its_ceiling() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 99_999;
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            Some("Capture width lowered to the 1600px maximum.".to_string()),
+            clamp_notice(&form, &out)
+        );
+    }
+
+    #[test]
+    fn both_clamped_axes_are_both_reported() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 1;
+        form.capture_height = 9_999;
+        let notice = clamp_notice(&form, &apply_to(&form, &cfg)).expect("both were clamped");
+        assert!(notice.contains("Capture width raised to the 100px minimum."), "{notice}");
+        assert!(notice.contains("Capture height lowered to the 600px maximum."), "{notice}");
+    }
+
+    #[test]
+    fn in_range_capture_values_produce_no_notice() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 500;
+        form.capture_height = 220;
+        assert_eq!(None, clamp_notice(&form, &apply_to(&form, &cfg)));
     }
 
     #[test]

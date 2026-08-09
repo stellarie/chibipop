@@ -1144,10 +1144,17 @@ pub fn run(
                                     kind: TriggerKind::Reload(Box::new(worker_settings(&live))),
                                     id: latest_dispatched,
                                 });
+                                let clamped = settings::clamp_notice(&edited, &updated);
                                 cfg = updated.clone();
                                 save_in_background(updated, config_path.to_path_buf(),
                                                    save_tx.clone(), main_tid);
-                                w.set_status("Settings applied.");
+                                match &clamped {
+                                    Some(notice) => {
+                                        w.set_capture_fields(&cfg.ocr);
+                                        w.set_status(notice);
+                                    }
+                                    None => w.set_status("Settings applied."),
+                                }
                                 let ms = t0.elapsed().as_millis();
                                 if ms > APPLY_BUDGET_MS {
                                     eprintln!(
