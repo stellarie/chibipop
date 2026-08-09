@@ -368,6 +368,17 @@ impl Overlay {
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.capture_exclusion
     }
+
+    /// Re-applies live; may refuse.
+    pub fn set_capture_exclusion(&self, on: bool) {
+        let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        // SAFETY: `self.hwnd` was created by `create` and is destroyed
+        // only by this `Overlay`'s own `Drop`, so it is valid for
+        // `&self`'s lifetime. Refusal is accepted, as in `create`.
+        unsafe {
+            let _ = SetWindowDisplayAffinity(self.hwnd, affinity);
+        }
+    }
 }
 
 impl Drop for Overlay {

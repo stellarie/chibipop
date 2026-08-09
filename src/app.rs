@@ -65,6 +65,9 @@ const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 /// Apply staging finished.
 const WM_APP_APPLY: u32 = WM_APP + 8;
 
+/// Background save finished.
+const WM_APP_SAVED: u32 = WM_APP + 9;
+
 /// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -85,6 +88,9 @@ const ARM_WARN_TICKS: u32 = 250;
 
 /// Rebuild progress poll, ms.
 const REBUILD_TICK_MS: u32 = 100;
+
+/// Over this, hooks stall.
+const APPLY_BUDGET_MS: u128 = 50;
 
 
 /// Staleness by id, no sentinel.
@@ -585,7 +591,12 @@ fn service_settings_click(
 }
 
 /// Run until the user quits.
-pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
+pub fn run(
+    mut cfg: Config,
+    dict_path: &Path,
+    rules_path: &Path,
+    config_path: &Path,
+) -> Result<()> {
     // Nothing built yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
@@ -609,7 +620,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     // SAFETY: FFI call with no preconditions - always succeeds, returns the
     // id of whichever thread calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
-    let live = derive(&cfg);
+    let mut live = derive(&cfg);
     let w_present_cfg = live.present_cfg.clone();
     let w_max_ocr_passes = live.max_ocr_passes;
     let w_prefer_vertical = live.prefer_vertical;
@@ -698,14 +709,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         eprintln!("chibipop: ============================================================");
     }
 
-    let anki_button = if cfg.anki.enabled {
-        Some(
-            AnkiButton::create(live.exclude_from_capture)
-                .context("creating the Anki button window")?,
-        )
-    } else {
-        None
-    };
+    // Always live; shown on demand.
+    let anki_button = Some(
+        AnkiButton::create(live.exclude_from_capture)
+            .context("creating the Anki button window")?,
+    );
 
     if let Some(CaptureExclusion::AttemptFailed) =
         anki_button.as_ref().map(AnkiButton::capture_exclusion)
@@ -726,17 +734,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
-    let theme = theme_from_config(&live.popup);
+    let mut theme = theme_from_config(&live.popup);
     if live.show_lookup_log {
         crate::ui::console::show();
     }
 
     let _hooks = Hooks::install().context("installing the low-level input hooks")?;
-    Hooks::set_mode(cfg.trigger.mode);
-    if let Some(vk) = crate::config::parse_trigger_key(&cfg.trigger.trigger_key) {
+    Hooks::set_mode(live.trigger_mode);
+    if let Some(vk) = crate::config::parse_trigger_key(&live.trigger_key) {
         Hooks::set_trigger_key(vk);
     }
-    if let Some(vk) = crate::config::parse_trigger_key(&cfg.anki.add_key) {
+    if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
         Hooks::set_add_hotkey(vk);
     }
 
@@ -771,6 +779,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     let (apply_tx, apply_rx) =
         mpsc::channel::<Result<(Pending, mpsc::Receiver<Progress>)>>();
+    let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
     let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
@@ -1003,7 +1012,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 );
                             }
                         }
-                    } else if click_y >= s.popup.h && anki_button.is_some() {
+                    } else if click_y >= s.popup.h && live.anki_enabled {
                         // Below popup = button area.
                         start_add_to_anki(
                             s, &mut renderer, &theme,
@@ -1122,14 +1131,27 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                         });
                                     }
                                 }
-                            } else if let Err(e) = updated.save(config_path) {
-                                eprintln!("chibipop: could not save settings to {}: {e:#}",
-                                          config_path.display());
-                            } else if let Err(e) = restart_self() {
-                                eprintln!("chibipop: settings saved, but the restart failed: {e:#}");
-                                eprintln!("chibipop: they will apply next time you start chibipop.");
                             } else {
-                                unsafe { PostQuitMessage(0) };
+                                let t0 = std::time::Instant::now();
+                                live = derive(&updated);
+                                apply_live(&live, &popup, overlay.as_ref(),
+                                           anki_button.as_ref(), &mut theme);
+                                next_id += 1;
+                                latest_dispatched = RequestId(next_id);
+                                let _ = trigger_tx.send(Trigger {
+                                    kind: TriggerKind::Reload(Box::new(worker_settings(&live))),
+                                    id: latest_dispatched,
+                                });
+                                cfg = updated.clone();
+                                save_in_background(updated, config_path.to_path_buf(),
+                                                   save_tx.clone(), main_tid);
+                                w.set_status("Settings applied.");
+                                let ms = t0.elapsed().as_millis();
+                                if ms > APPLY_BUDGET_MS {
+                                    eprintln!(
+                                        "chibipop: Apply took {ms} ms (budget {APPLY_BUDGET_MS})"
+                                    );
+                                }
                             }
                         }
                         None => {}
@@ -1402,6 +1424,19 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     Err(e) => {
                         pending_cfg = None;
                         refuse_apply(w, &e);
+                    }
+                }
+            }
+        } else if msg.message == WM_APP_SAVED {
+            while let Ok(result) = save_rx.try_recv() {
+                if let Err(e) = result {
+                    eprintln!("chibipop: could not save settings to {}: {e:#}",
+                              config_path.display());
+                    if let Some(w) = &settings {
+                        w.set_status(
+                            "Settings applied, but could not be saved - \
+                             they will be lost on restart.",
+                        );
                     }
                 }
             }
@@ -2098,6 +2133,9 @@ struct LiveSettings {
     anki_deck: String,
     anki_model: String,
     anki_field_map: Vec<crate::config::FieldMapping>,
+    trigger_mode: crate::config::TriggerMode,
+    trigger_key: String,
+    anki_add_key: String,
 }
 
 /// Rebuilt on each change.
@@ -2129,7 +2167,71 @@ fn derive(cfg: &Config) -> LiveSettings {
         } else {
             cfg.anki.field_map.clone()
         },
+        trigger_mode: cfg.trigger.mode,
+        trigger_key: cfg.trigger.trigger_key.clone(),
+        anki_add_key: cfg.anki.add_key.clone(),
     }
+}
+
+/// What the worker reloads.
+fn worker_settings(live: &LiveSettings) -> WorkerSettings {
+    WorkerSettings {
+        max_passes: live.max_ocr_passes,
+        prefer_vertical: live.prefer_vertical,
+        capture: live.capture,
+        scan_alphanumeric: live.scan_alphanumeric,
+        present_cfg: live.present_cfg.clone(),
+        scan_display: live.scan_display,
+    }
+}
+
+/// Push settings to windows.
+fn apply_live(
+    live: &LiveSettings,
+    popup: &Popup,
+    overlay: Option<&Overlay>,
+    button: Option<&AnkiButton>,
+    theme: &mut Theme,
+) {
+    popup.set_capture_exclusion(live.exclude_from_capture);
+    if let Some(o) = overlay {
+        o.set_capture_exclusion(live.exclude_from_capture);
+    }
+    if let Some(b) = button {
+        b.set_capture_exclusion(live.exclude_from_capture);
+        if !live.anki_enabled {
+            b.hide();
+        }
+    }
+    *theme = theme_from_config(&live.popup);
+    if live.show_lookup_log {
+        crate::ui::console::show();
+    } else {
+        crate::ui::console::hide();
+    }
+    Hooks::set_mode(live.trigger_mode);
+    if let Some(vk) = crate::config::parse_trigger_key(&live.trigger_key) {
+        Hooks::set_trigger_key(vk);
+    }
+    if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
+        Hooks::set_add_hotkey(vk);
+    }
+}
+
+/// Must not block the pump.
+fn save_in_background(
+    cfg: Config,
+    path: PathBuf,
+    tx: mpsc::Sender<Result<()>>,
+    main_tid: u32,
+) {
+    thread::spawn(move || {
+        let _ = tx.send(cfg.save(&path));
+        // SAFETY: wakes the pump thread.
+        unsafe {
+            let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -2351,5 +2453,18 @@ mod tests {
         assert!(live.side_panel);
         assert!(live.anki_enabled);
         assert_eq!("テスト", live.anki_deck);
+    }
+
+    /// Step 3b: the input trio.
+    #[test]
+    fn derive_carries_the_three_input_settings() {
+        let mut cfg = Config::default();
+        cfg.trigger.mode = crate::config::TriggerMode::HoldKey;
+        cfg.trigger.trigger_key = "f8".to_string();
+        cfg.anki.add_key = "f9".to_string();
+        let live = derive(&cfg);
+        assert_eq!(crate::config::TriggerMode::HoldKey, live.trigger_mode);
+        assert_eq!("f8", live.trigger_key);
+        assert_eq!("f9", live.anki_add_key);
     }
 }

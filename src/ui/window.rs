@@ -205,6 +205,17 @@ impl Popup {
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.capture_exclusion
     }
+
+    /// Re-applies live; may refuse.
+    pub fn set_capture_exclusion(&self, on: bool) {
+        let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        // SAFETY: `self.hwnd` was created by `create` and is owned by
+        // this `Popup`, so it is valid for `&self`'s lifetime. Refusal
+        // is an accepted, non-fatal outcome, exactly as in `create`.
+        unsafe {
+            let _ = SetWindowDisplayAffinity(self.hwnd, affinity);
+        }
+    }
 }
 
 /// Fixed height, 96-DPI px.
@@ -529,6 +540,17 @@ impl AnkiButton {
     /// Whether it is excluded.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.capture_exclusion
+    }
+
+    /// Re-applies live; may refuse.
+    pub fn set_capture_exclusion(&self, on: bool) {
+        let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        // SAFETY: `self.hwnd` was created by `create` and is owned by
+        // this `AnkiButton`, so it is valid for `&self`'s lifetime.
+        // Refusal is an accepted outcome, exactly as in `create`.
+        unsafe {
+            let _ = SetWindowDisplayAffinity(self.hwnd, affinity);
+        }
     }
 
     /// Fixed height, DPI-scaled.
