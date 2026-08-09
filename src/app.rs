@@ -598,15 +598,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     // SAFETY: FFI call with no preconditions - always succeeds, returns the
     // id of whichever thread calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
-    let present_cfg = cfg.present_config();
-    let max_ocr_passes = cfg.ocr.max_ocr_passes;
-    let prefer_vertical = cfg.ocr.prefer_vertical;
-    let capture = CaptureSize { w: cfg.ocr.capture_width, h: cfg.ocr.capture_height };
-    let scan_alphanumeric = cfg.ocr.scan_alphanumeric;
-    let scan_display = ScanDisplay {
-        captures: cfg.debug.show_scan_region,
-        highlight: cfg.popup.highlight_match,
-    };
+    let live = derive(&cfg);
+    let w_present_cfg = live.present_cfg.clone();
+    let w_max_ocr_passes = live.max_ocr_passes;
+    let w_prefer_vertical = live.prefer_vertical;
+    let w_capture = live.capture;
+    let w_scan_alphanumeric = live.scan_alphanumeric;
+    let w_scan_display = live.scan_display;
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
@@ -614,12 +612,12 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         worker_main(
             dict_path,
             rules_path,
-            present_cfg,
-            max_ocr_passes,
-            prefer_vertical,
-            capture,
-            scan_alphanumeric,
-            scan_display,
+            w_present_cfg,
+            w_max_ocr_passes,
+            w_prefer_vertical,
+            w_capture,
+            w_scan_alphanumeric,
+            w_scan_display,
             main_tid,
             trigger_rx,
             result_tx,
@@ -635,7 +633,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         .recv()
         .context("worker thread ended before completing startup")??;
 
-    let popup = Popup::create(cfg.popup.exclude_from_capture).context("creating the popup window")?;
+    let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
     // Contract 2: report all three.
     match popup.capture_exclusion() {
@@ -662,8 +660,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     }
 
     // Never fatal - spec §5.
-    let overlay = if scan_display.any() {
-        match Overlay::create(cfg.popup.exclude_from_capture) {
+    let overlay = if live.scan_display.any() {
+        match Overlay::create(live.exclude_from_capture) {
             Ok(o) => Some(o),
             Err(e) => {
                 eprintln!(
@@ -691,7 +689,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
     let anki_button = if cfg.anki.enabled {
         Some(
-            AnkiButton::create(cfg.popup.exclude_from_capture)
+            AnkiButton::create(live.exclude_from_capture)
                 .context("creating the Anki button window")?,
         )
     } else {
@@ -717,24 +715,10 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
-    let theme = theme_from_config(&cfg.popup);
-    if cfg.debug.show_lookup_log {
+    let theme = theme_from_config(&live.popup);
+    if live.show_lookup_log {
         crate::ui::console::show();
     }
-    let max_height_percent = i32::from(cfg.popup.max_height_percent);
-    let max_width_percent = i32::from(cfg.popup.max_width_percent);
-    let scroll_popup = cfg.popup.scroll_popup;
-    let side_panel = cfg.popup.side_panel;
-    let summary_chars = cfg.popup.summary_chars;
-    let anki_enabled = cfg.anki.enabled;
-    let anki_url = cfg.anki.url.clone();
-    let anki_deck = cfg.anki.deck.clone();
-    let anki_model = cfg.anki.model.clone();
-    let anki_field_map = if cfg.anki.field_map.is_empty() {
-        crate::config::AnkiConfig::default().field_map
-    } else {
-        cfg.anki.field_map.clone()
-    };
 
     let _hooks = Hooks::install().context("installing the low-level input hooks")?;
     Hooks::set_mode(cfg.trigger.mode);
@@ -899,28 +883,28 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             // Spec D7: the popup's own rect.
-            let live = cursor_now();
+            let cursor_pos = cursor_now();
             let over_popup = shown.as_ref().is_some_and(|s| {
-                s.popup.contains(live)
+                s.popup.contains(cursor_pos)
             });
             let over_popup_or_btn = shown.as_ref().is_some_and(|s| {
                 let btn_h = anki_button.as_ref()
                     .filter(|b| b.is_visible())
                     .map_or(0, |b| b.height_phys());
                 let full = PhysRect { h: s.popup.h + btn_h, ..s.popup };
-                full.contains(live)
+                full.contains(cursor_pos)
             });
-            let armed = scroll_popup
+            let armed = live.scroll_popup
                 && over_popup
                 && shown.as_ref().is_some_and(|s| s.content_h > s.view_h);
             Hooks::set_scroll_armed(armed);
             Hooks::set_click_armed(over_popup_or_btn);
-            Hooks::set_add_armed(shown.is_some() && anki_enabled);
+            Hooks::set_add_armed(shown.is_some() && live.anki_enabled);
 
             if over_popup {
                 if let Some(s) = shown.as_ref() {
-                    let lx = live.x - s.popup.x;
-                    let ly = live.y - s.popup.y;
+                    let lx = cursor_pos.x - s.popup.x;
+                    let ly = cursor_pos.y - s.popup.y;
                     let clickable = renderer.hit_test(lx, ly, s.scroll).is_some();
                     if clickable {
                         if let Ok(cur) = unsafe { LoadCursorW(None, IDC_HAND) } {
@@ -950,7 +934,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if next != s.scroll {
                         s.scroll = next;
                         let back = !s.history.is_empty();
-                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, back, side_panel) {
+                        let painted = renderer
+                            .paint(&s.presentation, &theme, s.scroll, back, live.side_panel);
+                        if let Err(e) = painted {
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
                         }
                     }
@@ -965,18 +951,18 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if let Some(action) = renderer.hit_test(click_x, click_y, s.scroll) {
                         match action {
                             HitAction::ExpandEntry(i) => {
-                                present::swap_top(&mut s.presentation, i, summary_chars);
+                                present::swap_top(&mut s.presentation, i, live.summary_chars);
                                 match show_presentation(
                                     &popup,
                                     &mut renderer,
                                     &theme,
-                                    max_height_percent,
-                                    max_width_percent,
+                                    live.max_height_percent,
+                                    live.max_width_percent,
                                     &s.presentation,
                                     s.anchor,
                                     0,
                                     has_history,
-                                    side_panel,
+                                    live.side_panel,
                                 ) {
                                     Ok((rect, content_h, view_h)) => {
                                         s.popup = rect;
@@ -1001,8 +987,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             HitAction::Back => {
                                 pop_history(
                                     s, &popup, &mut renderer, &theme,
-                                    max_height_percent, max_width_percent,
-                                    anki_button.as_ref(), side_panel,
+                                    live.max_height_percent, live.max_width_percent,
+                                    anki_button.as_ref(), live.side_panel,
                                 );
                             }
                         }
@@ -1010,8 +996,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         // Below popup = button area.
                         start_add_to_anki(
                             s, &mut renderer, &theme,
-                            &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                            &add_tx, main_tid, side_panel,
+                            &live.anki_url, &live.anki_deck, &live.anki_model,
+                            &live.anki_field_map, &add_tx, main_tid, live.side_panel,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                     }
@@ -1023,8 +1009,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
                         s, &mut renderer, &theme,
-                        &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                        &add_tx, main_tid, side_panel,
+                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
+                        &add_tx, main_tid, live.side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -1034,8 +1020,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
                         s, &mut renderer, &theme,
-                        &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                        &add_tx, main_tid, side_panel,
+                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
+                        &add_tx, main_tid, live.side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -1047,8 +1033,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     pop_history(
                         s, &popup, &mut renderer, &theme,
-                        max_height_percent, max_width_percent,
-                        anki_button.as_ref(), side_panel,
+                        live.max_height_percent, live.max_width_percent,
+                        anki_button.as_ref(), live.side_panel,
                     );
                 }
             }
@@ -1164,7 +1150,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             let cursor = Hooks::take_pending().unwrap_or_else(|| {
                 // Fallback: poll GetCursorPos when the LL hook
                 // is blocked (e.g. by anti-cheat).
-                let pos = live;
+                let pos = cursor_pos;
                 let dominated = Hooks::poll_gate(pos);
                 if dominated { pos } else {
                     PhysPoint { x: i32::MIN, y: i32::MIN }
@@ -1204,11 +1190,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if let Some(s) = shown.as_mut() {
                         push_drilldown(
                             s, *pres, &popup, &mut renderer, &theme,
-                            max_height_percent, max_width_percent,
-                            anki_enabled, side_panel,
+                            live.max_height_percent, live.max_width_percent,
+                            live.anki_enabled, live.side_panel,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                        if anki_enabled {
+                        if live.anki_enabled {
                             popup_gen = popup_gen.wrapping_add(1);
                             s.gen = popup_gen;
                             let mut exprs: Vec<String> = Vec::new();
@@ -1218,9 +1204,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 }
                             }
                             if !exprs.is_empty() {
-                                let url = anki_url.clone();
-                                let deck = anki_deck.clone();
-                                let model = anki_model.clone();
+                                let url = live.anki_url.clone();
+                                let deck = live.anki_deck.clone();
+                                let model = live.anki_model.clone();
                                 let gen = popup_gen;
                                 let tx = anki_tx.clone();
                                 thread::spawn(move || {
@@ -1248,17 +1234,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &popup,
                         &mut renderer,
                         &theme,
-                        max_height_percent,
-                        max_width_percent,
+                        live.max_height_percent,
+                        live.max_width_percent,
                         overlay.as_ref(),
                         &mut shown,
                         result.outcome,
-                        cfg.debug.show_lookup_log,
-                        anki_enabled,
-                        side_panel,
+                        live.show_lookup_log,
+                        live.anki_enabled,
+                        live.side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), shown.as_ref(), &theme);
-                    if new_popup && anki_enabled {
+                    if new_popup && live.anki_enabled {
                         popup_gen = popup_gen.wrapping_add(1);
                         let mut exprs: Vec<String> = Vec::new();
                         if let Some(s) = shown.as_mut() {
@@ -1275,9 +1261,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             }
                         }
                         if !exprs.is_empty() {
-                            let url = anki_url.clone();
-                            let deck = anki_deck.clone();
-                            let model = anki_model.clone();
+                            let url = live.anki_url.clone();
+                            let deck = live.anki_deck.clone();
+                            let model = live.anki_model.clone();
                             let gen = popup_gen;
                             let tx = anki_tx.clone();
                             thread::spawn(move || {
@@ -1320,13 +1306,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             &popup,
                             &mut renderer,
                             &theme,
-                            max_height_percent,
-                            max_width_percent,
+                            live.max_height_percent,
+                            live.max_width_percent,
                             &s.presentation,
                             s.anchor,
                             s.scroll,
                             back,
-                            side_panel,
+                            live.side_panel,
                         ) {
                             Ok((rect, content_h, view_h)) => {
                                 s.popup = rect;
@@ -1358,13 +1344,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &popup,
                         &mut renderer,
                         &theme,
-                        max_height_percent,
-                        max_width_percent,
+                        live.max_height_percent,
+                        live.max_width_percent,
                         &s.presentation,
                         s.anchor,
                         s.scroll,
                         back,
-                        side_panel,
+                        live.side_panel,
                     ) {
                         Ok((rect, content_h, view_h)) => {
                             s.popup = rect;
@@ -2060,6 +2046,61 @@ fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
     theme
 }
 
+/// What run reads from config.
+struct LiveSettings {
+    popup: crate::config::PopupConfig,
+    present_cfg: PresentConfig,
+    scan_display: ScanDisplay,
+    max_ocr_passes: u8,
+    prefer_vertical: bool,
+    capture: CaptureSize,
+    scan_alphanumeric: bool,
+    exclude_from_capture: bool,
+    show_lookup_log: bool,
+    max_height_percent: i32,
+    max_width_percent: i32,
+    scroll_popup: bool,
+    side_panel: bool,
+    summary_chars: usize,
+    anki_enabled: bool,
+    anki_url: String,
+    anki_deck: String,
+    anki_model: String,
+    anki_field_map: Vec<crate::config::FieldMapping>,
+}
+
+/// Rebuilt on each change.
+fn derive(cfg: &Config) -> LiveSettings {
+    LiveSettings {
+        popup: cfg.popup.clone(),
+        present_cfg: cfg.present_config(),
+        scan_display: ScanDisplay {
+            captures: cfg.debug.show_scan_region,
+            highlight: cfg.popup.highlight_match,
+        },
+        max_ocr_passes: cfg.ocr.max_ocr_passes,
+        prefer_vertical: cfg.ocr.prefer_vertical,
+        capture: CaptureSize { w: cfg.ocr.capture_width, h: cfg.ocr.capture_height },
+        scan_alphanumeric: cfg.ocr.scan_alphanumeric,
+        exclude_from_capture: cfg.popup.exclude_from_capture,
+        show_lookup_log: cfg.debug.show_lookup_log,
+        max_height_percent: i32::from(cfg.popup.max_height_percent),
+        max_width_percent: i32::from(cfg.popup.max_width_percent),
+        scroll_popup: cfg.popup.scroll_popup,
+        side_panel: cfg.popup.side_panel,
+        summary_chars: cfg.popup.summary_chars,
+        anki_enabled: cfg.anki.enabled,
+        anki_url: cfg.anki.url.clone(),
+        anki_deck: cfg.anki.deck.clone(),
+        anki_model: cfg.anki.model.clone(),
+        anki_field_map: if cfg.anki.field_map.is_empty() {
+            crate::config::AnkiConfig::default().field_map
+        } else {
+            cfg.anki.field_map.clone()
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2221,5 +2262,23 @@ mod tests {
         let past = PhysRect { x: 100 + ANCHOR_JITTER_PX + 1, y: 200, w: 26, h: 27 };
         assert!(same_content(&prev, &presentation_of("宿舎"), at));
         assert!(!same_content(&prev, &presentation_of("宿舎"), past));
+    }
+
+    #[test]
+    fn derive_carries_every_popup_field() {
+        let mut cfg = Config::default();
+        cfg.popup.max_width_percent = 33;
+        cfg.popup.max_height_percent = 44;
+        cfg.popup.summary_chars = 55;
+        cfg.popup.side_panel = true;
+        cfg.anki.enabled = true;
+        cfg.anki.deck = "テスト".to_string();
+        let live = derive(&cfg);
+        assert_eq!(33, live.max_width_percent);
+        assert_eq!(44, live.max_height_percent);
+        assert_eq!(55, live.summary_chars);
+        assert!(live.side_panel);
+        assert!(live.anki_enabled);
+        assert_eq!("テスト", live.anki_deck);
     }
 }
