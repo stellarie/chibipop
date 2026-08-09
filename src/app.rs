@@ -91,10 +91,21 @@ const REBUILD_TICK_MS: u32 = 100;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct RequestId(u64);
 
-/// Hover or drill-down.
-enum TriggerKind {
+/// Hover, drill-down, reload.
+pub enum TriggerKind {
     Hover(PhysPoint),
     DrillDown(String),
+    Reload(Box<WorkerSettings>),
+}
+
+/// What the worker owns.
+pub struct WorkerSettings {
+    pub max_passes: u8,
+    pub prefer_vertical: bool,
+    pub capture: CaptureSize,
+    pub scan_alphanumeric: bool,
+    pub present_cfg: PresentConfig,
+    pub scan_display: ScanDisplay,
 }
 
 /// One gated cursor movement.
@@ -1447,17 +1458,32 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     std::process::exit(0)
 }
 
+/// Newest hover; all reloads.
+fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<WorkerSettings>) {
+    let mut reloads = Vec::new();
+    let mut hover = None;
+    let mut take = |t: Trigger| match t.kind {
+        TriggerKind::Reload(s) => reloads.push(*s),
+        _ => hover = Some(t),
+    };
+    take(first);
+    while let Ok(next) = rx.try_recv() {
+        take(next);
+    }
+    (hover, reloads)
+}
+
 /// Serves triggers, owns OCR.
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
     dict_path: PathBuf,
     rules_path: PathBuf,
-    present_cfg: PresentConfig,
+    mut present_cfg: PresentConfig,
     max_ocr_passes: u8,
     prefer_vertical: bool,
     capture: CaptureSize,
     scan_alphanumeric: bool,
-    scan_display: ScanDisplay,
+    mut scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -1467,7 +1493,7 @@ fn worker_main(
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
     let built = OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric);
-    let ocr = match built.context("creating the OCR text source") {
+    let mut ocr = match built.context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
             let _ = startup_tx.send(Err(e));
@@ -1511,18 +1537,20 @@ fn worker_main(
         return; // main thread gave up waiting; nothing left to do.
     }
 
-    loop {
-        let mut trigger = match trigger_rx.recv() {
-            Ok(t) => t,
-            Err(_) => break, // sender dropped: shutdown (decision 5, step 2).
-        };
-        // The newest queued wins.
-        while let Ok(newer) = trigger_rx.try_recv() {
-            trigger = newer;
+    // Sender dropped: shutdown.
+    while let Ok(first) = trigger_rx.recv() {
+        let (hover, reloads) = drain(first, &trigger_rx);
+        for s in reloads {
+            ocr.apply_settings(s.max_passes, s.prefer_vertical, s.capture, s.scan_alphanumeric);
+            present_cfg = s.present_cfg;
+            scan_display = s.scan_display;
         }
         if !running.load(Ordering::SeqCst) {
             break;
         }
+        let Some(trigger) = hover else {
+            continue;
+        };
 
         // Fresh, so no ordering rule.
         let guard = if capture_guard_active.load(Ordering::SeqCst) {
@@ -1551,6 +1579,9 @@ fn worker_main(
                     &present_cfg,
                     text,
                 ),
+                TriggerKind::Reload(_) => {
+                    WorkerOutcome::Failed("a reload reached the hover path".to_string())
+                }
             }
         }))
         .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
@@ -2262,6 +2293,46 @@ mod tests {
         let past = PhysRect { x: 100 + ANCHOR_JITTER_PX + 1, y: 200, w: 26, h: 27 };
         assert!(same_content(&prev, &presentation_of("宿舎"), at));
         assert!(!same_content(&prev, &presentation_of("宿舎"), past));
+    }
+
+    fn ws(passes: u8) -> WorkerSettings {
+        WorkerSettings {
+            max_passes: passes,
+            prefer_vertical: false,
+            capture: CaptureSize::default(),
+            scan_alphanumeric: true,
+            present_cfg: Config::default().present_config(),
+            scan_display: ScanDisplay { captures: false, highlight: false },
+        }
+    }
+
+    /// Newest hover; every reload.
+    #[test]
+    fn drain_keeps_the_newest_hover_and_every_reload() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        let reload = TriggerKind::Reload(Box::new(ws(2)));
+        tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
+        let newer = TriggerKind::Hover(PhysPoint { x: 9, y: 9 });
+        tx.send(Trigger { kind: newer, id: RequestId(3) }).unwrap();
+        let older = TriggerKind::Hover(PhysPoint { x: 1, y: 1 });
+        let first = Trigger { kind: older, id: RequestId(1) };
+        let (hover, reloads) = drain(first, &rx);
+        let hover = hover.expect("a hover survives");
+        assert!(matches!(hover.kind, TriggerKind::Hover(p) if p.x == 9), "newest hover wins");
+        assert_eq!(1, reloads.len(), "the reload must not be swallowed");
+        assert_eq!(2, reloads[0].max_passes);
+    }
+
+    /// A reload alone still arrives.
+    #[test]
+    fn drain_returns_no_hover_when_only_a_reload_queued() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        drop(tx);
+        let first = Trigger { kind: TriggerKind::Reload(Box::new(ws(3))), id: RequestId(1) };
+        let (hover, reloads) = drain(first, &rx);
+        assert!(hover.is_none());
+        assert_eq!(1, reloads.len());
+        assert_eq!(3, reloads[0].max_passes);
     }
 
     #[test]
