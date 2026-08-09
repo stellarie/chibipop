@@ -31,9 +31,27 @@ Start chibipop. The settings window opens by itself.
 
 Everything is in the settings window — you shouldn't need to edit any files.
 
-Pressing **Apply** saves your settings and restarts chibipop, which takes
-a couple of seconds. Your settings live in `chibipop.toml` beside
-`chibipop.exe`, and you can edit that by hand if you prefer.
+Pressing **Apply** saves your settings and starts using them straight away.
+chibipop keeps running and the window stays open, so you can change something,
+hover a word to see how it feels, and change it again. If you added or removed
+a dictionary the button reads **Apply & Restart** instead — swapping the
+dictionary out needs a restart, and that takes a couple of seconds.
+
+Your settings live in `chibipop.toml` beside `chibipop.exe`, and you can edit
+that by hand if you prefer.
+
+Two worth knowing about:
+
+- **Capture width / height** — how large an area chibipop reads around your
+  cursor, in pixels. Wider takes in more of a long line; taller is more
+  forgiving about exactly where you point. **Vertical mode swaps the two**, so
+  the 500 × 100 that reads across becomes 100 × 500 reading down. Very small or
+  very large values are pulled back to something workable, and the window tells
+  you when it does that.
+- **Scan alphanumeric text** — on by default. Turn it off and chibipop stops
+  reacting to English words, so hovering a menu or a button does nothing.
+  Japanese with numbers or Latin mixed into it still works: 「3人」 still looks
+  up, with the 3 in place.
 
 ---
 

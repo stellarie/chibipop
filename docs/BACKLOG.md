@@ -1,7 +1,12 @@
 # chibipop — backlog
 
 Work that is designed or measured but deliberately not built yet, with the reason and the
-evidence needed to pick it up cheaply. Newest first.
+evidence needed to pick it up cheaply.
+
+**Append only; never renumber.** These numbers are stable IDs and other documents cite them by
+number — `docs/REGRESSION.md` alone points at 7 and 8. New items go at the **end**. (The header
+said "Newest first" until 2026-08-09, which no item had ever obeyed and which would have had the
+next person inserting at the top and shifting every ID below it.)
 
 ---
 
@@ -78,6 +83,13 @@ transpose. Design the round around **square pass 1 → transposed second capture
 - `band_of` floors the perpendicular extent with `REGION_H`, i.e. floors a *width* with a
   *height* constant, so vertical tiles already come out 100×500. That is luck, not design, and is
   untested at any other text size.
+  > **Updated 2026-08-09.** `band_of` now takes an explicit `short_floor` argument
+  > (`src/text/layout.rs:107`) and the callers pass the *configured* short axis, so the
+  > width-floored-by-a-height-constant accident is gone and the floor is tested at a second value
+  > (`band_of_floors_on_the_configured_short_axis`). What this changes for the item: the shape is
+  > now **tunable** — a user can already ask for a square pass 1 — so the round below is about
+  > choosing the shape per pass automatically, not about making the shape settable at all. The
+  > 2/6-vs-6/6 measurement is unaffected; it was never about who owned the constant.
 - Pass 1's region is **not clamped to the monitor** (tiles are). Measured live: a hover at
   x=2696 produced a region starting at x=2446, 114 px onto the neighbouring monitor.
 
@@ -305,3 +317,71 @@ exactly chibipop's use case.
 100.0 vs 96.2 solid). `UPSCALE = 2` may simply be wrong once glyphs are already ~28px or larger.
 It is one constant, but moving a global default on the evidence of one image is overfitting;
 measure across several glyph sizes before touching it.
+
+---
+
+## 9. `chibipop settings` says "Apply & Restart" and restarts nothing
+
+**Raised 2026-08-09 by the hot-reload branch. A product decision, deliberately not taken by the
+agent that found it.** Not a regression: this wording predates the branch and is unchanged by it.
+
+`chibipop settings` opens the settings window in its own process, with no `chibipop run` to talk
+to. Its Apply writes `chibipop.toml` for the *next* start. The button nevertheless reads
+**"Apply & Restart"** and the hint reads **"Applying saves your settings and restarts chibipop."**
+Neither is true there — nothing is restarted, because there is nothing running to restart.
+
+The design spec for this branch (§6, row 3 — a working note, not published with the repo, as with
+item 1's sources) wants that third row to read **"Apply"** with a next-start hint instead, on the
+grounds that `chibipop settings` edits the file for the next start and should say so. That is a
+reasonable request and it is **not** what the code does.
+
+### What is actually there
+
+`apply_caption` / `apply_hint` (`src/ui/settings_window.rs:772`) key on
+`ApplyMode` × *dictionary staged*:
+
+| Opened by | Staged? | Caption | Hint |
+|---|---|---|---|
+| `run` (`ApplyMode::Live`) | no | Apply | "…uses them right away." |
+| `run` | yes | Apply & Restart | "…restarts chibipop." |
+| `settings` (`ApplyMode::Standalone`) | either | Apply & Restart | "…restarts chibipop." |
+
+The branch made the `run` rows vary; it left `Standalone` exactly as it found it.
+
+### Why it was left
+
+Changing what a shipped button says to the user is oniichan's call, not an implementer's, and the
+branch had no requirement that turned on it. It is also the *safe* wording to leave standing: it
+over-promises a restart rather than under-promising one, so a user who follows it restarts
+needlessly instead of wondering why nothing changed.
+
+### If picked up
+
+One arm of `apply_caption` and one of `apply_hint`, plus the three assertions at
+`settings_window.rs:2502`. Decide the wording first — "Apply" alone is what the spec asks for, but
+"Saved. Restart chibipop to use them." carries more information and is what
+`docs/REGRESSION.md` 11b spent its whole life believing was there. Whatever is chosen, **11b's
+table must move with it**; that item was wrong for months precisely because a caption and a
+checklist drifted apart with nobody comparing them to the program.
+
+---
+
+## 10. `ScanDisplay::any()` has no callers
+
+**Raised 2026-08-09. Trivial, and recorded only because nothing will ever tell you.**
+
+`ScanDisplay::any()` (`src/geom.rs:90`) returns `captures || highlight`. Its last non-test caller
+went away when the scan overlay stopped being created conditionally — the overlay is now created
+unconditionally and shown on demand, so nobody needs to ask in advance whether *any* overlay might
+be wanted. The only remaining reference is its own unit test at `src/geom.rs:366`.
+
+**No warning fires**, and that is the durable point: `any()` is `pub`, and in a crate that is both
+a library and a binary, `pub` items are part of the library's API, so `dead_code` never triggers.
+The tier 0 clippy gate is exactly the mechanism that would normally catch this and it is
+structurally blind to it. Any `pub` helper in this crate can quietly lose its last caller and the
+gate will stay green — a unit test on a dead function looks identical to a unit test on a live one.
+
+**Not removed here** because deletion is a code change and the branch that orphaned it was a
+documentation task by then. Removing it is `any()` plus its test, and nothing else references it.
+Worth a moment first on whether the *reverse* is wanted: if a future round wants to skip creating
+the overlay again on some cheaper grounds, this is the predicate it would want back.

@@ -7,13 +7,20 @@ Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed 
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
+**Two exceptions to "verified", both marked in place.** Tier 1 items **1.9–1.13** were added
+2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Item **11b**
+was corrected the same day, having described behaviour that never existed in any version of the
+program.
+
 ---
 
 ## Tier 0 — the automated gate (~2 min, no screen)
 
-**This tier is the CI contract.** Every command below was re-run verbatim on 2026-07-29 and
-reproduces the stated numbers, so it can be lifted into a workflow as-is. Two of them are
-`grep -c` counts rather than exit codes, and that is deliberate — see the note under the table.
+**This tier is the CI contract.** The commands below are unchanged since 2026-07-29 and are what
+`.github/workflows/ci.yml` runs; the numbers beside them were last re-measured on **2026-08-09**.
+Two of them are `grep -c` counts rather than exit codes, and that is deliberate — see the note
+under the table. CI additionally passes `--color never` and runs the suite three times; both of
+those are explained in the callouts below, and neither is optional there.
 
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
@@ -25,10 +32,36 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **626** total across **6** targets (was 416; re-measured 2026-08-08) |
-| Clippy | **exactly 4** accepted errors (was 5; the comment sweep retired `doc list item`) |
+| Rust tests | **all green**, **664** total across **6** targets, 1 ignored (was 626; re-measured 2026-08-09) |
+| Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
+| Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
+
+**The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
+silently not running must. CI asserts `≥ 400` and prints the total; **664** is what this machine
+measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
+that is the difference between the two rows and it is deliberate.
+
+**The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
+`chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
+test catches it — the cost lands on unrelated applications, because Apply runs on the thread that
+owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that misses
+`LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
+before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
+
+**The three accepted clippy errors, as of 2026-08-09:**
+
+| Lint | Site |
+|---|---|
+| `useless_conversion` — explicit `.into_iter()` in an `IntoIterator` argument | `src/lookup/deconj.rs:78` |
+| `too_many_arguments` (8/7) | `src/lookup/model.rs:78` |
+| `too_many_arguments` (10/7) | `src/ui/render.rs:699` |
+
+It was **4** until 2026-08-09. The fourth was `while_let_loop`, on `worker_main`'s trigger drain;
+the hot-reload branch replaced that loop with an explicit `drain` (a `Reload` message must never be
+swallowed by newest-wins coalescing), so the lint went with it. That is a legitimate 4 → 3, not a
+suppression — the count went **down** because the code did.
 
 > [!warning] The clippy line changed on 2026-07-29, because the old one could not fail
 > It used to be `grep -cE "^error: (doc list|explicit call|this function|this loop)"` —
@@ -57,10 +90,18 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 > "unchanged" — and that 5 was quoted to a reviewer as the baseline, hiding a dead-code
 > regression inside the one number whose whole job is to expose one. A baseline carried forward
 > from memory is not a baseline.
+>
+> It happened again, better, on 2026-08-09: 4 → 3, because the hot-reload branch deleted the loop
+> that produced the fourth. This time the drop was **predicted in the plan before it happened**
+> ("Task 6 rewrites the very loop that produces accepted error #1, so the raw gate may legitimately
+> drop to 3 — re-baseline, do not treat 3 as a violation"), which is what a re-baseline should look
+> like: named in advance, so nobody has to decide at the gate whether a moving number is a
+> regression. **A count that changes is only ever a finding or a re-baseline. Say which, in
+> writing, in the same commit that moves it.**
 
-**Why counts, not exit status.** The repo carries four accepted clippy errors; a plain
-`-D warnings` run therefore always exits non-zero, and CI must assert the count is **4** rather than
-that clippy passed. A 5th is a real regression — most often a field added by one commit and read by
+**Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
+that clippy passed. A 4th is a real regression — most often a field added by one commit and read by
 the next, which is why a task that adds a field must be the task that reads it.
 
 The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
@@ -201,6 +242,98 @@ ls -l target/release/chibipop.exe          # ~3.4 MB, limit 100 MB
 ⚠️ `run` under sustained **real** hovering has never been re-measured and recorded 94.8 MB at M3.
 That is the one number still outstanding.
 
+> [!warning] 1.9 through 1.13 were added 2026-08-09 and **have not been run**
+> They are the acceptance checks for the resizable-capture / hot-reload branch, written from the
+> code by an agent with no screen. Every one of them needs a human on the portrait secondary.
+> Nothing below carries a ✅ and nothing below should be read as passing. They are also all
+> *live-apply* checks, which is precisely the class no unit test can reach: the unit tests prove
+> the new value is computed, never that a running instance started obeying it.
+
+### 1.9 Settings apply without restarting
+
+Record the PID (`Get-Process chibipop`), open Settings, change **Capture height**, press Apply.
+
+- The **PID is unchanged** — that is the actual test of "no restart", not a proxy. Everything else
+  in this entry is equally consistent with a fast restart; only the PID rules one out.
+- The settings window **stays open**. It used to vanish, because the process died under it.
+- A value under 80 is clamped and the status line says so. Bounds: height 80–600, width 100–1600.
+- `probe --at <x>,<y>` reports the new region height.
+
+> [!warning] `probe` is not a read-only observer, and it reads the file rather than the process
+> **It writes.** `probe` calls `config::load_or_create`, whose NotFound arm **creates a fresh
+> `chibipop.toml`** — including when `--region` makes the config irrelevant. That side effect is new
+> as of this branch (`src/main.rs`, before the `--region` match). Probing a directory with no config
+> is therefore not an inspection, it is an initialisation. Harmless in the ordinary case, since the
+> app writes that file anyway — not harmless if you were about to conclude something from the file
+> being absent.
+>
+> **It is a different process.** `probe` reads `chibipop.toml` from disk, so it proves Apply
+> *persisted* the value and that a fresh process picks it up. It says nothing directly about the
+> region the already-running instance is now using; that is what hovering, and the unchanged PID,
+> are for.
+
+### 1.10 Alphanumeric scanning
+
+Uncheck **Scan alphanumeric text**, Apply.
+
+- Hovering an English menu bar (`File`, `Edit`) produces **no popup**.
+- 「3人」 still resolves **with the 3 intact** — hover the 人.
+- Hovering the `3` itself produces nothing.
+
+Segmentation is why this is a tier 1 check and not a unit test: it depends on how the live engine
+splits that line. The filter makes a Latin-only word **unhoverable** rather than deleting it from
+the assembled text, which is what keeps 「PCを使う」 looking up whole from the 使.
+
+### 1.11 Trigger mode and both hotkeys apply live
+
+Three bindings the settings window has always been able to edit, and that have never once taken
+effect without a restart. The design's audit of "what needs recreating" missed all three.
+
+In `chibipop run`, with the PID recorded:
+
+1. Switch **Trigger** from `Live` to `Hold key`, Apply. Hovering alone must now do nothing; holding
+   the trigger key while moving must raise the popup.
+2. Press the **Trigger key** button, press a different key, Apply. The new key works, the old one
+   does not.
+3. Change the Anki group's **Shortcut key**, Apply, and add a card with the new key.
+
+The observable in all three is the same: the new binding works **and the PID has not changed**.
+Before this branch Apply restarted the process, so these appeared to work while the thing making
+them work was the restart. Remove the restart and they silently stop — which is why a pass here is
+meaningless without the PID beside it.
+
+### 1.12 The scan overlay can be switched on live
+
+Start `chibipop run` with **Outline what each hover captured** *off* (`[debug] show_scan_region =
+false`, the shipped default). Turn it on in Settings, Apply, then hover.
+
+- The capture outlines **appear**, with no restart.
+
+**Start with it off.** Starting with it on tests nothing — that is the case that always worked.
+Before this branch the overlay window was only *created* when the setting was on at startup, so
+turning it on later had no window to show and the checkbox did nothing whatsoever. It is now
+created unconditionally and merely shown on demand.
+
+### 1.13 The capture guard tracks a live `exclude_from_capture` toggle
+
+The one with real teeth: chibipop's own OCR capture must never contain chibipop's own popup.
+
+With `chibipop run` live, uncheck **Hide the popup from screen capture**, Apply, then keep hovering
+along a line of Japanese.
+
+- Lookups stay correct — no popup text bleeds into them. Turn on **Outline what each hover
+  captured** (1.12) and screenshot: nothing chibipop drew may be sitting inside a capture box.
+  **A lookup that resolves the popup's own text is the failure.**
+- Re-check the box, Apply, and it returns to the exclusion path — again with no restart.
+
+Two mechanisms have to hand off cleanly. Exclusion on: Windows keeps the popup out of the capture.
+Exclusion off: chibipop must instead hide the popup around each capture itself
+(`capture_guard_active`). That flag is recomputed from what the windows **report after** the
+affinity call rather than from what was asked for, because `SetWindowDisplayAffinity` is allowed to
+refuse. Before this branch the cached value kept its startup setting for the life of the process,
+so turning exclusion off left the guard off with it, and the popup contaminated the very lookup it
+was displaying.
+
 ---
 
 ## Tier 2 — mostly automatable (~5 min)
@@ -273,8 +406,41 @@ That is the one number still outstanding.
     with **`IsWindowVisible` = False** while `ChibipopSettingsClass` is True. That is
     `own_console()` hiding a console it owns alone. A visible black box here means
     `GetConsoleProcessList` returned something other than 1.
-11b. **`chibipop settings`** → the same window, captioned **"Apply"** and "Restart chibipop to use
-    them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
+11b. **The Apply button's caption and hint.** Two processes open the same window and only one of
+    them varies its caption. What the code does, as of 2026-08-09
+    (`apply_caption`/`apply_hint`, `src/ui/settings_window.rs:772`):
+
+| Opened by | Dictionary staged? | Caption | Hint |
+|---|---|---|---|
+| `chibipop run` | no | **Apply** | "Applying saves your settings and uses them right away." |
+| `chibipop run` | yes | **Apply & Restart** | "Applying saves your settings and restarts chibipop." |
+| `chibipop settings` | either | **Apply & Restart** | "Applying saves your settings and restarts chibipop." |
+
+   The varying row is new with the hot-reload branch; `chibipop settings` is unchanged and does not
+   vary. In the source the caption reads `"Apply && Restart"` — `&&` renders as one `&`, and a
+   single `&` would render as an accelerator underline instead (see the traps table).
+
+> [!warning] Corrected 2026-08-09 — this entry described behaviour that has never existed
+> It asserted `chibipop settings` shows caption **"Apply"** plus a hint "Restart chibipop to use
+> them", and blamed a `restarts` flag when they did not match. Three things were checked against
+> the source, and all three came back against the entry:
+>
+> - That hint string appears **nowhere in `src/`**. It exists only in this branch's plan and design
+>   spec, which are working notes and are not published with the repo.
+> - There is **no `restarts` flag** anywhere in the codebase.
+> - The caption has been a hardcoded "Apply & Restart" in **both** processes for its entire history.
+>
+> So **11b could not have passed on any commit, before this branch or after it** — it was a
+> checklist item written from a design document rather than from the program, and every run that
+> "passed" it passed it by not looking.
+>
+> The ruling was to **fix the doc, not the behaviour**: changing what `chibipop settings` says is a
+> product decision, not a regression fix. The open question — that window says "Apply & Restart"
+> and then restarts nothing — is recorded as **BACKLOG 9**.
+>
+> **The lesson is the general one.** A checklist item copied from a spec asserts what someone
+> intended; only an item written against the program asserts what it does. When they disagree the
+> spec is not automatically wrong, but the checklist is not evidence either way.
 11e. **Close via the X (`WM_CLOSE`), not Escape or a button.** In `settings_only`
     (`chibipop settings`, or `chibipop run` before a dictionary exists) it fully exits
     chibipop, same as "Quit chibipop" — there is no tray to fall back on, so `wndproc`'s
@@ -355,7 +521,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **`&` in a button caption is an accelerator** | "Apply & Restart" renders "Apply ‗Restart". Double it. |
 | **Nested message pumps eat `WM_TIMER`** | `TrackPopupMenuEx`, `MessageBoxW`, `DialogBoxParamW`, caption drag. The wheel arm latches. Disarm before any of them. |
 | **`display_order` holds substrings, not names** | Order works today, silently stops after the next dictionary rebuild. Never write live names back. |
-| **A task that adds a field must be the task that reads it** | `field never read` = a 6th clippy error against a 5-error gate. |
+| **A task that adds a field must be the task that reads it** | `field never read` is a dead-code error, and the gate asserts an exact count — one extra breaks it. (Caught once as a 6th error against the 5-error gate of the day; the gate is 3 now, the trap is unchanged.) |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
 | **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so `chibipop run` cannot have the new database renamed over the one its worker is holding. It builds to `<out>.new` and swaps it in **after** the worker is joined, on the way to the restart. Measured, and pinned by `tests/rebuild.rs`. |
 | **Never delete an archive before the rebuild proves out** | The user's `.zip` files are 50–200 MB downloads chibipop may not redistribute. Apply moves removals to `library/.removed/`, which `build-dict` cannot see because it scans top-level `*.zip` only, and deletes them only after the new database is in place. Every failure path calls `Pending::rollback`. |

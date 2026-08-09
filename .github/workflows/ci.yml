@@ -51,13 +51,19 @@ jobs:
       # cargo prefixes every diagnostic with an ANSI escape and `^error` never
       # matches. That silently counted 0 and this gate had never once run.
       #
-      # The repo carries four accepted clippy errors, so `-D warnings` always
-      # exits non-zero here. CI must assert the COUNT is 4 - a fifth is a real
+      # The repo carries three accepted clippy errors, so `-D warnings` always
+      # exits non-zero here. CI must assert the COUNT is 3 - a fourth is a real
       # regression. Count every error line and subtract the per-target "could
       # not compile" summaries; matching known lint TEXTS instead is blind to
       # any new lint, which is how a dead-code regression got through on
       # 2026-07-31. See docs/REGRESSION.md.
-      - name: Clippy - exactly four accepted errors
+      #
+      # Was 4 until 2026-08-09. The hot-reload branch replaced worker_main's
+      # trigger drain, which was the `while_let_loop` site, so the count went
+      # down because the code did. This number is a baseline, not a constant:
+      # when it moves, say in the commit message whether it is a finding or a
+      # re-baseline, and move docs/REGRESSION.md's table with it.
+      - name: Clippy - exactly three accepted errors
         shell: bash
         run: |
           set +e
@@ -65,9 +71,9 @@ jobs:
           set -e
           n=$(printf '%s\n' "$raw" | grep -E "^error" | grep -vc "could not compile" || true)
           echo "accepted clippy errors: $n"
-          if [ "$n" -ne 4 ]; then
+          if [ "$n" -ne 3 ]; then
             printf '%s\n' "$raw"
-            echo "::error::expected exactly 4 accepted clippy errors, got $n"
+            echo "::error::expected exactly 3 accepted clippy errors, got $n"
             exit 1
           fi
 
