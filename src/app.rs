@@ -780,6 +780,8 @@ pub fn run(
     let (apply_tx, apply_rx) =
         mpsc::channel::<Result<(Pending, mpsc::Receiver<Progress>)>>();
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
+    // One writer at a time.
+    let mut save_job: Option<thread::JoinHandle<()>> = None;
     let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
@@ -1146,7 +1148,8 @@ pub fn run(
                                 });
                                 let clamped = settings::clamp_notice(&edited, &updated);
                                 cfg = updated.clone();
-                                save_in_background(updated, config_path.to_path_buf(),
+                                save_in_background(&mut save_job, updated,
+                                                   config_path.to_path_buf(),
                                                    save_tx.clone(), main_tid);
                                 match &clamped {
                                     Some(notice) => {
@@ -1499,6 +1502,8 @@ pub fn run(
     if restart_at_exit {
         let _ = restart_self();
     }
+    // exit(0) kills it mid-write.
+    join_save(&mut save_job);
     std::process::exit(0)
 }
 
@@ -2251,18 +2256,27 @@ fn apply_live(
 
 /// Must not block the pump.
 fn save_in_background(
+    prev: &mut Option<thread::JoinHandle<()>>,
     cfg: Config,
     path: PathBuf,
     tx: mpsc::Sender<Result<()>>,
     main_tid: u32,
 ) {
-    thread::spawn(move || {
+    join_save(prev);
+    *prev = Some(thread::spawn(move || {
         let _ = tx.send(cfg.save(&path));
         // SAFETY: wakes the pump thread.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
         }
-    });
+    }));
+}
+
+/// No second writer, ever.
+fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
+    if let Some(h) = job.take() {
+        let _ = h.join();
+    }
 }
 
 #[cfg(test)]
