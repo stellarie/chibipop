@@ -2207,6 +2207,7 @@ fn apply_live(
     theme: &mut Theme,
     capture_guard_active: &AtomicBool,
 ) {
+    capture_guard_active.store(true, Ordering::SeqCst);
     popup.set_capture_exclusion(live.exclude_from_capture);
     if let Some(o) = overlay {
         o.set_capture_exclusion(live.exclude_from_capture);
