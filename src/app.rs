@@ -2468,13 +2468,16 @@ mod tests {
         tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
         let newer = TriggerKind::Hover(PhysPoint { x: 9, y: 9 });
         tx.send(Trigger { kind: newer, id: RequestId(3) }).unwrap();
+        let second = TriggerKind::Reload(Box::new(ws(4)));
+        tx.send(Trigger { kind: second, id: RequestId(4) }).unwrap();
         let older = TriggerKind::Hover(PhysPoint { x: 1, y: 1 });
         let first = Trigger { kind: older, id: RequestId(1) };
         let (hover, reloads) = drain(first, &rx);
         let hover = hover.expect("a hover survives");
         assert!(matches!(hover.kind, TriggerKind::Hover(p) if p.x == 9), "newest hover wins");
-        assert_eq!(1, reloads.len(), "the reload must not be swallowed");
-        assert_eq!(2, reloads[0].max_passes);
+        assert_eq!(2, reloads.len(), "neither reload may be swallowed");
+        let passes: Vec<u8> = reloads.iter().map(|r| r.max_passes).collect();
+        assert_eq!(vec![2, 4], passes, "reloads keep the order they were sent");
     }
 
     /// A reload alone still arrives.
@@ -2505,6 +2508,31 @@ mod tests {
         assert!(live.side_panel);
         assert!(live.anki_enabled);
         assert_eq!("テスト", live.anki_deck);
+    }
+
+    #[test]
+    fn derive_carries_the_capture_settings() {
+        let mut cfg = Config::default();
+        cfg.ocr.capture_width = 320;
+        cfg.ocr.capture_height = 240;
+        cfg.ocr.scan_alphanumeric = false;
+        let live = derive(&cfg);
+        assert_eq!(CaptureSize { w: 320, h: 240 }, live.capture);
+        assert!(!live.scan_alphanumeric);
+    }
+
+    /// The headline plumbing.
+    #[test]
+    fn worker_settings_carries_the_capture_settings() {
+        let mut cfg = Config::default();
+        cfg.ocr.capture_width = 640;
+        cfg.ocr.capture_height = 480;
+        cfg.ocr.scan_alphanumeric = false;
+        cfg.ocr.max_ocr_passes = 3;
+        let out = worker_settings(&derive(&cfg));
+        assert_eq!(CaptureSize { w: 640, h: 480 }, out.capture);
+        assert!(!out.scan_alphanumeric);
+        assert_eq!(3, out.max_passes);
     }
 
     /// Step 3b: the input trio.
