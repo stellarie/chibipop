@@ -1086,6 +1086,7 @@ pub fn run(
                             (Ok(()), Some(flight)) => {
                                 let updated =
                                     pending_cfg.take().unwrap_or_else(|| cfg.clone());
+                                join_save(&mut save_job);
                                 if let Err(e) = updated.save(config_path) {
                                     eprintln!("chibipop: could not save settings to {}: {e:#}",
                                               config_path.display());
