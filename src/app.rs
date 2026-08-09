@@ -707,11 +707,18 @@ pub fn run(
         eprintln!("chibipop: ============================================================");
     }
 
+    // Never fatal - spec §5.
+    //
     // Always live; shown on demand.
-    let anki_button = Some(
-        AnkiButton::create(live.exclude_from_capture)
-            .context("creating the Anki button window")?,
-    );
+    let anki_button = match AnkiButton::create(live.exclude_from_capture) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!(
+                "chibipop: the Anki button could not be created, continuing without it: {e:#}"
+            );
+            None
+        }
+    };
 
     if let Some(CaptureExclusion::AttemptFailed) =
         anki_button.as_ref().map(AnkiButton::capture_exclusion)
