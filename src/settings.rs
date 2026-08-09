@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Re-exported for config.rs.
-pub use crate::config::{MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+pub use crate::config::{
+    CAPTURE_H_RANGE, CAPTURE_W_RANGE, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
+    SUMMARY_RANGE,
+};
 
 /// What the window edits.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +30,9 @@ pub struct SettingsForm {
     pub dict_names: Vec<String>,
     pub max_ocr_passes: u8,
     pub prefer_vertical: bool,
+    pub capture_width: i32,
+    pub capture_height: i32,
+    pub scan_alphanumeric: bool,
     pub show_scan_region: bool,
     pub freq_names: Vec<String>,
     pub staged_adds: Vec<StagedAdd>,
@@ -239,6 +245,9 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         dict_names: ordered.iter().map(|d| d.name.clone()).collect(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
+        capture_width: cfg.ocr.capture_width,
+        capture_height: cfg.ocr.capture_height,
+        scan_alphanumeric: cfg.ocr.scan_alphanumeric,
         show_scan_region: cfg.debug.show_scan_region,
         freq_names: Vec::new(),
         staged_adds: Vec::new(),
@@ -272,6 +281,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup.exclude_from_capture = form.exclude_from_capture;
     out.ocr.max_ocr_passes = form.max_ocr_passes.clamp(PASSES_RANGE.0, PASSES_RANGE.1);
     out.ocr.prefer_vertical = form.prefer_vertical;
+    out.ocr.capture_width = form.capture_width.clamp(CAPTURE_W_RANGE.0, CAPTURE_W_RANGE.1);
+    out.ocr.capture_height = form.capture_height.clamp(CAPTURE_H_RANGE.0, CAPTURE_H_RANGE.1);
+    out.ocr.scan_alphanumeric = form.scan_alphanumeric;
     out.debug.show_scan_region = form.show_scan_region;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
@@ -449,6 +461,9 @@ mod tests {
         cfg.popup.exclude_from_capture = true;
         cfg.ocr.max_ocr_passes = 3;
         cfg.ocr.prefer_vertical = true;
+        cfg.ocr.capture_width = 640;
+        cfg.ocr.capture_height = 180;
+        cfg.ocr.scan_alphanumeric = false;
         cfg.debug.show_scan_region = true;
         cfg.anki.enabled = true;
         cfg.anki.url = "http://localhost:9999".into();
@@ -501,6 +516,25 @@ mod tests {
         assert_eq!(MAX_HEIGHT_RANGE.1, out.popup.max_height_percent);
         assert_eq!(SUMMARY_RANGE.0, out.popup.summary_chars);
         assert_eq!(PASSES_RANGE.1, out.ocr.max_ocr_passes);
+    }
+
+    #[test]
+    fn apply_to_clamps_the_capture_size() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 99_999;
+        form.capture_height = 1;
+        let out = apply_to(&form, &cfg);
+        assert_eq!(CAPTURE_W_RANGE.1, out.ocr.capture_width);
+        assert_eq!(CAPTURE_H_RANGE.0, out.ocr.capture_height);
+    }
+
+    #[test]
+    fn apply_to_carries_scan_alphanumeric() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.scan_alphanumeric = false;
+        assert!(!apply_to(&form, &cfg).ocr.scan_alphanumeric);
     }
 
     fn staged_form() -> SettingsForm {

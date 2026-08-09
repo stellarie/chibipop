@@ -18,7 +18,7 @@ use crate::text::layout::{CaptureSize, Orientation};
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
-use crate::ui::settings_window::{SettingsClick, SettingsOutcome, SettingsWindow};
+use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
@@ -212,8 +212,8 @@ pub fn settings_only(
     let library = library_dir();
     let form = form_with_library(&cfg, dicts, &library);
     let stale = settings::stale_order_entries(&cfg, dicts);
-    let window =
-        SettingsWindow::open(&form, &stale).context("opening the settings window")?;
+    let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
+        .context("opening the settings window")?;
 
     // A run may hold it open.
     let staged_db = rebuild::staging_path(dict_path);
@@ -785,6 +785,7 @@ pub fn run(
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
         &form_with_library(&cfg, &dicts, &library),
         &settings::stale_order_entries(&cfg, &dicts),
+        ApplyMode::Live,
     ) {
         // Never fatal.
         Err(e) => {
@@ -1457,7 +1458,7 @@ pub fn run(
                     } else {
                         let form = form_with_library(&cfg, &dicts, &library);
                         let stale = settings::stale_order_entries(&cfg, &dicts);
-                        match SettingsWindow::open(&form, &stale) {
+                        match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
                             // Never fatal.
                             Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
                             Ok(w) => settings = Some(w),

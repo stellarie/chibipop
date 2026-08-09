@@ -43,6 +43,15 @@ pub enum SettingsClick {
     CheckUpdate,
 }
 
+/// Who owns the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyMode {
+    /// `run`: applies live.
+    Live,
+    /// Saves for the next start.
+    Standalone,
+}
+
 // ---- control ids ----
 
 const ID_APPLY: i32 = 100;
@@ -80,6 +89,9 @@ const ID_PREFER_VERT: i32 = 132;
 const ID_ANKI_ADD_KEY: i32 = 133;
 const ID_SIDE_PANEL: i32 = 134;
 const ID_FIELD_MAP_TOGGLE: i32 = 135;
+const ID_CAPTURE_W: i32 = 136;
+const ID_CAPTURE_H: i32 = 137;
+const ID_SCAN_ALNUM: i32 = 138;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -756,6 +768,25 @@ fn field_map_toggle_label(collapsed: bool) -> &'static str {
     if collapsed { "Field mapping \u{25B6}" } else { "Field mapping \u{25BC}" }
 }
 
+/// `&&` renders one `&`.
+fn apply_caption(mode: ApplyMode, staged: bool) -> &'static str {
+    if mode == ApplyMode::Live && !staged { "Apply" } else { "Apply && Restart" }
+}
+
+/// What that button will do.
+fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
+    if mode == ApplyMode::Live && !staged {
+        "Applying saves your settings and uses them right away."
+    } else {
+        "Applying saves your settings and restarts chibipop."
+    }
+}
+
+/// Junk keeps the old value.
+fn parse_px(text: &str, fallback: i32) -> i32 {
+    text.trim().parse().unwrap_or(fallback)
+}
+
 /// `None` unless capturing.
 fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
@@ -835,6 +866,8 @@ pub struct SettingsWindow {
     bottom_tail: i32,
     /// Which tab is showing.
     current_tab: Cell<u32>,
+    /// What Apply will do.
+    apply_mode: ApplyMode,
 }
 
 impl SettingsWindow {
@@ -843,7 +876,13 @@ impl SettingsWindow {
     /// `stale` are `display_order` entries matching no installed dictionary
     /// (spec D6a); when non-empty a warning naming them is shown, because that
     /// is what a dictionary rename looks like from in here.
-    pub fn open(form: &SettingsForm, stale: &[String]) -> Result<SettingsWindow> {
+    ///
+    /// `mode` words the Apply button.
+    pub fn open(
+        form: &SettingsForm,
+        stale: &[String],
+        mode: ApplyMode,
+    ) -> Result<SettingsWindow> {
         // SAFETY: every call below is an ordinary window-creation FFI call
         // with handles this function owns; each `?` leaves nothing to leak
         // because the window is the only resource and it is not yet created.
@@ -891,6 +930,7 @@ impl SettingsWindow {
                 bottom_y0: 0,
                 bottom_tail: 0,
                 current_tab: Cell::new(0),
+                apply_mode: mode,
             };
             // `build` reports where its layout actually ended; the window is
             // then sized to that rather than to a guess. The first version of
@@ -1011,6 +1051,24 @@ impl SettingsWindow {
         unsafe {
             if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
                 let _ = SetWindowTextW(c, PCWSTR(wide(text).as_ptr()));
+            }
+        }
+    }
+
+    /// Re-word Apply after staging.
+    fn refresh_apply(&self) {
+        let staged = self.staged.borrow().has_staged();
+        // SAFETY: `ID_APPLY` and `ID_STATUS` are live children of `self.hwnd`,
+        // created in `build`; `SetWindowTextW` copies each string during the
+        // call, so the temporaries below outlive every use.
+        unsafe {
+            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_APPLY) {
+                let caption = wide(apply_caption(self.apply_mode, staged));
+                let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
+            }
+            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
+                let hint = wide(apply_hint(self.apply_mode, staged));
+                let _ = SetWindowTextW(c, PCWSTR(hint.as_ptr()));
             }
         }
     }
@@ -1311,6 +1369,7 @@ impl SettingsWindow {
             }
             self.staged.borrow_mut().stage_remove(&name);
             update_list_buttons(self.hwnd);
+            self.refresh_apply();
         }
     }
 
@@ -1345,6 +1404,7 @@ impl SettingsWindow {
                 }
             }
             update_list_buttons(self.hwnd);
+            self.refresh_apply();
         }
     }
 
@@ -1671,7 +1731,7 @@ impl SettingsWindow {
 
             // ---- OCR / Debug ----
             y = content_y;
-            ocr.push(group("OCR / Debug", y, 4 * ROW_H + 34)?);
+            ocr.push(group("OCR / Debug", y, 8 * ROW_H + 34)?);
             y += 20;
             self.passes = numeric_choices(
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
@@ -1687,8 +1747,24 @@ impl SettingsWindow {
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
+            ocr.push(label("Capture width (px)", y)?);
+            ocr.push(child(h, w!("EDIT"), &form.capture_width.to_string(),
+                WS_TABSTOP | WS_BORDER,
+                FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_W, f)?);
+            y += ROW_H;
+            ocr.push(label("Capture height (px)", y)?);
+            ocr.push(child(h, w!("EDIT"), &form.capture_height.to_string(),
+                WS_TABSTOP | WS_BORDER,
+                FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_H, f)?);
+            y += ROW_H;
+            ocr.push(child(h, w!("STATIC"), "Vertical mode swaps these two values.",
+                WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
+            y += ROW_H;
             ocr.push(check("Prefer vertical text (manga, VN)",
                 ID_PREFER_VERT, form.prefer_vertical, y)?);
+            y += ROW_H;
+            ocr.push(check("Scan alphanumeric text",
+                ID_SCAN_ALNUM, form.scan_alphanumeric, y)?);
             y += ROW_H;
             let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
@@ -1767,13 +1843,14 @@ impl SettingsWindow {
 
             // ---- Apply / Cancel ----
             // Also the progress line.
+            let staged = form.has_staged();
             let status = child(h, w!("EDIT"),
-                "Applying saves your settings and restarts chibipop.",
+                apply_hint(self.apply_mode, staged),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
                 PAD, y, WIN_W - 2 * PAD - 16, STATUS_H, ID_STATUS, f)?;
             bottom.push((status, PAD, y));
             y += STATUS_H + 2;
-            let apply_btn = child(h, w!("BUTTON"), "Apply && Restart",
+            let apply_btn = child(h, w!("BUTTON"), apply_caption(self.apply_mode, staged),
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                   WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
             bottom.push((apply_btn, WIN_W - PAD - 144, y));
@@ -1824,6 +1901,7 @@ impl SettingsWindow {
             let text_of = |id: i32| -> String {
                 GetDlgItem(Some(h), id).map(|c| window_text(c)).unwrap_or_default()
             };
+            let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
             // Empty is not missing.
             let dict_names =
@@ -1882,6 +1960,9 @@ impl SettingsWindow {
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
                                      template.max_ocr_passes as i64) as u8,
                 prefer_vertical: checked(ID_PREFER_VERT),
+                capture_width: px(ID_CAPTURE_W, template.capture_width),
+                capture_height: px(ID_CAPTURE_H, template.capture_height),
+                scan_alphanumeric: checked(ID_SCAN_ALNUM),
                 show_scan_region: checked(ID_SHOW_SCAN),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),
@@ -2374,6 +2455,52 @@ mod tests {
         for vk in [0x10u16, 0x11, 0x12, 0x70, 0x7B, 0x41, 0x30, 0x20, 0xBA] {
             let stored = stored_trigger_key(vk);
             assert_eq!(Some(vk), crate::config::parse_trigger_key(&stored), "{stored}");
+        }
+    }
+
+    // ---- capture size fields ----
+
+    #[test]
+    fn parse_px_reads_a_plain_number() {
+        assert_eq!(640, parse_px("640", 500));
+    }
+
+    /// Typing leaves stray spaces.
+    #[test]
+    fn parse_px_ignores_surrounding_space() {
+        assert_eq!(640, parse_px("  640 ", 500));
+    }
+
+    /// The trap: never zero.
+    #[test]
+    fn parse_px_keeps_the_old_value_for_junk() {
+        assert_eq!(500, parse_px("", 500));
+        assert_eq!(500, parse_px("abc", 500));
+        assert_eq!(500, parse_px("640px", 500));
+        assert_eq!(500, parse_px("6.4", 500));
+    }
+
+    // ---- apply caption ----
+
+    /// Only `run` applies live.
+    #[test]
+    fn a_live_window_with_nothing_staged_just_applies() {
+        assert_eq!("Apply", apply_caption(ApplyMode::Live, false));
+        assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
+    }
+
+    #[test]
+    fn a_staged_dictionary_still_promises_a_restart() {
+        assert_eq!("Apply && Restart", apply_caption(ApplyMode::Live, true));
+        assert!(apply_hint(ApplyMode::Live, true).contains("restarts chibipop"));
+    }
+
+    /// It reloads no other process.
+    #[test]
+    fn a_standalone_window_never_promises_a_live_apply() {
+        for staged in [false, true] {
+            assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone, staged));
+            assert!(apply_hint(ApplyMode::Standalone, staged).contains("restarts chibipop"));
         }
     }
 }
