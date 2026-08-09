@@ -1106,6 +1106,7 @@ pub fn run(
                         // Already on the main thread.
                         Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
                         Some(SettingsOutcome::Apply) => {
+                            let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
                             // Never half-apply.
@@ -1133,7 +1134,6 @@ pub fn run(
                                     }
                                 }
                             } else {
-                                let t0 = std::time::Instant::now();
                                 live = derive(&updated);
                                 apply_live(&live, &popup, overlay.as_ref(),
                                            anki_button.as_ref(), &mut theme,
