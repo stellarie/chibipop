@@ -135,14 +135,12 @@ fn main() -> Result<()> {
                 y: ys.trim().parse().context("Y in --at is not an integer")?,
             };
 
-            let source = chibipop::text::ocr::OcrTextSource::new(tiles, false)?;
+            let capture = probe_capture_size();
+            let source =
+                chibipop::text::ocr::OcrTextSource::new(tiles, false, capture, true)?;
             let region_was_default = region.is_none();
             let region = match region {
-                None => chibipop::text::layout::region_around(
-                    cursor,
-                    false,
-                    chibipop::text::layout::CaptureSize::default(),
-                ),
+                None => chibipop::text::layout::region_around(cursor, false, capture),
                 Some(spec) => {
                     let (ws, hs) = spec
                         .split_once(',')
@@ -305,7 +303,12 @@ fn main() -> Result<()> {
         Command::Watch { dict, rules, tiles } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
-            let source = chibipop::text::ocr::OcrTextSource::new(tiles, false)?;
+            let source = chibipop::text::ocr::OcrTextSource::new(
+                tiles,
+                false,
+                chibipop::text::layout::CaptureSize::default(),
+                true,
+            )?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
 
@@ -477,6 +480,20 @@ fn file_name(path: &Path) -> String {
 /// Beside the running exe.
 fn default_config_path() -> PathBuf {
     chibipop::paths::beside_exe("chibipop.toml")
+}
+
+/// Probe's box, from config.
+fn probe_capture_size() -> chibipop::text::layout::CaptureSize {
+    match chibipop::config::load_or_create(&default_config_path()) {
+        Ok(cfg) => chibipop::text::layout::CaptureSize {
+            w: cfg.ocr.capture_width,
+            h: cfg.ocr.capture_height,
+        },
+        Err(e) => {
+            eprintln!("chibipop: config unreadable, using the default capture size: {e:#}");
+            chibipop::text::layout::CaptureSize::default()
+        }
+    }
 }
 
 /// Keeps a window painted.

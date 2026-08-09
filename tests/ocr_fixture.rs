@@ -5,7 +5,7 @@
 //! `cargo test` — the same approved pattern the M1 golden corpus uses.
 
 use chibipop::geom::{PhysPoint, PhysRect};
-use chibipop::text::layout::{map_from_upscaled, resolve, OcrLine, OcrWord};
+use chibipop::text::layout::{map_from_upscaled, resolve, CaptureSize, OcrLine, OcrWord};
 
 const FIX_W: i32 = 400;
 const FIX_H: i32 = 120;
@@ -22,7 +22,8 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         eprintln!("SKIP: tests/fixtures/japanese_bgra.bin not present");
         return;
     };
-    let source = match chibipop::text::ocr::OcrTextSource::new(1, false) {
+    let built = chibipop::text::ocr::OcrTextSource::new(1, false, CaptureSize::default(), true);
+    let source = match built {
         Ok(source) => source,
         Err(_) => {
             eprintln!("SKIP: no Japanese OCR engine available");

@@ -14,7 +14,7 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
-use crate::text::layout::Orientation;
+use crate::text::layout::{CaptureSize, Orientation};
 use crate::text::ocr::OcrTextSource;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
@@ -601,6 +601,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     let present_cfg = cfg.present_config();
     let max_ocr_passes = cfg.ocr.max_ocr_passes;
     let prefer_vertical = cfg.ocr.prefer_vertical;
+    let capture = CaptureSize { w: cfg.ocr.capture_width, h: cfg.ocr.capture_height };
+    let scan_alphanumeric = cfg.ocr.scan_alphanumeric;
     let scan_display = ScanDisplay {
         captures: cfg.debug.show_scan_region,
         highlight: cfg.popup.highlight_match,
@@ -615,6 +617,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             present_cfg,
             max_ocr_passes,
             prefer_vertical,
+            capture,
+            scan_alphanumeric,
             scan_display,
             main_tid,
             trigger_rx,
@@ -1465,6 +1469,8 @@ fn worker_main(
     present_cfg: PresentConfig,
     max_ocr_passes: u8,
     prefer_vertical: bool,
+    capture: CaptureSize,
+    scan_alphanumeric: bool,
     scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
@@ -1474,7 +1480,8 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
-    let ocr = match OcrTextSource::new(max_ocr_passes, prefer_vertical).context("creating the OCR text source") {
+    let built = OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric);
+    let ocr = match built.context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
             let _ = startup_tx.send(Err(e));

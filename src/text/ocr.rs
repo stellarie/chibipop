@@ -160,15 +160,35 @@ pub struct RegionRead {
     pub dxgi_error: Option<String>,
 }
 
+/// The OCR knobs, reloadable.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SettingsSnapshot {
+    pub max_passes: u8,
+    pub prefer_vertical: bool,
+    pub capture: CaptureSize,
+    pub scan_alphanumeric: bool,
+}
+
+impl SettingsSnapshot {
+    /// Replace every field at once.
+    pub fn apply(&mut self, max_passes: u8, prefer_vertical: bool,
+                 capture: CaptureSize, scan_alphanumeric: bool) {
+        self.max_passes = max_passes;
+        self.prefer_vertical = prefer_vertical;
+        self.capture = capture;
+        self.scan_alphanumeric = scan_alphanumeric;
+    }
+}
+
 pub struct OcrTextSource {
     engine: OcrEngine,
-    max_passes: u8,
-    prefer_vertical: bool,
+    settings: SettingsSnapshot,
 }
 
 impl OcrTextSource {
     /// Inits WinRT + engine once.
-    pub fn new(max_passes: u8, prefer_vertical: bool) -> Result<Self> {
+    pub fn new(max_passes: u8, prefer_vertical: bool,
+               capture: CaptureSize, scan_alphanumeric: bool) -> Result<Self> {
         init_dpi_awareness()?;
         // Else CO_E_NOTINITIALIZED.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
@@ -177,7 +197,15 @@ impl OcrTextSource {
             "no Japanese OCR recogniser available - add Japanese under \
              Windows Settings, Time & language, Language & region",
         )?;
-        Ok(OcrTextSource { engine, max_passes, prefer_vertical })
+        let settings =
+            SettingsSnapshot { max_passes, prefer_vertical, capture, scan_alphanumeric };
+        Ok(OcrTextSource { engine, settings })
+    }
+
+    /// Swap in new OCR settings.
+    pub fn apply_settings(&mut self, max_passes: u8, prefer_vertical: bool,
+                          capture: CaptureSize, scan_alphanumeric: bool) {
+        self.settings.apply(max_passes, prefer_vertical, capture, scan_alphanumeric);
     }
 
     /// The engine from `new`.
@@ -192,7 +220,7 @@ impl OcrTextSource {
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
         let read = self.resolve_in_region(
             cursor,
-            region_around(cursor, self.prefer_vertical, CaptureSize::default()),
+            region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
         )?;
         Ok((read.lines, read.resolved))
     }
@@ -208,7 +236,7 @@ impl OcrTextSource {
         } else {
             (lines, cap)
         };
-        let resolved = resolve(&lines, cursor, true);
+        let resolved = resolve(&lines, cursor, self.settings.scan_alphanumeric);
         Ok(RegionRead {
             lines,
             resolved,
@@ -268,11 +296,11 @@ impl OcrTextSource {
         let Some(first) = resolved else { return Ok((None, scan)) };
         if collect {
             scan.push(ScanRect {
-                rect: region_around(cursor, self.prefer_vertical, CaptureSize::default()),
+                rect: region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
                 kind: ScanKind::Pass1,
             });
         }
-        if self.max_passes <= 1 {
+        if self.settings.max_passes <= 1 {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
@@ -280,8 +308,10 @@ impl OcrTextSource {
         }
 
         // Pass 1's own kept tail; no re-read.
-        let region = region_around(cursor, self.prefer_vertical, CaptureSize::default());
-        let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region, true) else {
+        let region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
+        let alnum = self.settings.scan_alphanumeric;
+        let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region, alnum)
+        else {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
@@ -290,7 +320,7 @@ impl OcrTextSource {
         let head_chars = head.chars().count();
 
         let anchor = first.span.anchor;
-        let band = band_of(anchor, orientation, CaptureSize::default().short());
+        let band = band_of(anchor, orientation, self.settings.capture.short());
         let perpendicular_centre = match orientation {
             Orientation::Horizontal => anchor.center().y,
             Orientation::Vertical => anchor.center().x,
@@ -306,7 +336,7 @@ impl OcrTextSource {
             band,
             tail_start,
             orientation,
-            usize::from(self.max_passes - 1),
+            usize::from(self.settings.max_passes - 1),
             MAX_LOOKUP_CHARS.saturating_sub(head_chars),
             bounds,
             |tile| {
@@ -438,5 +468,21 @@ mod tests {
             line(vec![word("大", 40)]),
         ];
         assert!(!glyphs_look_small(&lines));
+    }
+
+    /// Reload replaces every OCR field.
+    #[test]
+    fn apply_settings_replaces_all_four_fields() {
+        let mut s = SettingsSnapshot {
+            max_passes: 1,
+            prefer_vertical: false,
+            capture: CaptureSize { w: 500, h: 100 },
+            scan_alphanumeric: true,
+        };
+        s.apply(3, true, CaptureSize { w: 800, h: 120 }, false);
+        assert_eq!(3, s.max_passes);
+        assert!(s.prefer_vertical);
+        assert_eq!(CaptureSize { w: 800, h: 120 }, s.capture);
+        assert!(!s.scan_alphanumeric);
     }
 }
