@@ -682,18 +682,16 @@ pub fn run(
     }
 
     // Never fatal - spec §5.
-    let overlay = if live.scan_display.any() {
-        match Overlay::create(live.exclude_from_capture) {
-            Ok(o) => Some(o),
-            Err(e) => {
-                eprintln!(
-                    "chibipop: the scan overlay could not be created, continuing without it: {e:#}"
-                );
-                None
-            }
+    //
+    // Always live; shown on demand.
+    let overlay = match Overlay::create(live.exclude_from_capture) {
+        Ok(o) => Some(o),
+        Err(e) => {
+            eprintln!(
+                "chibipop: the scan overlay could not be created, continuing without it: {e:#}"
+            );
+            None
         }
-    } else {
-        None
     };
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
 
@@ -724,13 +722,15 @@ pub fn run(
         );
     }
 
-    // Default stays false - D5.
-    if popup.capture_exclusion().needs_capture_guard()
-        || overlay.as_ref().is_some_and(|ov| ov.capture_exclusion().needs_capture_guard())
-        || anki_button.as_ref().is_some_and(|b| b.capture_exclusion().needs_capture_guard())
-    {
-        capture_guard_active.store(true, Ordering::SeqCst);
-    }
+    // Recomputed by `apply_live`.
+    capture_guard_active.store(
+        capture_guard_needed(
+            popup.capture_exclusion(),
+            overlay.as_ref().map(Overlay::capture_exclusion),
+            anki_button.as_ref().map(AnkiButton::capture_exclusion),
+        ),
+        Ordering::SeqCst,
+    );
 
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
@@ -1135,7 +1135,8 @@ pub fn run(
                                 let t0 = std::time::Instant::now();
                                 live = derive(&updated);
                                 apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(), &mut theme);
+                                           anki_button.as_ref(), &mut theme,
+                                           &capture_guard_active);
                                 next_id += 1;
                                 latest_dispatched = RequestId(next_id);
                                 let _ = trigger_tx.send(Trigger {
@@ -2185,6 +2186,18 @@ fn worker_settings(live: &LiveSettings) -> WorkerSettings {
     }
 }
 
+/// Not excluded means guard on.
+/// `None`: no such window.
+fn capture_guard_needed(
+    popup: CaptureExclusion,
+    overlay: Option<CaptureExclusion>,
+    button: Option<CaptureExclusion>,
+) -> bool {
+    popup.needs_capture_guard()
+        || overlay.is_some_and(CaptureExclusion::needs_capture_guard)
+        || button.is_some_and(CaptureExclusion::needs_capture_guard)
+}
+
 /// Push settings to windows.
 fn apply_live(
     live: &LiveSettings,
@@ -2192,6 +2205,7 @@ fn apply_live(
     overlay: Option<&Overlay>,
     button: Option<&AnkiButton>,
     theme: &mut Theme,
+    capture_guard_active: &AtomicBool,
 ) {
     popup.set_capture_exclusion(live.exclude_from_capture);
     if let Some(o) = overlay {
@@ -2203,6 +2217,14 @@ fn apply_live(
             b.hide();
         }
     }
+    capture_guard_active.store(
+        capture_guard_needed(
+            popup.capture_exclusion(),
+            overlay.map(Overlay::capture_exclusion),
+            button.map(AnkiButton::capture_exclusion),
+        ),
+        Ordering::SeqCst,
+    );
     *theme = theme_from_config(&live.popup);
     if live.show_lookup_log {
         crate::ui::console::show();
@@ -2466,5 +2488,55 @@ mod tests {
         assert_eq!(crate::config::TriggerMode::HoldKey, live.trigger_mode);
         assert_eq!("f8", live.trigger_key);
         assert_eq!("f9", live.anki_add_key);
+    }
+
+    #[test]
+    fn three_excluded_windows_leave_the_guard_disarmed() {
+        assert!(!capture_guard_needed(
+            CaptureExclusion::Excluded,
+            Some(CaptureExclusion::Excluded),
+            Some(CaptureExclusion::Excluded),
+        ));
+    }
+
+    #[test]
+    fn the_popup_alone_can_arm_the_guard() {
+        assert!(capture_guard_needed(
+            CaptureExclusion::DeliberatelyNotExcluded,
+            Some(CaptureExclusion::Excluded),
+            Some(CaptureExclusion::Excluded),
+        ));
+    }
+
+    /// Spec D5: they can diverge.
+    #[test]
+    fn an_overlay_the_os_refused_arms_the_guard_alone() {
+        assert!(capture_guard_needed(
+            CaptureExclusion::Excluded,
+            Some(CaptureExclusion::AttemptFailed),
+            Some(CaptureExclusion::Excluded),
+        ));
+    }
+
+    #[test]
+    fn a_button_the_os_refused_arms_the_guard_alone() {
+        assert!(capture_guard_needed(
+            CaptureExclusion::Excluded,
+            Some(CaptureExclusion::Excluded),
+            Some(CaptureExclusion::AttemptFailed),
+        ));
+    }
+
+    #[test]
+    fn a_window_that_was_never_created_cannot_need_the_guard() {
+        assert!(!capture_guard_needed(CaptureExclusion::Excluded, None, None));
+    }
+
+    #[test]
+    fn the_guard_tracks_a_live_exclusion_toggle_in_both_directions() {
+        let off = CaptureExclusion::from_attempt(false, false);
+        assert!(capture_guard_needed(off, Some(off), Some(off)));
+        let on = CaptureExclusion::from_attempt(true, true);
+        assert!(!capture_guard_needed(on, Some(on), Some(on)));
     }
 }

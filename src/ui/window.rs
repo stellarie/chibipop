@@ -6,7 +6,7 @@
 use crate::geom::PhysRect;
 use crate::ui::theme::Theme;
 use anyhow::{Context, Result};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem::size_of;
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,12 +90,21 @@ impl CaptureExclusion {
     pub fn needs_capture_guard(self) -> bool {
         !matches!(self, CaptureExclusion::Excluded)
     }
+
+    /// Wanted, and what the OS said.
+    pub fn from_attempt(on: bool, ok: bool) -> CaptureExclusion {
+        match (on, ok) {
+            (false, _) => CaptureExclusion::DeliberatelyNotExcluded,
+            (true, true) => CaptureExclusion::Excluded,
+            (true, false) => CaptureExclusion::AttemptFailed,
+        }
+    }
 }
 
 /// The popup window.
 pub struct Popup {
     hwnd: HWND,
-    capture_exclusion: CaptureExclusion,
+    capture_exclusion: Cell<CaptureExclusion>,
 }
 
 impl Popup {
@@ -142,7 +151,7 @@ impl Popup {
                 CaptureExclusion::DeliberatelyNotExcluded
             };
 
-            Ok(Popup { hwnd, capture_exclusion })
+            Ok(Popup { hwnd, capture_exclusion: Cell::new(capture_exclusion) })
         }
     }
 
@@ -203,7 +212,7 @@ impl Popup {
 
     /// Whether it is excluded.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
-        self.capture_exclusion
+        self.capture_exclusion.get()
     }
 
     /// Re-applies live; may refuse.
@@ -211,10 +220,10 @@ impl Popup {
         let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
         // SAFETY: `self.hwnd` was created by `create` and is owned by
         // this `Popup`, so it is valid for `&self`'s lifetime. Refusal
-        // is an accepted, non-fatal outcome, exactly as in `create`.
-        unsafe {
-            let _ = SetWindowDisplayAffinity(self.hwnd, affinity);
-        }
+        // is an accepted, non-fatal outcome, exactly as in `create` -
+        // here it is also recorded, because it is the new state.
+        let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
+        self.capture_exclusion.set(CaptureExclusion::from_attempt(on, ok));
     }
 }
 
@@ -396,7 +405,7 @@ unsafe fn register_btn_class(hinstance: HINSTANCE) -> Result<()> {
 /// trick needed.
 pub struct AnkiButton {
     hwnd: HWND,
-    capture_exclusion: CaptureExclusion,
+    capture_exclusion: Cell<CaptureExclusion>,
 }
 
 impl AnkiButton {
@@ -446,7 +455,7 @@ impl AnkiButton {
                 CaptureExclusion::DeliberatelyNotExcluded
             };
 
-            Ok(AnkiButton { hwnd, capture_exclusion })
+            Ok(AnkiButton { hwnd, capture_exclusion: Cell::new(capture_exclusion) })
         }
     }
 
@@ -539,7 +548,7 @@ impl AnkiButton {
 
     /// Whether it is excluded.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
-        self.capture_exclusion
+        self.capture_exclusion.get()
     }
 
     /// Re-applies live; may refuse.
@@ -547,10 +556,10 @@ impl AnkiButton {
         let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
         // SAFETY: `self.hwnd` was created by `create` and is owned by
         // this `AnkiButton`, so it is valid for `&self`'s lifetime.
-        // Refusal is an accepted outcome, exactly as in `create`.
-        unsafe {
-            let _ = SetWindowDisplayAffinity(self.hwnd, affinity);
-        }
+        // Refusal is an accepted outcome, exactly as in `create` -
+        // here it is also recorded, because it is the new state.
+        let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
+        self.capture_exclusion.set(CaptureExclusion::from_attempt(on, ok));
     }
 
     /// Fixed height, DPI-scaled.
@@ -561,5 +570,52 @@ impl AnkiButton {
     /// Takes the click, once.
     pub fn take_click(&self) -> bool {
         BTN_CLICKED.swap(false, Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_accepted_exclusion_attempt_is_recorded_as_excluded() {
+        assert_eq!(
+            CaptureExclusion::Excluded,
+            CaptureExclusion::from_attempt(true, true)
+        );
+    }
+
+    #[test]
+    fn a_refused_exclusion_attempt_is_never_recorded_as_excluded() {
+        assert_eq!(
+            CaptureExclusion::AttemptFailed,
+            CaptureExclusion::from_attempt(true, false)
+        );
+    }
+
+    #[test]
+    fn turning_exclusion_off_is_deliberate_whatever_the_os_answered() {
+        assert_eq!(
+            CaptureExclusion::DeliberatelyNotExcluded,
+            CaptureExclusion::from_attempt(false, true)
+        );
+        assert_eq!(
+            CaptureExclusion::DeliberatelyNotExcluded,
+            CaptureExclusion::from_attempt(false, false)
+        );
+    }
+
+    #[test]
+    fn only_a_real_exclusion_leaves_the_capture_guard_disarmed() {
+        assert!(!CaptureExclusion::Excluded.needs_capture_guard());
+        assert!(CaptureExclusion::DeliberatelyNotExcluded.needs_capture_guard());
+        assert!(CaptureExclusion::AttemptFailed.needs_capture_guard());
+    }
+
+    #[test]
+    fn a_refused_attempt_still_arms_the_guard() {
+        assert!(CaptureExclusion::from_attempt(true, false).needs_capture_guard());
+        assert!(!CaptureExclusion::from_attempt(true, true).needs_capture_guard());
+        assert!(CaptureExclusion::from_attempt(false, true).needs_capture_guard());
     }
 }
