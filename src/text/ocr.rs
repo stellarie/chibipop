@@ -222,7 +222,6 @@ fn make_engine(language: &str) -> Result<OcrEngine> {
     })
 }
 
-/// What a reload does to the engine.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum LangAction {
     Keep,

@@ -2341,7 +2341,6 @@ fn per_char_freeze(on: bool, mode: crate::config::TriggerMode) -> bool {
     on && matches!(mode, crate::config::TriggerMode::Live)
 }
 
-/// Which rect holds the popup still.
 fn freeze_rect(s: &Shown, on: bool, mode: crate::config::TriggerMode) -> PhysRect {
     if per_char_freeze(on, mode) {
         s.hold_char
@@ -2350,7 +2349,7 @@ fn freeze_rect(s: &Shown, on: bool, mode: crate::config::TriggerMode) -> PhysRec
     }
 }
 
-/// Some(tag) to substitute at startup.
+/// Some = substitute it.
 fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -> bool)
     -> Option<String> {
     if configured.eq_ignore_ascii_case(fallback) || available() {
