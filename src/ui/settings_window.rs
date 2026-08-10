@@ -496,14 +496,14 @@ unsafe extern "system" fn enum_font_cb(
 
 /// Combo rows: name, tag.
 ///
-/// D4: an absent tag is kept.
+/// D4: absent tag kept, marked.
 fn language_choices(installed: Vec<(String, String)>, configured: &str)
     -> Vec<(String, String)> {
     let mut out = installed;
     if !configured.is_empty()
         && !out.iter().any(|(_, tag)| tag.eq_ignore_ascii_case(configured))
     {
-        out.push((configured.to_string(), configured.to_string()));
+        out.push((format!("{configured} (not installed)"), configured.to_string()));
     }
     out
 }
@@ -1796,7 +1796,7 @@ impl SettingsWindow {
             self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
             y += ROW_H;
             ocr.push(child(h, w!("STATIC"),
-                "Only recognizers installed in Windows are listed.",
+                "Installed recognizers, plus any marked (not installed).",
                 WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
             y += ROW_H;
             self.passes = numeric_choices(
@@ -2607,14 +2607,14 @@ mod tests {
     fn a_configured_language_missing_from_the_list_is_appended() {
         let got = language_choices(installed(), "ko");
         assert_eq!(3, got.len());
-        assert_eq!(("ko".to_string(), "ko".to_string()), got[2]);
+        assert_eq!(("ko (not installed)".to_string(), "ko".to_string()), got[2]);
     }
 
     /// Survives a failed call.
     #[test]
     fn an_empty_list_still_offers_the_configured_language() {
         assert_eq!(
-            vec![("ja".to_string(), "ja".to_string())],
+            vec![("ja (not installed)".to_string(), "ja".to_string())],
             language_choices(Vec::new(), "ja")
         );
     }

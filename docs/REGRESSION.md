@@ -403,10 +403,14 @@ The **OCR language** dropdown is the first row of the **OCR / Debug** group.
 Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — that is the test of
 "no restart", not a proxy — then hover text in the new language and confirm it resolves.
 
-- Only installed recognizers appear in the dropdown. The list comes from
-  `OcrEngine::AvailableRecognizerLanguages()`, so you cannot select a recognizer Windows does not
-  have. The dropdown displays each language's **display name** while carrying its BCP-47 **tag** in
-  a side table, so a display name can never reach `ocr.language` in the TOML.
+- The dropdown lists the installed recognizers — the list comes from
+  `OcrEngine::AvailableRecognizerLanguages()` — **plus the configured one when it is not among
+  them**, appended as `<tag> (not installed)`. That row is deliberate: a hand-edited or
+  since-uninstalled language stays visible and selectable instead of being silently reselected.
+  **A first run with no Japanese pack shows `ja (not installed)`, and that is the warning.** The
+  dropdown displays each language's **display name** while carrying its BCP-47 **tag** in a side
+  table, so a display name can never reach `ocr.language` in the TOML — the appended row stores
+  the bare tag, not the `(not installed)` label.
 - If a language pack is removed while selected, lookups must keep working with the **previous**
   recognizer rather than breaking. The engine is rebuilt on the worker thread, and on failure the
   working engine is kept. **Losing OCR entirely is the failure this catches.** There are two

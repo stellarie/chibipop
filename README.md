@@ -59,8 +59,10 @@ A few worth knowing about:
   in **Live** trigger mode, so the checkbox is greyed out if you use a trigger
   key.
 - **OCR language** (on the *OCR / Debug* tab) — which Windows recognizer reads
-  the text. Only the languages you actually have installed are offered; to add
-  more, use Windows Settings → Time & language → Language & region.
+  the text. The languages you have installed are listed; if the one your config
+  names is not among them it is still shown, marked **(not installed)**, so you
+  can see what is set rather than having it silently changed. To add more, use
+  Windows Settings → Time & language → Language & region.
 
 ---
 
