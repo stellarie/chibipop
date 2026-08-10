@@ -501,3 +501,66 @@ matching height is **276**, i.e. **+38px** on today's 238.
 **That +38px lands squarely on item 11.** It makes the General tab, already the tallest, taller
 still, and General is what sets the bottom row's position on every tab. Fix the scrolling or the
 per-tab layout first, or fix both in one round; do not spend the headroom without looking at it.
+
+---
+
+## 13. The startup OCR-language fallback is a pre-check, not a retry — and it is silent
+
+**Added 2026-08-11 by the v0.7.0 fix wave.** Not a defect; this records what the fallback does and
+does not cover, and why it is shaped the way it is, because both limits are invisible from the
+diff.
+
+### What it does
+
+`worker_main` (`src/app.rs`) now asks `recogniser_available` before building the engine. If the
+configured language has no recognizer **and** it is not already the default, it prints a line and
+starts on `default_ocr_language()` (`"ja"`) instead of returning `Err` from `run`. Without it,
+picking a second language from the new v0.7.0 dropdown and later removing that language pack made
+chibipop **do nothing at all** on the next launch: `main.rs:100` has already hidden the console by
+then (`ui/console.rs:51`), so the error goes to a hidden window, and a double-click launch never
+reaches the settings window — there is no in-app way back.
+
+### Limit 1 — it cannot be a retry, because DPI awareness is a one-shot
+
+The obvious shape is "try the configured language, and on failure retry with the default". **That
+cannot work in this process.** `OcrTextSource::new` opens with `init_dpi_awareness()`, and
+`SetProcessDpiAwarenessContext` fails once a process's awareness has been established — the
+`assets/chibipop.manifest` comment already records this, which is why the manifest deliberately
+omits `<dpiAware>`. Measured directly:
+
+```
+first=Ok(()) second=Err(setting per-monitor DPI awareness
+Caused by:
+    Access is denied. (0x80070005))
+```
+
+So a second `OcrTextSource::new` in one process fails at the DPI step whatever language it is
+handed, and a retry-shaped fallback would have looked correct in review and never once produced a
+working engine.
+
+The pre-check also matches the reload path, which gates on the same `recogniser_available` before
+rebuilding — so startup and Apply now answer "is that pack there?" the same way.
+
+### Limit 2 — "installed but will not build" is still fatal at startup
+
+`recogniser_available` answers *is the pack listed*, not *will the engine build*. A language that
+is listed yet fails `OcrEngine::TryCreateFromLanguage` still aborts startup exactly as before. The
+reload path has the same split and handles it (`ocr.rs:277`, "recogniser failed, keeping ..."),
+because there it has a working engine to keep. Startup has nothing to keep, and cannot call `new`
+again. Covering it needs `init_dpi_awareness` split out of `new` — a separate change with the
+capture path in its blast radius.
+
+### Limit 3 — the substitution notice is as invisible as the error it replaced
+
+The `eprintln!` lands on the same hidden console. Someone who double-clicks chibipop sees it come
+up reading Japanese with no explanation of why their Korean stopped working; only a launch from a
+terminal shows the line. **The fallback fixes "does nothing", not "says nothing".** If picked up:
+the honest surfacing is a one-shot notice on the popup or a `MessageBoxW` at startup, and the same
+question applies to every other `eprintln!` on the startup path.
+
+### Covered by tests
+
+`startup_language` — the keep/substitute decision — is pure and unit-tested for all four
+outcomes, including that the default language never substitutes itself and never queries WinRT.
+The wiring (that `worker_main` builds with the language the decision returned) is **not** tested;
+it needs a real `OcrEngine`. Tier 1 §1.15 is where that gets exercised by hand.

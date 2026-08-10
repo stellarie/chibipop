@@ -15,7 +15,7 @@ use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::layout::{CaptureSize, Orientation};
-use crate::text::ocr::OcrTextSource;
+use crate::text::ocr::{recogniser_available, OcrTextSource};
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
@@ -1560,6 +1560,15 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
+    let fallback = crate::config::default_ocr_language();
+    let substitute = startup_language(&language, &fallback, || recogniser_available(&language));
+    let language = match substitute {
+        Some(sub) => {
+            eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
+            sub
+        }
+        None => language,
+    };
     let built =
         OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language);
     let mut ocr = match built.context("creating the OCR text source") {
@@ -2338,6 +2347,16 @@ fn per_char_freeze(on: bool, mode: crate::config::TriggerMode) -> bool {
     on && matches!(mode, crate::config::TriggerMode::Live)
 }
 
+/// Some(tag) to substitute at startup.
+fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -> bool)
+    -> Option<String> {
+    if configured.eq_ignore_ascii_case(fallback) || available() {
+        None
+    } else {
+        Some(fallback.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2667,6 +2686,34 @@ mod tests {
         cfg.trigger.per_character_lookup = true;
         assert!(derive(&cfg).per_character_lookup);
         assert!(!derive(&Config::default()).per_character_lookup, "must default off");
+    }
+
+    #[test]
+    fn a_startup_language_with_no_pack_falls_back_to_the_default() {
+        assert_eq!(Some("ja".to_string()), startup_language("ko", "ja", || false));
+    }
+
+    #[test]
+    fn an_installed_startup_language_is_left_alone() {
+        assert_eq!(None, startup_language("ko", "ja", || true));
+    }
+
+    /// Else it would loop on itself.
+    #[test]
+    fn the_default_language_never_substitutes_itself() {
+        assert_eq!(None, startup_language("JA", "ja", || false));
+    }
+
+    /// No WinRT call on the default.
+    #[test]
+    fn the_default_language_never_asks_windows() {
+        let mut asked = false;
+        let got = startup_language("ja", "ja", || {
+            asked = true;
+            false
+        });
+        assert_eq!(None, got);
+        assert!(!asked);
     }
 
     /// Hold-key stays unchanged.

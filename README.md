@@ -62,7 +62,9 @@ A few worth knowing about:
   the text. The languages you have installed are listed; if the one your config
   names is not among them it is still shown, marked **(not installed)**, so you
   can see what is set rather than having it silently changed. To add more, use
-  Windows Settings → Time & language → Language & region.
+  Windows Settings → Time & language → Language & region. If the recognizer you
+  chose is gone by the time chibipop next starts, it starts in Japanese instead
+  of refusing to start, and says so on stderr.
 
 ---
 
