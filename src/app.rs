@@ -1219,7 +1219,14 @@ pub fn run(
                         h: s.popup.h + btn_h,
                         ..s.popup
                     };
-                    in_sticky(cursor, s.hold, s.hold, sticky_rect)
+                    let freeze = if per_char_freeze(
+                        live.per_character_lookup, live.trigger_mode,
+                    ) {
+                        s.hold_char
+                    } else {
+                        s.hold
+                    };
+                    in_sticky(cursor, freeze, s.hold, sticky_rect)
                 });
                 if !frozen {
                     next_id += 1;
@@ -1833,11 +1840,12 @@ fn handle_worker_outcome(
                 }
                 Ok((rect, content_h, view_h)) => {
                     Hooks::discard_scroll();
+                    let (hold, hold_char) = hold_regions(anchor, matched, orientation);
                     let s = Shown {
                         anchor,
                         popup: rect,
-                        hold: hold_region(anchor, matched, orientation),
-                        hold_char: hold_region(anchor, None, orientation),
+                        hold,
+                        hold_char,
                         presentation: *presentation,
                         scroll: 0,
                         content_h,
@@ -1846,7 +1854,6 @@ fn handle_worker_outcome(
                         anki,
                         history: Vec::new(),
                     };
-                    debug_assert!(matched.is_some() || s.hold == s.hold_char);
                     *shown = Some(s);
                     if let Some(ov) = overlay {
                         if let Err(e) = ov.show_rects(&scan, theme) {
@@ -1945,6 +1952,18 @@ fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
     prev.presentation == *new
         && (prev.anchor.x - anchor.x).abs() <= ANCHOR_JITTER_PX
         && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
+}
+
+/// The span hold, then the char.
+fn hold_regions(
+    anchor: PhysRect,
+    matched: Option<PhysRect>,
+    orientation: Orientation,
+) -> (PhysRect, PhysRect) {
+    (
+        hold_region(anchor, matched, orientation),
+        hold_region(anchor, None, orientation),
+    )
 }
 
 /// Match one axis, slack other.
@@ -2163,6 +2182,7 @@ struct LiveSettings {
     trigger_mode: crate::config::TriggerMode,
     trigger_key: String,
     anki_add_key: String,
+    per_character_lookup: bool,
 }
 
 /// Rebuilt on each change.
@@ -2197,6 +2217,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         trigger_mode: cfg.trigger.mode,
         trigger_key: cfg.trigger.trigger_key.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
+        per_character_lookup: cfg.trigger.per_character_lookup,
     }
 }
 
@@ -2290,6 +2311,11 @@ fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
     if let Some(h) = job.take() {
         let _ = h.join();
     }
+}
+
+/// Live mode only, by design.
+fn per_char_freeze(on: bool, mode: crate::config::TriggerMode) -> bool {
+    on && matches!(mode, crate::config::TriggerMode::Live)
 }
 
 #[cfg(test)]
@@ -2603,5 +2629,51 @@ mod tests {
         assert!(capture_guard_needed(off, Some(off), Some(off)));
         let on = CaptureExclusion::from_attempt(true, true);
         assert!(!capture_guard_needed(on, Some(on), Some(on)));
+    }
+
+    #[test]
+    fn derive_carries_per_character_lookup() {
+        let mut cfg = Config::default();
+        cfg.trigger.per_character_lookup = true;
+        assert!(derive(&cfg).per_character_lookup);
+    }
+
+    /// Hold-key stays unchanged.
+    #[test]
+    fn the_char_freeze_applies_only_in_live_mode() {
+        use crate::config::TriggerMode;
+        assert!(per_char_freeze(true, TriggerMode::Live));
+        assert!(!per_char_freeze(true, TriggerMode::HoldKey));
+        assert!(!per_char_freeze(true, TriggerMode::HoldShift));
+        assert!(!per_char_freeze(false, TriggerMode::Live));
+    }
+
+    /// What `Shown` really gets.
+    #[test]
+    fn the_char_hold_ignores_the_matched_span() {
+        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        // 通ってる matched 4 characters.
+        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        let (hold, hold_char) = hold_regions(anchor, Some(matched), Orientation::Horizontal);
+        let next_glyph = PhysPoint { x: 3100, y: 270 };
+        assert_ne!(hold, hold_char, "the char hold must not be the span hold");
+        assert!(hold.contains(next_glyph), "the span hold still reaches");
+        assert!(!hold_char.contains(next_glyph), "one character stops short");
+    }
+
+    /// The freeze/reach seam.
+    #[test]
+    fn a_char_freeze_still_reaches_the_popup() {
+        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        let (hold, hold_char) = hold_regions(anchor, Some(matched), Orientation::Horizontal);
+        let popup = PhysRect { x: 3007, y: hold.y + hold.h + POPUP_GAP, w: 420, h: 300 };
+        let x = anchor.x + anchor.w / 2;
+        for y in hold_char.y..(popup.y + popup.h) {
+            assert!(
+                in_sticky(PhysPoint { x, y }, hold_char, hold, popup),
+                "row {y} escaped the sticky region",
+            );
+        }
     }
 }
