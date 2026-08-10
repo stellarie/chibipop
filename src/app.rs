@@ -1219,7 +1219,7 @@ pub fn run(
                         h: s.popup.h + btn_h,
                         ..s.popup
                     };
-                    in_sticky(cursor, s.hold, sticky_rect)
+                    in_sticky(cursor, s.hold, s.hold, sticky_rect)
                 });
                 if !frozen {
                     next_id += 1;
@@ -1738,6 +1738,8 @@ struct Shown {
     popup: PhysRect,
     /// Where the cursor may roam.
     hold: PhysRect,
+    /// One character's hold.
+    hold_char: PhysRect,
     presentation: Presentation,
     /// Content offset; 0 is the top.
     scroll: i32,
@@ -1831,10 +1833,11 @@ fn handle_worker_outcome(
                 }
                 Ok((rect, content_h, view_h)) => {
                     Hooks::discard_scroll();
-                    *shown = Some(Shown {
+                    let s = Shown {
                         anchor,
                         popup: rect,
                         hold: hold_region(anchor, matched, orientation),
+                        hold_char: hold_region(anchor, None, orientation),
                         presentation: *presentation,
                         scroll: 0,
                         content_h,
@@ -1842,7 +1845,9 @@ fn handle_worker_outcome(
                         gen: 0,
                         anki,
                         history: Vec::new(),
-                    });
+                    };
+                    debug_assert!(matched.is_some() || s.hold == s.hold_char);
+                    *shown = Some(s);
                     if let Some(ov) = overlay {
                         if let Err(e) = ov.show_rects(&scan, theme) {
                             eprintln!("chibipop: showing the scan overlay failed: {e:#}");
@@ -2341,6 +2346,7 @@ mod tests {
             anchor,
             popup: PhysRect { x: anchor.x, y: anchor.y + anchor.h + POPUP_GAP, w: 420, h: 300 },
             hold: anchor,
+            hold_char: anchor,
             presentation: presentation_of(written),
             scroll: 0,
             content_h: 300,
@@ -2385,12 +2391,12 @@ mod tests {
         let popup = PhysRect { x: 3007, y: 300, w: 420, h: 300 };
 
         // Same word, later glyphs.
-        assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, popup));
-        assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, popup));
+        assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, matched, popup));
+        assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, matched, popup));
         // Past the match: re-resolve.
-        assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, popup));
+        assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, matched, popup));
         // The anchor alone releases.
-        assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, popup));
+        assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, anchor, popup));
     }
 
     /// A 22px は resolves over 34px.
