@@ -1567,8 +1567,7 @@ impl SettingsWindow {
             };
 
             // ---- Trigger ----
-            gen.push(group("Trigger", y,
-                ROW_H + ROW_GAP + ROW_H + ROW_GAP + ROW_H + 28 + 26)?);
+            gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
             y += 20;
             let live = child(h, w!("BUTTON"), "Live",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
@@ -1592,21 +1591,7 @@ impl SettingsWindow {
                 FIELD_X, y, FIELD_W, ROW_H, ID_TRIGGER_KEY, f)?;
             gen.push(key_btn);
             let _ = EnableWindow(key_btn, !is_live);
-            y += ROW_H + ROW_GAP;
-            // WS_GROUP ends the radios.
-            let per_char = child(h, w!("BUTTON"), "Look up each character as you hover",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_GROUP | WS_TABSTOP,
-                PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_PER_CHAR, f)?;
-            gen.push(per_char);
-            SendMessageW(per_char, BM_SETCHECK,
-                Some(WPARAM(if form.per_character_lookup { 1 } else { 0 })), None);
-            let _ = EnableWindow(per_char, is_live);
-            y += ROW_H;
-            gen.push(child(h, w!("STATIC"),
-                "Live mode only. Off: the popup holds while the cursor stays on \
-                 the matched word.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
-            y += 28 + 18;
+            y += ROW_H + 18;
 
             // ---- Popup ----
             // WS_GROUP terminates the radio group above. Without it the group
@@ -1792,7 +1777,7 @@ impl SettingsWindow {
 
             // ---- OCR / Debug ----
             y = content_y;
-            ocr.push(group("OCR / Debug", y, 10 * ROW_H + 34)?);
+            ocr.push(group("OCR / Debug", y, 12 * ROW_H + 38)?);
             y += 20;
             ocr.push(label("OCR language", y)?);
             let lang = child(h, w!("COMBOBOX"), "",
@@ -1847,6 +1832,16 @@ impl SettingsWindow {
             ocr.push(check("Scan alphanumeric text",
                 ID_SCAN_ALNUM, form.scan_alphanumeric, y)?);
             y += ROW_H;
+            let per_char = check("Look up each character as you hover",
+                ID_PER_CHAR, form.per_character_lookup, y)?;
+            ocr.push(per_char);
+            let _ = EnableWindow(per_char, is_live);
+            y += ROW_H;
+            ocr.push(child(h, w!("STATIC"),
+                "Live mode only. Off: the popup holds while the cursor stays on \
+                 the matched word.",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
+            y += 28;
             let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
@@ -2640,9 +2635,12 @@ mod tests {
         assert_eq!(vec!["ja".to_string(), "en-US".to_string()], tags);
     }
 
+    /// A blank combo if this drifts.
     #[test]
     fn a_configured_tag_matches_its_entry_whatever_its_case() {
-        assert_eq!(2, language_choices(installed(), "EN-us").len());
+        let rows = language_choices(installed(), "EN-us");
+        assert_eq!(2, rows.len());
+        assert_eq!(Some(1), language_index(&rows, "EN-us"));
     }
 
     /// Nothing to keep, none added.
