@@ -1840,7 +1840,8 @@ fn handle_worker_outcome(
                 }
                 Ok((rect, content_h, view_h)) => {
                     Hooks::discard_scroll();
-                    let (hold, hold_char) = hold_regions(anchor, matched, orientation);
+                    let HoldRects { hold, hold_char } =
+                        hold_regions(anchor, matched, orientation);
                     let s = Shown {
                         anchor,
                         popup: rect,
@@ -1954,16 +1955,21 @@ fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
         && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
 }
 
-/// The span hold, then the char.
+/// The span hold and the char.
+struct HoldRects {
+    hold: PhysRect,
+    hold_char: PhysRect,
+}
+
 fn hold_regions(
     anchor: PhysRect,
     matched: Option<PhysRect>,
     orientation: Orientation,
-) -> (PhysRect, PhysRect) {
-    (
-        hold_region(anchor, matched, orientation),
-        hold_region(anchor, None, orientation),
-    )
+) -> HoldRects {
+    HoldRects {
+        hold: hold_region(anchor, matched, orientation),
+        hold_char: hold_region(anchor, None, orientation),
+    }
 }
 
 /// Match one axis, slack other.
@@ -2636,6 +2642,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.trigger.per_character_lookup = true;
         assert!(derive(&cfg).per_character_lookup);
+        assert!(!derive(&Config::default()).per_character_lookup, "must default off");
     }
 
     /// Hold-key stays unchanged.
@@ -2654,7 +2661,8 @@ mod tests {
         let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
         // 通ってる matched 4 characters.
         let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        let (hold, hold_char) = hold_regions(anchor, Some(matched), Orientation::Horizontal);
+        let HoldRects { hold, hold_char } =
+            hold_regions(anchor, Some(matched), Orientation::Horizontal);
         let next_glyph = PhysPoint { x: 3100, y: 270 };
         assert_ne!(hold, hold_char, "the char hold must not be the span hold");
         assert!(hold.contains(next_glyph), "the span hold still reaches");
@@ -2666,7 +2674,8 @@ mod tests {
     fn a_char_freeze_still_reaches_the_popup() {
         let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
         let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        let (hold, hold_char) = hold_regions(anchor, Some(matched), Orientation::Horizontal);
+        let HoldRects { hold, hold_char } =
+            hold_regions(anchor, Some(matched), Orientation::Horizontal);
         let popup = PhysRect { x: 3007, y: hold.y + hold.h + POPUP_GAP, w: 420, h: 300 };
         let x = anchor.x + anchor.w / 2;
         for y in hold_char.y..(popup.y + popup.h) {

@@ -94,7 +94,9 @@ impl ScanDisplay {
 
 /// Freeze rect, popup, corridor.
 pub fn sticky_region(freeze: PhysRect, reach: PhysRect, popup: PhysRect) -> [PhysRect; 3] {
-    [freeze, popup, bridge_between(reach, popup)]
+    // Flush to freeze, reach-wide.
+    let bridge_src = PhysRect { x: reach.x, w: reach.w, y: freeze.y, h: freeze.h };
+    [freeze, popup, bridge_between(bridge_src, popup)]
 }
 
 /// The gap band between two.
@@ -525,5 +527,45 @@ mod tests {
         assert!(in_sticky(inside_popup, freeze, reach, popup), "the popup always holds");
         let next_char = PhysPoint { x: 130, y: 110 };
         assert!(!in_sticky(next_char, freeze, freeze, popup), "next char is not frozen");
+    }
+
+    /// Tategaki 経験, one char held.
+    #[test]
+    fn a_vertical_char_freeze_still_bridges_down_to_the_popup() {
+        let freeze = r(987, 500, 52, 26);
+        let reach = r(987, 497, 52, 58);
+        let popup = r(1000, 538, 420, 300);
+        for y in 500..838 {
+            assert!(in_sticky(p(1000, y), freeze, reach, popup), "row {y} escaped");
+        }
+    }
+
+    /// HIGHLIGHT_PAD is 3px.
+    #[test]
+    fn a_single_character_vertical_match_leaves_no_pad_gap() {
+        let freeze = r(987, 500, 52, 26);
+        let reach = r(987, 497, 52, 32);
+        let popup = r(1000, 538, 420, 300);
+        for y in 500..838 {
+            assert!(in_sticky(p(1000, y), freeze, reach, popup), "row {y} escaped");
+        }
+    }
+
+    /// Horizontal must not shift.
+    #[test]
+    fn a_horizontal_char_freeze_leaves_the_corridor_untouched() {
+        let freeze = r(3010, 244, 27, 52);
+        let reach = r(3007, 244, 120, 52);
+        let popup = r(3007, 308, 420, 300);
+        assert_eq!(bridge_between(reach, popup), sticky_region(freeze, reach, popup)[2]);
+    }
+
+    /// Toggle off must not shift.
+    #[test]
+    fn an_equal_freeze_and_reach_bridges_exactly_as_before() {
+        let popup = r(1000, 538, 420, 300);
+        for held in [r(987, 497, 52, 58), r(3007, 244, 120, 52)] {
+            assert_eq!(bridge_between(held, popup), sticky_region(held, held, popup)[2]);
+        }
     }
 }
