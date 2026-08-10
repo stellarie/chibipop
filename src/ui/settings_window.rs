@@ -1979,6 +1979,8 @@ impl SettingsWindow {
                 capture_width: px(ID_CAPTURE_W, template.capture_width),
                 capture_height: px(ID_CAPTURE_H, template.capture_height),
                 scan_alphanumeric: checked(ID_SCAN_ALNUM),
+                per_character_lookup: template.per_character_lookup,
+                ocr_language: template.ocr_language.clone(),
                 show_scan_region: checked(ID_SHOW_SCAN),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),

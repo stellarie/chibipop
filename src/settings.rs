@@ -33,6 +33,8 @@ pub struct SettingsForm {
     pub capture_width: i32,
     pub capture_height: i32,
     pub scan_alphanumeric: bool,
+    pub per_character_lookup: bool,
+    pub ocr_language: String,
     pub show_scan_region: bool,
     pub freq_names: Vec<String>,
     pub staged_adds: Vec<StagedAdd>,
@@ -248,6 +250,8 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         capture_width: cfg.ocr.capture_width,
         capture_height: cfg.ocr.capture_height,
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
+        per_character_lookup: cfg.trigger.per_character_lookup,
+        ocr_language: cfg.ocr.language.clone(),
         show_scan_region: cfg.debug.show_scan_region,
         freq_names: Vec::new(),
         staged_adds: Vec::new(),
@@ -284,6 +288,8 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.ocr.capture_width = form.capture_width.clamp(CAPTURE_W_RANGE.0, CAPTURE_W_RANGE.1);
     out.ocr.capture_height = form.capture_height.clamp(CAPTURE_H_RANGE.0, CAPTURE_H_RANGE.1);
     out.ocr.scan_alphanumeric = form.scan_alphanumeric;
+    out.trigger.per_character_lookup = form.per_character_lookup;
+    out.ocr.language = form.ocr_language.clone();
     out.debug.show_scan_region = form.show_scan_region;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
@@ -605,6 +611,22 @@ mod tests {
         let mut form = from_config(&cfg, &dicts());
         form.scan_alphanumeric = false;
         assert!(!apply_to(&form, &cfg).ocr.scan_alphanumeric);
+    }
+
+    #[test]
+    fn apply_to_carries_per_character_lookup() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.per_character_lookup = true;
+        assert!(apply_to(&form, &cfg).trigger.per_character_lookup);
+    }
+
+    #[test]
+    fn apply_to_carries_the_ocr_language() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_language = "zh-Hans".to_string();
+        assert_eq!("zh-Hans", apply_to(&form, &cfg).ocr.language);
     }
 
     fn staged_form() -> SettingsForm {
