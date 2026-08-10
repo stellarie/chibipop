@@ -43,11 +43,18 @@ pub struct TriggerConfig {
     /// Which key gates popups.
     #[serde(default = "default_trigger_key")]
     pub trigger_key: String,
+    /// Re-look-up per character?
+    #[serde(default)]
+    pub per_character_lookup: bool,
 }
 
 /// `"shift"` for backwards compat.
 fn default_trigger_key() -> String {
     "shift".to_string()
+}
+
+fn default_ocr_language() -> String {
+    "ja".to_string()
 }
 
 /// `kebab-case` for the TOML.
@@ -195,6 +202,9 @@ pub struct OcrConfig {
     /// Resolve Latin-only words?
     #[serde(default = "default_scan_alphanumeric")]
     pub scan_alphanumeric: bool,
+    /// OCR recogniser language tag.
+    #[serde(default = "default_ocr_language")]
+    pub language: String,
 }
 
 /// 1: tiling is off by default.
@@ -222,6 +232,7 @@ impl Default for OcrConfig {
             capture_width: default_capture_width(),
             capture_height: default_capture_height(),
             scan_alphanumeric: default_scan_alphanumeric(),
+            language: default_ocr_language(),
         }
     }
 }
@@ -316,6 +327,7 @@ impl Default for Config {
             trigger: TriggerConfig {
                 mode: TriggerMode::Live,
                 trigger_key: default_trigger_key(),
+                per_character_lookup: false,
             },
             popup: PopupConfig {
                 theme: "dark".to_string(),
@@ -1165,5 +1177,30 @@ mod tests {
         c.clamp_ranges(Path::new("test.toml"));
         assert_eq!(CAPTURE_W_RANGE.0, c.ocr.capture_width);
         assert_eq!(CAPTURE_H_RANGE.1, c.ocr.capture_height);
+    }
+
+    #[test]
+    fn per_character_lookup_defaults_off() {
+        assert!(!Config::default().trigger.per_character_lookup);
+    }
+
+    #[test]
+    fn ocr_language_defaults_to_japanese() {
+        assert_eq!("ja", Config::default().ocr.language);
+    }
+
+    #[test]
+    fn a_config_without_the_new_keys_still_loads() {
+        let p = tmp("no_v07_keys");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n\n",
+            "[ocr]\nmax_ocr_passes = 1\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        assert!(!c.trigger.per_character_lookup);
+        assert_eq!("ja", c.ocr.language);
     }
 }
