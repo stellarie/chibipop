@@ -20,7 +20,7 @@ pub fn hit_scan(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Optio
 
     for (li, line) in lines.iter().enumerate() {
         for (wi, word) in line.words.iter().enumerate() {
-            if !scan_alnum && !has_japanese(&word.text) {
+            if !scan_alnum && !has_scannable_script(&word.text) {
                 continue;
             }
             if word.rect.contains(cursor) {
@@ -531,7 +531,7 @@ impl CaptureSize {
 }
 
 /// Any kana or CJK ideograph?
-pub fn has_japanese(s: &str) -> bool {
+pub fn has_scannable_script(s: &str) -> bool {
     s.chars().any(|c| {
         matches!(c,
             '\u{3040}'..='\u{309F}'   // hiragana
@@ -1787,28 +1787,28 @@ mod tests {
     // -- hit-scan eligibility --
 
     #[test]
-    fn kana_and_kanji_count_as_japanese() {
-        assert!(has_japanese("ひ"));
-        assert!(has_japanese("カ"));
-        assert!(has_japanese("漢"));
-        assert!(has_japanese("々"));
-        assert!(has_japanese("ｶ"), "halfwidth katakana");
+    fn kana_and_kanji_count_as_scannable_script() {
+        assert!(has_scannable_script("ひ"));
+        assert!(has_scannable_script("カ"));
+        assert!(has_scannable_script("漢"));
+        assert!(has_scannable_script("々"));
+        assert!(has_scannable_script("ｶ"), "halfwidth katakana");
     }
 
     #[test]
-    fn latin_digits_and_fullwidth_latin_are_not_japanese() {
-        assert!(!has_japanese("Edit"));
-        assert!(!has_japanese("3"));
-        assert!(!has_japanese("Ａ"), "fullwidth Latin is Latin");
-        assert!(!has_japanese("１"), "fullwidth digit is a digit");
-        assert!(!has_japanese("。"), "punctuation alone is not a word");
+    fn latin_digits_and_fullwidth_latin_are_not_scannable_script() {
+        assert!(!has_scannable_script("Edit"));
+        assert!(!has_scannable_script("3"));
+        assert!(!has_scannable_script("Ａ"), "fullwidth Latin is Latin");
+        assert!(!has_scannable_script("１"), "fullwidth digit is a digit");
+        assert!(!has_scannable_script("。"), "punctuation alone is not a word");
     }
 
     #[test]
-    fn mixed_words_count_as_japanese() {
-        assert!(has_japanese("3人"));
-        assert!(has_japanese("Aランク"));
-        assert!(has_japanese("PCを使う"));
+    fn mixed_words_count_as_scannable_script() {
+        assert!(has_scannable_script("3人"));
+        assert!(has_scannable_script("Aランク"));
+        assert!(has_scannable_script("PCを使う"));
     }
 
     /// Latin words are unhoverable.
