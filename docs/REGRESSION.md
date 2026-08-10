@@ -414,7 +414,8 @@ Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — t
 - If a language pack is removed while selected, lookups must keep working with the **previous**
   recognizer rather than breaking. The engine is rebuilt on the worker thread, and on failure the
   working engine is kept. **Losing OCR entirely is the failure this catches.** There are two
-  distinct stderr lines and they mean different things (`src/text/ocr.rs:249` and `:256`):
+  distinct stderr lines and they mean different things (`src/text/ocr.rs:269` and `:277`, chosen
+  by `language_action`):
 
   | Line | Means |
   |---|---|
@@ -426,6 +427,9 @@ Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — t
   means a future edit that reintroduced a hardcoded language at the reload site would be completely
   invisible whenever the hardcoded value happened to match — no message, no crash, no failing test.
   If you are testing this after touching the reload path, switch to a language you can *see* fail.
+  The keep/swap/no-pack **decision** is now pure and unit-tested (`language_action`), so inverting
+  that guard fails the suite; what is still unwitnessed by any test is the wiring around it — that
+  `apply_settings` is handed the language the user picked, and that a swap really rebuilds.
 
 ---
 

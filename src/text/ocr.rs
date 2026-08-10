@@ -222,6 +222,25 @@ fn make_engine(language: &str) -> Result<OcrEngine> {
     })
 }
 
+/// What a reload does to the engine.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LangAction {
+    Keep,
+    Swap,
+    NoPack,
+}
+
+fn language_action(current: &str, requested: &str, available: impl FnOnce() -> bool)
+    -> LangAction {
+    if requested.eq_ignore_ascii_case(current) {
+        LangAction::Keep
+    } else if available() {
+        LangAction::Swap
+    } else {
+        LangAction::NoPack
+    }
+}
+
 pub struct OcrTextSource {
     engine: OcrEngine,
     settings: SettingsSnapshot,
@@ -244,21 +263,21 @@ impl OcrTextSource {
     /// Swap in new OCR settings.
     pub fn apply_settings(&mut self, max_passes: u8, prefer_vertical: bool, capture: CaptureSize,
                           scan_alphanumeric: bool, language: &str) {
-        if !language.eq_ignore_ascii_case(&self.language) {
-            if !recogniser_available(language) {
+        match language_action(&self.language, language, || recogniser_available(language)) {
+            LangAction::Keep => {}
+            LangAction::NoPack => {
                 eprintln!("chibipop: no {language} recogniser; keeping {}", self.language);
-            } else {
-                match make_engine(language) {
-                    Ok(engine) => {
-                        self.engine = engine;
-                        self.language = language.to_string();
-                    }
-                    Err(e) => eprintln!(
-                        "chibipop: {language} recogniser failed, keeping {}: {e:#}",
-                        self.language
-                    ),
-                }
             }
+            LangAction::Swap => match make_engine(language) {
+                Ok(engine) => {
+                    self.engine = engine;
+                    self.language = language.to_string();
+                }
+                Err(e) => eprintln!(
+                    "chibipop: {language} recogniser failed, keeping {}: {e:#}",
+                    self.language
+                ),
+            },
         }
         self.settings.apply(max_passes, prefer_vertical, capture, scan_alphanumeric);
     }
@@ -539,6 +558,39 @@ mod tests {
         assert!(s.prefer_vertical);
         assert_eq!(CaptureSize { w: 800, h: 120 }, s.capture);
         assert!(!s.scan_alphanumeric);
+    }
+
+    #[test]
+    fn an_unchanged_language_is_kept() {
+        assert_eq!(LangAction::Keep, language_action("ja", "ja", || true));
+    }
+
+    /// The guard folds case.
+    #[test]
+    fn an_unchanged_language_is_kept_even_with_no_pack() {
+        assert_eq!(LangAction::Keep, language_action("ja", "JA", || false));
+    }
+
+    #[test]
+    fn a_new_language_with_a_pack_is_swapped_in() {
+        assert_eq!(LangAction::Swap, language_action("ja", "ko", || true));
+    }
+
+    #[test]
+    fn a_new_language_with_no_pack_is_refused() {
+        assert_eq!(LangAction::NoPack, language_action("ja", "ko", || false));
+    }
+
+    /// No WinRT call on the no-op.
+    #[test]
+    fn an_unchanged_language_never_asks_windows() {
+        let mut asked = false;
+        let got = language_action("ja", "ja", || {
+            asked = true;
+            true
+        });
+        assert_eq!(LangAction::Keep, got);
+        assert!(!asked);
     }
 
     #[test]
