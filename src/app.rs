@@ -1222,13 +1222,7 @@ pub fn run(
                         h: s.popup.h + btn_h,
                         ..s.popup
                     };
-                    let freeze = if per_char_freeze(
-                        live.per_character_lookup, live.trigger_mode,
-                    ) {
-                        s.hold_char
-                    } else {
-                        s.hold
-                    };
+                    let freeze = freeze_rect(s, live.per_character_lookup, live.trigger_mode);
                     in_sticky(cursor, freeze, s.hold, sticky_rect)
                 });
                 if !frozen {
@@ -2347,6 +2341,15 @@ fn per_char_freeze(on: bool, mode: crate::config::TriggerMode) -> bool {
     on && matches!(mode, crate::config::TriggerMode::Live)
 }
 
+/// Which rect holds the popup still.
+fn freeze_rect(s: &Shown, on: bool, mode: crate::config::TriggerMode) -> PhysRect {
+    if per_char_freeze(on, mode) {
+        s.hold_char
+    } else {
+        s.hold
+    }
+}
+
 /// Some(tag) to substitute at startup.
 fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -> bool)
     -> Option<String> {
@@ -2714,6 +2717,19 @@ mod tests {
         });
         assert_eq!(None, got);
         assert!(!asked);
+    }
+
+    /// The arms are same-typed.
+    #[test]
+    fn the_freeze_rect_is_the_char_hold_only_when_per_character_is_live() {
+        use crate::config::TriggerMode;
+        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        let mut s = shown_of("字", anchor);
+        s.hold = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        s.hold_char = PhysRect { x: 3010, y: 254, w: 27, h: 32 };
+        assert_eq!(s.hold, freeze_rect(&s, false, TriggerMode::Live), "default off");
+        assert_eq!(s.hold_char, freeze_rect(&s, true, TriggerMode::Live));
+        assert_eq!(s.hold, freeze_rect(&s, true, TriggerMode::HoldKey));
     }
 
     /// Hold-key stays unchanged.
