@@ -110,6 +110,7 @@ pub struct WorkerSettings {
     pub prefer_vertical: bool,
     pub capture: CaptureSize,
     pub scan_alphanumeric: bool,
+    pub language: String,
     pub present_cfg: PresentConfig,
     pub scan_display: ScanDisplay,
 }
@@ -626,6 +627,7 @@ pub fn run(
     let w_prefer_vertical = live.prefer_vertical;
     let w_capture = live.capture;
     let w_scan_alphanumeric = live.scan_alphanumeric;
+    let w_language = live.language.clone();
     let w_scan_display = live.scan_display;
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
@@ -639,6 +641,7 @@ pub fn run(
             w_prefer_vertical,
             w_capture,
             w_scan_alphanumeric,
+            w_language,
             w_scan_display,
             main_tid,
             trigger_rx,
@@ -1547,6 +1550,7 @@ fn worker_main(
     prefer_vertical: bool,
     capture: CaptureSize,
     scan_alphanumeric: bool,
+    language: String,
     mut scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
@@ -1557,7 +1561,7 @@ fn worker_main(
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
     let built =
-        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, "ja");
+        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language);
     let mut ocr = match built.context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
@@ -1611,7 +1615,7 @@ fn worker_main(
                 s.prefer_vertical,
                 s.capture,
                 s.scan_alphanumeric,
-                "ja",
+                &s.language,
             );
             present_cfg = s.present_cfg;
             scan_display = s.scan_display;
@@ -2180,6 +2184,7 @@ struct LiveSettings {
     prefer_vertical: bool,
     capture: CaptureSize,
     scan_alphanumeric: bool,
+    language: String,
     exclude_from_capture: bool,
     show_lookup_log: bool,
     max_height_percent: i32,
@@ -2211,6 +2216,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         prefer_vertical: cfg.ocr.prefer_vertical,
         capture: CaptureSize { w: cfg.ocr.capture_width, h: cfg.ocr.capture_height },
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
+        language: cfg.ocr.language.clone(),
         exclude_from_capture: cfg.popup.exclude_from_capture,
         show_lookup_log: cfg.debug.show_lookup_log,
         max_height_percent: i32::from(cfg.popup.max_height_percent),
@@ -2241,6 +2247,7 @@ fn worker_settings(live: &LiveSettings) -> WorkerSettings {
         prefer_vertical: live.prefer_vertical,
         capture: live.capture,
         scan_alphanumeric: live.scan_alphanumeric,
+        language: live.language.clone(),
         present_cfg: live.present_cfg.clone(),
         scan_display: live.scan_display,
     }
@@ -2501,6 +2508,7 @@ mod tests {
             prefer_vertical: false,
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
+            language: "ja".to_string(),
             present_cfg: Config::default().present_config(),
             scan_display: ScanDisplay { captures: false, highlight: false },
         }
@@ -2579,6 +2587,15 @@ mod tests {
         assert_eq!(CaptureSize { w: 640, h: 480 }, out.capture);
         assert!(!out.scan_alphanumeric);
         assert_eq!(3, out.max_passes);
+    }
+
+    #[test]
+    fn worker_settings_carries_the_language() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hant".to_string();
+        let live = derive(&cfg);
+        assert_eq!("zh-Hant", live.language);
+        assert_eq!("zh-Hant", worker_settings(&live).language);
     }
 
     /// Step 3b: the input trio.
