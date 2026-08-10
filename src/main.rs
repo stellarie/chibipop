@@ -137,7 +137,7 @@ fn main() -> Result<()> {
 
             let capture = probe_capture_size();
             let source =
-                chibipop::text::ocr::OcrTextSource::new(tiles, false, capture, true)?;
+                chibipop::text::ocr::OcrTextSource::new(tiles, false, capture, true, "ja")?;
             let region_was_default = region.is_none();
             let region = match region {
                 None => chibipop::text::layout::region_around(cursor, false, capture),
@@ -308,6 +308,7 @@ fn main() -> Result<()> {
                 false,
                 chibipop::text::layout::CaptureSize::default(),
                 true,
+                "ja",
             )?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));

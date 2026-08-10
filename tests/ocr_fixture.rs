@@ -22,7 +22,8 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         eprintln!("SKIP: tests/fixtures/japanese_bgra.bin not present");
         return;
     };
-    let built = chibipop::text::ocr::OcrTextSource::new(1, false, CaptureSize::default(), true);
+    let built =
+        chibipop::text::ocr::OcrTextSource::new(1, false, CaptureSize::default(), true, "ja");
     let source = match built {
         Ok(source) => source,
         Err(_) => {

@@ -180,31 +180,67 @@ impl SettingsSnapshot {
     }
 }
 
+/// Is this recogniser installed?
+pub fn recogniser_available(tag: &str) -> bool {
+    let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+        return false;
+    };
+    langs.into_iter().any(|l| {
+        l.LanguageTag()
+            .map(|t| t.to_string().eq_ignore_ascii_case(tag))
+            .unwrap_or(false)
+    })
+}
+
+/// Builds an engine for a tag.
+fn make_engine(language: &str) -> Result<OcrEngine> {
+    let lang = Language::CreateLanguage(&HSTRING::from(language))?;
+    OcrEngine::TryCreateFromLanguage(&lang).with_context(|| {
+        format!(
+            "no OCR recogniser for {language} - add it under Windows Settings, \
+             Time & language, Language & region"
+        )
+    })
+}
+
 pub struct OcrTextSource {
     engine: OcrEngine,
     settings: SettingsSnapshot,
+    language: String,
 }
 
 impl OcrTextSource {
     /// Inits WinRT + engine once.
-    pub fn new(max_passes: u8, prefer_vertical: bool,
-               capture: CaptureSize, scan_alphanumeric: bool) -> Result<Self> {
+    pub fn new(max_passes: u8, prefer_vertical: bool, capture: CaptureSize,
+               scan_alphanumeric: bool, language: &str) -> Result<Self> {
         init_dpi_awareness()?;
         // Else CO_E_NOTINITIALIZED.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
-        let lang = Language::CreateLanguage(&HSTRING::from("ja"))?;
-        let engine = OcrEngine::TryCreateFromLanguage(&lang).context(
-            "no Japanese OCR recogniser available - add Japanese under \
-             Windows Settings, Time & language, Language & region",
-        )?;
+        let engine = make_engine(language)?;
         let settings =
             SettingsSnapshot { max_passes, prefer_vertical, capture, scan_alphanumeric };
-        Ok(OcrTextSource { engine, settings })
+        Ok(OcrTextSource { engine, settings, language: language.to_string() })
     }
 
     /// Swap in new OCR settings.
-    pub fn apply_settings(&mut self, max_passes: u8, prefer_vertical: bool,
-                          capture: CaptureSize, scan_alphanumeric: bool) {
+    pub fn apply_settings(&mut self, max_passes: u8, prefer_vertical: bool, capture: CaptureSize,
+                          scan_alphanumeric: bool, language: &str) {
+        if !language.eq_ignore_ascii_case(&self.language) {
+            if !recogniser_available(language) {
+                eprintln!("chibipop: no {language} recogniser; keeping {}", self.language);
+            } else {
+                match make_engine(language) {
+                    Ok(engine) => {
+                        self.engine = engine;
+                        self.language = language.to_string();
+                    }
+                    Err(e) => eprintln!(
+                        "chibipop: {language} recogniser failed, keeping {}: {e:#}",
+                        self.language
+                    ),
+                }
+            }
+        }
         self.settings.apply(max_passes, prefer_vertical, capture, scan_alphanumeric);
     }
 
@@ -484,5 +520,23 @@ mod tests {
         assert!(s.prefer_vertical);
         assert_eq!(CaptureSize { w: 800, h: 120 }, s.capture);
         assert!(!s.scan_alphanumeric);
+    }
+
+    #[test]
+    fn a_nonsense_tag_is_not_available() {
+        assert!(!recogniser_available("xx-Fake"));
+    }
+
+    /// True on any machine.
+    #[test]
+    fn every_installed_recogniser_reports_available() {
+        let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+            return;
+        };
+        for l in langs {
+            if let Ok(tag) = l.LanguageTag() {
+                assert!(recogniser_available(&tag.to_string()));
+            }
+        }
     }
 }

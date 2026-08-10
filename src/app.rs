@@ -1556,7 +1556,8 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
-    let built = OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric);
+    let built =
+        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, "ja");
     let mut ocr = match built.context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
@@ -1605,7 +1606,13 @@ fn worker_main(
     while let Ok(first) = trigger_rx.recv() {
         let (hover, reloads) = drain(first, &trigger_rx);
         for s in reloads {
-            ocr.apply_settings(s.max_passes, s.prefer_vertical, s.capture, s.scan_alphanumeric);
+            ocr.apply_settings(
+                s.max_passes,
+                s.prefer_vertical,
+                s.capture,
+                s.scan_alphanumeric,
+                "ja",
+            );
             present_cfg = s.present_cfg;
             scan_display = s.scan_display;
         }
