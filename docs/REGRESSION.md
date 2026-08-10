@@ -33,14 +33,14 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **698** total across **6** targets, 1 ignored (was 670; re-measured 2026-08-11) |
+| Rust tests | **all green**, **710** total across **6** targets, 1 ignored (was 698; re-measured 2026-08-11) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
 **The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total; **698** is what this machine
+silently not running must. CI asserts `≥ 400` and prints the total; **710** is what this machine
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
 
@@ -50,6 +50,15 @@ across seven tasks and removed none; the count rose monotonically with each one 
 685, 687, 688, 698) and the rename in the last task left it unchanged, as a rename must. The three
 runs above the table reported **698, 698, 698** — identical, which is the point of running it three
 times. The clippy counts did **not** move: still 3 raw and 0 on the bin target.
+
+**698 → 710 is a second re-baseline in the same round, also not a finding.** The v0.7.0 fix wave
+added 12 tests and removed none, all of them on decisions that previously had no executable
+coverage at all: five for `language_action` (the reload's keep / swap / no-pack choice, which
+could not be reached without a real `OcrEngine`), four for `startup_language`, one for
+`freeze_rect`, and two for `from_config` seeding the two new settings. It also added one assertion
+inside an existing test — `recogniser_available` on an upper-cased tag — which pins case folding
+without moving the count. The clippy counts did **not** move here either: still 3 raw and 0 on the
+bin target, at the same three sites.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
