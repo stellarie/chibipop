@@ -92,6 +92,8 @@ const ID_FIELD_MAP_TOGGLE: i32 = 135;
 const ID_CAPTURE_W: i32 = 136;
 const ID_CAPTURE_H: i32 = 137;
 const ID_SCAN_ALNUM: i32 = 138;
+const ID_PER_CHAR: i32 = 139;
+const ID_OCR_LANG: i32 = 140;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -345,6 +347,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if let Ok(c) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
                         let _ = EnableWindow(c, id == ID_MODE_HOLD);
                     }
+                    if let Ok(c) = GetDlgItem(Some(hwnd), ID_PER_CHAR) {
+                        let _ = EnableWindow(c, id == ID_MODE_LIVE);
+                    }
                 },
                 ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
                 ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
@@ -487,6 +492,28 @@ unsafe extern "system" fn enum_font_cb(
         }
     }
     1
+}
+
+/// Combo rows: name, tag.
+///
+/// D4: an absent tag is kept.
+fn language_choices(installed: Vec<(String, String)>, configured: &str)
+    -> Vec<(String, String)> {
+    let mut out = installed;
+    if !configured.is_empty()
+        && !out.iter().any(|(_, tag)| tag.eq_ignore_ascii_case(configured))
+    {
+        out.push((configured.to_string(), configured.to_string()));
+    }
+    out
+}
+
+/// Row holding `configured`.
+fn language_index(rows: &[(String, String)], configured: &str) -> Option<usize> {
+    if configured.is_empty() {
+        return None;
+    }
+    rows.iter().position(|(_, tag)| tag.eq_ignore_ascii_case(configured))
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -840,6 +867,8 @@ pub struct SettingsWindow {
     summaries: Vec<i64>,
     passes: Vec<i64>,
     fonts: Vec<String>,
+    /// Language tags, combo order.
+    ocr_langs: Vec<String>,
     /// What Apply has yet to do.
     staged: RefCell<SettingsForm>,
     /// General-tab-only controls.
@@ -917,6 +946,7 @@ impl SettingsWindow {
                 summaries: Vec::new(),
                 passes: Vec::new(),
                 fonts: Vec::new(),
+                ocr_langs: Vec::new(),
                 staged: RefCell::new(form.clone()),
                 general_ctrls: Vec::new(),
                 dict_ctrls: Vec::new(),
@@ -1537,7 +1567,8 @@ impl SettingsWindow {
             };
 
             // ---- Trigger ----
-            gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
+            gen.push(group("Trigger", y,
+                ROW_H + ROW_GAP + ROW_H + ROW_GAP + ROW_H + 28 + 26)?);
             y += 20;
             let live = child(h, w!("BUTTON"), "Live",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
@@ -1561,7 +1592,21 @@ impl SettingsWindow {
                 FIELD_X, y, FIELD_W, ROW_H, ID_TRIGGER_KEY, f)?;
             gen.push(key_btn);
             let _ = EnableWindow(key_btn, !is_live);
-            y += ROW_H + 18;
+            y += ROW_H + ROW_GAP;
+            // WS_GROUP ends the radios.
+            let per_char = child(h, w!("BUTTON"), "Look up each character as you hover",
+                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_GROUP | WS_TABSTOP,
+                PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_PER_CHAR, f)?;
+            gen.push(per_char);
+            SendMessageW(per_char, BM_SETCHECK,
+                Some(WPARAM(if form.per_character_lookup { 1 } else { 0 })), None);
+            let _ = EnableWindow(per_char, is_live);
+            y += ROW_H;
+            gen.push(child(h, w!("STATIC"),
+                "Live mode only. Off: the popup holds while the cursor stays on \
+                 the matched word.",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
+            y += 28 + 18;
 
             // ---- Popup ----
             // WS_GROUP terminates the radio group above. Without it the group
@@ -1747,8 +1792,28 @@ impl SettingsWindow {
 
             // ---- OCR / Debug ----
             y = content_y;
-            ocr.push(group("OCR / Debug", y, 8 * ROW_H + 34)?);
+            ocr.push(group("OCR / Debug", y, 10 * ROW_H + 34)?);
             y += 20;
+            ocr.push(label("OCR language", y)?);
+            let lang = child(h, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_OCR_LANG, f)?;
+            ocr.push(lang);
+            let langs =
+                language_choices(crate::text::ocr::installed_recognisers(), &form.ocr_language);
+            for (name, _) in &langs {
+                SendMessageW(lang, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(name).as_ptr() as isize)));
+            }
+            if let Some(i) = language_index(&langs, &form.ocr_language) {
+                SendMessageW(lang, CB_SETCURSEL, Some(WPARAM(i)), None);
+            }
+            self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
+            y += ROW_H;
+            ocr.push(child(h, w!("STATIC"),
+                "Only recognizers installed in Windows are listed.",
+                WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
+            y += ROW_H;
             self.passes = numeric_choices(
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
                 form.max_ocr_passes as i64);
@@ -1935,6 +2000,17 @@ impl SettingsWindow {
                     self.fonts.get(i as usize).cloned().unwrap_or_else(|| template.font.clone())
                 }
             };
+            let ocr_language = {
+                let i = combo_index(ID_OCR_LANG);
+                if i < 0 {
+                    template.ocr_language.clone()
+                } else {
+                    self.ocr_langs
+                        .get(i as usize)
+                        .cloned()
+                        .unwrap_or_else(|| template.ocr_language.clone())
+                }
+            };
 
             let trigger_key = resolved_trigger_key(h, &template.trigger_key);
             let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
@@ -1979,8 +2055,8 @@ impl SettingsWindow {
                 capture_width: px(ID_CAPTURE_W, template.capture_width),
                 capture_height: px(ID_CAPTURE_H, template.capture_height),
                 scan_alphanumeric: checked(ID_SCAN_ALNUM),
-                per_character_lookup: template.per_character_lookup,
-                ocr_language: template.ocr_language.clone(),
+                per_character_lookup: checked(ID_PER_CHAR),
+                ocr_language,
                 show_scan_region: checked(ID_SHOW_SCAN),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),
@@ -2520,5 +2596,74 @@ mod tests {
             assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone, staged));
             assert!(apply_hint(ApplyMode::Standalone, staged).contains("restarts chibipop"));
         }
+    }
+
+    // ---- ocr language list ----
+
+    fn installed() -> Vec<(String, String)> {
+        vec![
+            ("Japanese".to_string(), "ja".to_string()),
+            ("English (United States)".to_string(), "en-US".to_string()),
+        ]
+    }
+
+    /// Spec D4: never reselect.
+    #[test]
+    fn a_configured_language_missing_from_the_list_is_appended() {
+        let got = language_choices(installed(), "ko");
+        assert_eq!(3, got.len());
+        assert_eq!(("ko".to_string(), "ko".to_string()), got[2]);
+    }
+
+    /// Survives a failed call.
+    #[test]
+    fn an_empty_list_still_offers_the_configured_language() {
+        assert_eq!(
+            vec![("ja".to_string(), "ja".to_string())],
+            language_choices(Vec::new(), "ja")
+        );
+    }
+
+    /// Display name out, tag in.
+    #[test]
+    fn an_installed_language_keeps_its_display_name_and_its_tag() {
+        let got = language_choices(installed(), "ja");
+        assert_eq!(installed(), got);
+        assert_eq!("Japanese", got[0].0);
+        assert_eq!("ja", got[0].1);
+    }
+
+    #[test]
+    fn the_installed_order_is_the_listed_order() {
+        let tags: Vec<String> =
+            language_choices(installed(), "ja").into_iter().map(|(_, t)| t).collect();
+        assert_eq!(vec!["ja".to_string(), "en-US".to_string()], tags);
+    }
+
+    #[test]
+    fn a_configured_tag_matches_its_entry_whatever_its_case() {
+        assert_eq!(2, language_choices(installed(), "EN-us").len());
+    }
+
+    /// Nothing to keep, none added.
+    #[test]
+    fn an_empty_configured_language_is_not_offered_as_a_blank_row() {
+        assert!(language_choices(Vec::new(), "").is_empty());
+        assert_eq!(installed(), language_choices(installed(), ""));
+    }
+
+    /// What `read` gives back.
+    #[test]
+    fn an_untouched_combo_reads_back_the_configured_tag() {
+        for configured in ["ja", "en-US", "ko"] {
+            let rows = language_choices(installed(), configured);
+            let i = language_index(&rows, configured).expect("a row is always selected");
+            assert_eq!(configured, rows[i].1);
+        }
+    }
+
+    #[test]
+    fn nothing_is_selected_when_no_language_is_configured() {
+        assert_eq!(None, language_index(&installed(), ""));
     }
 }

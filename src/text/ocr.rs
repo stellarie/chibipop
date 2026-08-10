@@ -192,6 +192,25 @@ pub fn recogniser_available(tag: &str) -> bool {
     })
 }
 
+/// Installed ones: name, tag.
+///
+/// Empty if the call fails.
+pub fn installed_recognisers() -> Vec<(String, String)> {
+    let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for l in langs {
+        let Ok(tag) = l.LanguageTag() else {
+            continue;
+        };
+        let tag = tag.to_string();
+        let name = l.DisplayName().map(|n| n.to_string()).unwrap_or_else(|_| tag.clone());
+        out.push((name, tag));
+    }
+    out
+}
+
 /// Builds an engine for a tag.
 fn make_engine(language: &str) -> Result<OcrEngine> {
     let lang = Language::CreateLanguage(&HSTRING::from(language))?;
@@ -538,5 +557,23 @@ mod tests {
                 assert!(recogniser_available(&tag.to_string()));
             }
         }
+    }
+
+    /// True on any machine.
+    #[test]
+    fn every_listed_recogniser_is_named_and_available() {
+        for (name, tag) in installed_recognisers() {
+            assert!(!name.is_empty(), "{tag} has no display name");
+            assert!(!tag.is_empty());
+            assert!(recogniser_available(&tag));
+        }
+    }
+
+    #[test]
+    fn the_listed_recognisers_match_the_engine_list() {
+        let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+            return;
+        };
+        assert_eq!(langs.Size().unwrap_or(0) as usize, installed_recognisers().len());
     }
 }
