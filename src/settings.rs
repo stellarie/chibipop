@@ -629,6 +629,27 @@ mod tests {
         assert_eq!("zh-Hans", apply_to(&form, &cfg).ocr.language);
     }
 
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_per_character_lookup() {
+        let mut cfg = Config::default();
+        cfg.trigger.per_character_lookup = true;
+        assert!(from_config(&cfg, &dicts()).per_character_lookup);
+        assert!(
+            !from_config(&Config::default(), &dicts()).per_character_lookup,
+            "must default off"
+        );
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_the_ocr_language() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans".to_string();
+        assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
+        assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+    }
+
     fn staged_form() -> SettingsForm {
         from_config(&cfg_with(&["大辞林", "Jitendex"]), &dicts())
     }

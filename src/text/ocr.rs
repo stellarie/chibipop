@@ -607,6 +607,7 @@ mod tests {
         for l in langs {
             if let Ok(tag) = l.LanguageTag() {
                 assert!(recogniser_available(&tag.to_string()));
+                assert!(recogniser_available(&tag.to_string().to_uppercase()));
             }
         }
     }
