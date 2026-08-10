@@ -419,18 +419,21 @@ to accept anything. Measuring the content fixed *that* cause. It does not protec
 
 The branch's **first attempt** put the checkbox on the General tab, which took the governing
 tallest-tab figure **426 → 484** and the client height **594 → 652 logical px** on every tab. That
-attempt was discarded; what shipped is the second row below.
+attempt was discarded; what shipped is the last row below.
 
 Tab heights, walked from the layout constants — `content_y` = `PAD` + `TAB_H` + 4 = 46, then group
 by group:
 
 | | `y_general` | `y_dict` | `y_ocr` | `y_ank` | governing `max()` | client height |
 |---|---|---|---|---|---|---|
+| v0.6.0 | **426** | 316 (400 worst case) | 280 | 260 | **426** | **594** |
 | Task 7's first attempt — **discarded, never shipped** | **484** | 316 (400 worst case) | 328 | 260 | **484** | **652** |
-| v0.6.0, and shipped v0.7.0 | **426** | 316 (400 worst case) | **380** | 260 | **426** | **594** |
+| shipped v0.7.0 | **426** | 316 (400 worst case) | **380** | 260 | **426** | **594** |
 
-The bottom block and padding add a constant 168px below the governing `max()`, which is why both
-rows are internally consistent (426 + 168 = 594; 484 + 168 = 652). **426 is the number to budget
+**Only `y_ocr` moved between v0.6.0 and v0.7.0**; the other four columns are identical across all
+three rows, which is exactly why the governing `max()` and the client height did not move. The
+bottom block and padding add a constant 168px below the governing `max()`, which is why every row
+is internally consistent (426 + 168 = 594; 484 + 168 = 652). **426 is the number to budget
 against**; 484 only ever existed on the discarded attempt.
 
 - **On oniichan's machine this is not a problem and would not have been.** 96 dpi / 100% scaling,
@@ -444,7 +447,8 @@ against**; 484 only ever existed on the discarded attempt.
 
 The checkbox was moved to the OCR / Debug tab instead, returning the governing figure to exactly
 its pre-branch **426** and the client height to 594. The OCR tab absorbed the growth as
-`y_ocr` **328 → 380** (+52: the checkbox's 24px row plus a 28px explanatory static), which stays
+`y_ocr` **328 → 380** (+52: the checkbox's 24px row plus a 28px explanatory static) — 328 being
+v0.6.0's 280 plus the 48px the language dropdown and its caption had already added — which stays
 46px clear of the governing 426 — so OCR did **not** become the tallest tab and the bottom block
 did not move. That is a **reroute, not a fix**: the next tab to grow inherits the whole problem.
 
