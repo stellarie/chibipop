@@ -385,3 +385,103 @@ gate will stay green — a unit test on a dead function looks identical to a uni
 documentation task by then. Removing it is `any()` plus its test, and nothing else references it.
 Worth a moment first on whether the *reverse* is wanted: if a future round wants to skip creating
 the overlay again on some cheaper grounds, this is the predicate it would want back.
+
+---
+
+## 11. The settings window is height-constrained and cannot scroll
+
+**Raised 2026-08-11 by the per-character-retrigger / OCR-language branch, which nearly tripped it
+and was rerouted instead of fixing it.** Not a regression — this ceiling predates the branch and
+the branch ships clear of it. It is recorded because the next tab that grows will hit it, and
+nothing will warn.
+
+### The mechanism
+
+Three facts compose into the problem:
+
+- **The bottom block sits at the tallest tab.** `settings_window.rs:1907` is
+  `y = y_general.max(y_dict).max(y_ocr).max(y_ank)`, and the Apply / Cancel / Quit row is placed
+  from that `y`. So a tab growing taller pushes the buttons down on **every** tab, not just its own.
+- **`fit_to` clamps to the work area** (`settings_window.rs:1478-1480`): `outer_h.min(cap)`, where
+  `cap` is `work_area_height`. When the content is taller than the screen allows, the window is
+  silently made shorter than its content.
+- **There is no scrolling.** `grep -c "WM_VSCROLL\|SetScrollInfo" src/ui/settings_window.rs`
+  returns **0**. (The `WS_VSCROLL` flags in that file are all on combo boxes — dropdown
+  scrollbars, not a scrollable window.) So the clamp does not hide content behind a scrollbar; it
+  truncates it, and what is at the bottom is the row containing **Apply**.
+
+That failure has shipped once already. The comment at `settings_window.rs:965-971` records the
+first version of the file passing a hand-tuned height to `CreateWindowExW` — which takes the
+*outer* size — so 39px of caption and frame ate Apply and Cancel and the window opened with no way
+to accept anything. Measuring the content fixed *that* cause. It does not protect against this one.
+
+### What was measured
+
+The branch moved a checkbox onto the General tab and the tallest-tab figure went **484 → 542**,
+taking the client height **594 → 652 logical px** on every tab. Tab heights, derived from the
+layout constants: `y_general` 484, `y_dict` 316 (400 worst case), `y_ocr` 328, `y_ank` 260.
+
+- **On oniichan's machine this is not a problem and would not have been.** 96 dpi / 100% scaling,
+  work area 2560x1050; the window needs ~702px against 1050. Enormous headroom.
+- **At 150% on a 1080-tall laptop the margin is roughly zero**, and at **175% it exceeds the clamp
+  for certain — as it already did before this branch**, at 594. The non-client and taskbar figures
+  in that estimate are approximations and the margin sits inside their uncertainty, so the honest
+  claim is "headroom is ~0 at 150%", not "broken today".
+
+The checkbox was moved to the OCR / Debug tab instead, returning the tallest tab to exactly its
+pre-branch 484 and the client height to 594. That is a **reroute, not a fix**: the next tab to grow
+inherits the whole problem.
+
+### If picked up
+
+Either make the window scrollable (a scrollable content pane under a fixed bottom row, so the
+clamp costs visibility rather than the ability to accept), or stop laying the bottom row out at the
+cross-tab `max()` and pin it per-tab. The first is the real fix; the second is cheaper and removes
+the "one tab grows, every tab pays" coupling that makes this so easy to trip.
+
+**Note the interaction with item 12** — that fix makes the General tab ~38px taller, which spends
+headroom this item says is already thin at 150%. The two want deciding together.
+
+---
+
+## 12. The General tab's "Popup" group box is 32px too short for its contents
+
+**Present in shipped v0.6.0. Spotted 2026-08-11 by the per-character-retrigger / OCR-language
+branch and correctly left alone — it was out of that branch's scope and is purely cosmetic.**
+
+The `Popup` group box on the General tab is drawn 238px tall but encloses 270px of controls, so the
+fourth checkbox — **`Hide the popup from screen capture`** — draws entirely **below its own frame**,
+and the third (`Show related words beside the popup`) has its bottom 8px clipped by it too.
+
+### The arithmetic, so nobody has to re-derive it
+
+`settings_window.rs:1600` declares the height as a formula that literally counts **three**
+checkboxes:
+
+```rust
+group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?   // = 238
+```
+
+With `ROW_H = 24` and `ROW_GAP = 6`, the content the group actually spans is 20px of top inset,
+five combo rows (Theme, Font, Max width, Max height, Summary — the last carrying an extra 4px) at
+154px, then **four** checkboxes at 24px each:
+
+| | |
+|---|---|
+| Declared frame height | `5*(24+6) + 3*24 + 16` = 150 + 72 + 16 = **238** |
+| Content actually enclosed | 20 (top inset) + 154 (five combo rows) + 4×24 (checkboxes) = **270** |
+| Shortfall | **32** |
+
+So a fourth checkbox was added at some point and the `3 * ROW_H` in the formula was never moved to
+`4 * ROW_H`. Nothing catches this: the group box is a `BS_GROUPBOX` with no layout relationship to
+the controls it visually contains, so the frame and its contents are free to disagree forever.
+
+### If picked up
+
+Changing `3 * ROW_H` to `4 * ROW_H` gets to 262, which is still 8px short of the content. The house
+bottom inset in this file is **6px** — the `Trigger` group is 80px against 74px of content — so the
+matching height is **276**, i.e. **+38px** on today's 238.
+
+**That +38px lands squarely on item 11.** It makes the General tab, already the tallest, taller
+still, and General is what sets the bottom row's position on every tab. Fix the scrolling or the
+per-tab layout first, or fix both in one round; do not spend the headroom without looking at it.

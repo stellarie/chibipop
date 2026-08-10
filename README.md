@@ -40,7 +40,7 @@ dictionary out needs a restart, and that takes a couple of seconds.
 Your settings live in `chibipop.toml` beside `chibipop.exe`, and you can edit
 that by hand if you prefer.
 
-Two worth knowing about:
+A few worth knowing about:
 
 - **Capture width / height** — how large an area chibipop reads around your
   cursor, in pixels. Wider takes in more of a long line; taller is more
@@ -52,6 +52,15 @@ Two worth knowing about:
   reacting to English words, so hovering a menu or a button does nothing.
   Japanese with numbers or Latin mixed into it still works: 「3人」 still looks
   up, with the 3 in place.
+- **Look up each character as you hover** (on the *OCR / Debug* tab) — off by
+  default. Normally the popup holds still while your cursor stays anywhere on
+  the word it matched; turn this on and moving to the next character looks that
+  character up instead. Handy for reading kanji one at a time. It only applies
+  in **Live** trigger mode, so the checkbox is greyed out if you use a trigger
+  key.
+- **OCR language** (on the *OCR / Debug* tab) — which Windows recognizer reads
+  the text. Only the languages you actually have installed are offered; to add
+  more, use Windows Settings → Time & language → Language & region.
 
 ---
 

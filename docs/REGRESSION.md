@@ -7,17 +7,18 @@ Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed 
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
-**Two exceptions to "verified", both marked in place.** Tier 1 items **1.9–1.13** were added
-2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Item **11b**
-was corrected the same day, having described behaviour that never existed in any version of the
-program.
+**Three exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
+2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Items
+**1.14–1.15** were added 2026-08-11 with the per-character-retrigger / OCR-language branch and
+**have not been run either**. Item **11b** was corrected 2026-08-09, having described behaviour
+that never existed in any version of the program.
 
 ---
 
 ## Tier 0 — the automated gate (~2 min, no screen)
 
 **This tier is the CI contract.** The commands below are unchanged since 2026-07-29 and are what
-`.github/workflows/ci.yml` runs; the numbers beside them were last re-measured on **2026-08-09**.
+`.github/workflows/ci.yml` runs; the numbers beside them were last re-measured on **2026-08-11**.
 Two of them are `grep -c` counts rather than exit codes, and that is deliberate — see the note
 under the table. CI additionally passes `--color never` and runs the suite three times; both of
 those are explained in the callouts below, and neither is optional there.
@@ -32,16 +33,23 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **670** total across **6** targets, 1 ignored (was 626; re-measured 2026-08-10) |
+| Rust tests | **all green**, **698** total across **6** targets, 1 ignored (was 670; re-measured 2026-08-11) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
 **The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total; **670** is what this machine
+silently not running must. CI asserts `≥ 400` and prints the total; **698** is what this machine
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
+
+**670 → 698 is a re-baseline, not a finding**, and it is recorded here in the commit that moves it,
+per the rule in the callout below. The per-character-retrigger / OCR-language branch added 28 tests
+across seven tasks and removed none; the count rose monotonically with each one (673, 675, 677,
+685, 687, 688, 698) and the rename in the last task left it unchanged, as a rename must. The three
+runs above the table reported **698, 698, 698** — identical, which is the point of running it three
+times. The clippy counts did **not** move: still 3 raw and 0 on the bin target.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
@@ -50,7 +58,7 @@ owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that
 `LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
 before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
 
-**The three accepted clippy errors, as of 2026-08-09:**
+**The three accepted clippy errors — unchanged since 2026-08-09, sites re-confirmed 2026-08-11:**
 
 | Lint | Site |
 |---|---|
@@ -333,6 +341,87 @@ affinity call rather than from what was asked for, because `SetWindowDisplayAffi
 refuse. Before this branch the cached value kept its startup setting for the life of the process,
 so turning exclusion off left the guard off with it, and the popup contaminated the very lookup it
 was displaying.
+
+> [!warning] 1.14 and 1.15 were added 2026-08-11 and **have not been run**
+> They are the acceptance checks for the per-character-retrigger / OCR-language branch, written
+> from the code by an agent with no screen and forbidden from driving the GUI. Neither carries a ✅
+> and neither should be read as passing. Both are *live-apply* checks, the class no unit test can
+> reach: the unit tests prove the new freeze rect and the new engine are **computed**, never that a
+> running instance started obeying them.
+
+### 1.14 Per-character retrigger
+
+**The procedure spans two tabs, and that is not a mistake.** The checkbox **Look up each character
+as you hover** is on the **OCR / Debug** tab; the **Trigger** radios that gate it are on
+**General**. The checkbox is greyed out unless the trigger mode is Live, so setting this up means
+moving between the two. (It was on General until 2026-08-11 — putting it there grew the window from
+594 to 652 logical px on *every* tab, which at 150% scaling risked pushing the Apply row off the
+bottom. See BACKLOG 11.)
+
+With trigger mode **Live** (General) and **Look up each character as you hover** on (OCR / Debug),
+hover the first character of a two-character word (経験) in **horizontal** text, then move one
+character right **without leaving the line**. The popup must change to 験's entry. Turn the setting
+off, press Apply, and repeat: the popup must now hold on 経験.
+
+- In both states, moving onto the popup must hold it, and wheel-scroll and kanji drill-down must
+  still work. That is the property the split freeze/reach rects exist to preserve.
+- In hold-key mode the setting is inert **and the checkbox greys out**, by design. Switch Trigger
+  to `Hold key` on General and watch the checkbox disable on OCR / Debug; the grey-out uses the
+  same predicate as the back end, so a legacy `HoldShift` config greys correctly too.
+- **The PID must not change** across either Apply. This setting is consumed on the pump thread in
+  the `WM_TIMER` freeze check, and it applies to an **already-visible** popup the moment Apply
+  lands — you do not need a fresh lookup to see it take effect.
+
+**In vertical text, moving *down* the reading axis is expected NOT to re-fire the lookup.** Only
+upward or lateral motion does. This is correct and deliberate. **Do not file it as a bug.**
+
+The popup is placed directly below the anchor, so in tategaki the next glyph down sits exactly
+where the corridor from the text to the popup has to run — the dead band *is* the next character,
+and you cannot both retrigger on it and route a corridor through it. The corridor is therefore
+built flush with the freeze rect (`sticky_region`, `src/geom.rs:96-100`), which puts the next
+glyph's top band inside the corridor and its remainder underneath the popup. The alternative was
+measured on this branch and is strictly worse: without the flush corridor, every downward move
+re-fired the lookup and the replacement popup was **unreachable** — no scroll, no drill-down, no
+Anki button — because it appeared one advance lower with the same gap beneath it. Reachability was
+chosen over retriggering, deliberately.
+
+The consequence to accept: with the toggle on, the feature is largely **inert along the primary
+reading direction in vertical text**, and useful mainly in horizontal prose. What would actually
+unlock tategaki is placing the popup to the *side* in vertical orientation. That is a separate
+round and was consciously not taken here.
+
+*(Horizontal text is unaffected by any of this. There, the corridor's source rect is identical to
+the reach rect field-for-field, so the sticky region is byte-identical to v0.6.0's — and when the
+toggle is off, freeze and reach are equal, which makes the whole three-rect array identical to
+v0.6.0's for every user who does not opt in. "Default-off = default-unchanged" holds by
+construction, not by convention.)*
+
+### 1.15 OCR language
+
+The **OCR language** dropdown is the first row of the **OCR / Debug** group.
+
+Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — that is the test of
+"no restart", not a proxy — then hover text in the new language and confirm it resolves.
+
+- Only installed recognizers appear in the dropdown. The list comes from
+  `OcrEngine::AvailableRecognizerLanguages()`, so you cannot select a recognizer Windows does not
+  have. The dropdown displays each language's **display name** while carrying its BCP-47 **tag** in
+  a side table, so a display name can never reach `ocr.language` in the TOML.
+- If a language pack is removed while selected, lookups must keep working with the **previous**
+  recognizer rather than breaking. The engine is rebuilt on the worker thread, and on failure the
+  working engine is kept. **Losing OCR entirely is the failure this catches.** There are two
+  distinct stderr lines and they mean different things (`src/text/ocr.rs:249` and `:256`):
+
+  | Line | Means |
+  |---|---|
+  | `chibipop: no <tag> recogniser; keeping <tag>` | the tag is not in the installed list — the pack is gone |
+  | `chibipop: <tag> recogniser failed, keeping <tag>: <err>` | it *is* installed but the engine would not build |
+
+- **Read stderr, because success is silent and so is one class of regression.** An Apply whose
+  language is unchanged returns early and prints nothing at all. That silence is fine here, but it
+  means a future edit that reintroduced a hardcoded language at the reload site would be completely
+  invisible whenever the hardcoded value happened to match — no message, no crash, no failing test.
+  If you are testing this after touching the reload path, switch to a language you can *see* fail.
 
 ---
 
