@@ -417,20 +417,36 @@ to accept anything. Measuring the content fixed *that* cause. It does not protec
 
 ### What was measured
 
-The branch moved a checkbox onto the General tab and the tallest-tab figure went **484 → 542**,
-taking the client height **594 → 652 logical px** on every tab. Tab heights, derived from the
-layout constants: `y_general` 484, `y_dict` 316 (400 worst case), `y_ocr` 328, `y_ank` 260.
+The branch's **first attempt** put the checkbox on the General tab, which took the governing
+tallest-tab figure **426 → 484** and the client height **594 → 652 logical px** on every tab. That
+attempt was discarded; what shipped is the second row below.
+
+Tab heights, walked from the layout constants — `content_y` = `PAD` + `TAB_H` + 4 = 46, then group
+by group:
+
+| | `y_general` | `y_dict` | `y_ocr` | `y_ank` | governing `max()` | client height |
+|---|---|---|---|---|---|---|
+| Task 7's first attempt — **discarded, never shipped** | **484** | 316 (400 worst case) | 328 | 260 | **484** | **652** |
+| v0.6.0, and shipped v0.7.0 | **426** | 316 (400 worst case) | **380** | 260 | **426** | **594** |
+
+The bottom block and padding add a constant 168px below the governing `max()`, which is why both
+rows are internally consistent (426 + 168 = 594; 484 + 168 = 652). **426 is the number to budget
+against**; 484 only ever existed on the discarded attempt.
 
 - **On oniichan's machine this is not a problem and would not have been.** 96 dpi / 100% scaling,
-  work area 2560x1050; the window needs ~702px against 1050. Enormous headroom.
+  work area 2560x1050. The ~702px figure measured during the branch was against the **652** client
+  height of the discarded attempt; on the same ~50px non-client allowance the shipped 594 needs
+  ~644. Either way, enormous headroom against 1050.
 - **At 150% on a 1080-tall laptop the margin is roughly zero**, and at **175% it exceeds the clamp
   for certain — as it already did before this branch**, at 594. The non-client and taskbar figures
   in that estimate are approximations and the margin sits inside their uncertainty, so the honest
   claim is "headroom is ~0 at 150%", not "broken today".
 
-The checkbox was moved to the OCR / Debug tab instead, returning the tallest tab to exactly its
-pre-branch 484 and the client height to 594. That is a **reroute, not a fix**: the next tab to grow
-inherits the whole problem.
+The checkbox was moved to the OCR / Debug tab instead, returning the governing figure to exactly
+its pre-branch **426** and the client height to 594. The OCR tab absorbed the growth as
+`y_ocr` **328 → 380** (+52: the checkbox's 24px row plus a 28px explanatory static), which stays
+46px clear of the governing 426 — so OCR did **not** become the tallest tab and the bottom block
+did not move. That is a **reroute, not a fix**: the next tab to grow inherits the whole problem.
 
 ### If picked up
 
