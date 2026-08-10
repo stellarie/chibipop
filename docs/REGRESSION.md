@@ -351,12 +351,27 @@ refuse. Before this branch the cached value kept its startup setting for the lif
 so turning exclusion off left the guard off with it, and the popup contaminated the very lookup it
 was displaying.
 
-> [!warning] 1.14 and 1.15 were added 2026-08-11 and **have not been run**
-> They are the acceptance checks for the per-character-retrigger / OCR-language branch, written
-> from the code by an agent with no screen and forbidden from driving the GUI. Neither carries a ✅
-> and neither should be read as passing. Both are *live-apply* checks, the class no unit test can
-> reach: the unit tests prove the new freeze rect and the new engine are **computed**, never that a
-> running instance started obeying them.
+> [!note] 1.14 and 1.15 were added 2026-08-11 and **partially run the same day**
+> They are the acceptance checks for the per-character-retrigger / OCR-language branch. Both are
+> *live-apply* checks, the class no unit test can reach: the unit tests prove the new freeze rect
+> and the new engine are **computed**, never that a running instance started obeying them.
+>
+> **Run on 2026-08-11, horizontal text, one machine (100% DPI, `ja` + `en-US` installed):**
+> - **1.14 core — passes.** With the toggle on and mode Live, hovering 経 of 経験人数 showed 経
+>   entries; moving one character right to 験 changed the popup to 験〔げん〕, freq 42368, without
+>   leaving the line.
+> - **1.15 — passes, both directions.** Switching Japanese → English (United States) → Japanese
+>   left the **PID unchanged** each time (18080 throughout, identical start time), persisted to
+>   `chibipop.toml`, and the engine genuinely swapped: with `en-US` active the same Japanese text
+>   stopped resolving entirely, and resolved again on switching back.
+> - The dropdown listed exactly the two installed recognizers by display name, and the corrected
+>   caption rendered on one line, unclipped.
+>
+> **NOT exercised, and still owed — do not read these as passing:**
+> - the **tategaki** case in 1.14, which is the path this branch broke and repaired;
+> - that the toggle is inert in hold-key mode;
+> - that drill-down and wheel-scroll still work with the toggle on, in either orientation;
+> - 1.15's missing-recognizer path, and the startup fallback, which need a pack uninstalled.
 
 ### 1.14 Per-character retrigger
 
