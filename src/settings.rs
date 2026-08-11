@@ -291,6 +291,14 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     }
 }
 
+fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| !unreadable.iter().any(|u| u == *name))
+        .map(|name| order_key(name, existing))
+        .collect()
+}
+
 /// Substrings, not live names.
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
@@ -323,17 +331,26 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
-    let existing =
-        cfg.dictionaries.per_language.get(&form.ocr_language).map(|v| v.as_slice()).unwrap_or(&[]);
+    let full: Vec<String> =
+        form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
+    out.dictionaries.display_order =
+        keyed_names(&full, &form.unreadable, &cfg.dictionaries.display_order);
+
+    let scoped =
+        form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty();
     let mut per_language = form.per_language.clone();
-    per_language.insert(
-        form.ocr_language.clone(),
-        form.dict_names
-            .iter()
-            .filter(|name| !form.unreadable.iter().any(|u| u == *name))
-            .map(|name| order_key(name, existing))
-            .collect(),
-    );
+    if scoped {
+        let existing = cfg
+            .dictionaries
+            .per_language
+            .get(&form.ocr_language)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        per_language.insert(
+            form.ocr_language.clone(),
+            keyed_names(&form.dict_names, &form.unreadable, existing),
+        );
+    }
     out.dictionaries.per_language = per_language;
     out
 }
