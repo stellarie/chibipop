@@ -2045,6 +2045,8 @@ impl SettingsWindow {
                 side_panel: checked(ID_SIDE_PANEL),
                 exclude_from_capture: checked(ID_EXCLUDE),
                 dict_names,
+                dict_excluded: template.dict_excluded.clone(),
+                per_language: template.per_language.clone(),
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
                                      template.max_ocr_passes as i64) as u8,
                 prefer_vertical: checked(ID_PREFER_VERT),

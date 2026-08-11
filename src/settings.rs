@@ -4,6 +4,7 @@ use crate::config::{Config, FieldMapping, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Re-exported for config.rs.
@@ -28,6 +29,8 @@ pub struct SettingsForm {
     pub exclude_from_capture: bool,
     /// Live names, not substrings.
     pub dict_names: Vec<String>,
+    pub dict_excluded: Vec<String>,
+    pub per_language: BTreeMap<String, Vec<String>>,
     pub max_ocr_passes: u8,
     pub prefer_vertical: bool,
     pub capture_width: i32,
@@ -222,15 +225,34 @@ fn mutate(
     lib.save(dir)
 }
 
+fn sorted_by_order<'a>(dicts: &'a [DictInfo], order: &[String]) -> Vec<&'a DictInfo> {
+    let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
+    ordered.sort_by_key(|d| (dict_order_rank(&d.name, order).unwrap_or(usize::MAX), d.dict_id));
+    ordered
+}
+
 /// Flatten, in popup order.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
-    let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
-    ordered.sort_by_key(|d| {
-        (
-            dict_order_rank(&d.name, &cfg.dictionaries.display_order).unwrap_or(usize::MAX),
-            d.dict_id,
-        )
-    });
+    let ordered = sorted_by_order(dicts, &cfg.dictionaries.display_order);
+    let active = cfg.dictionaries.per_language.get(&cfg.ocr.language).filter(|l| !l.is_empty());
+    let (dict_names, dict_excluded) = match active {
+        Some(list) => {
+            let matching = sorted_by_order(dicts, list);
+            (
+                matching
+                    .into_iter()
+                    .filter(|d| dict_order_rank(&d.name, list).is_some())
+                    .map(|d| d.name.clone())
+                    .collect(),
+                ordered
+                    .iter()
+                    .filter(|d| dict_order_rank(&d.name, list).is_none())
+                    .map(|d| d.name.clone())
+                    .collect(),
+            )
+        }
+        None => (ordered.iter().map(|d| d.name.clone()).collect(), Vec::new()),
+    };
 
     SettingsForm {
         mode: cfg.trigger.mode,
@@ -244,7 +266,9 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         scroll_popup: cfg.popup.scroll_popup,
         side_panel: cfg.popup.side_panel,
         exclude_from_capture: cfg.popup.exclude_from_capture,
-        dict_names: ordered.iter().map(|d| d.name.clone()).collect(),
+        dict_names,
+        dict_excluded,
+        per_language: cfg.dictionaries.per_language.clone(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
         capture_width: cfg.ocr.capture_width,
@@ -299,12 +323,18 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
-    out.dictionaries.display_order = form
-        .dict_names
-        .iter()
-        .filter(|name| !form.unreadable.iter().any(|u| u == *name))
-        .map(|name| order_key(name, &cfg.dictionaries.display_order))
-        .collect();
+    let existing =
+        cfg.dictionaries.per_language.get(&form.ocr_language).map(|v| v.as_slice()).unwrap_or(&[]);
+    let mut per_language = form.per_language.clone();
+    per_language.insert(
+        form.ocr_language.clone(),
+        form.dict_names
+            .iter()
+            .filter(|name| !form.unreadable.iter().any(|u| u == *name))
+            .map(|name| order_key(name, existing))
+            .collect(),
+    );
+    out.dictionaries.per_language = per_language;
     out
 }
 
@@ -648,6 +678,48 @@ mod tests {
         cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
         assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+    }
+
+    #[test]
+    fn from_config_splits_active_from_excluded() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert!(form.dict_names.iter().all(|n| n.contains("大辞林")));
+        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+    }
+
+    #[test]
+    fn apply_to_writes_the_visible_list_into_its_language() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            out.dictionaries.per_language["ja"],
+        );
+    }
+
+    /// Others must survive.
+    #[test]
+    fn apply_to_preserves_other_languages() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["中日大辞典".to_string()],
+            out.dictionaries.per_language["zh-Hans-CN"],
+            "the other language's list must survive",
+        );
     }
 
     fn staged_form() -> SettingsForm {
