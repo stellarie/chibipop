@@ -10,7 +10,10 @@ explaining before dismissing.
 **Three exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
 2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Items
 **1.14–1.15** were added 2026-08-11 with the per-character-retrigger / OCR-language branch and
-**have not been run either**. Item **11b** was corrected 2026-08-09, having described behaviour
+were **partially run the same day** — 1.14's core and all of 1.15 passed on one machine in
+horizontal text; the tategaki case, hold-key inertness, drill-down/scroll preservation and the
+missing-recognizer paths were **not** exercised. See the callout above 1.14 for exactly what was
+and was not covered. Item **11b** was corrected 2026-08-09, having described behaviour
 that never existed in any version of the program.
 
 ---
