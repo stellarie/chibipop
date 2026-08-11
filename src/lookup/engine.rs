@@ -196,6 +196,7 @@ mod tests {
     fn sense(gloss: &str, pos: &str) -> Sense {
         Sense {
             glosses: vec![gloss.to_string()],
+            glosses_html: vec![],
             pos: vec![pos.to_string()],
             misc: vec![],
         }

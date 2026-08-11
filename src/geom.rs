@@ -92,9 +92,11 @@ impl ScanDisplay {
     }
 }
 
-/// Anchor, popup, bridge.
-pub fn sticky_region(anchor: PhysRect, popup: PhysRect) -> [PhysRect; 3] {
-    [anchor, popup, bridge_between(anchor, popup)]
+/// Freeze rect, popup, corridor.
+pub fn sticky_region(freeze: PhysRect, reach: PhysRect, popup: PhysRect) -> [PhysRect; 3] {
+    // Flush to freeze, reach-wide.
+    let bridge_src = PhysRect { x: reach.x, w: reach.w, y: freeze.y, h: freeze.h };
+    [freeze, popup, bridge_between(bridge_src, popup)]
 }
 
 /// The gap band between two.
@@ -106,9 +108,9 @@ fn bridge_between(a: PhysRect, b: PhysRect) -> PhysRect {
     PhysRect { x: left, y: top, w: right - left, h: lower.y - top }
 }
 
-/// On anchor, popup, or gap.
-pub fn in_sticky(p: PhysPoint, anchor: PhysRect, popup: PhysRect) -> bool {
-    sticky_region(anchor, popup)
+/// On freeze, popup, or gap.
+pub fn in_sticky(p: PhysPoint, freeze: PhysRect, reach: PhysRect, popup: PhysRect) -> bool {
+    sticky_region(freeze, reach, popup)
         .iter()
         .any(|r| r.w > 0 && r.h > 0 && r.contains(p))
 }
@@ -407,17 +409,17 @@ mod tests {
     #[test]
     fn the_anchor_and_the_popup_are_both_sticky() {
         let (a, pop) = anchor_and_popup();
-        assert!(in_sticky(p(113, 113), a, pop), "anchor centre");
-        assert!(in_sticky(p(310, 289), a, pop), "popup centre");
-        assert!(in_sticky(p(100, 100), a, pop), "anchor top-left is inclusive");
-        assert!(in_sticky(p(519, 438), a, pop), "popup bottom-right interior");
+        assert!(in_sticky(p(113, 113), a, a, pop), "anchor centre");
+        assert!(in_sticky(p(310, 289), a, a, pop), "popup centre");
+        assert!(in_sticky(p(100, 100), a, a, pop), "anchor top-left is inclusive");
+        assert!(in_sticky(p(519, 438), a, a, pop), "popup bottom-right interior");
     }
 
     #[test]
     fn the_bridge_covers_the_gap_between_them() {
         let (a, pop) = anchor_and_popup();
         for y in 127..139 {
-            assert!(in_sticky(p(113, y), a, pop), "gap row {y} must be sticky");
+            assert!(in_sticky(p(113, y), a, a, pop), "gap row {y} must be sticky");
         }
     }
 
@@ -426,7 +428,7 @@ mod tests {
     fn the_three_rects_tile_without_a_seam() {
         let (a, pop) = anchor_and_popup();
         for y in 100..439 {
-            assert!(in_sticky(p(113, y), a, pop), "row {y} fell through a seam");
+            assert!(in_sticky(p(113, y), a, a, pop), "row {y} fell through a seam");
         }
     }
 
@@ -441,7 +443,7 @@ mod tests {
                     let cx = ax + 13;
                     for y in ay..(ay + 27 + 12 + ph) {
                         assert!(
-                            in_sticky(p(cx, y), a, pop),
+                            in_sticky(p(cx, y), a, a, pop),
                             "anchor ({ax},{ay}) popup {pw}x{ph}: row {y}"
                         );
                     }
@@ -456,17 +458,17 @@ mod tests {
         let a = r(100, 900, 26, 27);
         let pop = r(100, 588, 420, 300);
         for y in 888..900 {
-            assert!(in_sticky(p(113, y), a, pop), "gap row {y} above the anchor");
+            assert!(in_sticky(p(113, y), a, a, pop), "gap row {y} above the anchor");
         }
-        assert!(in_sticky(p(310, 700), a, pop), "popup centre");
+        assert!(in_sticky(p(310, 700), a, a, pop), "popup centre");
     }
 
     /// Fails on a bounding box.
     #[test]
     fn the_next_character_along_the_line_is_not_sticky() {
         let (a, pop) = anchor_and_popup();
-        assert!(!in_sticky(p(139, 113), a, pop), "one glyph right of the anchor");
-        assert!(!in_sticky(p(300, 113), a, pop), "far along the same line");
+        assert!(!in_sticky(p(139, 113), a, a, pop), "one glyph right of the anchor");
+        assert!(!in_sticky(p(300, 113), a, a, pop), "far along the same line");
     }
 
     /// Leaving is on purpose.
@@ -474,7 +476,7 @@ mod tests {
     fn a_shallow_diagonal_leaves_the_region_on_purpose() {
         let (a, pop) = anchor_and_popup();
         assert!(
-            !in_sticky(p(127, 126), a, pop),
+            !in_sticky(p(127, 126), a, a, pop),
             "exits the anchor's right edge one row before the bridge"
         );
     }
@@ -482,8 +484,8 @@ mod tests {
     #[test]
     fn a_point_well_away_from_both_is_not_sticky() {
         let (a, pop) = anchor_and_popup();
-        assert!(!in_sticky(p(50, 50), a, pop));
-        assert!(!in_sticky(p(1000, 1000), a, pop));
+        assert!(!in_sticky(p(50, 50), a, a, pop));
+        assert!(!in_sticky(p(1000, 1000), a, a, pop));
     }
 
     /// Zero-height bridge is nil.
@@ -492,16 +494,78 @@ mod tests {
         let a = r(100, 100, 26, 27);
         let pop = r(100, 127, 420, 300);
         for y in 100..427 {
-            assert!(in_sticky(p(113, y), a, pop), "row {y} with gap 0");
+            assert!(in_sticky(p(113, y), a, a, pop), "row {y} with gap 0");
         }
     }
 
     #[test]
     fn sticky_region_returns_the_anchor_the_popup_and_the_bridge() {
         let (a, pop) = anchor_and_popup();
-        let rects = sticky_region(a, pop);
+        let rects = sticky_region(a, a, pop);
         assert_eq!(a, rects[0]);
         assert_eq!(pop, rects[1]);
         assert_eq!(r(100, 127, 420, 12), rects[2], "bridge spans the union's x-extent");
+    }
+
+    #[test]
+    fn the_bridge_spans_the_reach_not_the_freeze() {
+        let freeze = r(100, 100, 20, 20);
+        let reach = r(100, 100, 500, 20);
+        let popup = r(100, 300, 420, 60);
+        let wide = sticky_region(freeze, reach, popup)[2];
+        let narrow = sticky_region(freeze, freeze, popup)[2];
+        assert!(wide.w > narrow.w, "a wider reach must widen the corridor");
+        assert_eq!(freeze, sticky_region(freeze, reach, popup)[0]);
+    }
+
+    #[test]
+    fn a_one_character_freeze_still_holds_on_the_popup() {
+        let freeze = r(100, 100, 20, 20);
+        let reach = r(100, 100, 200, 20);
+        let popup = r(100, 300, 420, 60);
+        let inside_popup = PhysPoint { x: 300, y: 330 };
+        assert!(in_sticky(inside_popup, freeze, reach, popup), "the popup always holds");
+        let next_char = PhysPoint { x: 130, y: 110 };
+        assert!(!in_sticky(next_char, freeze, freeze, popup), "next char is not frozen");
+    }
+
+    /// Tategaki 経験, one char held.
+    #[test]
+    fn a_vertical_char_freeze_still_bridges_down_to_the_popup() {
+        let freeze = r(987, 500, 52, 26);
+        let reach = r(987, 497, 52, 58);
+        let popup = r(1000, 538, 420, 300);
+        for y in 500..838 {
+            assert!(in_sticky(p(1000, y), freeze, reach, popup), "row {y} escaped");
+        }
+    }
+
+    /// HIGHLIGHT_PAD is 3px.
+    #[test]
+    fn a_single_character_vertical_match_leaves_no_pad_gap() {
+        let freeze = r(987, 500, 52, 26);
+        let reach = r(987, 497, 52, 32);
+        let popup = r(1000, 538, 420, 300);
+        for y in 500..838 {
+            assert!(in_sticky(p(1000, y), freeze, reach, popup), "row {y} escaped");
+        }
+    }
+
+    /// Horizontal must not shift.
+    #[test]
+    fn a_horizontal_char_freeze_leaves_the_corridor_untouched() {
+        let freeze = r(3010, 244, 27, 52);
+        let reach = r(3007, 244, 120, 52);
+        let popup = r(3007, 308, 420, 300);
+        assert_eq!(bridge_between(reach, popup), sticky_region(freeze, reach, popup)[2]);
+    }
+
+    /// Toggle off must not shift.
+    #[test]
+    fn an_equal_freeze_and_reach_bridges_exactly_as_before() {
+        let popup = r(1000, 538, 420, 300);
+        for held in [r(987, 497, 52, 58), r(3007, 244, 120, 52)] {
+            assert_eq!(bridge_between(held, popup), sticky_region(held, held, popup)[2]);
+        }
     }
 }

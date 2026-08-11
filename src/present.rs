@@ -32,6 +32,8 @@ pub struct Card {
 pub struct GlossBlock {
     pub dict_name: String,
     pub glosses: Vec<String>,
+    /// Same glosses, HTML-formatted. Empty wherever `glosses` is empty.
+    pub glosses_html: Vec<String>,
 }
 
 /// A non-top group, one line.
@@ -163,7 +165,9 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
             let dict_name = dict_name_for(dict_id, dicts);
             let rank = dict_order_rank(&dict_name, &cfg.dict_order).unwrap_or(usize::MAX);
             let glosses = hit.entry.senses.iter().flat_map(|s| s.glosses.clone()).collect();
-            (rank, dict_id, GlossBlock { dict_name, glosses })
+            let glosses_html =
+                hit.entry.senses.iter().flat_map(|s| s.glosses_html.clone()).collect();
+            (rank, dict_id, GlossBlock { dict_name, glosses, glosses_html })
         })
         .collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -231,6 +235,7 @@ mod tests {
                 dict_id,
                 senses: vec![Sense {
                     glosses: vec![gloss.to_string()],
+                    glosses_html: vec![],
                     pos: vec!["noun".into()],
                     misc: vec![],
                 }],
@@ -334,6 +339,32 @@ mod tests {
         assert_eq!(1, p.top.as_ref().unwrap().blocks.len());
     }
 
+    #[test]
+    fn ordered_blocks_carries_html_glosses_alongside_plain_text() {
+        let hit = Hit {
+            written: Some("猫".into()),
+            reading: Some("ねこ".into()),
+            match_len: 1,
+            freq: Some(365),
+            score: 7.7,
+            process: vec![],
+            entry: Entry {
+                entry_id: 1,
+                dict_id: 1,
+                senses: vec![Sense {
+                    glosses: vec!["cat".into()],
+                    glosses_html: vec!["<b>cat</b>".into()],
+                    pos: vec![],
+                    misc: vec![],
+                }],
+            },
+        };
+        let p = build(&[hit], &dicts(), &cfg());
+        let block = &p.top.as_ref().unwrap().blocks[0];
+        assert_eq!(vec!["cat".to_string()], block.glosses);
+        assert_eq!(vec!["<b>cat</b>".to_string()], block.glosses_html);
+    }
+
     fn bare_card(match_len: usize) -> Card {
         Card {
             written: None,
@@ -428,6 +459,7 @@ mod tests {
             blocks: vec![GlossBlock {
                 dict_name: "Test".into(),
                 glosses: vec!["cat".into(), "feline".into()],
+                glosses_html: vec![],
             }],
             match_len: 1,
         };
@@ -448,6 +480,7 @@ mod tests {
             blocks: vec![GlossBlock {
                 dict_name: "D".into(),
                 glosses: vec![long],
+                glosses_html: vec![],
             }],
             match_len: 1,
         };

@@ -5,7 +5,7 @@
 //! `cargo test` — the same approved pattern the M1 golden corpus uses.
 
 use chibipop::geom::{PhysPoint, PhysRect};
-use chibipop::text::layout::{map_from_upscaled, resolve, OcrLine, OcrWord};
+use chibipop::text::layout::{map_from_upscaled, resolve, CaptureSize, OcrLine, OcrWord};
 
 const FIX_W: i32 = 400;
 const FIX_H: i32 = 120;
@@ -22,7 +22,9 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         eprintln!("SKIP: tests/fixtures/japanese_bgra.bin not present");
         return;
     };
-    let source = match chibipop::text::ocr::OcrTextSource::new(1, false) {
+    let built =
+        chibipop::text::ocr::OcrTextSource::new(1, false, CaptureSize::default(), true, "ja");
+    let source = match built {
         Ok(source) => source,
         Err(_) => {
             eprintln!("SKIP: no Japanese OCR engine available");
@@ -53,7 +55,7 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
     // Pointing at the centre of the first recognised character must resolve to
     // that same character.
     let first = &lines[0].words[0];
-    let hit = resolve(&lines, first.rect.center()).expect("centre of a word must resolve");
+    let hit = resolve(&lines, first.rect.center(), true).expect("centre of a word must resolve");
     assert!(
         hit.span.text[hit.span.cursor_byte_offset..].starts_with(&first.text),
         "expected the span to start at {:?}, got {:?}",
@@ -76,7 +78,7 @@ fn mapping_and_resolution_compose_correctly() {
             ),
         }],
     };
-    let got = resolve(&[mapped], PhysPoint { x: 1110, y: 560 }).expect("must resolve");
+    let got = resolve(&[mapped], PhysPoint { x: 1110, y: 560 }, true).expect("must resolve");
     assert_eq!("食", got.span.text);
     assert_eq!(0, got.span.cursor_byte_offset);
     assert_eq!(1100, got.span.anchor.x);

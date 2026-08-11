@@ -1,7 +1,12 @@
 # chibipop — backlog
 
 Work that is designed or measured but deliberately not built yet, with the reason and the
-evidence needed to pick it up cheaply. Newest first.
+evidence needed to pick it up cheaply.
+
+**Append only; never renumber.** These numbers are stable IDs and other documents cite them by
+number — `docs/REGRESSION.md` alone points at 7 and 8. New items go at the **end**. (The header
+said "Newest first" until 2026-08-09, which no item had ever obeyed and which would have had the
+next person inserting at the top and shifting every ID below it.)
 
 ---
 
@@ -78,6 +83,13 @@ transpose. Design the round around **square pass 1 → transposed second capture
 - `band_of` floors the perpendicular extent with `REGION_H`, i.e. floors a *width* with a
   *height* constant, so vertical tiles already come out 100×500. That is luck, not design, and is
   untested at any other text size.
+  > **Updated 2026-08-09.** `band_of` now takes an explicit `short_floor` argument
+  > (`src/text/layout.rs:107`) and the callers pass the *configured* short axis, so the
+  > width-floored-by-a-height-constant accident is gone and the floor is tested at a second value
+  > (`band_of_floors_on_the_configured_short_axis`). What this changes for the item: the shape is
+  > now **tunable** — a user can already ask for a square pass 1 — so the round below is about
+  > choosing the shape per pass automatically, not about making the shape settable at all. The
+  > 2/6-vs-6/6 measurement is unaffected; it was never about who owned the constant.
 - Pass 1's region is **not clamped to the monitor** (tiles are). Measured live: a hover at
   x=2696 produced a region starting at x=2446, 114 px onto the neighbouring monitor.
 
@@ -305,3 +317,257 @@ exactly chibipop's use case.
 100.0 vs 96.2 solid). `UPSCALE = 2` may simply be wrong once glyphs are already ~28px or larger.
 It is one constant, but moving a global default on the evidence of one image is overfitting;
 measure across several glyph sizes before touching it.
+
+---
+
+## 9. `chibipop settings` says "Apply & Restart" and restarts nothing
+
+**Raised 2026-08-09 by the hot-reload branch. A product decision, deliberately not taken by the
+agent that found it.** Not a regression: this wording predates the branch and is unchanged by it.
+
+`chibipop settings` opens the settings window in its own process, with no `chibipop run` to talk
+to. Its Apply writes `chibipop.toml` for the *next* start. The button nevertheless reads
+**"Apply & Restart"** and the hint reads **"Applying saves your settings and restarts chibipop."**
+Neither is true there — nothing is restarted, because there is nothing running to restart.
+
+The design spec for this branch (§6, row 3 — a working note, not published with the repo, as with
+item 1's sources) wants that third row to read **"Apply"** with a next-start hint instead, on the
+grounds that `chibipop settings` edits the file for the next start and should say so. That is a
+reasonable request and it is **not** what the code does.
+
+### What is actually there
+
+`apply_caption` / `apply_hint` (`src/ui/settings_window.rs:772`) key on
+`ApplyMode` × *dictionary staged*:
+
+| Opened by | Staged? | Caption | Hint |
+|---|---|---|---|
+| `run` (`ApplyMode::Live`) | no | Apply | "…uses them right away." |
+| `run` | yes | Apply & Restart | "…restarts chibipop." |
+| `settings` (`ApplyMode::Standalone`) | either | Apply & Restart | "…restarts chibipop." |
+
+The branch made the `run` rows vary; it left `Standalone` exactly as it found it.
+
+### Why it was left
+
+Changing what a shipped button says to the user is oniichan's call, not an implementer's, and the
+branch had no requirement that turned on it. It is also the *safe* wording to leave standing: it
+over-promises a restart rather than under-promising one, so a user who follows it restarts
+needlessly instead of wondering why nothing changed.
+
+### If picked up
+
+One arm of `apply_caption` and one of `apply_hint`, plus the three assertions at
+`settings_window.rs:2502`. Decide the wording first — "Apply" alone is what the spec asks for, but
+"Saved. Restart chibipop to use them." carries more information and is what
+`docs/REGRESSION.md` 11b spent its whole life believing was there. Whatever is chosen, **11b's
+table must move with it**; that item was wrong for months precisely because a caption and a
+checklist drifted apart with nobody comparing them to the program.
+
+---
+
+## 10. `ScanDisplay::any()` has no callers
+
+**Raised 2026-08-09. Trivial, and recorded only because nothing will ever tell you.**
+
+`ScanDisplay::any()` (`src/geom.rs:90`) returns `captures || highlight`. Its last non-test caller
+went away when the scan overlay stopped being created conditionally — the overlay is now created
+unconditionally and shown on demand, so nobody needs to ask in advance whether *any* overlay might
+be wanted. The only remaining reference is its own unit test at `src/geom.rs:366`.
+
+**No warning fires**, and that is the durable point: `any()` is `pub`, and in a crate that is both
+a library and a binary, `pub` items are part of the library's API, so `dead_code` never triggers.
+The tier 0 clippy gate is exactly the mechanism that would normally catch this and it is
+structurally blind to it. Any `pub` helper in this crate can quietly lose its last caller and the
+gate will stay green — a unit test on a dead function looks identical to a unit test on a live one.
+
+**Not removed here** because deletion is a code change and the branch that orphaned it was a
+documentation task by then. Removing it is `any()` plus its test, and nothing else references it.
+Worth a moment first on whether the *reverse* is wanted: if a future round wants to skip creating
+the overlay again on some cheaper grounds, this is the predicate it would want back.
+
+---
+
+## 11. The settings window is height-constrained and cannot scroll
+
+**Raised 2026-08-11 by the per-character-retrigger / OCR-language branch, which nearly tripped it
+and was rerouted instead of fixing it.** Not a regression — this ceiling predates the branch and
+the branch ships clear of it. It is recorded because the next tab that grows will hit it, and
+nothing will warn.
+
+### The mechanism
+
+Three facts compose into the problem:
+
+- **The bottom block sits at the tallest tab.** `settings_window.rs:1907` is
+  `y = y_general.max(y_dict).max(y_ocr).max(y_ank)`, and the Apply / Cancel / Quit row is placed
+  from that `y`. So a tab growing taller pushes the buttons down on **every** tab, not just its own.
+- **`fit_to` clamps to the work area** (`settings_window.rs:1478-1480`): `outer_h.min(cap)`, where
+  `cap` is `work_area_height`. When the content is taller than the screen allows, the window is
+  silently made shorter than its content.
+- **There is no scrolling.** `grep -c "WM_VSCROLL\|SetScrollInfo" src/ui/settings_window.rs`
+  returns **0**. (The `WS_VSCROLL` flags in that file are all on combo boxes — dropdown
+  scrollbars, not a scrollable window.) So the clamp does not hide content behind a scrollbar; it
+  truncates it, and what is at the bottom is the row containing **Apply**.
+
+That failure has shipped once already. The comment at `settings_window.rs:965-971` records the
+first version of the file passing a hand-tuned height to `CreateWindowExW` — which takes the
+*outer* size — so 39px of caption and frame ate Apply and Cancel and the window opened with no way
+to accept anything. Measuring the content fixed *that* cause. It does not protect against this one.
+
+### What was measured
+
+The branch's **first attempt** put the checkbox on the General tab, which took the governing
+tallest-tab figure **426 → 484** and the client height **594 → 652 logical px** on every tab. That
+attempt was discarded; what shipped is the last row below.
+
+Tab heights, walked from the layout constants — `content_y` = `PAD` + `TAB_H` + 4 = 46, then group
+by group:
+
+| | `y_general` | `y_dict` | `y_ocr` | `y_ank` | governing `max()` | client height |
+|---|---|---|---|---|---|---|
+| v0.6.0 | **426** | 316 (400 worst case) | 280 | 260 | **426** | **594** |
+| Task 7's first attempt — **discarded, never shipped** | **484** | 316 (400 worst case) | 328 | 260 | **484** | **652** |
+| shipped v0.7.0 | **426** | 316 (400 worst case) | **380** | 260 | **426** | **594** |
+
+**Only `y_ocr` moved between v0.6.0 and v0.7.0**; the other four columns are identical across all
+three rows, which is exactly why the governing `max()` and the client height did not move. The
+bottom block and padding add a constant 168px below the governing `max()`, which is why every row
+is internally consistent (426 + 168 = 594; 484 + 168 = 652). **426 is the number to budget
+against**; 484 only ever existed on the discarded attempt.
+
+- **On oniichan's machine this is not a problem and would not have been.** 96 dpi / 100% scaling,
+  work area 2560x1050. The ~702px figure measured during the branch was against the **652** client
+  height of the discarded attempt; on the same ~50px non-client allowance the shipped 594 needs
+  ~644. Either way, enormous headroom against 1050.
+- **At 150% on a 1080-tall laptop the margin is roughly zero**, and at **175% it exceeds the clamp
+  for certain — as it already did before this branch**, at 594. The non-client and taskbar figures
+  in that estimate are approximations and the margin sits inside their uncertainty, so the honest
+  claim is "headroom is ~0 at 150%", not "broken today".
+
+The checkbox was moved to the OCR / Debug tab instead, returning the governing figure to exactly
+its pre-branch **426** and the client height to 594. The OCR tab absorbed the growth as
+`y_ocr` **328 → 380** (+52: the checkbox's 24px row plus a 28px explanatory static) — 328 being
+v0.6.0's 280 plus the 48px the language dropdown and its caption had already added — which stays
+46px clear of the governing 426 — so OCR did **not** become the tallest tab and the bottom block
+did not move. That is a **reroute, not a fix**: the next tab to grow inherits the whole problem.
+
+### If picked up
+
+Either make the window scrollable (a scrollable content pane under a fixed bottom row, so the
+clamp costs visibility rather than the ability to accept), or stop laying the bottom row out at the
+cross-tab `max()` and pin it per-tab. The first is the real fix; the second is cheaper and removes
+the "one tab grows, every tab pays" coupling that makes this so easy to trip.
+
+**Note the interaction with item 12** — that fix makes the General tab ~38px taller, which spends
+headroom this item says is already thin at 150%. The two want deciding together.
+
+---
+
+## 12. The General tab's "Popup" group box is 32px too short for its contents
+
+**Present in shipped v0.6.0. Spotted 2026-08-11 by the per-character-retrigger / OCR-language
+branch and correctly left alone — it was out of that branch's scope and is purely cosmetic.**
+
+The `Popup` group box on the General tab is drawn 238px tall but encloses 270px of controls, so the
+fourth checkbox — **`Hide the popup from screen capture`** — draws entirely **below its own frame**,
+and the third (`Show related words beside the popup`) has its bottom 8px clipped by it too.
+
+### The arithmetic, so nobody has to re-derive it
+
+`settings_window.rs:1600` declares the height as a formula that literally counts **three**
+checkboxes:
+
+```rust
+group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?   // = 238
+```
+
+With `ROW_H = 24` and `ROW_GAP = 6`, the content the group actually spans is 20px of top inset,
+five combo rows (Theme, Font, Max width, Max height, Summary — the last carrying an extra 4px) at
+154px, then **four** checkboxes at 24px each:
+
+| | |
+|---|---|
+| Declared frame height | `5*(24+6) + 3*24 + 16` = 150 + 72 + 16 = **238** |
+| Content actually enclosed | 20 (top inset) + 154 (five combo rows) + 4×24 (checkboxes) = **270** |
+| Shortfall | **32** |
+
+So a fourth checkbox was added at some point and the `3 * ROW_H` in the formula was never moved to
+`4 * ROW_H`. Nothing catches this: the group box is a `BS_GROUPBOX` with no layout relationship to
+the controls it visually contains, so the frame and its contents are free to disagree forever.
+
+### If picked up
+
+Changing `3 * ROW_H` to `4 * ROW_H` gets to 262, which is still 8px short of the content. The house
+bottom inset in this file is **6px** — the `Trigger` group is 80px against 74px of content — so the
+matching height is **276**, i.e. **+38px** on today's 238.
+
+**That +38px lands squarely on item 11.** It makes the General tab, already the tallest, taller
+still, and General is what sets the bottom row's position on every tab. Fix the scrolling or the
+per-tab layout first, or fix both in one round; do not spend the headroom without looking at it.
+
+---
+
+## 13. The startup OCR-language fallback is a pre-check, not a retry — and it is silent
+
+**Added 2026-08-11 by the v0.7.0 fix wave.** Not a defect; this records what the fallback does and
+does not cover, and why it is shaped the way it is, because both limits are invisible from the
+diff.
+
+### What it does
+
+`worker_main` (`src/app.rs`) now asks `recogniser_available` before building the engine. If the
+configured language has no recognizer **and** it is not already the default, it prints a line and
+starts on `default_ocr_language()` (`"ja"`) instead of returning `Err` from `run`. Without it,
+picking a second language from the new v0.7.0 dropdown and later removing that language pack made
+chibipop **do nothing at all** on the next launch: `main.rs:100` has already hidden the console by
+then (`ui/console.rs:51`), so the error goes to a hidden window, and a double-click launch never
+reaches the settings window — there is no in-app way back.
+
+### Limit 1 — it cannot be a retry, because DPI awareness is a one-shot
+
+The obvious shape is "try the configured language, and on failure retry with the default". **That
+cannot work in this process.** `OcrTextSource::new` opens with `init_dpi_awareness()`, and
+`SetProcessDpiAwarenessContext` fails once a process's awareness has been established — the
+`assets/chibipop.manifest` comment already records this, which is why the manifest deliberately
+omits `<dpiAware>`. Measured directly:
+
+```
+first=Ok(()) second=Err(setting per-monitor DPI awareness
+Caused by:
+    Access is denied. (0x80070005))
+```
+
+So a second `OcrTextSource::new` in one process fails at the DPI step whatever language it is
+handed, and a retry-shaped fallback would have looked correct in review and never once produced a
+working engine.
+
+The pre-check also matches the reload path, which gates on the same `recogniser_available` before
+rebuilding — so startup and Apply now answer "is that pack there?" the same way.
+
+### Limit 2 — "installed but will not build" is still fatal at startup
+
+`recogniser_available` answers *is the pack listed*, not *will the engine build*. A language that
+is listed yet fails `OcrEngine::TryCreateFromLanguage` still aborts startup exactly as before. The
+reload path has the same split and handles it (`ocr.rs:277`, "recogniser failed, keeping ..."),
+because there it has a working engine to keep. Startup has nothing to keep, and cannot call `new`
+again. Covering it needs `init_dpi_awareness` split out of `new` — a separate change with the
+capture path in its blast radius.
+
+### Limit 3 — the substitution notice is as invisible as the error it replaced
+
+The `eprintln!` lands on the same hidden console. Someone who double-clicks chibipop sees it come
+up reading Japanese with no explanation of why their Korean stopped working; only a launch from a
+terminal shows the line. **The fallback fixes "does nothing", not "says nothing".** If picked up:
+the honest surfacing is a one-shot notice on the popup or a `MessageBoxW` at startup, and the same
+question applies to every other `eprintln!` on the startup path.
+
+### Covered by tests
+
+`startup_language` — the keep/substitute decision — is pure and unit-tested for all four
+outcomes, including that the default language never substitutes itself and never queries WinRT.
+The wiring (that `worker_main` builds with the language the decision returned) is **not** tested;
+it needs a real `OcrEngine`. Tier 1 **§1.16** is where that gets exercised by hand, and it has
+**not been run** — so as of 2026-08-11 the wiring is witnessed by nothing at all. This line used
+to point at §1.15, which does not exercise the startup path: §1.15 is the *reload* path, and no
+step for the startup fallback existed anywhere until §1.16 was written on 2026-08-11.

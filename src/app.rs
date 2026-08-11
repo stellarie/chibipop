@@ -14,11 +14,11 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
-use crate::text::layout::Orientation;
-use crate::text::ocr::OcrTextSource;
+use crate::text::layout::{CaptureSize, Orientation};
+use crate::text::ocr::{recogniser_available, OcrTextSource};
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
-use crate::ui::settings_window::{SettingsClick, SettingsOutcome, SettingsWindow};
+use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
@@ -65,6 +65,9 @@ const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 /// Apply staging finished.
 const WM_APP_APPLY: u32 = WM_APP + 8;
 
+/// Background save finished.
+const WM_APP_SAVED: u32 = WM_APP + 9;
+
 /// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -86,15 +89,30 @@ const ARM_WARN_TICKS: u32 = 250;
 /// Rebuild progress poll, ms.
 const REBUILD_TICK_MS: u32 = 100;
 
+/// Over this, hooks stall.
+const APPLY_BUDGET_MS: u128 = 50;
+
 
 /// Staleness by id, no sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct RequestId(u64);
 
-/// Hover or drill-down.
-enum TriggerKind {
+/// Hover, drill-down, reload.
+pub enum TriggerKind {
     Hover(PhysPoint),
     DrillDown(String),
+    Reload(Box<WorkerSettings>),
+}
+
+/// What the worker owns.
+pub struct WorkerSettings {
+    pub max_passes: u8,
+    pub prefer_vertical: bool,
+    pub capture: CaptureSize,
+    pub scan_alphanumeric: bool,
+    pub language: String,
+    pub present_cfg: PresentConfig,
+    pub scan_display: ScanDisplay,
 }
 
 /// One gated cursor movement.
@@ -195,8 +213,8 @@ pub fn settings_only(
     let library = library_dir();
     let form = form_with_library(&cfg, dicts, &library);
     let stale = settings::stale_order_entries(&cfg, dicts);
-    let window =
-        SettingsWindow::open(&form, &stale).context("opening the settings window")?;
+    let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
+        .context("opening the settings window")?;
 
     // A run may hold it open.
     let staged_db = rebuild::staging_path(dict_path);
@@ -574,7 +592,12 @@ fn service_settings_click(
 }
 
 /// Run until the user quits.
-pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
+pub fn run(
+    mut cfg: Config,
+    dict_path: &Path,
+    rules_path: &Path,
+    config_path: &Path,
+) -> Result<()> {
     // Nothing built yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
@@ -598,24 +621,28 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     // SAFETY: FFI call with no preconditions - always succeeds, returns the
     // id of whichever thread calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
-    let present_cfg = cfg.present_config();
-    let max_ocr_passes = cfg.ocr.max_ocr_passes;
-    let prefer_vertical = cfg.ocr.prefer_vertical;
-    let scan_display = ScanDisplay {
-        captures: cfg.debug.show_scan_region,
-        highlight: cfg.popup.highlight_match,
-    };
+    let mut live = derive(&cfg);
+    let w_present_cfg = live.present_cfg.clone();
+    let w_max_ocr_passes = live.max_ocr_passes;
+    let w_prefer_vertical = live.prefer_vertical;
+    let w_capture = live.capture;
+    let w_scan_alphanumeric = live.scan_alphanumeric;
+    let w_language = live.language.clone();
+    let w_scan_display = live.scan_display;
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
-    let _worker = thread::spawn(move || {
+    let worker = thread::spawn(move || {
         worker_main(
             dict_path,
             rules_path,
-            present_cfg,
-            max_ocr_passes,
-            prefer_vertical,
-            scan_display,
+            w_present_cfg,
+            w_max_ocr_passes,
+            w_prefer_vertical,
+            w_capture,
+            w_scan_alphanumeric,
+            w_language,
+            w_scan_display,
             main_tid,
             trigger_rx,
             result_tx,
@@ -631,7 +658,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         .recv()
         .context("worker thread ended before completing startup")??;
 
-    let popup = Popup::create(cfg.popup.exclude_from_capture).context("creating the popup window")?;
+    let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
     // Contract 2: report all three.
     match popup.capture_exclusion() {
@@ -658,18 +685,16 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     }
 
     // Never fatal - spec §5.
-    let overlay = if scan_display.any() {
-        match Overlay::create(cfg.popup.exclude_from_capture) {
-            Ok(o) => Some(o),
-            Err(e) => {
-                eprintln!(
-                    "chibipop: the scan overlay could not be created, continuing without it: {e:#}"
-                );
-                None
-            }
+    //
+    // Always live; shown on demand.
+    let overlay = match Overlay::create(live.exclude_from_capture) {
+        Ok(o) => Some(o),
+        Err(e) => {
+            eprintln!(
+                "chibipop: the scan overlay could not be created, continuing without it: {e:#}"
+            );
+            None
         }
-    } else {
-        None
     };
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
 
@@ -685,13 +710,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         eprintln!("chibipop: ============================================================");
     }
 
-    let anki_button = if cfg.anki.enabled {
-        Some(
-            AnkiButton::create(cfg.popup.exclude_from_capture)
-                .context("creating the Anki button window")?,
-        )
-    } else {
-        None
+    // Never fatal - spec §5.
+    //
+    // Always live; shown on demand.
+    let anki_button = match AnkiButton::create(live.exclude_from_capture) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!(
+                "chibipop: the Anki button could not be created, continuing without it: {e:#}"
+            );
+            None
+        }
     };
 
     if let Some(CaptureExclusion::AttemptFailed) =
@@ -703,41 +732,29 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         );
     }
 
-    // Default stays false - D5.
-    if popup.capture_exclusion().needs_capture_guard()
-        || overlay.as_ref().is_some_and(|ov| ov.capture_exclusion().needs_capture_guard())
-        || anki_button.as_ref().is_some_and(|b| b.capture_exclusion().needs_capture_guard())
-    {
-        capture_guard_active.store(true, Ordering::SeqCst);
-    }
+    // Recomputed by `apply_live`.
+    capture_guard_active.store(
+        capture_guard_needed(
+            popup.capture_exclusion(),
+            overlay.as_ref().map(Overlay::capture_exclusion),
+            anki_button.as_ref().map(AnkiButton::capture_exclusion),
+        ),
+        Ordering::SeqCst,
+    );
 
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
-    let theme = theme_from_config(&cfg.popup);
-    if cfg.debug.show_lookup_log {
+    let mut theme = theme_from_config(&live.popup);
+    if live.show_lookup_log {
         crate::ui::console::show();
     }
-    let max_height_percent = i32::from(cfg.popup.max_height_percent);
-    let max_width_percent = i32::from(cfg.popup.max_width_percent);
-    let scroll_popup = cfg.popup.scroll_popup;
-    let side_panel = cfg.popup.side_panel;
-    let summary_chars = cfg.popup.summary_chars;
-    let anki_enabled = cfg.anki.enabled;
-    let anki_url = cfg.anki.url.clone();
-    let anki_deck = cfg.anki.deck.clone();
-    let anki_model = cfg.anki.model.clone();
-    let anki_field_map = if cfg.anki.field_map.is_empty() {
-        crate::config::AnkiConfig::default().field_map
-    } else {
-        cfg.anki.field_map.clone()
-    };
 
     let _hooks = Hooks::install().context("installing the low-level input hooks")?;
-    Hooks::set_mode(cfg.trigger.mode);
-    if let Some(vk) = crate::config::parse_trigger_key(&cfg.trigger.trigger_key) {
+    Hooks::set_mode(live.trigger_mode);
+    if let Some(vk) = crate::config::parse_trigger_key(&live.trigger_key) {
         Hooks::set_trigger_key(vk);
     }
-    if let Some(vk) = crate::config::parse_trigger_key(&cfg.anki.add_key) {
+    if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
         Hooks::set_add_hotkey(vk);
     }
 
@@ -772,11 +789,15 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
         mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     let (apply_tx, apply_rx) =
         mpsc::channel::<Result<(Pending, mpsc::Receiver<Progress>)>>();
+    let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
+    // One writer at a time.
+    let mut save_job: Option<thread::JoinHandle<()>> = None;
     let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
         &form_with_library(&cfg, &dicts, &library),
         &settings::stale_order_entries(&cfg, &dicts),
+        ApplyMode::Live,
     ) {
         // Never fatal.
         Err(e) => {
@@ -895,28 +916,28 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             // Spec D7: the popup's own rect.
-            let live = cursor_now();
+            let cursor_pos = cursor_now();
             let over_popup = shown.as_ref().is_some_and(|s| {
-                s.popup.contains(live)
+                s.popup.contains(cursor_pos)
             });
             let over_popup_or_btn = shown.as_ref().is_some_and(|s| {
                 let btn_h = anki_button.as_ref()
                     .filter(|b| b.is_visible())
                     .map_or(0, |b| b.height_phys());
                 let full = PhysRect { h: s.popup.h + btn_h, ..s.popup };
-                full.contains(live)
+                full.contains(cursor_pos)
             });
-            let armed = scroll_popup
+            let armed = live.scroll_popup
                 && over_popup
                 && shown.as_ref().is_some_and(|s| s.content_h > s.view_h);
             Hooks::set_scroll_armed(armed);
             Hooks::set_click_armed(over_popup_or_btn);
-            Hooks::set_add_armed(shown.is_some() && anki_enabled);
+            Hooks::set_add_armed(shown.is_some() && live.anki_enabled);
 
             if over_popup {
                 if let Some(s) = shown.as_ref() {
-                    let lx = live.x - s.popup.x;
-                    let ly = live.y - s.popup.y;
+                    let lx = cursor_pos.x - s.popup.x;
+                    let ly = cursor_pos.y - s.popup.y;
                     let clickable = renderer.hit_test(lx, ly, s.scroll).is_some();
                     if clickable {
                         if let Ok(cur) = unsafe { LoadCursorW(None, IDC_HAND) } {
@@ -946,7 +967,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if next != s.scroll {
                         s.scroll = next;
                         let back = !s.history.is_empty();
-                        if let Err(e) = renderer.paint(&s.presentation, &theme, s.scroll, back, side_panel) {
+                        let painted = renderer
+                            .paint(&s.presentation, &theme, s.scroll, back, live.side_panel);
+                        if let Err(e) = painted {
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
                         }
                     }
@@ -961,18 +984,18 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if let Some(action) = renderer.hit_test(click_x, click_y, s.scroll) {
                         match action {
                             HitAction::ExpandEntry(i) => {
-                                present::swap_top(&mut s.presentation, i, summary_chars);
+                                present::swap_top(&mut s.presentation, i, live.summary_chars);
                                 match show_presentation(
                                     &popup,
                                     &mut renderer,
                                     &theme,
-                                    max_height_percent,
-                                    max_width_percent,
+                                    live.max_height_percent,
+                                    live.max_width_percent,
                                     &s.presentation,
                                     s.anchor,
                                     0,
                                     has_history,
-                                    side_panel,
+                                    live.side_panel,
                                 ) {
                                     Ok((rect, content_h, view_h)) => {
                                         s.popup = rect;
@@ -997,17 +1020,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             HitAction::Back => {
                                 pop_history(
                                     s, &popup, &mut renderer, &theme,
-                                    max_height_percent, max_width_percent,
-                                    anki_button.as_ref(), side_panel,
+                                    live.max_height_percent, live.max_width_percent,
+                                    anki_button.as_ref(), live.side_panel,
                                 );
                             }
                         }
-                    } else if click_y >= s.popup.h && anki_button.is_some() {
+                    } else if click_y >= s.popup.h && live.anki_enabled {
                         // Below popup = button area.
                         start_add_to_anki(
                             s, &mut renderer, &theme,
-                            &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                            &add_tx, main_tid, side_panel,
+                            &live.anki_url, &live.anki_deck, &live.anki_model,
+                            &live.anki_field_map, &add_tx, main_tid, live.side_panel,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                     }
@@ -1019,8 +1042,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
                         s, &mut renderer, &theme,
-                        &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                        &add_tx, main_tid, side_panel,
+                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
+                        &add_tx, main_tid, live.side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -1030,8 +1053,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
                         s, &mut renderer, &theme,
-                        &anki_url, &anki_deck, &anki_model, &anki_field_map,
-                        &add_tx, main_tid, side_panel,
+                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
+                        &add_tx, main_tid, live.side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -1043,8 +1066,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                 if let Some(s) = shown.as_mut() {
                     pop_history(
                         s, &popup, &mut renderer, &theme,
-                        max_height_percent, max_width_percent,
-                        anki_button.as_ref(), side_panel,
+                        live.max_height_percent, live.max_width_percent,
+                        anki_button.as_ref(), live.side_panel,
                     );
                 }
             }
@@ -1066,6 +1089,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             (Ok(()), Some(flight)) => {
                                 let updated =
                                     pending_cfg.take().unwrap_or_else(|| cfg.clone());
+                                join_save(&mut save_job);
                                 if let Err(e) = updated.save(config_path) {
                                     eprintln!("chibipop: could not save settings to {}: {e:#}",
                                               config_path.display());
@@ -1095,6 +1119,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         // Already on the main thread.
                         Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
                         Some(SettingsOutcome::Apply) => {
+                            let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
                             // Never half-apply.
@@ -1121,14 +1146,35 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                         });
                                     }
                                 }
-                            } else if let Err(e) = updated.save(config_path) {
-                                eprintln!("chibipop: could not save settings to {}: {e:#}",
-                                          config_path.display());
-                            } else if let Err(e) = restart_self() {
-                                eprintln!("chibipop: settings saved, but the restart failed: {e:#}");
-                                eprintln!("chibipop: they will apply next time you start chibipop.");
                             } else {
-                                unsafe { PostQuitMessage(0) };
+                                live = derive(&updated);
+                                apply_live(&live, &popup, overlay.as_ref(),
+                                           anki_button.as_ref(), &mut theme,
+                                           &capture_guard_active);
+                                next_id += 1;
+                                latest_dispatched = RequestId(next_id);
+                                let _ = trigger_tx.send(Trigger {
+                                    kind: TriggerKind::Reload(Box::new(worker_settings(&live))),
+                                    id: latest_dispatched,
+                                });
+                                let clamped = settings::clamp_notice(&edited, &updated);
+                                cfg = updated.clone();
+                                save_in_background(&mut save_job, updated,
+                                                   config_path.to_path_buf(),
+                                                   save_tx.clone(), main_tid);
+                                match &clamped {
+                                    Some(notice) => {
+                                        w.set_capture_fields(&cfg.ocr);
+                                        w.set_status(notice);
+                                    }
+                                    None => w.set_status("Settings applied."),
+                                }
+                                let ms = t0.elapsed().as_millis();
+                                if ms > APPLY_BUDGET_MS {
+                                    eprintln!(
+                                        "chibipop: Apply took {ms} ms (budget {APPLY_BUDGET_MS})"
+                                    );
+                                }
                             }
                         }
                         None => {}
@@ -1160,7 +1206,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
             let cursor = Hooks::take_pending().unwrap_or_else(|| {
                 // Fallback: poll GetCursorPos when the LL hook
                 // is blocked (e.g. by anti-cheat).
-                let pos = live;
+                let pos = cursor_pos;
                 let dominated = Hooks::poll_gate(pos);
                 if dominated { pos } else {
                     PhysPoint { x: i32::MIN, y: i32::MIN }
@@ -1176,7 +1222,8 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         h: s.popup.h + btn_h,
                         ..s.popup
                     };
-                    in_sticky(cursor, s.hold, sticky_rect)
+                    let freeze = freeze_rect(s, live.per_character_lookup, live.trigger_mode);
+                    in_sticky(cursor, freeze, s.hold, sticky_rect)
                 });
                 if !frozen {
                     next_id += 1;
@@ -1200,11 +1247,11 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     if let Some(s) = shown.as_mut() {
                         push_drilldown(
                             s, *pres, &popup, &mut renderer, &theme,
-                            max_height_percent, max_width_percent,
-                            anki_enabled, side_panel,
+                            live.max_height_percent, live.max_width_percent,
+                            live.anki_enabled, live.side_panel,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                        if anki_enabled {
+                        if live.anki_enabled {
                             popup_gen = popup_gen.wrapping_add(1);
                             s.gen = popup_gen;
                             let mut exprs: Vec<String> = Vec::new();
@@ -1214,9 +1261,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                                 }
                             }
                             if !exprs.is_empty() {
-                                let url = anki_url.clone();
-                                let deck = anki_deck.clone();
-                                let model = anki_model.clone();
+                                let url = live.anki_url.clone();
+                                let deck = live.anki_deck.clone();
+                                let model = live.anki_model.clone();
                                 let gen = popup_gen;
                                 let tx = anki_tx.clone();
                                 thread::spawn(move || {
@@ -1244,17 +1291,17 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &popup,
                         &mut renderer,
                         &theme,
-                        max_height_percent,
-                        max_width_percent,
+                        live.max_height_percent,
+                        live.max_width_percent,
                         overlay.as_ref(),
                         &mut shown,
                         result.outcome,
-                        cfg.debug.show_lookup_log,
-                        anki_enabled,
-                        side_panel,
+                        live.show_lookup_log,
+                        live.anki_enabled,
+                        live.side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), shown.as_ref(), &theme);
-                    if new_popup && anki_enabled {
+                    if new_popup && live.anki_enabled {
                         popup_gen = popup_gen.wrapping_add(1);
                         let mut exprs: Vec<String> = Vec::new();
                         if let Some(s) = shown.as_mut() {
@@ -1271,9 +1318,9 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             }
                         }
                         if !exprs.is_empty() {
-                            let url = anki_url.clone();
-                            let deck = anki_deck.clone();
-                            let model = anki_model.clone();
+                            let url = live.anki_url.clone();
+                            let deck = live.anki_deck.clone();
+                            let model = live.anki_model.clone();
                             let gen = popup_gen;
                             let tx = anki_tx.clone();
                             thread::spawn(move || {
@@ -1316,13 +1363,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                             &popup,
                             &mut renderer,
                             &theme,
-                            max_height_percent,
-                            max_width_percent,
+                            live.max_height_percent,
+                            live.max_width_percent,
                             &s.presentation,
                             s.anchor,
                             s.scroll,
                             back,
-                            side_panel,
+                            live.side_panel,
                         ) {
                             Ok((rect, content_h, view_h)) => {
                                 s.popup = rect;
@@ -1354,13 +1401,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                         &popup,
                         &mut renderer,
                         &theme,
-                        max_height_percent,
-                        max_width_percent,
+                        live.max_height_percent,
+                        live.max_width_percent,
                         &s.presentation,
                         s.anchor,
                         s.scroll,
                         back,
-                        side_panel,
+                        live.side_panel,
                     ) {
                         Ok((rect, content_h, view_h)) => {
                             s.popup = rect;
@@ -1404,6 +1451,19 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     }
                 }
             }
+        } else if msg.message == WM_APP_SAVED {
+            while let Ok(result) = save_rx.try_recv() {
+                if let Err(e) = result {
+                    eprintln!("chibipop: could not save settings to {}: {e:#}",
+                              config_path.display());
+                    if let Some(w) = &settings {
+                        w.set_status(
+                            "Settings applied, but could not be saved - \
+                             they will be lost on restart.",
+                        );
+                    }
+                }
+            }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
             // Drain, never one per wakeup.
             drain_capture_guard();
@@ -1420,7 +1480,7 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
                     } else {
                         let form = form_with_library(&cfg, &dicts, &library);
                         let stale = settings::stale_order_entries(&cfg, &dicts);
-                        match SettingsWindow::open(&form, &stale) {
+                        match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
                             // Never fatal.
                             Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
                             Ok(w) => settings = Some(w),
@@ -1444,17 +1504,55 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
     unsafe {
         let _ = KillTimer(None, timer_id);
     }
+    // Step 1 (decision 5): let the worker go. `trigger_rx.recv()` returning
+    // `Err` once its sender is dropped is what actually ends the worker's
+    // loop - but this function exits via `std::process::exit` below, which
+    // never runs local destructors, so `trigger_tx` would otherwise sit
+    // un-dropped forever and the worker would never let go of its
+    // `SqliteDictionary`. Promoting the rebuilt database over the live one
+    // needs that file closed first, so the drop and the join have to happen
+    // here, by hand, before the promote below. A worker mid-capture is
+    // bounded by its own guard-ack timeout (ACK_TIMEOUT), so this is a short
+    // wait, not a hang.
+    drop(trigger_tx);
+    let _ = worker.join();
     if let Some(staged) = promote {
-        if let Ok(()) = rebuild::promote(&staged, &db_path) {
-            if let Some(flight) = &applied {
-                let _ = flight.pending.commit();
+        match rebuild::promote(&staged, &db_path) {
+            Ok(()) => {
+                if let Some(flight) = &applied {
+                    let _ = flight.pending.commit();
+                }
+            }
+            Err(e) => {
+                eprintln!("chibipop: could not put the rebuilt dictionary in place: {e:#}");
+                eprintln!(
+                    "chibipop: your changes are staged (.new / .removed), not lost - \
+                     open Settings and Apply again."
+                );
             }
         }
     }
     if restart_at_exit {
         let _ = restart_self();
     }
+    // exit(0) kills it mid-write.
+    join_save(&mut save_job);
     std::process::exit(0)
+}
+
+/// Newest hover; all reloads.
+fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<WorkerSettings>) {
+    let mut reloads = Vec::new();
+    let mut hover = None;
+    let mut take = |t: Trigger| match t.kind {
+        TriggerKind::Reload(s) => reloads.push(*s),
+        _ => hover = Some(t),
+    };
+    take(first);
+    while let Ok(next) = rx.try_recv() {
+        take(next);
+    }
+    (hover, reloads)
 }
 
 /// Serves triggers, owns OCR.
@@ -1462,10 +1560,13 @@ pub fn run(cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path)
 fn worker_main(
     dict_path: PathBuf,
     rules_path: PathBuf,
-    present_cfg: PresentConfig,
+    mut present_cfg: PresentConfig,
     max_ocr_passes: u8,
     prefer_vertical: bool,
-    scan_display: ScanDisplay,
+    capture: CaptureSize,
+    scan_alphanumeric: bool,
+    language: String,
+    mut scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -1474,7 +1575,18 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
-    let ocr = match OcrTextSource::new(max_ocr_passes, prefer_vertical).context("creating the OCR text source") {
+    let fallback = crate::config::default_ocr_language();
+    let substitute = startup_language(&language, &fallback, || recogniser_available(&language));
+    let language = match substitute {
+        Some(sub) => {
+            eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
+            sub
+        }
+        None => language,
+    };
+    let built =
+        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language);
+    let mut ocr = match built.context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
             let _ = startup_tx.send(Err(e));
@@ -1518,18 +1630,26 @@ fn worker_main(
         return; // main thread gave up waiting; nothing left to do.
     }
 
-    loop {
-        let mut trigger = match trigger_rx.recv() {
-            Ok(t) => t,
-            Err(_) => break, // sender dropped: shutdown (decision 5, step 2).
-        };
-        // The newest queued wins.
-        while let Ok(newer) = trigger_rx.try_recv() {
-            trigger = newer;
+    // Sender dropped: shutdown.
+    while let Ok(first) = trigger_rx.recv() {
+        let (hover, reloads) = drain(first, &trigger_rx);
+        for s in reloads {
+            ocr.apply_settings(
+                s.max_passes,
+                s.prefer_vertical,
+                s.capture,
+                s.scan_alphanumeric,
+                &s.language,
+            );
+            present_cfg = s.present_cfg;
+            scan_display = s.scan_display;
         }
         if !running.load(Ordering::SeqCst) {
             break;
         }
+        let Some(trigger) = hover else {
+            continue;
+        };
 
         // Fresh, so no ordering rule.
         let guard = if capture_guard_active.load(Ordering::SeqCst) {
@@ -1558,6 +1678,9 @@ fn worker_main(
                     &present_cfg,
                     text,
                 ),
+                TriggerKind::Reload(_) => {
+                    WorkerOutcome::Failed("a reload reached the hover path".to_string())
+                }
             }
         }))
         .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
@@ -1657,6 +1780,8 @@ struct Shown {
     popup: PhysRect,
     /// Where the cursor may roam.
     hold: PhysRect,
+    /// One character's hold.
+    hold_char: PhysRect,
     presentation: Presentation,
     /// Content offset; 0 is the top.
     scroll: i32,
@@ -1750,10 +1875,13 @@ fn handle_worker_outcome(
                 }
                 Ok((rect, content_h, view_h)) => {
                     Hooks::discard_scroll();
-                    *shown = Some(Shown {
+                    let HoldRects { hold, hold_char } =
+                        hold_regions(anchor, matched, orientation);
+                    let s = Shown {
                         anchor,
                         popup: rect,
-                        hold: hold_region(anchor, matched, orientation),
+                        hold,
+                        hold_char,
                         presentation: *presentation,
                         scroll: 0,
                         content_h,
@@ -1761,7 +1889,8 @@ fn handle_worker_outcome(
                         gen: 0,
                         anki,
                         history: Vec::new(),
-                    });
+                    };
+                    *shown = Some(s);
                     if let Some(ov) = overlay {
                         if let Err(e) = ov.show_rects(&scan, theme) {
                             eprintln!("chibipop: showing the scan overlay failed: {e:#}");
@@ -1859,6 +1988,23 @@ fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
     prev.presentation == *new
         && (prev.anchor.x - anchor.x).abs() <= ANCHOR_JITTER_PX
         && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
+}
+
+/// The span hold and the char.
+struct HoldRects {
+    hold: PhysRect,
+    hold_char: PhysRect,
+}
+
+fn hold_regions(
+    anchor: PhysRect,
+    matched: Option<PhysRect>,
+    orientation: Orientation,
+) -> HoldRects {
+    HoldRects {
+        hold: hold_region(anchor, matched, orientation),
+        hold_char: hold_region(anchor, None, orientation),
+    }
 }
 
 /// Match one axis, slack other.
@@ -2053,6 +2199,187 @@ fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
     theme
 }
 
+/// What run reads from config.
+struct LiveSettings {
+    popup: crate::config::PopupConfig,
+    present_cfg: PresentConfig,
+    scan_display: ScanDisplay,
+    max_ocr_passes: u8,
+    prefer_vertical: bool,
+    capture: CaptureSize,
+    scan_alphanumeric: bool,
+    language: String,
+    exclude_from_capture: bool,
+    show_lookup_log: bool,
+    max_height_percent: i32,
+    max_width_percent: i32,
+    scroll_popup: bool,
+    side_panel: bool,
+    summary_chars: usize,
+    anki_enabled: bool,
+    anki_url: String,
+    anki_deck: String,
+    anki_model: String,
+    anki_field_map: Vec<crate::config::FieldMapping>,
+    trigger_mode: crate::config::TriggerMode,
+    trigger_key: String,
+    anki_add_key: String,
+    per_character_lookup: bool,
+}
+
+/// Rebuilt on each change.
+fn derive(cfg: &Config) -> LiveSettings {
+    LiveSettings {
+        popup: cfg.popup.clone(),
+        present_cfg: cfg.present_config(),
+        scan_display: ScanDisplay {
+            captures: cfg.debug.show_scan_region,
+            highlight: cfg.popup.highlight_match,
+        },
+        max_ocr_passes: cfg.ocr.max_ocr_passes,
+        prefer_vertical: cfg.ocr.prefer_vertical,
+        capture: CaptureSize { w: cfg.ocr.capture_width, h: cfg.ocr.capture_height },
+        scan_alphanumeric: cfg.ocr.scan_alphanumeric,
+        language: cfg.ocr.language.clone(),
+        exclude_from_capture: cfg.popup.exclude_from_capture,
+        show_lookup_log: cfg.debug.show_lookup_log,
+        max_height_percent: i32::from(cfg.popup.max_height_percent),
+        max_width_percent: i32::from(cfg.popup.max_width_percent),
+        scroll_popup: cfg.popup.scroll_popup,
+        side_panel: cfg.popup.side_panel,
+        summary_chars: cfg.popup.summary_chars,
+        anki_enabled: cfg.anki.enabled,
+        anki_url: cfg.anki.url.clone(),
+        anki_deck: cfg.anki.deck.clone(),
+        anki_model: cfg.anki.model.clone(),
+        anki_field_map: if cfg.anki.field_map.is_empty() {
+            crate::config::AnkiConfig::default().field_map
+        } else {
+            cfg.anki.field_map.clone()
+        },
+        trigger_mode: cfg.trigger.mode,
+        trigger_key: cfg.trigger.trigger_key.clone(),
+        anki_add_key: cfg.anki.add_key.clone(),
+        per_character_lookup: cfg.trigger.per_character_lookup,
+    }
+}
+
+/// What the worker reloads.
+fn worker_settings(live: &LiveSettings) -> WorkerSettings {
+    WorkerSettings {
+        max_passes: live.max_ocr_passes,
+        prefer_vertical: live.prefer_vertical,
+        capture: live.capture,
+        scan_alphanumeric: live.scan_alphanumeric,
+        language: live.language.clone(),
+        present_cfg: live.present_cfg.clone(),
+        scan_display: live.scan_display,
+    }
+}
+
+/// Not excluded means guard on.
+/// `None`: no such window.
+fn capture_guard_needed(
+    popup: CaptureExclusion,
+    overlay: Option<CaptureExclusion>,
+    button: Option<CaptureExclusion>,
+) -> bool {
+    popup.needs_capture_guard()
+        || overlay.is_some_and(CaptureExclusion::needs_capture_guard)
+        || button.is_some_and(CaptureExclusion::needs_capture_guard)
+}
+
+/// Push settings to windows.
+fn apply_live(
+    live: &LiveSettings,
+    popup: &Popup,
+    overlay: Option<&Overlay>,
+    button: Option<&AnkiButton>,
+    theme: &mut Theme,
+    capture_guard_active: &AtomicBool,
+) {
+    capture_guard_active.store(true, Ordering::SeqCst);
+    popup.set_capture_exclusion(live.exclude_from_capture);
+    if let Some(o) = overlay {
+        o.set_capture_exclusion(live.exclude_from_capture);
+    }
+    if let Some(b) = button {
+        b.set_capture_exclusion(live.exclude_from_capture);
+        if !live.anki_enabled {
+            b.hide();
+        }
+    }
+    capture_guard_active.store(
+        capture_guard_needed(
+            popup.capture_exclusion(),
+            overlay.map(Overlay::capture_exclusion),
+            button.map(AnkiButton::capture_exclusion),
+        ),
+        Ordering::SeqCst,
+    );
+    *theme = theme_from_config(&live.popup);
+    if live.show_lookup_log {
+        crate::ui::console::show();
+    } else {
+        crate::ui::console::hide();
+    }
+    Hooks::set_mode(live.trigger_mode);
+    if let Some(vk) = crate::config::parse_trigger_key(&live.trigger_key) {
+        Hooks::set_trigger_key(vk);
+    }
+    if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
+        Hooks::set_add_hotkey(vk);
+    }
+}
+
+/// Must not block the pump.
+fn save_in_background(
+    prev: &mut Option<thread::JoinHandle<()>>,
+    cfg: Config,
+    path: PathBuf,
+    tx: mpsc::Sender<Result<()>>,
+    main_tid: u32,
+) {
+    join_save(prev);
+    *prev = Some(thread::spawn(move || {
+        let _ = tx.send(cfg.save(&path));
+        // SAFETY: wakes the pump thread.
+        unsafe {
+            let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
+        }
+    }));
+}
+
+/// No second writer, ever.
+fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
+    if let Some(h) = job.take() {
+        let _ = h.join();
+    }
+}
+
+/// Live mode only, by design.
+fn per_char_freeze(on: bool, mode: crate::config::TriggerMode) -> bool {
+    on && matches!(mode, crate::config::TriggerMode::Live)
+}
+
+fn freeze_rect(s: &Shown, on: bool, mode: crate::config::TriggerMode) -> PhysRect {
+    if per_char_freeze(on, mode) {
+        s.hold_char
+    } else {
+        s.hold
+    }
+}
+
+/// Some = substitute it.
+fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -> bool)
+    -> Option<String> {
+    if configured.eq_ignore_ascii_case(fallback) || available() {
+        None
+    } else {
+        Some(fallback.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2107,6 +2434,7 @@ mod tests {
             anchor,
             popup: PhysRect { x: anchor.x, y: anchor.y + anchor.h + POPUP_GAP, w: 420, h: 300 },
             hold: anchor,
+            hold_char: anchor,
             presentation: presentation_of(written),
             scroll: 0,
             content_h: 300,
@@ -2151,12 +2479,12 @@ mod tests {
         let popup = PhysRect { x: 3007, y: 300, w: 420, h: 300 };
 
         // Same word, later glyphs.
-        assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, popup));
-        assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, popup));
+        assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, matched, popup));
+        assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, matched, popup));
         // Past the match: re-resolve.
-        assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, popup));
+        assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, matched, popup));
         // The anchor alone releases.
-        assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, popup));
+        assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, anchor, popup));
     }
 
     /// A 22px は resolves over 34px.
@@ -2214,5 +2542,254 @@ mod tests {
         let past = PhysRect { x: 100 + ANCHOR_JITTER_PX + 1, y: 200, w: 26, h: 27 };
         assert!(same_content(&prev, &presentation_of("宿舎"), at));
         assert!(!same_content(&prev, &presentation_of("宿舎"), past));
+    }
+
+    fn ws(passes: u8) -> WorkerSettings {
+        WorkerSettings {
+            max_passes: passes,
+            prefer_vertical: false,
+            capture: CaptureSize::default(),
+            scan_alphanumeric: true,
+            language: "ja".to_string(),
+            present_cfg: Config::default().present_config(),
+            scan_display: ScanDisplay { captures: false, highlight: false },
+        }
+    }
+
+    /// Newest hover; every reload.
+    #[test]
+    fn drain_keeps_the_newest_hover_and_every_reload() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        let reload = TriggerKind::Reload(Box::new(ws(2)));
+        tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
+        let newer = TriggerKind::Hover(PhysPoint { x: 9, y: 9 });
+        tx.send(Trigger { kind: newer, id: RequestId(3) }).unwrap();
+        let second = TriggerKind::Reload(Box::new(ws(4)));
+        tx.send(Trigger { kind: second, id: RequestId(4) }).unwrap();
+        let older = TriggerKind::Hover(PhysPoint { x: 1, y: 1 });
+        let first = Trigger { kind: older, id: RequestId(1) };
+        let (hover, reloads) = drain(first, &rx);
+        let hover = hover.expect("a hover survives");
+        assert!(matches!(hover.kind, TriggerKind::Hover(p) if p.x == 9), "newest hover wins");
+        assert_eq!(2, reloads.len(), "neither reload may be swallowed");
+        let passes: Vec<u8> = reloads.iter().map(|r| r.max_passes).collect();
+        assert_eq!(vec![2, 4], passes, "reloads keep the order they were sent");
+    }
+
+    /// A reload alone still arrives.
+    #[test]
+    fn drain_returns_no_hover_when_only_a_reload_queued() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        drop(tx);
+        let first = Trigger { kind: TriggerKind::Reload(Box::new(ws(3))), id: RequestId(1) };
+        let (hover, reloads) = drain(first, &rx);
+        assert!(hover.is_none());
+        assert_eq!(1, reloads.len());
+        assert_eq!(3, reloads[0].max_passes);
+    }
+
+    #[test]
+    fn derive_carries_every_popup_field() {
+        let mut cfg = Config::default();
+        cfg.popup.max_width_percent = 33;
+        cfg.popup.max_height_percent = 44;
+        cfg.popup.summary_chars = 55;
+        cfg.popup.side_panel = true;
+        cfg.anki.enabled = true;
+        cfg.anki.deck = "テスト".to_string();
+        let live = derive(&cfg);
+        assert_eq!(33, live.max_width_percent);
+        assert_eq!(44, live.max_height_percent);
+        assert_eq!(55, live.summary_chars);
+        assert!(live.side_panel);
+        assert!(live.anki_enabled);
+        assert_eq!("テスト", live.anki_deck);
+    }
+
+    #[test]
+    fn derive_carries_the_capture_settings() {
+        let mut cfg = Config::default();
+        cfg.ocr.capture_width = 320;
+        cfg.ocr.capture_height = 240;
+        cfg.ocr.scan_alphanumeric = false;
+        let live = derive(&cfg);
+        assert_eq!(CaptureSize { w: 320, h: 240 }, live.capture);
+        assert!(!live.scan_alphanumeric);
+    }
+
+    /// The headline plumbing.
+    #[test]
+    fn worker_settings_carries_the_capture_settings() {
+        let mut cfg = Config::default();
+        cfg.ocr.capture_width = 640;
+        cfg.ocr.capture_height = 480;
+        cfg.ocr.scan_alphanumeric = false;
+        cfg.ocr.max_ocr_passes = 3;
+        let out = worker_settings(&derive(&cfg));
+        assert_eq!(CaptureSize { w: 640, h: 480 }, out.capture);
+        assert!(!out.scan_alphanumeric);
+        assert_eq!(3, out.max_passes);
+    }
+
+    #[test]
+    fn worker_settings_carries_the_language() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hant".to_string();
+        let live = derive(&cfg);
+        assert_eq!("zh-Hant", live.language);
+        assert_eq!("zh-Hant", worker_settings(&live).language);
+    }
+
+    /// Step 3b: the input trio.
+    #[test]
+    fn derive_carries_the_three_input_settings() {
+        let mut cfg = Config::default();
+        cfg.trigger.mode = crate::config::TriggerMode::HoldKey;
+        cfg.trigger.trigger_key = "f8".to_string();
+        cfg.anki.add_key = "f9".to_string();
+        let live = derive(&cfg);
+        assert_eq!(crate::config::TriggerMode::HoldKey, live.trigger_mode);
+        assert_eq!("f8", live.trigger_key);
+        assert_eq!("f9", live.anki_add_key);
+    }
+
+    #[test]
+    fn three_excluded_windows_leave_the_guard_disarmed() {
+        assert!(!capture_guard_needed(
+            CaptureExclusion::Excluded,
+            Some(CaptureExclusion::Excluded),
+            Some(CaptureExclusion::Excluded),
+        ));
+    }
+
+    #[test]
+    fn the_popup_alone_can_arm_the_guard() {
+        assert!(capture_guard_needed(
+            CaptureExclusion::DeliberatelyNotExcluded,
+            Some(CaptureExclusion::Excluded),
+            Some(CaptureExclusion::Excluded),
+        ));
+    }
+
+    /// Spec D5: they can diverge.
+    #[test]
+    fn an_overlay_the_os_refused_arms_the_guard_alone() {
+        assert!(capture_guard_needed(
+            CaptureExclusion::Excluded,
+            Some(CaptureExclusion::AttemptFailed),
+            Some(CaptureExclusion::Excluded),
+        ));
+    }
+
+    #[test]
+    fn a_button_the_os_refused_arms_the_guard_alone() {
+        assert!(capture_guard_needed(
+            CaptureExclusion::Excluded,
+            Some(CaptureExclusion::Excluded),
+            Some(CaptureExclusion::AttemptFailed),
+        ));
+    }
+
+    #[test]
+    fn a_window_that_was_never_created_cannot_need_the_guard() {
+        assert!(!capture_guard_needed(CaptureExclusion::Excluded, None, None));
+    }
+
+    #[test]
+    fn the_guard_tracks_a_live_exclusion_toggle_in_both_directions() {
+        let off = CaptureExclusion::from_attempt(false, false);
+        assert!(capture_guard_needed(off, Some(off), Some(off)));
+        let on = CaptureExclusion::from_attempt(true, true);
+        assert!(!capture_guard_needed(on, Some(on), Some(on)));
+    }
+
+    #[test]
+    fn derive_carries_per_character_lookup() {
+        let mut cfg = Config::default();
+        cfg.trigger.per_character_lookup = true;
+        assert!(derive(&cfg).per_character_lookup);
+        assert!(!derive(&Config::default()).per_character_lookup, "must default off");
+    }
+
+    #[test]
+    fn a_startup_language_with_no_pack_falls_back_to_the_default() {
+        assert_eq!(Some("ja".to_string()), startup_language("ko", "ja", || false));
+    }
+
+    #[test]
+    fn an_installed_startup_language_is_left_alone() {
+        assert_eq!(None, startup_language("ko", "ja", || true));
+    }
+
+    /// Else it would loop on itself.
+    #[test]
+    fn the_default_language_never_substitutes_itself() {
+        assert_eq!(None, startup_language("JA", "ja", || false));
+    }
+
+    /// No WinRT call on the default.
+    #[test]
+    fn the_default_language_never_asks_windows() {
+        let mut asked = false;
+        let got = startup_language("ja", "ja", || {
+            asked = true;
+            false
+        });
+        assert_eq!(None, got);
+        assert!(!asked);
+    }
+
+    /// The arms are same-typed.
+    #[test]
+    fn the_freeze_rect_is_the_char_hold_only_when_per_character_is_live() {
+        use crate::config::TriggerMode;
+        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        let mut s = shown_of("字", anchor);
+        s.hold = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        s.hold_char = PhysRect { x: 3010, y: 254, w: 27, h: 32 };
+        assert_eq!(s.hold, freeze_rect(&s, false, TriggerMode::Live), "default off");
+        assert_eq!(s.hold_char, freeze_rect(&s, true, TriggerMode::Live));
+        assert_eq!(s.hold, freeze_rect(&s, true, TriggerMode::HoldKey));
+    }
+
+    /// Hold-key stays unchanged.
+    #[test]
+    fn the_char_freeze_applies_only_in_live_mode() {
+        use crate::config::TriggerMode;
+        assert!(per_char_freeze(true, TriggerMode::Live));
+        assert!(!per_char_freeze(true, TriggerMode::HoldKey));
+        assert!(!per_char_freeze(true, TriggerMode::HoldShift));
+        assert!(!per_char_freeze(false, TriggerMode::Live));
+    }
+
+    /// What `Shown` really gets.
+    #[test]
+    fn the_char_hold_ignores_the_matched_span() {
+        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        // 通ってる matched 4 characters.
+        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        let HoldRects { hold, hold_char } =
+            hold_regions(anchor, Some(matched), Orientation::Horizontal);
+        let next_glyph = PhysPoint { x: 3100, y: 270 };
+        assert_ne!(hold, hold_char, "the char hold must not be the span hold");
+        assert!(hold.contains(next_glyph), "the span hold still reaches");
+        assert!(!hold_char.contains(next_glyph), "one character stops short");
+    }
+
+    /// The freeze/reach seam.
+    #[test]
+    fn a_char_freeze_still_reaches_the_popup() {
+        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        let HoldRects { hold, hold_char } =
+            hold_regions(anchor, Some(matched), Orientation::Horizontal);
+        let popup = PhysRect { x: 3007, y: hold.y + hold.h + POPUP_GAP, w: 420, h: 300 };
+        let x = anchor.x + anchor.w / 2;
+        for y in hold_char.y..(popup.y + popup.h) {
+            assert!(
+                in_sticky(PhysPoint { x, y }, hold_char, hold, popup),
+                "row {y} escaped the sticky region",
+            );
+        }
     }
 }

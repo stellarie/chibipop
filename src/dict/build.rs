@@ -2,7 +2,7 @@
 
 use crate::dict::archive::{for_each_freq_row, for_each_term, read_index};
 use crate::dict::frequency::{lookup_freq, merge_freq_row, FreqTable};
-use crate::dict::glossary::{extract_pos, flatten_glossary};
+use crate::dict::glossary::{extract_pos, flatten_glossary, render_glossary_html};
 use crate::lookup::model::Sense;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 #[cfg(test)]
 const BATCH_ROWS: usize = 2;
 #[cfg(not(test))]
@@ -188,7 +188,12 @@ fn build_into(
                 if entry_id % 5000 == 0 {
                     on_progress(&format!("progress  {entry_id} / ?"));
                 }
-                let sense = Sense { glosses, pos: extract_pos(&t.glossary), misc: Vec::new() };
+                let sense = Sense {
+                    glosses,
+                    glosses_html: render_glossary_html(&t.glossary),
+                    pos: extract_pos(&t.glossary),
+                    misc: Vec::new(),
+                };
                 json_buf.clear();
                 {
                     let mut ser = serde_json::Serializer::with_formatter(&mut json_buf, PySpaced);
@@ -621,6 +626,22 @@ mod tests {
         let (conn, _guard) = build_fixture_db("structured_content_flattens_to_one_gloss");
         let senses = senses_for(&conn, "食べる");
         assert_eq!(json!(["to eat"]), senses[0]["glosses"]);
+    }
+
+    #[test]
+    fn structured_content_also_gets_an_html_rendering() {
+        let (conn, _guard) = build_fixture_db("structured_content_also_gets_an_html_rendering");
+        let senses = senses_for(&conn, "食べる");
+        assert_eq!(json!(["<span>to eat</span>"]), senses[0]["glosses_html"]);
+    }
+
+    #[test]
+    fn a_plain_string_glossary_gets_a_matching_html_rendering() {
+        let (conn, _guard) =
+            build_fixture_db("a_plain_string_glossary_gets_a_matching_html_rendering");
+        let senses = senses_for(&conn, "ねこ");
+        assert_eq!(json!(["cat"]), senses[0]["glosses"]);
+        assert_eq!(json!(["cat"]), senses[0]["glosses_html"]);
     }
 
     #[test]

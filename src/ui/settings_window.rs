@@ -5,6 +5,7 @@
 
 use crate::library::Kind;
 use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+use crate::text::ocr::tag_matches;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,15 @@ pub enum SettingsOutcome {
 pub enum SettingsClick {
     AnkiTest,
     CheckUpdate,
+}
+
+/// Who owns the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyMode {
+    /// `run`: applies live.
+    Live,
+    /// Saves for the next start.
+    Standalone,
 }
 
 // ---- control ids ----
@@ -80,13 +90,18 @@ const ID_PREFER_VERT: i32 = 132;
 const ID_ANKI_ADD_KEY: i32 = 133;
 const ID_SIDE_PANEL: i32 = 134;
 const ID_FIELD_MAP_TOGGLE: i32 = 135;
+const ID_CAPTURE_W: i32 = 136;
+const ID_CAPTURE_H: i32 = 137;
+const ID_SCAN_ALNUM: i32 = 138;
+const ID_PER_CHAR: i32 = 139;
+const ID_OCR_LANG: i32 = 140;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
 
 /// Field-map combo choices.
-const FIELD_MAP_SOURCES: [&str; 5] =
-    ["(none)", "expression", "reading", "glossary", "frequency"];
+const FIELD_MAP_SOURCES: [&str; 6] =
+    ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html"];
 
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
@@ -333,6 +348,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if let Ok(c) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
                         let _ = EnableWindow(c, id == ID_MODE_HOLD);
                     }
+                    if let Ok(c) = GetDlgItem(Some(hwnd), ID_PER_CHAR) {
+                        let _ = EnableWindow(c, id == ID_MODE_LIVE);
+                    }
                 },
                 ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
                 ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
@@ -475,6 +493,28 @@ unsafe extern "system" fn enum_font_cb(
         }
     }
     1
+}
+
+/// Combo rows: name, tag.
+///
+/// D4: absent tag kept, marked.
+fn language_choices(installed: Vec<(String, String)>, configured: &str)
+    -> Vec<(String, String)> {
+    let mut out = installed;
+    if !configured.is_empty()
+        && !out.iter().any(|(_, tag)| tag_matches(tag, configured))
+    {
+        out.push((format!("{configured} (not installed)"), configured.to_string()));
+    }
+    out
+}
+
+/// Row holding `configured`.
+fn language_index(rows: &[(String, String)], configured: &str) -> Option<usize> {
+    if configured.is_empty() {
+        return None;
+    }
+    rows.iter().position(|(_, tag)| tag_matches(tag, configured))
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -756,6 +796,25 @@ fn field_map_toggle_label(collapsed: bool) -> &'static str {
     if collapsed { "Field mapping \u{25B6}" } else { "Field mapping \u{25BC}" }
 }
 
+/// `&&` renders one `&`.
+fn apply_caption(mode: ApplyMode, staged: bool) -> &'static str {
+    if mode == ApplyMode::Live && !staged { "Apply" } else { "Apply && Restart" }
+}
+
+/// What that button will do.
+fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
+    if mode == ApplyMode::Live && !staged {
+        "Applying saves your settings and uses them right away."
+    } else {
+        "Applying saves your settings and restarts chibipop."
+    }
+}
+
+/// Junk keeps the old value.
+fn parse_px(text: &str, fallback: i32) -> i32 {
+    text.trim().parse().unwrap_or(fallback)
+}
+
 /// `None` unless capturing.
 fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
@@ -809,6 +868,8 @@ pub struct SettingsWindow {
     summaries: Vec<i64>,
     passes: Vec<i64>,
     fonts: Vec<String>,
+    /// Language tags, combo order.
+    ocr_langs: Vec<String>,
     /// What Apply has yet to do.
     staged: RefCell<SettingsForm>,
     /// General-tab-only controls.
@@ -835,6 +896,8 @@ pub struct SettingsWindow {
     bottom_tail: i32,
     /// Which tab is showing.
     current_tab: Cell<u32>,
+    /// What Apply will do.
+    apply_mode: ApplyMode,
 }
 
 impl SettingsWindow {
@@ -843,7 +906,13 @@ impl SettingsWindow {
     /// `stale` are `display_order` entries matching no installed dictionary
     /// (spec D6a); when non-empty a warning naming them is shown, because that
     /// is what a dictionary rename looks like from in here.
-    pub fn open(form: &SettingsForm, stale: &[String]) -> Result<SettingsWindow> {
+    ///
+    /// `mode` words the Apply button.
+    pub fn open(
+        form: &SettingsForm,
+        stale: &[String],
+        mode: ApplyMode,
+    ) -> Result<SettingsWindow> {
         // SAFETY: every call below is an ordinary window-creation FFI call
         // with handles this function owns; each `?` leaves nothing to leak
         // because the window is the only resource and it is not yet created.
@@ -878,6 +947,7 @@ impl SettingsWindow {
                 summaries: Vec::new(),
                 passes: Vec::new(),
                 fonts: Vec::new(),
+                ocr_langs: Vec::new(),
                 staged: RefCell::new(form.clone()),
                 general_ctrls: Vec::new(),
                 dict_ctrls: Vec::new(),
@@ -891,6 +961,7 @@ impl SettingsWindow {
                 bottom_y0: 0,
                 bottom_tail: 0,
                 current_tab: Cell::new(0),
+                apply_mode: mode,
             };
             // `build` reports where its layout actually ended; the window is
             // then sized to that rather than to a guess. The first version of
@@ -1011,6 +1082,40 @@ impl SettingsWindow {
         unsafe {
             if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
                 let _ = SetWindowTextW(c, PCWSTR(wide(text).as_ptr()));
+            }
+        }
+    }
+
+    /// Show what was really applied.
+    pub fn set_capture_fields(&self, ocr: &crate::config::OcrConfig) {
+        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are live children of
+        // `self.hwnd`, created in `build`; each `GetDlgItem` result is
+        // checked, and `SetWindowTextW` copies the string during the call,
+        // so each temporary outlives its only use.
+        unsafe {
+            for (id, px) in [(ID_CAPTURE_W, ocr.capture_width), (ID_CAPTURE_H, ocr.capture_height)]
+            {
+                if let Ok(c) = GetDlgItem(Some(self.hwnd), id) {
+                    let _ = SetWindowTextW(c, PCWSTR(wide(&px.to_string()).as_ptr()));
+                }
+            }
+        }
+    }
+
+    /// Re-word Apply after staging.
+    fn refresh_apply(&self) {
+        let staged = self.staged.borrow().has_staged();
+        // SAFETY: `ID_APPLY` and `ID_STATUS` are live children of `self.hwnd`,
+        // created in `build`; `SetWindowTextW` copies each string during the
+        // call, so the temporaries below outlive every use.
+        unsafe {
+            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_APPLY) {
+                let caption = wide(apply_caption(self.apply_mode, staged));
+                let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
+            }
+            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
+                let hint = wide(apply_hint(self.apply_mode, staged));
+                let _ = SetWindowTextW(c, PCWSTR(hint.as_ptr()));
             }
         }
     }
@@ -1311,6 +1416,7 @@ impl SettingsWindow {
             }
             self.staged.borrow_mut().stage_remove(&name);
             update_list_buttons(self.hwnd);
+            self.refresh_apply();
         }
     }
 
@@ -1345,6 +1451,7 @@ impl SettingsWindow {
                 }
             }
             update_list_buttons(self.hwnd);
+            self.refresh_apply();
         }
     }
 
@@ -1671,8 +1778,28 @@ impl SettingsWindow {
 
             // ---- OCR / Debug ----
             y = content_y;
-            ocr.push(group("OCR / Debug", y, 4 * ROW_H + 34)?);
+            ocr.push(group("OCR / Debug", y, 12 * ROW_H + 38)?);
             y += 20;
+            ocr.push(label("OCR language", y)?);
+            let lang = child(h, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_OCR_LANG, f)?;
+            ocr.push(lang);
+            let langs =
+                language_choices(crate::text::ocr::installed_recognisers(), &form.ocr_language);
+            for (name, _) in &langs {
+                SendMessageW(lang, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(name).as_ptr() as isize)));
+            }
+            if let Some(i) = language_index(&langs, &form.ocr_language) {
+                SendMessageW(lang, CB_SETCURSEL, Some(WPARAM(i)), None);
+            }
+            self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
+            y += ROW_H;
+            ocr.push(child(h, w!("STATIC"),
+                "Installed recognizers, plus any marked (not installed).",
+                WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
+            y += ROW_H;
             self.passes = numeric_choices(
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
                 form.max_ocr_passes as i64);
@@ -1687,9 +1814,35 @@ impl SettingsWindow {
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
+            ocr.push(label("Capture width (px)", y)?);
+            ocr.push(child(h, w!("EDIT"), &form.capture_width.to_string(),
+                WS_TABSTOP | WS_BORDER,
+                FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_W, f)?);
+            y += ROW_H;
+            ocr.push(label("Capture height (px)", y)?);
+            ocr.push(child(h, w!("EDIT"), &form.capture_height.to_string(),
+                WS_TABSTOP | WS_BORDER,
+                FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_H, f)?);
+            y += ROW_H;
+            ocr.push(child(h, w!("STATIC"), "Vertical mode swaps these two values.",
+                WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
+            y += ROW_H;
             ocr.push(check("Prefer vertical text (manga, VN)",
                 ID_PREFER_VERT, form.prefer_vertical, y)?);
             y += ROW_H;
+            ocr.push(check("Scan alphanumeric text",
+                ID_SCAN_ALNUM, form.scan_alphanumeric, y)?);
+            y += ROW_H;
+            let per_char = check("Look up each character as you hover",
+                ID_PER_CHAR, form.per_character_lookup, y)?;
+            ocr.push(per_char);
+            let _ = EnableWindow(per_char, is_live);
+            y += ROW_H;
+            ocr.push(child(h, w!("STATIC"),
+                "Live mode only. Off: the popup holds while the cursor stays on \
+                 the matched word.",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
+            y += 28;
             let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
@@ -1767,13 +1920,14 @@ impl SettingsWindow {
 
             // ---- Apply / Cancel ----
             // Also the progress line.
+            let staged = form.has_staged();
             let status = child(h, w!("EDIT"),
-                "Applying saves your settings and restarts chibipop.",
+                apply_hint(self.apply_mode, staged),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
                 PAD, y, WIN_W - 2 * PAD - 16, STATUS_H, ID_STATUS, f)?;
             bottom.push((status, PAD, y));
             y += STATUS_H + 2;
-            let apply_btn = child(h, w!("BUTTON"), "Apply && Restart",
+            let apply_btn = child(h, w!("BUTTON"), apply_caption(self.apply_mode, staged),
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                   WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
             bottom.push((apply_btn, WIN_W - PAD - 144, y));
@@ -1824,6 +1978,7 @@ impl SettingsWindow {
             let text_of = |id: i32| -> String {
                 GetDlgItem(Some(h), id).map(|c| window_text(c)).unwrap_or_default()
             };
+            let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
             // Empty is not missing.
             let dict_names =
@@ -1839,6 +1994,17 @@ impl SettingsWindow {
                     template.font.clone()
                 } else {
                     self.fonts.get(i as usize).cloned().unwrap_or_else(|| template.font.clone())
+                }
+            };
+            let ocr_language = {
+                let i = combo_index(ID_OCR_LANG);
+                if i < 0 {
+                    template.ocr_language.clone()
+                } else {
+                    self.ocr_langs
+                        .get(i as usize)
+                        .cloned()
+                        .unwrap_or_else(|| template.ocr_language.clone())
                 }
             };
 
@@ -1882,6 +2048,11 @@ impl SettingsWindow {
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
                                      template.max_ocr_passes as i64) as u8,
                 prefer_vertical: checked(ID_PREFER_VERT),
+                capture_width: px(ID_CAPTURE_W, template.capture_width),
+                capture_height: px(ID_CAPTURE_H, template.capture_height),
+                scan_alphanumeric: checked(ID_SCAN_ALNUM),
+                per_character_lookup: checked(ID_PER_CHAR),
+                ocr_language,
                 show_scan_region: checked(ID_SHOW_SCAN),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),
@@ -2375,5 +2546,185 @@ mod tests {
             let stored = stored_trigger_key(vk);
             assert_eq!(Some(vk), crate::config::parse_trigger_key(&stored), "{stored}");
         }
+    }
+
+    // ---- capture size fields ----
+
+    #[test]
+    fn parse_px_reads_a_plain_number() {
+        assert_eq!(640, parse_px("640", 500));
+    }
+
+    /// Typing leaves stray spaces.
+    #[test]
+    fn parse_px_ignores_surrounding_space() {
+        assert_eq!(640, parse_px("  640 ", 500));
+    }
+
+    /// The trap: never zero.
+    #[test]
+    fn parse_px_keeps_the_old_value_for_junk() {
+        assert_eq!(500, parse_px("", 500));
+        assert_eq!(500, parse_px("abc", 500));
+        assert_eq!(500, parse_px("640px", 500));
+        assert_eq!(500, parse_px("6.4", 500));
+    }
+
+    // ---- apply caption ----
+
+    /// Only `run` applies live.
+    #[test]
+    fn a_live_window_with_nothing_staged_just_applies() {
+        assert_eq!("Apply", apply_caption(ApplyMode::Live, false));
+        assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
+    }
+
+    #[test]
+    fn a_staged_dictionary_still_promises_a_restart() {
+        assert_eq!("Apply && Restart", apply_caption(ApplyMode::Live, true));
+        assert!(apply_hint(ApplyMode::Live, true).contains("restarts chibipop"));
+    }
+
+    /// It reloads no other process.
+    #[test]
+    fn a_standalone_window_never_promises_a_live_apply() {
+        for staged in [false, true] {
+            assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone, staged));
+            assert!(apply_hint(ApplyMode::Standalone, staged).contains("restarts chibipop"));
+        }
+    }
+
+    // ---- ocr language list ----
+
+    fn installed() -> Vec<(String, String)> {
+        vec![
+            ("Japanese".to_string(), "ja".to_string()),
+            ("English (United States)".to_string(), "en-US".to_string()),
+        ]
+    }
+
+    /// Spec D4: never reselect.
+    #[test]
+    fn a_configured_language_missing_from_the_list_is_appended() {
+        let got = language_choices(installed(), "ko");
+        assert_eq!(3, got.len());
+        assert_eq!(("ko (not installed)".to_string(), "ko".to_string()), got[2]);
+    }
+
+    /// Survives a failed call.
+    #[test]
+    fn an_empty_list_still_offers_the_configured_language() {
+        assert_eq!(
+            vec![("ja (not installed)".to_string(), "ja".to_string())],
+            language_choices(Vec::new(), "ja")
+        );
+    }
+
+    /// Display name out, tag in.
+    #[test]
+    fn an_installed_language_keeps_its_display_name_and_its_tag() {
+        let got = language_choices(installed(), "ja");
+        assert_eq!(installed(), got);
+        assert_eq!("Japanese", got[0].0);
+        assert_eq!("ja", got[0].1);
+    }
+
+    #[test]
+    fn the_installed_order_is_the_listed_order() {
+        let tags: Vec<String> =
+            language_choices(installed(), "ja").into_iter().map(|(_, t)| t).collect();
+        assert_eq!(vec!["ja".to_string(), "en-US".to_string()], tags);
+    }
+
+    /// A blank combo if this drifts.
+    #[test]
+    fn a_configured_tag_matches_its_entry_whatever_its_case() {
+        let rows = language_choices(installed(), "EN-us");
+        assert_eq!(2, rows.len());
+        assert_eq!(Some(1), language_index(&rows, "EN-us"));
+    }
+
+    /// Nothing to keep, none added.
+    #[test]
+    fn an_empty_configured_language_is_not_offered_as_a_blank_row() {
+        assert!(language_choices(Vec::new(), "").is_empty());
+        assert_eq!(installed(), language_choices(installed(), ""));
+    }
+
+    /// What `read` gives back.
+    #[test]
+    fn an_untouched_combo_reads_back_the_configured_tag() {
+        for configured in ["ja", "en-US", "ko"] {
+            let rows = language_choices(installed(), configured);
+            let i = language_index(&rows, configured).expect("a row is always selected");
+            assert_eq!(configured, rows[i].1);
+        }
+    }
+
+    #[test]
+    fn nothing_is_selected_when_no_language_is_configured() {
+        assert_eq!(None, language_index(&installed(), ""));
+    }
+
+    fn installed_four() -> Vec<(String, String)> {
+        vec![
+            ("English (United States)".to_string(), "en-US".to_string()),
+            ("Japanese".to_string(), "ja".to_string()),
+            ("Chinese (Simplified)".to_string(), "zh-Hans-CN".to_string()),
+            ("Chinese (Traditional)".to_string(), "zh-Hant-TW".to_string()),
+        ]
+    }
+
+    #[test]
+    fn a_configured_prefix_is_not_appended_as_a_phantom_row() {
+        assert_eq!(installed_four(), language_choices(installed_four(), "zh-Hans"));
+    }
+
+    #[test]
+    fn a_configured_prefix_selects_the_specific_installed_row() {
+        let rows = language_choices(installed_four(), "zh-Hans");
+        assert_eq!(Some(2), language_index(&rows, "zh-Hans"));
+        assert_eq!("zh-Hans-CN", rows[2].1);
+    }
+
+    #[test]
+    fn a_more_specific_configured_tag_selects_the_bare_row() {
+        let rows = language_choices(installed_four(), "ja-JP");
+        assert_eq!(installed_four(), rows);
+        assert_eq!(Some(1), language_index(&rows, "ja-JP"));
+    }
+
+    /// FIX 1 behaviour, still live.
+    #[test]
+    fn a_genuinely_absent_language_is_still_appended_and_read_back() {
+        let rows = language_choices(installed_four(), "ko");
+        assert_eq!(5, rows.len());
+        assert_eq!(("ko (not installed)".to_string(), "ko".to_string()), rows[4]);
+        assert_eq!(Some(4), language_index(&rows, "ko"));
+    }
+
+    /// Boundary, not starts_with.
+    #[test]
+    fn a_partial_subtag_is_treated_as_absent() {
+        let rows = language_choices(installed_four(), "zh-Han");
+        assert_eq!(5, rows.len());
+        assert_eq!(Some(4), language_index(&rows, "zh-Han"));
+        assert_eq!("zh-Han", rows[4].1);
+    }
+
+    /// First match wins; arbitrary.
+    #[test]
+    fn an_ambiguous_prefix_picks_the_first_installed_match() {
+        let rows = language_choices(installed_four(), "zh");
+        assert_eq!(installed_four(), rows);
+        assert_eq!(Some(2), language_index(&rows, "zh"));
+        assert_eq!("zh-Hans-CN", rows[2].1);
+    }
+
+    #[test]
+    fn a_configured_prefix_matches_whatever_its_case() {
+        let rows = language_choices(installed_four(), "ZH-hans");
+        assert_eq!(installed_four(), rows);
+        assert_eq!(Some(2), language_index(&rows, "ZH-hans"));
     }
 }

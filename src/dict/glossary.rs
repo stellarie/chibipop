@@ -119,6 +119,167 @@ fn collect_pos(node: &Value, out: &mut Vec<String>) {
     }
 }
 
+// ---- HTML rendering ----
+//
+// A second view of the same tree `render` walks, for callers that want
+// formatting instead of flattened text (currently: the Anki `glossary_html`
+// field). Same editorial drops as `render` - attribution, footnotes, example
+// sentences, part-of-speech spans (`extract_pos` already surfaces those
+// separately) - but a kept node becomes real markup instead of joined text,
+// so bold, ruby/furigana, links and lists survive.
+//
+// Structured content is untrusted input from a dictionary file, not from
+// chibipop itself, so tags and attributes are allow-listed rather than
+// passed through: an unrecognised tag keeps its text and drops the wrapper,
+// the same way an unrecognised `type` already does in `flatten_glossary`.
+
+const ALLOWED_HTML_TAGS: [&str; 28] = [
+    "a", "b", "strong", "i", "em", "u", "s", "small", "big", "sub", "sup", "code", "pre", "span",
+    "div", "ruby", "rt", "rp", "br", "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td",
+];
+
+/// Yomitan `style` keys this renderer maps to CSS. Deliberately small: the
+/// properties dictionaries actually reach for (superscript reference marks,
+/// small print, coloured tags), not a general style-object translator.
+const STYLE_KEYS: [(&str, &str); 6] = [
+    ("fontWeight", "font-weight"),
+    ("fontStyle", "font-style"),
+    ("fontSize", "font-size"),
+    ("verticalAlign", "vertical-align"),
+    ("textDecorationLine", "text-decoration"),
+    ("listStyleType", "list-style-type"),
+];
+
+/// HTML glosses, one fragment per top-level item - parallel to
+/// `flatten_glossary`.
+pub fn render_glossary_html(glossary: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(items) = glossary.as_array() else { return out };
+    for item in items {
+        let html = match item {
+            Value::String(s) => escape_text(s),
+            Value::Object(_) => {
+                let kind = item.get("type").and_then(Value::as_str);
+                match kind {
+                    Some("text") => {
+                        escape_text(item.get("text").and_then(Value::as_str).unwrap_or(""))
+                    }
+                    Some("structured-content") => content_of_html(item),
+                    Some("image") => String::new(),
+                    _ => render_html(item),
+                }
+            }
+            _ => String::new(),
+        };
+        let trimmed = html.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+/// One node to HTML. Mirrors `render`'s tree walk and drop rules; only what
+/// a kept node turns into differs.
+fn render_html(node: &Value) -> String {
+    match node {
+        Value::Null => String::new(),
+        Value::String(s) => escape_text(s),
+        Value::Array(items) => items.iter().map(render_html).collect(),
+        Value::Object(_) => {
+            let marker = content_marker(node).and_then(Value::as_str);
+            if marker.is_some_and(|m| DROP_CONTENT.contains(&m) || m == POS_CONTENT) {
+                return String::new();
+            }
+            let tag = node.get("tag").and_then(Value::as_str);
+            if tag == Some("img") {
+                return String::new();
+            }
+            match tag.filter(|t| ALLOWED_HTML_TAGS.contains(t)) {
+                Some("br") => "<br>".to_string(),
+                Some(tag) => {
+                    let inner = content_of_html(node);
+                    if inner.trim().is_empty() {
+                        // Nothing left after drops (e.g. an image-only
+                        // wrapper): no point in an empty tag shell.
+                        return inner;
+                    }
+                    let attrs = html_attrs(tag, node);
+                    format!("<{tag}{attrs}>{inner}</{tag}>")
+                }
+                // Not a tag we emit: keep the text, drop the wrapper.
+                None => content_of_html(node),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// A node's content field, rendered as HTML.
+fn content_of_html(node: &Value) -> String {
+    node.get("content").map_or_else(String::new, render_html)
+}
+
+/// `href` on `<a>`, `colSpan`/`rowSpan` on cells, and a small `style` subset
+/// on anything - a leading-space-prefixed attribute string, or empty.
+fn html_attrs(tag: &str, node: &Value) -> String {
+    let mut attrs = String::new();
+    if tag == "a" {
+        if let Some(href) = node.get("href").and_then(Value::as_str) {
+            attrs.push_str(&format!(" href=\"{}\"", escape_attr(href)));
+        }
+    }
+    if tag == "td" || tag == "th" {
+        for (key, html_attr) in [("colSpan", "colspan"), ("rowSpan", "rowspan")] {
+            if let Some(n) = node.get(key).and_then(Value::as_u64) {
+                attrs.push_str(&format!(" {html_attr}=\"{n}\""));
+            }
+        }
+    }
+    if let Some(style) = node.get("style").and_then(Value::as_object) {
+        let decls: Vec<String> = STYLE_KEYS
+            .iter()
+            .filter_map(|(key, css)| style.get(*key).map(|v| format!("{css}:{}", style_value(v))))
+            .collect();
+        if !decls.is_empty() {
+            attrs.push_str(&format!(" style=\"{}\"", escape_attr(&decls.join(";"))));
+        }
+    }
+    attrs
+}
+
+/// A style value as CSS. Numbers are Yomitan's em-multiplier convention;
+/// `textDecorationLine` can be a list, so arrays pass through space-joined.
+fn style_value(v: &Value) -> String {
+    match v {
+        Value::Number(n) => format!("{n}em"),
+        Value::String(s) => s.clone(),
+        Value::Array(items) => {
+            items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")
+        }
+        _ => String::new(),
+    }
+}
+
+/// Escapes text content. Not attribute-safe on its own - see `escape_attr`.
+fn escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `escape_text` plus quotes, for use inside a `"..."` attribute value.
+fn escape_attr(s: &str) -> String {
+    escape_text(s).replace('"', "&quot;")
+}
+
 /// Cleans one rendered string.
 fn tidy(text: &str) -> String {
     let parts: Vec<&str> = text
@@ -420,5 +581,172 @@ mod tests {
             ]}
         ]}]);
         assert_eq!(vec!["noun".to_string()], extract_pos(&g));
+    }
+
+    // ---- render_glossary_html ----
+
+    #[test]
+    fn a_plain_string_gloss_is_escaped_but_unwrapped() {
+        assert_eq!(vec!["to eat".to_string()], render_glossary_html(&json!(["to eat"])));
+    }
+
+    #[test]
+    fn a_typed_text_node_is_escaped() {
+        let g = json!([{"type": "text", "text": "5 < 10 & true"}]);
+        assert_eq!(vec!["5 &lt; 10 &amp; true".to_string()], render_glossary_html(&g));
+    }
+
+    #[test]
+    fn known_inline_tags_are_preserved() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "b", "content": "bold"},
+            {"tag": "span", "content": " and "},
+            {"tag": "i", "content": "italic"}
+        ]}]);
+        assert_eq!(
+            vec!["<b>bold</b><span> and </span><i>italic</i>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn ruby_and_rt_are_kept_unlike_the_plain_text_renderer() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "ruby", "content": [
+                {"tag": "span", "content": "猫"},
+                {"tag": "rt", "content": "ねこ"}
+            ]}
+        ]}]);
+        assert_eq!(
+            vec!["<ruby><span>猫</span><rt>ねこ</rt></ruby>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn a_link_keeps_its_href() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "a", "href": "?query=見出し語", "content": "見出し語"}
+        ]}]);
+        assert_eq!(
+            vec!["<a href=\"?query=見出し語\">見出し語</a>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn an_href_value_is_attribute_escaped() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "a", "href": "\"><b>x</b>", "content": "z"}
+        ]}]);
+        assert_eq!(
+            vec!["<a href=\"&quot;&gt;&lt;b&gt;x&lt;/b&gt;\">z</a>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_tag_keeps_its_text_and_drops_the_wrapper() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "script", "content": "alert(1)"}
+        ]}]);
+        assert_eq!(vec!["alert(1)".to_string()], render_glossary_html(&g));
+    }
+
+    #[test]
+    fn img_is_dropped_in_html_mode_too() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "img", "path": "gaiji/x.svg"},
+            {"tag": "span", "content": "meaning"}
+        ]}]);
+        assert_eq!(vec!["<span>meaning</span>".to_string()], render_glossary_html(&g));
+    }
+
+    #[test]
+    fn br_becomes_a_void_element() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "span", "content": "a"},
+            {"tag": "br"},
+            {"tag": "span", "content": "b"}
+        ]}]);
+        assert_eq!(
+            vec!["<span>a</span><br><span>b</span>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn lists_render_as_real_markup_not_a_separator_hack() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "ul", "content": [
+                {"tag": "li", "content": "first"},
+                {"tag": "li", "content": "second"}
+            ]}}]);
+        assert_eq!(
+            vec!["<ul><li>first</li><li>second</li></ul>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn attribution_and_example_sentences_are_dropped_in_html_mode_too() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "span", "content": "to eat"},
+            {"tag": "div", "data": {"content": "attribution"}, "content": [
+                {"tag": "a", "content": "JMdict"}
+            ]},
+            {"tag": "div", "data": {"content": "example-sentence"}, "content": [
+                {"tag": "span", "content": "a sentence"}
+            ]}
+        ]}]);
+        assert_eq!(vec!["<span>to eat</span>".to_string()], render_glossary_html(&g));
+    }
+
+    #[test]
+    fn part_of_speech_spans_do_not_leak_into_html_glosses_either() {
+        let g = pos_doc(&["noun", "suru"]);
+        assert_eq!(
+            vec!["<div><ul><li>chatting</li><li>idle talk</li></ul></div>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn an_inline_style_object_becomes_a_css_style_attribute() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "span", "style": {"fontWeight": "bold", "fontSize": 0.8},
+             "content": "note"}
+        ]}]);
+        assert_eq!(
+            vec!["<span style=\"font-weight:bold;font-size:0.8em\">note</span>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn a_table_cell_keeps_its_span_attributes() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "table", "content": {
+                "tag": "tr", "content": {
+                    "tag": "td", "colSpan": 2, "content": "wide"
+                }
+            }
+        }}]);
+        assert_eq!(
+            vec!["<table><tr><td colspan=\"2\">wide</td></tr></table>".to_string()],
+            render_glossary_html(&g)
+        );
+    }
+
+    #[test]
+    fn an_image_only_sense_yields_nothing_in_html_mode() {
+        assert!(render_glossary_html(&json!([{"type": "image", "path": "x.png"}])).is_empty());
+    }
+
+    #[test]
+    fn an_all_whitespace_html_result_is_dropped() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": ["  ", {"tag": "img"}, "  "]}}]);
+        assert!(render_glossary_html(&g).is_empty());
     }
 }

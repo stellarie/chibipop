@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Re-exported for config.rs.
-pub use crate::config::{MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+pub use crate::config::{
+    CAPTURE_H_RANGE, CAPTURE_W_RANGE, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
+    SUMMARY_RANGE,
+};
 
 /// What the window edits.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +30,11 @@ pub struct SettingsForm {
     pub dict_names: Vec<String>,
     pub max_ocr_passes: u8,
     pub prefer_vertical: bool,
+    pub capture_width: i32,
+    pub capture_height: i32,
+    pub scan_alphanumeric: bool,
+    pub per_character_lookup: bool,
+    pub ocr_language: String,
     pub show_scan_region: bool,
     pub freq_names: Vec<String>,
     pub staged_adds: Vec<StagedAdd>,
@@ -239,6 +247,11 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         dict_names: ordered.iter().map(|d| d.name.clone()).collect(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
+        capture_width: cfg.ocr.capture_width,
+        capture_height: cfg.ocr.capture_height,
+        scan_alphanumeric: cfg.ocr.scan_alphanumeric,
+        per_character_lookup: cfg.trigger.per_character_lookup,
+        ocr_language: cfg.ocr.language.clone(),
         show_scan_region: cfg.debug.show_scan_region,
         freq_names: Vec::new(),
         staged_adds: Vec::new(),
@@ -272,6 +285,11 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup.exclude_from_capture = form.exclude_from_capture;
     out.ocr.max_ocr_passes = form.max_ocr_passes.clamp(PASSES_RANGE.0, PASSES_RANGE.1);
     out.ocr.prefer_vertical = form.prefer_vertical;
+    out.ocr.capture_width = form.capture_width.clamp(CAPTURE_W_RANGE.0, CAPTURE_W_RANGE.1);
+    out.ocr.capture_height = form.capture_height.clamp(CAPTURE_H_RANGE.0, CAPTURE_H_RANGE.1);
+    out.ocr.scan_alphanumeric = form.scan_alphanumeric;
+    out.trigger.per_character_lookup = form.per_character_lookup;
+    out.ocr.language = form.ocr_language.clone();
     out.debug.show_scan_region = form.show_scan_region;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
@@ -288,6 +306,32 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
         .map(|name| order_key(name, &cfg.dictionaries.display_order))
         .collect();
     out
+}
+
+/// What `apply_to` had to move.
+pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
+    let mut parts = Vec::new();
+    if form.capture_width != applied.ocr.capture_width {
+        parts.push(axis_notice("width", form.capture_width, applied.ocr.capture_width));
+    }
+    if form.capture_height != applied.ocr.capture_height {
+        parts.push(axis_notice("height", form.capture_height, applied.ocr.capture_height));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+/// Spec §7's exact sentence.
+fn axis_notice(axis: &str, asked: i32, got: i32) -> String {
+    let (verb, bound) = if got > asked {
+        ("raised", "minimum")
+    } else {
+        ("lowered", "maximum")
+    };
+    format!("Capture {axis} {verb} to the {got}px {bound}.")
 }
 
 /// Keeps a matching entry.
@@ -449,6 +493,9 @@ mod tests {
         cfg.popup.exclude_from_capture = true;
         cfg.ocr.max_ocr_passes = 3;
         cfg.ocr.prefer_vertical = true;
+        cfg.ocr.capture_width = 640;
+        cfg.ocr.capture_height = 180;
+        cfg.ocr.scan_alphanumeric = false;
         cfg.debug.show_scan_region = true;
         cfg.anki.enabled = true;
         cfg.anki.url = "http://localhost:9999".into();
@@ -501,6 +548,106 @@ mod tests {
         assert_eq!(MAX_HEIGHT_RANGE.1, out.popup.max_height_percent);
         assert_eq!(SUMMARY_RANGE.0, out.popup.summary_chars);
         assert_eq!(PASSES_RANGE.1, out.ocr.max_ocr_passes);
+    }
+
+    #[test]
+    fn apply_to_clamps_the_capture_size() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 99_999;
+        form.capture_height = 1;
+        let out = apply_to(&form, &cfg);
+        assert_eq!(CAPTURE_W_RANGE.1, out.ocr.capture_width);
+        assert_eq!(CAPTURE_H_RANGE.0, out.ocr.capture_height);
+    }
+
+    #[test]
+    fn a_clamped_height_is_named_in_the_notice() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_height = 1;
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            Some("Capture height raised to the 80px minimum.".to_string()),
+            clamp_notice(&form, &out)
+        );
+    }
+
+    #[test]
+    fn a_clamped_width_is_named_with_its_ceiling() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 99_999;
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            Some("Capture width lowered to the 1600px maximum.".to_string()),
+            clamp_notice(&form, &out)
+        );
+    }
+
+    #[test]
+    fn both_clamped_axes_are_both_reported() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 1;
+        form.capture_height = 9_999;
+        let notice = clamp_notice(&form, &apply_to(&form, &cfg)).expect("both were clamped");
+        assert!(notice.contains("Capture width raised to the 100px minimum."), "{notice}");
+        assert!(notice.contains("Capture height lowered to the 600px maximum."), "{notice}");
+    }
+
+    #[test]
+    fn in_range_capture_values_produce_no_notice() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.capture_width = 500;
+        form.capture_height = 220;
+        assert_eq!(None, clamp_notice(&form, &apply_to(&form, &cfg)));
+    }
+
+    #[test]
+    fn apply_to_carries_scan_alphanumeric() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.scan_alphanumeric = false;
+        assert!(!apply_to(&form, &cfg).ocr.scan_alphanumeric);
+    }
+
+    #[test]
+    fn apply_to_carries_per_character_lookup() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.per_character_lookup = true;
+        assert!(apply_to(&form, &cfg).trigger.per_character_lookup);
+    }
+
+    #[test]
+    fn apply_to_carries_the_ocr_language() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_language = "zh-Hans".to_string();
+        assert_eq!("zh-Hans", apply_to(&form, &cfg).ocr.language);
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_per_character_lookup() {
+        let mut cfg = Config::default();
+        cfg.trigger.per_character_lookup = true;
+        assert!(from_config(&cfg, &dicts()).per_character_lookup);
+        assert!(
+            !from_config(&Config::default(), &dicts()).per_character_lookup,
+            "must default off"
+        );
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_the_ocr_language() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans".to_string();
+        assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
+        assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
     }
 
     fn staged_form() -> SettingsForm {

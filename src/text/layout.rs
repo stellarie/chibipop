@@ -15,11 +15,14 @@ pub struct OcrLine {
 }
 
 /// The word under `cursor`.
-pub fn hit_scan(lines: &[OcrLine], cursor: PhysPoint) -> Option<(usize, usize)> {
+pub fn hit_scan(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, f64)> = None;
 
     for (li, line) in lines.iter().enumerate() {
         for (wi, word) in line.words.iter().enumerate() {
+            if !scan_alnum && !has_scannable_script(&word.text) {
+                continue;
+            }
             if word.rect.contains(cursor) {
                 return Some((li, wi));
             }
@@ -100,16 +103,16 @@ pub const TILE_LEN: i32 = 500;
 /// Room for ascenders, drift.
 pub const BAND_FACTOR: f32 = 3.0;
 
-/// Floored at `REGION_H`.
-pub fn band_of(word: PhysRect, orientation: Orientation) -> PhysRect {
+/// Floored at the short axis.
+pub fn band_of(word: PhysRect, orientation: Orientation, short_floor: i32) -> PhysRect {
     let c = word.center();
     match orientation {
         Orientation::Horizontal => {
-            let h = (((word.h as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
+            let h = (((word.h as f32) * BAND_FACTOR).round() as i32).max(short_floor);
             PhysRect { x: word.x, y: c.y - h / 2, w: word.w, h }
         }
         Orientation::Vertical => {
-            let w = (((word.w as f32) * BAND_FACTOR).round() as i32).max(REGION_H);
+            let w = (((word.w as f32) * BAND_FACTOR).round() as i32).max(short_floor);
             PhysRect { x: c.x - w / 2, y: word.y, w, h: word.h }
         }
     }
@@ -285,11 +288,11 @@ pub fn union_chars(geom: &[TextGeom], from: usize, len: usize, pad: i32) -> Opti
     acc.map(|r| PhysRect { x: r.x - pad, y: r.y - pad, w: r.w + 2 * pad, h: r.h + 2 * pad })
 }
 
-pub fn region_around(cursor: PhysPoint, prefer_vertical: bool) -> PhysRect {
+pub fn region_around(cursor: PhysPoint, prefer_vertical: bool, size: CaptureSize) -> PhysRect {
     let (w, h) = if prefer_vertical {
-        (REGION_H, REGION_W)
+        (size.h, size.w)
     } else {
-        (REGION_W, REGION_H)
+        (size.w, size.h)
     };
     PhysRect {
         x: cursor.x - w / 2,
@@ -422,8 +425,9 @@ pub fn head_and_tail(
     lines: &[OcrLine],
     cursor: PhysPoint,
     region: PhysRect,
+    scan_alnum: bool,
 ) -> Option<(String, i32, Orientation)> {
-    let (li, wi) = hit_scan(lines, cursor)?;
+    let (li, wi) = hit_scan(lines, cursor, scan_alnum)?;
     let line = &lines[li];
     let orientation = orientation_of(line);
 
@@ -446,8 +450,8 @@ pub fn head_and_tail(
 }
 
 /// Resolve a hover.
-pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
-    let (li, wi) = hit_scan(lines, cursor)?;
+pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option<Resolved> {
+    let (li, wi) = hit_scan(lines, cursor, scan_alnum)?;
     let line = &lines[li];
     let orientation = orientation_of(line);
 
@@ -506,6 +510,40 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint) -> Option<Resolved> {
     })
 }
 
+/// The capture box, in pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CaptureSize {
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Default for CaptureSize {
+    fn default() -> Self {
+        CaptureSize { w: REGION_W, h: REGION_H }
+    }
+}
+
+impl CaptureSize {
+    /// The perpendicular extent.
+    pub fn short(self) -> i32 {
+        self.w.min(self.h)
+    }
+}
+
+/// Any kana or CJK ideograph?
+pub fn has_scannable_script(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c,
+            '\u{3040}'..='\u{309F}'   // hiragana
+            | '\u{30A0}'..='\u{30FF}' // katakana
+            | '\u{FF66}'..='\u{FF9D}' // halfwidth katakana
+            | '\u{4E00}'..='\u{9FFF}' // CJK
+            | '\u{3400}'..='\u{4DBF}' // CJK ext A
+            | '\u{3005}'              // 々
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,25 +566,25 @@ mod tests {
 
     #[test]
     fn direct_containment_wins() {
-        assert_eq!(Some((0, 1)), hit_scan(&horizontal_line(), p(135, 105)));
+        assert_eq!(Some((0, 1)), hit_scan(&horizontal_line(), p(135, 105), true));
     }
 
     #[test]
     fn near_miss_within_half_a_character_height_is_accepted() {
         // Half of 20 is 10.
-        assert_eq!(Some((0, 0)), hit_scan(&horizontal_line(), p(105, 95)));
+        assert_eq!(Some((0, 0)), hit_scan(&horizontal_line(), p(105, 95), true));
     }
 
     #[test]
     fn beyond_tolerance_returns_none() {
         // Far beyond half a height.
-        assert_eq!(None, hit_scan(&horizontal_line(), p(105, 60)));
+        assert_eq!(None, hit_scan(&horizontal_line(), p(105, 60), true));
     }
 
     #[test]
     fn empty_input_returns_none() {
-        assert_eq!(None, hit_scan(&[], p(105, 105)));
-        assert_eq!(None, hit_scan(&[OcrLine { words: vec![] }], p(105, 105)));
+        assert_eq!(None, hit_scan(&[], p(105, 105), true));
+        assert_eq!(None, hit_scan(&[OcrLine { words: vec![] }], p(105, 105), true));
     }
 
     #[test]
@@ -562,7 +600,7 @@ mod tests {
         assert_eq!(6.0, lines[0].words[1].rect.edge_distance_to(p(125, 105)));
         // The lower index must win.
         for _ in 0..20 {
-            assert_eq!(Some((0, 0)), hit_scan(&lines, p(125, 105)));
+            assert_eq!(Some((0, 0)), hit_scan(&lines, p(125, 105), true));
         }
     }
 
@@ -572,7 +610,7 @@ mod tests {
             OcrLine { words: vec![w("上", 100, 100, 20, 20)] },
             OcrLine { words: vec![w("下", 100, 200, 20, 20)] },
         ];
-        assert_eq!(Some((1, 0)), hit_scan(&lines, p(105, 205)));
+        assert_eq!(Some((1, 0)), hit_scan(&lines, p(105, 205), true));
     }
 
     fn vertical_line() -> Vec<OcrLine> {
@@ -615,14 +653,14 @@ mod tests {
                 w("日", 130, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(105, 105)).unwrap();
+        let got = resolve(&[line], p(105, 105), true).unwrap();
         assert_eq!("昨日は", got.span.text);
         assert_eq!(0, got.span.cursor_byte_offset);
     }
 
     #[test]
     fn assembly_orders_vertically_top_to_bottom() {
-        let got = resolve(&vertical_line(), p(105, 165)).unwrap();
+        let got = resolve(&vertical_line(), p(105, 165), true).unwrap();
         assert_eq!("昨日は", got.span.text);
         assert_eq!(Orientation::Vertical, got.orientation);
         // 昨 and 日 are 3 bytes each.
@@ -631,20 +669,20 @@ mod tests {
 
     #[test]
     fn cursor_byte_offset_lands_on_a_char_boundary() {
-        let got = resolve(&horizontal_line(), p(165, 105)).unwrap();
+        let got = resolve(&horizontal_line(), p(165, 105), true).unwrap();
         // Must not panic mid-char.
         assert!(got.span.text[got.span.cursor_byte_offset..].starts_with('は'));
     }
 
     #[test]
     fn anchor_is_the_hit_characters_own_rect() {
-        let got = resolve(&horizontal_line(), p(135, 105)).unwrap();
+        let got = resolve(&horizontal_line(), p(135, 105), true).unwrap();
         assert_eq!(PhysRect { x: 130, y: 100, w: 20, h: 20 }, got.span.anchor);
     }
 
     #[test]
     fn resolve_returns_none_when_nothing_is_near() {
-        assert_eq!(None, resolve(&horizontal_line(), p(500, 500)).map(|r| r.span.text));
+        assert_eq!(None, resolve(&horizontal_line(), p(500, 500), true).map(|r| r.span.text));
     }
 
     #[test]
@@ -685,7 +723,7 @@ mod tests {
         let line = OcrLine {
             words: vec![OcrWord { text: "食".to_string(), rect: got }],
         };
-        assert_eq!(Some((0, 0)), hit_scan(&[line], p(-1895, -85)));
+        assert_eq!(Some((0, 0)), hit_scan(&[line], p(-1895, -85), true));
     }
 
     #[test]
@@ -710,7 +748,7 @@ mod tests {
                 w("箱", 190, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(195, 105)).unwrap();
+        let got = resolve(&[line], p(195, 105), true).unwrap();
         assert_eq!("ツール箱", got.span.text);
         assert!(got.span.text[got.span.cursor_byte_offset..].starts_with('箱'));
         // 3 chars x 3 bytes = 9.
@@ -728,7 +766,7 @@ mod tests {
                 w("々", 190, 100, 20, 20), // trailing repeat, see doc comment
             ],
         };
-        let got = resolve(&[line], p(170, 110)).unwrap();
+        let got = resolve(&[line], p(170, 110), true).unwrap();
         assert_eq!("々人々々", got.span.text);
         // 2 chars x 3 bytes = 6.
         assert_eq!(6, got.span.cursor_byte_offset);
@@ -738,7 +776,7 @@ mod tests {
     /// Centring is the contract.
     #[test]
     fn the_region_is_centred_on_the_cursor() {
-        let r = region_around(p(1000, 500), false);
+        let r = region_around(p(1000, 500), false, CaptureSize::default());
         assert_eq!(REGION_W, r.w);
         assert_eq!(REGION_H, r.h);
         assert_eq!(1000 - REGION_W / 2, r.x);
@@ -747,33 +785,50 @@ mod tests {
 
     #[test]
     fn region_around_horizontal_is_wider_than_tall() {
-        let r = region_around(p(500, 500), false);
+        let r = region_around(p(500, 500), false, CaptureSize::default());
         assert!(r.w > r.h);
     }
 
     #[test]
     fn region_around_vertical_is_taller_than_wide() {
-        let r = region_around(p(500, 500), true);
+        let r = region_around(p(500, 500), true, CaptureSize::default());
         assert!(r.h > r.w);
+    }
+
+    #[test]
+    fn region_around_uses_the_configured_size() {
+        let size = CaptureSize { w: 800, h: 120 };
+        let r = region_around(p(1000, 500), false, size);
+        assert_eq!(800, r.w);
+        assert_eq!(120, r.h);
+        assert_eq!(1000 - 400, r.x);
+        assert_eq!(500 - 60, r.y);
+    }
+
+    #[test]
+    fn prefer_vertical_transposes_the_configured_size() {
+        let size = CaptureSize { w: 800, h: 120 };
+        let r = region_around(p(1000, 500), true, size);
+        assert_eq!(120, r.w, "vertical swaps the two numbers");
+        assert_eq!(800, r.h);
     }
 
     /// Must out-reach hit_scan.
     #[test]
-    fn the_region_is_taller_than_a_resolvable_hover_can_be_off_by() {
+    fn the_capture_floor_covers_hit_scan_slack() {
         let typical_word_h = 40;
-        let worst_offset = typical_word_h / 2;
-        let needed = worst_offset + typical_word_h / 2;
+        let needed = typical_word_h / 2 + typical_word_h / 2;
         assert!(
-            REGION_H / 2 >= needed,
-            "REGION_H/2 = {} must cover {needed}px of hit-scan slack plus half a glyph",
-            REGION_H / 2
+            crate::config::CAPTURE_H_RANGE.0 / 2 >= needed,
+            "CAPTURE_H_RANGE.0/2 = {} must cover {needed}px",
+            crate::config::CAPTURE_H_RANGE.0 / 2
         );
     }
 
     #[test]
     fn band_expands_perpendicular_and_keeps_the_word_centred() {
         let word = PhysRect { x: 1499, y: 870, w: 35, h: 34 };
-        let b = band_of(word, Orientation::Horizontal);
+        let b = band_of(word, Orientation::Horizontal, REGION_H);
         assert_eq!(102, b.h, "max(3.0x the word height, REGION_H)");
         assert_eq!(word.center().y, b.center().y, "same centre line");
         assert_eq!(word.x, b.x, "parallel axis untouched");
@@ -782,7 +837,7 @@ mod tests {
     #[test]
     fn band_swaps_axes_for_vertical_text() {
         let word = PhysRect { x: 1438, y: 344, w: 64, h: 70 };
-        let b = band_of(word, Orientation::Vertical);
+        let b = band_of(word, Orientation::Vertical, REGION_H);
         assert_eq!(192, b.w, "max(3.0x the word width, REGION_H)");
         assert_eq!(word.center().x, b.center().x);
         assert_eq!(word.y, b.y, "parallel axis untouched");
@@ -792,7 +847,7 @@ mod tests {
     #[test]
     fn band_floors_small_text_at_region_h() {
         let word = PhysRect { x: 1499, y: 870, w: 20, h: 22 };
-        let b = band_of(word, Orientation::Horizontal);
+        let b = band_of(word, Orientation::Horizontal, REGION_H);
         assert_eq!(REGION_H, b.h, "3.0x22=66 must be floored to REGION_H");
         assert_eq!(word.center().y, b.center().y, "same centre line");
     }
@@ -800,9 +855,16 @@ mod tests {
     #[test]
     fn band_factor_still_applies_above_the_floor() {
         let word = PhysRect { x: 1499, y: 870, w: 20, h: 60 };
-        let b = band_of(word, Orientation::Horizontal);
+        let b = band_of(word, Orientation::Horizontal, REGION_H);
         assert_eq!(180, b.h, "3.0x60=180 must not be clamped down to REGION_H");
         assert_eq!(word.center().y, b.center().y, "same centre line");
+    }
+
+    #[test]
+    fn band_of_floors_on_the_configured_short_axis() {
+        let word = PhysRect { x: 1499, y: 870, w: 35, h: 34 };
+        let b = band_of(word, Orientation::Horizontal, 200);
+        assert_eq!(200, b.h, "floored by the configured short axis");
     }
 
     #[test]
@@ -1249,7 +1311,7 @@ mod tests {
             words: vec![w("可", 100, 100, 30, 40), w("哀", 130, 100, 30, 40),
                         w("想", 160, 100, 30, 40)],
         };
-        let r = resolve(&[line], p(145, 120)).unwrap();
+        let r = resolve(&[line], p(145, 120), true).unwrap();
         assert_eq!(3, r.span.geom.len());
         assert_eq!(r.span.text.chars().count(),
                    r.span.geom.iter().map(|g| g.char_count).sum::<usize>());
@@ -1263,7 +1325,7 @@ mod tests {
                         w("可", 160, 100, 30, 40), w("哀", 190, 100, 30, 40),
                         w("想", 220, 100, 30, 40)],
         };
-        let r = resolve(&[line], p(175, 120)).unwrap();
+        let r = resolve(&[line], p(175, 120), true).unwrap();
         assert_ne!(0, r.span.cursor_byte_offset, "the fixture must exercise a non-zero offset");
 
         let from = r.span.text[..r.span.cursor_byte_offset].chars().count();
@@ -1411,7 +1473,7 @@ mod tests {
                 w("物", 200, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(155, 105)).unwrap();
+        let got = resolve(&[line], p(155, 105), true).unwrap();
         assert_eq!("食べ物", got.span.text);
         assert_eq!(1, got.span.geom.len());
         assert_eq!(3, got.span.geom[0].char_count);
@@ -1427,7 +1489,7 @@ mod tests {
                 w("物", 200, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(205, 105)).unwrap();
+        let got = resolve(&[line], p(205, 105), true).unwrap();
         assert_eq!(6, got.span.cursor_byte_offset);
         assert!(got.span.text[6..].starts_with('物'));
     }
@@ -1442,7 +1504,7 @@ mod tests {
                 w("物", 100, 200, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(105, 155)).unwrap();
+        let got = resolve(&[line], p(105, 155), true).unwrap();
         assert_eq!(Orientation::Vertical, got.orientation);
         assert_eq!(1, got.span.geom.len());
     }
@@ -1457,7 +1519,7 @@ mod tests {
                 w("想", 160, 100, 30, 40),
             ],
         };
-        let got = resolve(&[line], p(145, 120)).unwrap();
+        let got = resolve(&[line], p(145, 120), true).unwrap();
         assert_eq!(3, got.span.geom.len());
     }
 
@@ -1571,21 +1633,21 @@ mod tests {
 
     #[test]
     fn resolve_appends_the_wrapped_next_line() {
-        let got = resolve(&wrapped_lines(), p(190, 110)).unwrap();
+        let got = resolve(&wrapped_lines(), p(190, 110), true).unwrap();
         assert_eq!("新しい冒険が始まる", got.span.text);
     }
 
     /// 3rd char; two before it.
     #[test]
     fn resolve_wrap_keeps_the_hit_words_own_cursor_offset() {
-        let got = resolve(&wrapped_lines(), p(190, 110)).unwrap();
+        let got = resolve(&wrapped_lines(), p(190, 110), true).unwrap();
         assert_eq!(6, got.span.cursor_byte_offset);
         assert!(got.span.text[6..].starts_with('い'));
     }
 
     #[test]
     fn resolve_geom_spans_both_lines_of_a_wrap() {
-        let got = resolve(&wrapped_lines(), p(190, 110)).unwrap();
+        let got = resolve(&wrapped_lines(), p(190, 110), true).unwrap();
         assert_eq!(9, got.span.geom.len(), "one entry per touching char");
         let chars: usize = got.span.geom.iter().map(|g| g.char_count).sum();
         assert_eq!(got.span.text.chars().count(), chars);
@@ -1597,13 +1659,13 @@ mod tests {
             OcrLine { words: vec![w("上", 100, 100, 40, 40)] },
             OcrLine { words: vec![w("下", 100, 400, 40, 40)] },
         ];
-        let got = resolve(&lines, p(110, 110)).unwrap();
+        let got = resolve(&lines, p(110, 110), true).unwrap();
         assert_eq!("上", got.span.text);
     }
 
     #[test]
     fn resolve_only_looks_forward_not_backward_for_a_wrap() {
-        let got = resolve(&wrapped_lines(), p(110, 166)).unwrap();
+        let got = resolve(&wrapped_lines(), p(110, 166), true).unwrap();
         assert_eq!("始まる", got.span.text);
     }
 
@@ -1611,7 +1673,7 @@ mod tests {
     fn resolve_does_not_recursively_merge_a_third_line() {
         let mut lines = wrapped_lines();
         lines.push(OcrLine { words: vec![w("末", 100, 212, 40, 40)] });
-        let got = resolve(&lines, p(190, 110)).unwrap();
+        let got = resolve(&lines, p(190, 110), true).unwrap();
         assert_eq!("新しい冒険が始まる", got.span.text);
     }
 
@@ -1625,7 +1687,7 @@ mod tests {
             // True wrap: gap 60, nearer, listed second.
             OcrLine { words: vec![w("始", 100, 160, 40, 80)] },
         ];
-        let got = resolve(&lines, p(110, 130)).unwrap();
+        let got = resolve(&lines, p(110, 130), true).unwrap();
         assert_eq!(
             "新始", got.span.text,
             "the nearer line must win regardless of Vec order"
@@ -1642,7 +1704,7 @@ mod tests {
                 words: vec![w("左", 144, 100, 40, 40), w("右", 144, 140, 40, 40)],
             },
         ];
-        let got = resolve(&lines, p(210, 110)).unwrap();
+        let got = resolve(&lines, p(210, 110), true).unwrap();
         assert_eq!(Orientation::Vertical, got.orientation);
         assert_eq!("上下左右", got.span.text);
     }
@@ -1660,7 +1722,7 @@ mod tests {
             ],
         };
         let region = PhysRect { x: 50, y: 80, w: 500, h: 60 };
-        let (head, next, ori) = head_and_tail(&[line], p(165, 105), region).unwrap();
+        let (head, next, ori) = head_and_tail(&[line], p(165, 105), region, true).unwrap();
         assert_eq!("感想", head, "text before the hit word is not head");
         assert_eq!(Orientation::Horizontal, ori);
         assert_eq!(550, next, "region's own trailing edge: 50+500");
@@ -1675,7 +1737,7 @@ mod tests {
             ],
         };
         let region = PhysRect { x: 0, y: 80, w: 500, h: 60 };
-        let (head, next, _) = head_and_tail(&[line], p(465, 105), region).unwrap();
+        let (head, next, _) = head_and_tail(&[line], p(465, 105), region, true).unwrap();
         assert_eq!("感", head, "想 is clipped by the region's own edge");
         assert_eq!(490, next, "tiling resumes at the clipped word's own edge");
     }
@@ -1684,7 +1746,7 @@ mod tests {
     fn head_and_tail_empty_head_when_the_hit_word_itself_is_clipped() {
         let line = OcrLine { words: vec![w("想", 490, 100, 20, 20)] };
         let region = PhysRect { x: 0, y: 80, w: 500, h: 60 };
-        let (head, next, _) = head_and_tail(&[line], p(495, 105), region).unwrap();
+        let (head, next, _) = head_and_tail(&[line], p(495, 105), region, true).unwrap();
         assert_eq!("", head, "even the hit word is clipped by the region edge");
         assert_eq!(490, next, "falls back to the hit word's own leading edge");
     }
@@ -1693,7 +1755,7 @@ mod tests {
     fn head_and_tail_returns_none_when_nothing_is_hit() {
         let line = OcrLine { words: vec![w("食", 100, 100, 20, 20)] };
         let region = PhysRect { x: 0, y: 0, w: 500, h: 100 };
-        assert_eq!(None, head_and_tail(&[line], p(900, 900), region));
+        assert_eq!(None, head_and_tail(&[line], p(900, 900), region, true));
     }
 
     #[test]
@@ -1705,8 +1767,67 @@ mod tests {
             ],
         };
         let region = PhysRect { x: 80, y: 50, w: 60, h: 500 };
-        let (head, _, ori) = head_and_tail(&[line], p(105, 105), region).unwrap();
+        let (head, _, ori) = head_and_tail(&[line], p(105, 105), region, true).unwrap();
         assert_eq!("上下", head);
         assert_eq!(Orientation::Vertical, ori);
+    }
+
+    /// Flag reaches hit_scan.
+    #[test]
+    fn head_and_tail_skips_latin_words_when_alnum_is_off() {
+        let line = OcrLine {
+            words: vec![w("Edit", 100, 100, 40, 20), w("語", 150, 100, 20, 20)],
+        };
+        let region = PhysRect { x: 50, y: 80, w: 500, h: 60 };
+        let lines = std::slice::from_ref(&line);
+        assert!(head_and_tail(lines, p(110, 105), region, true).is_some());
+        assert_eq!(None, head_and_tail(lines, p(110, 105), region, false));
+    }
+
+    // -- hit-scan eligibility --
+
+    #[test]
+    fn kana_and_kanji_count_as_scannable_script() {
+        assert!(has_scannable_script("ひ"));
+        assert!(has_scannable_script("カ"));
+        assert!(has_scannable_script("漢"));
+        assert!(has_scannable_script("々"));
+        assert!(has_scannable_script("ｶ"), "halfwidth katakana");
+    }
+
+    #[test]
+    fn latin_digits_and_fullwidth_latin_are_not_scannable_script() {
+        assert!(!has_scannable_script("Edit"));
+        assert!(!has_scannable_script("3"));
+        assert!(!has_scannable_script("Ａ"), "fullwidth Latin is Latin");
+        assert!(!has_scannable_script("１"), "fullwidth digit is a digit");
+        assert!(!has_scannable_script("。"), "punctuation alone is not a word");
+    }
+
+    #[test]
+    fn mixed_words_count_as_scannable_script() {
+        assert!(has_scannable_script("3人"));
+        assert!(has_scannable_script("Aランク"));
+        assert!(has_scannable_script("PCを使う"));
+    }
+
+    /// Latin words are unhoverable.
+    #[test]
+    fn hit_scan_skips_latin_words_when_alnum_is_off() {
+        let lines = vec![OcrLine {
+            words: vec![w("Edit", 100, 100, 40, 30), w("語", 150, 100, 40, 30)],
+        }];
+        assert_eq!(Some((0, 0)), hit_scan(&lines, p(110, 110), true));
+        assert_eq!(None, hit_scan(&lines, p(110, 110), false));
+    }
+
+    /// Line text is not rewritten.
+    #[test]
+    fn a_japanese_word_still_resolves_the_whole_line() {
+        let lines = vec![OcrLine {
+            words: vec![w("PC", 100, 100, 40, 30), w("語", 150, 100, 40, 30)],
+        }];
+        let got = resolve(&lines, p(160, 110), false).unwrap();
+        assert_eq!("PC語", got.span.text, "PC stays in the text");
     }
 }

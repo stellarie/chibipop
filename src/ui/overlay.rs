@@ -6,7 +6,7 @@ use crate::geom::{inset, overlay_layout, PhysRect, ScanKind, ScanRect};
 use crate::ui::theme::Theme;
 use crate::ui::window::CaptureExclusion;
 use anyhow::{Context, Result};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem::size_of;
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -245,7 +245,7 @@ unsafe fn build_region(rects: &[ScanRect]) -> Result<HRGN> {
 /// The shaped outline window.
 pub struct Overlay {
     hwnd: HWND,
-    capture_exclusion: CaptureExclusion,
+    capture_exclusion: Cell<CaptureExclusion>,
 }
 
 /// Guards a second live Overlay.
@@ -302,7 +302,7 @@ impl Overlay {
             };
 
             OVERLAY_LIVE.store(true, Ordering::SeqCst);
-            Ok(Overlay { hwnd, capture_exclusion })
+            Ok(Overlay { hwnd, capture_exclusion: Cell::new(capture_exclusion) })
         }
     }
 
@@ -366,7 +366,18 @@ impl Overlay {
     ///
     /// May differ from the popup's.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
-        self.capture_exclusion
+        self.capture_exclusion.get()
+    }
+
+    /// Re-applies live; may refuse.
+    pub fn set_capture_exclusion(&self, on: bool) {
+        let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        // SAFETY: `self.hwnd` was created by `create` and is destroyed
+        // only by this `Overlay`'s own `Drop`, so it is valid for
+        // `&self`'s lifetime. Refusal is accepted, as in `create` -
+        // here it is also recorded, because it is the new state.
+        let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
+        self.capture_exclusion.set(CaptureExclusion::from_attempt(on, ok));
     }
 }
 

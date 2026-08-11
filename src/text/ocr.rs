@@ -7,7 +7,7 @@ use crate::text::capture::{
 };
 use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
-    tile_forward, OcrLine, OcrWord, Orientation, Resolved,
+    tile_forward, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
 };
 use crate::text::{TextSource, TextSpan};
 use anyhow::{Context, Result};
@@ -160,24 +160,141 @@ pub struct RegionRead {
     pub dxgi_error: Option<String>,
 }
 
+/// The OCR knobs, reloadable.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SettingsSnapshot {
+    pub max_passes: u8,
+    pub prefer_vertical: bool,
+    pub capture: CaptureSize,
+    pub scan_alphanumeric: bool,
+}
+
+impl SettingsSnapshot {
+    /// Replace every field at once.
+    pub fn apply(&mut self, max_passes: u8, prefer_vertical: bool,
+                 capture: CaptureSize, scan_alphanumeric: bool) {
+        self.max_passes = max_passes;
+        self.prefer_vertical = prefer_vertical;
+        self.capture = capture;
+        self.scan_alphanumeric = scan_alphanumeric;
+    }
+}
+
+fn extends_at_boundary(long: &str, short: &str) -> bool {
+    let (long, short) = (long.as_bytes(), short.as_bytes());
+    long.len() >= short.len()
+        && long[..short.len()].eq_ignore_ascii_case(short)
+        && (long.len() == short.len()
+            || (long.len() > short.len() + 1 && long[short.len()] == b'-'))
+}
+
+/// Subtag-boundary tag match.
+pub fn tag_matches(reported: &str, wanted: &str) -> bool {
+    extends_at_boundary(reported, wanted) || extends_at_boundary(wanted, reported)
+}
+
+/// Is this recogniser installed?
+pub fn recogniser_available(tag: &str) -> bool {
+    if !Language::IsWellFormed(&HSTRING::from(tag)).unwrap_or(false) {
+        return false;
+    }
+    let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+        return false;
+    };
+    langs.into_iter().any(|l| {
+        l.LanguageTag()
+            .map(|t| tag_matches(&t.to_string(), tag))
+            .unwrap_or(false)
+    })
+}
+
+/// Installed ones: name, tag.
+///
+/// Empty if the call fails.
+pub fn installed_recognisers() -> Vec<(String, String)> {
+    let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for l in langs {
+        let Ok(tag) = l.LanguageTag() else {
+            continue;
+        };
+        let tag = tag.to_string();
+        let name = l.DisplayName().map(|n| n.to_string()).unwrap_or_else(|_| tag.clone());
+        out.push((name, tag));
+    }
+    out
+}
+
+/// Builds an engine for a tag.
+fn make_engine(language: &str) -> Result<OcrEngine> {
+    let lang = Language::CreateLanguage(&HSTRING::from(language))?;
+    OcrEngine::TryCreateFromLanguage(&lang).with_context(|| {
+        format!(
+            "no OCR recogniser for {language} - add it under Windows Settings, \
+             Time & language, Language & region"
+        )
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LangAction {
+    Keep,
+    Swap,
+    NoPack,
+}
+
+fn language_action(current: &str, requested: &str, available: impl FnOnce() -> bool)
+    -> LangAction {
+    if requested.eq_ignore_ascii_case(current) {
+        LangAction::Keep
+    } else if available() {
+        LangAction::Swap
+    } else {
+        LangAction::NoPack
+    }
+}
+
 pub struct OcrTextSource {
     engine: OcrEngine,
-    max_passes: u8,
-    prefer_vertical: bool,
+    settings: SettingsSnapshot,
+    language: String,
 }
 
 impl OcrTextSource {
     /// Inits WinRT + engine once.
-    pub fn new(max_passes: u8, prefer_vertical: bool) -> Result<Self> {
+    pub fn new(max_passes: u8, prefer_vertical: bool, capture: CaptureSize,
+               scan_alphanumeric: bool, language: &str) -> Result<Self> {
         init_dpi_awareness()?;
         // Else CO_E_NOTINITIALIZED.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
-        let lang = Language::CreateLanguage(&HSTRING::from("ja"))?;
-        let engine = OcrEngine::TryCreateFromLanguage(&lang).context(
-            "no Japanese OCR recogniser available - add Japanese under \
-             Windows Settings, Time & language, Language & region",
-        )?;
-        Ok(OcrTextSource { engine, max_passes, prefer_vertical })
+        let engine = make_engine(language)?;
+        let settings =
+            SettingsSnapshot { max_passes, prefer_vertical, capture, scan_alphanumeric };
+        Ok(OcrTextSource { engine, settings, language: language.to_string() })
+    }
+
+    /// Swap in new OCR settings.
+    pub fn apply_settings(&mut self, max_passes: u8, prefer_vertical: bool, capture: CaptureSize,
+                          scan_alphanumeric: bool, language: &str) {
+        match language_action(&self.language, language, || recogniser_available(language)) {
+            LangAction::Keep => {}
+            LangAction::NoPack => {
+                eprintln!("chibipop: no {language} recogniser; keeping {}", self.language);
+            }
+            LangAction::Swap => match make_engine(language) {
+                Ok(engine) => {
+                    self.engine = engine;
+                    self.language = language.to_string();
+                }
+                Err(e) => eprintln!(
+                    "chibipop: {language} recogniser failed, keeping {}: {e:#}",
+                    self.language
+                ),
+            },
+        }
+        self.settings.apply(max_passes, prefer_vertical, capture, scan_alphanumeric);
     }
 
     /// The engine from `new`.
@@ -190,7 +307,10 @@ impl OcrTextSource {
         &self,
         cursor: PhysPoint,
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        let read = self.resolve_in_region(cursor, region_around(cursor, self.prefer_vertical))?;
+        let read = self.resolve_in_region(
+            cursor,
+            region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
+        )?;
         Ok((read.lines, read.resolved))
     }
 
@@ -205,7 +325,7 @@ impl OcrTextSource {
         } else {
             (lines, cap)
         };
-        let resolved = resolve(&lines, cursor);
+        let resolved = resolve(&lines, cursor, self.settings.scan_alphanumeric);
         Ok(RegionRead {
             lines,
             resolved,
@@ -264,9 +384,12 @@ impl OcrTextSource {
         let mut scan = Vec::new();
         let Some(first) = resolved else { return Ok((None, scan)) };
         if collect {
-            scan.push(ScanRect { rect: region_around(cursor, self.prefer_vertical), kind: ScanKind::Pass1 });
+            scan.push(ScanRect {
+                rect: region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
+                kind: ScanKind::Pass1,
+            });
         }
-        if self.max_passes <= 1 {
+        if self.settings.max_passes <= 1 {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
@@ -274,8 +397,10 @@ impl OcrTextSource {
         }
 
         // Pass 1's own kept tail; no re-read.
-        let region = region_around(cursor, self.prefer_vertical);
-        let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region) else {
+        let region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
+        let alnum = self.settings.scan_alphanumeric;
+        let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region, alnum)
+        else {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
@@ -284,7 +409,7 @@ impl OcrTextSource {
         let head_chars = head.chars().count();
 
         let anchor = first.span.anchor;
-        let band = band_of(anchor, orientation);
+        let band = band_of(anchor, orientation, self.settings.capture.short());
         let perpendicular_centre = match orientation {
             Orientation::Horizontal => anchor.center().y,
             Orientation::Vertical => anchor.center().x,
@@ -300,7 +425,7 @@ impl OcrTextSource {
             band,
             tail_start,
             orientation,
-            usize::from(self.max_passes - 1),
+            usize::from(self.settings.max_passes - 1),
             MAX_LOOKUP_CHARS.saturating_sub(head_chars),
             bounds,
             |tile| {
@@ -432,5 +557,183 @@ mod tests {
             line(vec![word("大", 40)]),
         ];
         assert!(!glyphs_look_small(&lines));
+    }
+
+    /// Reload replaces every OCR field.
+    #[test]
+    fn apply_settings_replaces_all_four_fields() {
+        let mut s = SettingsSnapshot {
+            max_passes: 1,
+            prefer_vertical: false,
+            capture: CaptureSize { w: 500, h: 100 },
+            scan_alphanumeric: true,
+        };
+        s.apply(3, true, CaptureSize { w: 800, h: 120 }, false);
+        assert_eq!(3, s.max_passes);
+        assert!(s.prefer_vertical);
+        assert_eq!(CaptureSize { w: 800, h: 120 }, s.capture);
+        assert!(!s.scan_alphanumeric);
+    }
+
+    #[test]
+    fn an_unchanged_language_is_kept() {
+        assert_eq!(LangAction::Keep, language_action("ja", "ja", || true));
+    }
+
+    /// The guard folds case.
+    #[test]
+    fn an_unchanged_language_is_kept_even_with_no_pack() {
+        assert_eq!(LangAction::Keep, language_action("ja", "JA", || false));
+    }
+
+    #[test]
+    fn a_new_language_with_a_pack_is_swapped_in() {
+        assert_eq!(LangAction::Swap, language_action("ja", "ko", || true));
+    }
+
+    #[test]
+    fn a_new_language_with_no_pack_is_refused() {
+        assert_eq!(LangAction::NoPack, language_action("ja", "ko", || false));
+    }
+
+    /// No WinRT call on the no-op.
+    #[test]
+    fn an_unchanged_language_never_asks_windows() {
+        let mut asked = false;
+        let got = language_action("ja", "ja", || {
+            asked = true;
+            true
+        });
+        assert_eq!(LangAction::Keep, got);
+        assert!(!asked);
+    }
+
+    #[test]
+    fn a_nonsense_tag_is_not_available() {
+        assert!(!recogniser_available("xx-Fake"));
+    }
+
+    /// True on any machine.
+    #[test]
+    fn every_installed_recogniser_reports_available() {
+        let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+            return;
+        };
+        for l in langs {
+            if let Ok(tag) = l.LanguageTag() {
+                assert!(recogniser_available(&tag.to_string()));
+                assert!(recogniser_available(&tag.to_string().to_uppercase()));
+            }
+        }
+    }
+
+    /// True on any machine.
+    #[test]
+    fn every_listed_recogniser_is_named_and_available() {
+        for (name, tag) in installed_recognisers() {
+            assert!(!name.is_empty(), "{tag} has no display name");
+            assert!(!tag.is_empty());
+            assert!(recogniser_available(&tag));
+        }
+    }
+
+    #[test]
+    fn the_listed_recognisers_match_the_engine_list() {
+        let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
+            return;
+        };
+        assert_eq!(langs.Size().unwrap_or(0) as usize, installed_recognisers().len());
+    }
+
+    #[test]
+    fn an_identical_tag_matches() {
+        assert!(tag_matches("ja", "ja"));
+        assert!(tag_matches("zh-Hans-CN", "zh-Hans-CN"));
+    }
+
+    #[test]
+    fn a_tag_matches_whatever_its_case() {
+        assert!(tag_matches("en-US", "EN-us"));
+        assert!(tag_matches("ZH-HANS-CN", "zh-hans"));
+    }
+
+    #[test]
+    fn a_more_specific_reported_tag_matches() {
+        assert!(tag_matches("zh-Hans-CN", "zh-Hans"));
+        assert!(tag_matches("en-US", "en"));
+        assert!(tag_matches("zh-Hans-CN", "zh"));
+    }
+
+    #[test]
+    fn a_more_specific_wanted_tag_matches() {
+        assert!(tag_matches("ja", "ja-JP"));
+        assert!(tag_matches("zh", "zh-Hant-TW"));
+    }
+
+    #[test]
+    fn a_different_script_does_not_match() {
+        assert!(!tag_matches("zh-Hant-TW", "zh-Hans"));
+        assert!(!tag_matches("zh-Hans-CN", "zh-Hant"));
+    }
+
+    /// Boundary, not starts_with.
+    #[test]
+    fn a_partial_subtag_does_not_match() {
+        assert!(!tag_matches("zh-Hans-CN", "zh-Han"));
+        assert!(!tag_matches("zh-Han", "zh-Hans-CN"));
+        assert!(!tag_matches("jav", "ja"));
+        assert!(!tag_matches("ja", "jav"));
+    }
+
+    #[test]
+    fn an_unrelated_tag_does_not_match() {
+        assert!(!tag_matches("ja", "ko"));
+        assert!(!tag_matches("en-US", "ja"));
+    }
+
+    #[test]
+    fn an_empty_tag_matches_nothing_real() {
+        assert!(!tag_matches("ja", ""));
+        assert!(!tag_matches("", "ja"));
+    }
+
+    #[test]
+    fn matching_is_symmetric() {
+        let tags = ["ja", "ja-JP", "en", "en-US", "zh", "zh-Hans", "zh-Hans-CN", "zh-Hant-TW"];
+        for a in tags {
+            for b in tags {
+                assert_eq!(tag_matches(a, b), tag_matches(b, a), "{a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_trailing_hyphen_does_not_match() {
+        assert!(!tag_matches("ja", "ja-"));
+        assert!(!tag_matches("ja-", "ja"));
+        assert!(!tag_matches("JA", "ja-"));
+        assert!(!tag_matches("zh-Hans", "zh-Hans-"));
+        assert!(!tag_matches("zh-Hans-", "zh-Hans"));
+    }
+
+    #[test]
+    fn a_lone_hyphen_matches_nothing() {
+        assert!(!tag_matches("-", ""));
+        assert!(!tag_matches("", "-"));
+    }
+
+    #[test]
+    fn a_leading_hyphen_does_not_match() {
+        assert!(!tag_matches("ja", "-ja"));
+        assert!(!tag_matches("-ja", "ja"));
+        assert!(!tag_matches("en-US", "-US"));
+    }
+
+    /// True on any machine.
+    #[test]
+    fn a_malformed_tag_is_never_available() {
+        for t in ["ja-", "ja--JP", "ja--", "ja---", "JA--jp", "-ja", "-", "", "ja-JP-"] {
+            assert!(!recogniser_available(t), "{t:?}");
+        }
     }
 }

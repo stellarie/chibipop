@@ -7,13 +7,26 @@ Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed 
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
+**Three exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
+2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Items
+**1.14–1.16** were added 2026-08-11 with the per-character-retrigger / OCR-language branch:
+**1.16 has not been run at all**, and 1.14 and 1.15 were **run only in part** the same day. What
+passed, on one machine in horizontal text, was 1.14's retrigger with the toggle **on** and 1.15's
+**switch path** — not all of 1.14, and not all of 1.15. Everything else in the three is still
+owed, 1.14's toggle-OFF half and 1.15's missing-recognizer path among it. **The callout above 1.14
+is the authority on the split; this sentence is a summary and is not the shorter list.** Item
+**11b** was corrected 2026-08-09, having described behaviour that never existed in any version of
+the program.
+
 ---
 
 ## Tier 0 — the automated gate (~2 min, no screen)
 
-**This tier is the CI contract.** Every command below was re-run verbatim on 2026-07-29 and
-reproduces the stated numbers, so it can be lifted into a workflow as-is. Two of them are
-`grep -c` counts rather than exit codes, and that is deliberate — see the note under the table.
+**This tier is the CI contract.** The commands below are unchanged since 2026-07-29 and are what
+`.github/workflows/ci.yml` runs; the numbers beside them were last re-measured on **2026-08-11**.
+Two of them are `grep -c` counts rather than exit codes, and that is deliberate — see the note
+under the table. CI additionally passes `--color never` and runs the suite three times; both of
+those are explained in the callouts below, and neither is optional there.
 
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
@@ -25,10 +38,76 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **626** total across **6** targets (was 416; re-measured 2026-08-08) |
-| Clippy | **exactly 4** accepted errors (was 5; the comment sweep retired `doc list item`) |
+| Rust tests | **all green**, **730** total across **6** targets, 1 ignored (was 729; re-measured 2026-08-12) |
+| Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
+| Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
+
+**The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
+silently not running must. CI asserts `≥ 400` and prints the total; **730** is what this machine
+measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
+that is the difference between the two rows and it is deliberate.
+
+**670 → 698 is a re-baseline, not a finding**, and it is recorded here in the commit that moves it,
+per the rule in the callout below. The per-character-retrigger / OCR-language branch added 28 tests
+across seven tasks and removed none; the count rose monotonically with each one (673, 675, 677,
+685, 687, 688, 698) and the rename in the last task left it unchanged, as a rename must. The three
+runs above the table reported **698, 698, 698** — identical, which is the point of running it three
+times. The clippy counts did **not** move: still 3 raw and 0 on the bin target.
+
+**698 → 710 is a second re-baseline in the same round, also not a finding.** The v0.7.0 fix wave
+added 12 tests and removed none, all of them on decisions that previously had no executable
+coverage at all: five for `language_action` (the reload's keep / swap / no-pack choice, which
+could not be reached without a real `OcrEngine`), four for `startup_language`, one for
+`freeze_rect`, and two for `from_config` seeding the two new settings. It also added one assertion
+inside an existing test — `recogniser_available` on an upper-cased tag — which pins case folding
+without moving the count. The clippy counts did **not** move here either: still 3 raw and 0 on the
+bin target, at the same three sites.
+
+**710 → 726 is a third re-baseline in the same round, also not a finding.** The BCP-47 tag-matching
+fix added 16 tests and removed none: nine for `tag_matches` in `src/text/ocr.rs` (equality, case
+folding, either side more specific, a differing script, symmetry, and the `zh-Han` vs `zh-Hans-CN`
+boundary that a raw `starts_with` would have got wrong) and seven for `language_choices` /
+`language_index` in `src/ui/settings_window.rs`, against a four-language installed list. The clippy
+counts did **not** move here either: still 3 raw and 0 on the bin target, at the same three sites.
+
+**726 → 729 is a fourth re-baseline in the same round, also not a finding.** The trailing-hyphen
+guard in `extends_at_boundary` added three `tag_matches` tests and removed none: a trailing hyphen,
+a lone hyphen against the empty string, and a leading hyphen. The first two were **red before the
+guard and green after** — `tag_matches("ja", "ja-")` and `tag_matches("-", "")` both returned true
+until it. The third was already green; it pins a case the guard does not change. The clippy counts
+did **not** move here either: still 3 raw and 0 on the bin target, at the same three sites.
+
+**729 → 730 is a fifth re-baseline in the same round, also not a finding.** The well-formedness
+gate in `recogniser_available` added one test and removed none: a malformed tag is never available,
+over nine shapes. It was **red before the gate and green after** — `recogniser_available("ja--JP")`
+returned true via the installed `ja`, because the subtag-boundary guard only requires *a* byte after
+the hyphen and `-` is a byte. That tag then reached `Language::CreateLanguage`, which rejects it, so
+`run` returned `Err` with the console already hidden. The assertion is machine-independent:
+well-formedness is checked before the installed list, so it holds on a runner with no recognisers.
+The clippy counts did **not** move here either: still 3 raw and 0 on the bin target, at the same
+three sites.
+
+**The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
+`chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
+test catches it — the cost lands on unrelated applications, because Apply runs on the thread that
+owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that misses
+`LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
+before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
+
+**The three accepted clippy errors — unchanged since 2026-08-09, sites re-confirmed 2026-08-11:**
+
+| Lint | Site |
+|---|---|
+| `useless_conversion` — explicit `.into_iter()` in an `IntoIterator` argument | `src/lookup/deconj.rs:78` |
+| `too_many_arguments` (8/7) | `src/lookup/model.rs:78` |
+| `too_many_arguments` (10/7) | `src/ui/render.rs:699` |
+
+It was **4** until 2026-08-09. The fourth was `while_let_loop`, on `worker_main`'s trigger drain;
+the hot-reload branch replaced that loop with an explicit `drain` (a `Reload` message must never be
+swallowed by newest-wins coalescing), so the lint went with it. That is a legitimate 4 → 3, not a
+suppression — the count went **down** because the code did.
 
 > [!warning] The clippy line changed on 2026-07-29, because the old one could not fail
 > It used to be `grep -cE "^error: (doc list|explicit call|this function|this loop)"` —
@@ -57,10 +136,18 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 > "unchanged" — and that 5 was quoted to a reviewer as the baseline, hiding a dead-code
 > regression inside the one number whose whole job is to expose one. A baseline carried forward
 > from memory is not a baseline.
+>
+> It happened again, better, on 2026-08-09: 4 → 3, because the hot-reload branch deleted the loop
+> that produced the fourth. This time the drop was **predicted in the plan before it happened**
+> ("Task 6 rewrites the very loop that produces accepted error #1, so the raw gate may legitimately
+> drop to 3 — re-baseline, do not treat 3 as a violation"), which is what a re-baseline should look
+> like: named in advance, so nobody has to decide at the gate whether a moving number is a
+> regression. **A count that changes is only ever a finding or a re-baseline. Say which, in
+> writing, in the same commit that moves it.**
 
-**Why counts, not exit status.** The repo carries four accepted clippy errors; a plain
-`-D warnings` run therefore always exits non-zero, and CI must assert the count is **4** rather than
-that clippy passed. A 5th is a real regression — most often a field added by one commit and read by
+**Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
+that clippy passed. A 4th is a real regression — most often a field added by one commit and read by
 the next, which is why a task that adds a field must be the task that reads it.
 
 The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
@@ -201,6 +288,299 @@ ls -l target/release/chibipop.exe          # ~3.4 MB, limit 100 MB
 ⚠️ `run` under sustained **real** hovering has never been re-measured and recorded 94.8 MB at M3.
 That is the one number still outstanding.
 
+> [!warning] 1.9 through 1.13 were added 2026-08-09 and **have not been run**
+> They are the acceptance checks for the resizable-capture / hot-reload branch, written from the
+> code by an agent with no screen. Every one of them needs a human on the portrait secondary.
+> Nothing below carries a ✅ and nothing below should be read as passing. They are also all
+> *live-apply* checks, which is precisely the class no unit test can reach: the unit tests prove
+> the new value is computed, never that a running instance started obeying it.
+
+### 1.9 Settings apply without restarting
+
+Record the PID (`Get-Process chibipop`), open Settings, change **Capture height**, press Apply.
+
+- The **PID is unchanged** — that is the actual test of "no restart", not a proxy. Everything else
+  in this entry is equally consistent with a fast restart; only the PID rules one out.
+- The settings window **stays open**. It used to vanish, because the process died under it.
+- A value under 80 is clamped and the status line says so. Bounds: height 80–600, width 100–1600.
+- `probe --at <x>,<y>` reports the new region height.
+
+> [!warning] `probe` is not a read-only observer, and it reads the file rather than the process
+> **It writes.** `probe` calls `config::load_or_create`, whose NotFound arm **creates a fresh
+> `chibipop.toml`** — including when `--region` makes the config irrelevant. That side effect is new
+> as of this branch (`src/main.rs`, before the `--region` match). Probing a directory with no config
+> is therefore not an inspection, it is an initialisation. Harmless in the ordinary case, since the
+> app writes that file anyway — not harmless if you were about to conclude something from the file
+> being absent.
+>
+> **It is a different process.** `probe` reads `chibipop.toml` from disk, so it proves Apply
+> *persisted* the value and that a fresh process picks it up. It says nothing directly about the
+> region the already-running instance is now using; that is what hovering, and the unchanged PID,
+> are for.
+
+### 1.10 Alphanumeric scanning
+
+Uncheck **Scan alphanumeric text**, Apply.
+
+- Hovering an English menu bar (`File`, `Edit`) produces **no popup**.
+- 「3人」 still resolves **with the 3 intact** — hover the 人.
+- Hovering the `3` itself produces nothing.
+
+Segmentation is why this is a tier 1 check and not a unit test: it depends on how the live engine
+splits that line. The filter makes a Latin-only word **unhoverable** rather than deleting it from
+the assembled text, which is what keeps 「PCを使う」 looking up whole from the 使.
+
+### 1.11 Trigger mode and both hotkeys apply live
+
+Three bindings the settings window has always been able to edit, and that have never once taken
+effect without a restart. The design's audit of "what needs recreating" missed all three.
+
+In `chibipop run`, with the PID recorded:
+
+1. Switch **Trigger** from `Live` to `Hold key`, Apply. Hovering alone must now do nothing; holding
+   the trigger key while moving must raise the popup.
+2. Press the **Trigger key** button, press a different key, Apply. The new key works, the old one
+   does not.
+3. Change the Anki group's **Shortcut key**, Apply, and add a card with the new key.
+
+The observable in all three is the same: the new binding works **and the PID has not changed**.
+Before this branch Apply restarted the process, so these appeared to work while the thing making
+them work was the restart. Remove the restart and they silently stop — which is why a pass here is
+meaningless without the PID beside it.
+
+### 1.12 The scan overlay can be switched on live
+
+Start `chibipop run` with **Outline what each hover captured** *off* (`[debug] show_scan_region =
+false`, the shipped default). Turn it on in Settings, Apply, then hover.
+
+- The capture outlines **appear**, with no restart.
+
+**Start with it off.** Starting with it on tests nothing — that is the case that always worked.
+Before this branch the overlay window was only *created* when the setting was on at startup, so
+turning it on later had no window to show and the checkbox did nothing whatsoever. It is now
+created unconditionally and merely shown on demand.
+
+### 1.13 The capture guard tracks a live `exclude_from_capture` toggle
+
+The one with real teeth: chibipop's own OCR capture must never contain chibipop's own popup.
+
+With `chibipop run` live, uncheck **Hide the popup from screen capture**, Apply, then keep hovering
+along a line of Japanese.
+
+- Lookups stay correct — no popup text bleeds into them. Turn on **Outline what each hover
+  captured** (1.12) and screenshot: nothing chibipop drew may be sitting inside a capture box.
+  **A lookup that resolves the popup's own text is the failure.**
+- Re-check the box, Apply, and it returns to the exclusion path — again with no restart.
+
+Two mechanisms have to hand off cleanly. Exclusion on: Windows keeps the popup out of the capture.
+Exclusion off: chibipop must instead hide the popup around each capture itself
+(`capture_guard_active`). That flag is recomputed from what the windows **report after** the
+affinity call rather than from what was asked for, because `SetWindowDisplayAffinity` is allowed to
+refuse. Before this branch the cached value kept its startup setting for the life of the process,
+so turning exclusion off left the guard off with it, and the popup contaminated the very lookup it
+was displaying.
+
+> [!note] 1.14–1.16 were added 2026-08-11; 1.14 and 1.15 ran **in part**, 1.16 **not at all**
+> They are the acceptance checks for the per-character-retrigger / OCR-language branch. All three
+> are *live-apply* checks, the class no unit test can reach: the unit tests prove the new freeze
+> rect and the new engine are **computed**, never that a running instance started obeying them.
+>
+> **Read the pass list as the whole of what was covered.** Anything in 1.14–1.16 not named below as
+> passing is still owed, whether or not the NOT-list bothers to repeat it. This callout was
+> previously read the other way round — as if the NOT-list were the complete debt — which quietly
+> promoted everything it forgot to mention.
+>
+> **Run on 2026-08-11, horizontal text, one machine (100% DPI, `ja` + `en-US` installed):**
+> - **1.14's retrigger, with the toggle ON — passes.** With the toggle on and mode Live, hovering
+>   経 of 経験人数 showed 経 entries; moving one character right to 験 changed the popup to
+>   験〔げん〕, freq 42368, without leaving the line.
+> - **1.14's no-restart property — passes, for the enabling Apply only.** The Apply that turned the
+>   toggle on left the **PID unchanged** (18080, identical start time). That is a real observation:
+>   1.14's PID bullet says "across either Apply" and this discharges one of the two. The other
+>   Apply is in the NOT-list below, because it was never pressed.
+> - **1.15's switch path — passes, both directions.** Switching Japanese → English (United States)
+>   → Japanese left the **PID unchanged** each time (18080 throughout, identical start time),
+>   persisted to `chibipop.toml`, and the engine genuinely swapped: with `en-US` active the same
+>   Japanese text stopped resolving entirely, and resolved again on switching back.
+> - The dropdown listed exactly the two installed recognizers by display name, and the corrected
+>   caption rendered on one line, unclipped. The settings window measured 486×633, **unchanged from
+>   v0.6.0** — which is what BACKLOG 11's shipped row requires, the checkbox having been moved to
+>   OCR / Debug precisely so the window would not grow.
+>
+> **NOT exercised, and still owed — do not read these as passing:**
+> - **1.14's toggle-OFF half was never performed.** The procedure's second half — "Turn the setting
+>   off, press Apply, and repeat: the popup must now hold on 経験" — was not run. Nothing has
+>   witnessed the toggle *stopping* the retrigger, only starting it, and that is the direction
+>   "default-off = default-unchanged" actually rests on. It also carries the second of the two
+>   Applies in 1.14's PID bullet.
+> - **1.14's already-visible-popup property was not witnessed.** The run pressed Apply *first* and
+>   hovered afterwards, so every popup it saw was raised under the new setting. The claim that it
+>   "applies to an **already-visible** popup the moment Apply lands — you do not need a fresh lookup
+>   to see it take effect" is therefore unverified. **The distinction matters:** a PID *was*
+>   observed across that Apply and it *was* unchanged, so this is not a missing PID. What is missing
+>   is the ordering — hover first, leave the popup on screen, *then* Apply, and watch that same
+>   popup start retriggering without a fresh lookup.
+> - the **tategaki** case in 1.14, which is the path this branch broke and repaired;
+> - that the toggle is inert in hold-key mode, and that the checkbox greys out with it;
+> - that drill-down and wheel-scroll still work with the toggle on, in either orientation;
+> - 1.15's missing-recognizer path, and **the whole of 1.16** — both need a machine with a language
+>   pack absent.
+
+### 1.14 Per-character retrigger
+
+**The procedure spans two tabs, and that is not a mistake.** The checkbox **Look up each character
+as you hover** is on the **OCR / Debug** tab; the **Trigger** radios that gate it are on
+**General**. The checkbox is greyed out unless the trigger mode is Live, so setting this up means
+moving between the two. (It was on General until 2026-08-11 — putting it there grew the window from
+594 to 652 logical px on *every* tab, which at 150% scaling risked pushing the Apply row off the
+bottom. See BACKLOG 11.)
+
+With trigger mode **Live** (General) and **Look up each character as you hover** on (OCR / Debug),
+hover the first character of a two-character word (経験) in **horizontal** text, then move one
+character right **without leaving the line**. The popup must change to 験's entry. Turn the setting
+off, press Apply, and repeat: the popup must now hold on 経験.
+
+- In both states, moving onto the popup must hold it, and wheel-scroll and kanji drill-down must
+  still work. That is the property the split freeze/reach rects exist to preserve.
+- In hold-key mode the setting is inert **and the checkbox greys out**, by design. Switch Trigger
+  to `Hold key` on General and watch the checkbox disable on OCR / Debug; the grey-out uses the
+  same predicate as the back end, so a legacy `HoldShift` config greys correctly too.
+- **The PID must not change** across either Apply. This setting is consumed on the pump thread in
+  the `WM_TIMER` freeze check, and it applies to an **already-visible** popup the moment Apply
+  lands — you do not need a fresh lookup to see it take effect.
+
+**In vertical text, moving *down* the reading axis is expected NOT to re-fire the lookup.** Only
+upward or lateral motion does. This is correct and deliberate. **Do not file it as a bug.**
+
+The popup is placed directly below the anchor, so in tategaki the next glyph down sits exactly
+where the corridor from the text to the popup has to run — the dead band *is* the next character,
+and you cannot both retrigger on it and route a corridor through it. The corridor is therefore
+built flush with the freeze rect (`sticky_region`, `src/geom.rs:96-100`), which puts the next
+glyph's top band inside the corridor and its remainder underneath the popup. The alternative was
+measured on this branch and is strictly worse: without the flush corridor, every downward move
+re-fired the lookup and the replacement popup was **unreachable** — no scroll, no drill-down, no
+Anki button — because it appeared one advance lower with the same gap beneath it. Reachability was
+chosen over retriggering, deliberately.
+
+The consequence to accept: with the toggle on, the feature is largely **inert along the primary
+reading direction in vertical text**, and useful mainly in horizontal prose. What would actually
+unlock tategaki is placing the popup to the *side* in vertical orientation. That is a separate
+round and was consciously not taken here.
+
+*(Horizontal text is unaffected by any of this. There, the corridor's source rect is identical to
+the reach rect field-for-field, so the sticky region is byte-identical to v0.6.0's — and when the
+toggle is off, freeze and reach are equal, which makes the whole three-rect array identical to
+v0.6.0's for every user who does not opt in. "Default-off = default-unchanged" holds by
+construction, not by convention.)*
+
+### 1.15 OCR language
+
+The **OCR language** dropdown is the first row of the **OCR / Debug** group.
+
+Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — that is the test of
+"no restart", not a proxy — then hover the **same Japanese text you were resolving a moment ago**
+and confirm it now resolves **nothing at all**. Switch back, Apply again, and confirm it resolves
+again. That pair — Japanese stopping, then returning — is what discriminates "the engine really
+swapped" from "the engine did not"; the unchanged PID alone does not, because a reload that
+silently kept the old engine also leaves the PID alone.
+
+> [!warning] Do not confirm the swap by hovering text in the **new** language — it can never resolve
+> Lookup is an exact match on a Japanese headword against the `term` table
+> (`src/lookup/sqlite.rs:53-54`, `WHERE surface = ?1`), and the shipped dictionaries are Japanese. So
+> with `en-US` selected, the recognizer can read a line of English perfectly and **still raise no
+> popup**, because there is no row to match — the OCR half succeeded and the lookup half had
+> nothing to do. A positive resolve in the new language would require a dictionary **for that
+> language**, which chibipop neither ships nor builds.
+>
+> This step used to read "hover text in the new language and confirm it resolves." It could only
+> ever be failed, and the next person to clear this debt would have seen nothing and filed a false
+> regression against a feature that was working. The 2026-08-11 run silently substituted the
+> negative observable instead of following the step as written, which is how the defect surfaced.
+
+- The dropdown lists the installed recognizers — the list comes from
+  `OcrEngine::AvailableRecognizerLanguages()` — **plus the configured one when it is not among
+  them**, appended as `<tag> (not installed)`. That row is deliberate: a hand-edited or
+  since-uninstalled language stays visible and selectable instead of being silently reselected.
+  **A first run with no Japanese pack shows `ja (not installed)`, and that is the warning.** The
+  dropdown displays each language's **display name** while carrying its BCP-47 **tag** in a side
+  table, so a display name can never reach `ocr.language` in the TOML — the appended row stores
+  the bare tag, not the `(not installed)` label.
+- **Apply rewrites a hand-edited tag to the one Windows reports. That is expected — do not file
+  it.** Since tags match by subtag boundary, `language = "zh-Hans"` selects the installed
+  `zh-Hans-CN` row (`src/ui/settings_window.rs:1794-1797`); `read` then returns **the row's** tag,
+  not the string that was configured (`:1999-2009`), `apply_to` copies it into `ocr.language`
+  (`src/settings.rs:292`), and Apply writes the file with no compare-against-old
+  (`src/app.rs:1162`). So pressing Apply **for any unrelated setting** rewrites `chibipop.toml` to
+  `language = "zh-Hans-CN"`. A bare `zh` resolves the same way, to the **first** matching row in
+  the order `AvailableRecognizerLanguages()` returns — nothing sorts that list — which was
+  `zh-Hans-CN` on the 2026-08-11 machine. The file ends up holding the tag Windows actually
+  reports, which is the intended self-healing. What *would* be a regression is the rewrite landing
+  on a **different language** (`ja` becoming `ko`), or a tag being rewritten while OCR keeps using
+  the old one.
+- If a language pack is removed while selected, lookups must keep working with the **previous**
+  recognizer rather than breaking. The engine is rebuilt on the worker thread, and on failure the
+  working engine is kept. **Losing OCR entirely is the failure this catches.** There are two
+  distinct stderr lines and they mean different things (`src/text/ocr.rs:269` and `:277`, chosen
+  by `language_action`):
+
+  | Line | Means |
+  |---|---|
+  | `chibipop: no <tag> recogniser; keeping <tag>` | the tag is not in the installed list — the pack is gone |
+  | `chibipop: <tag> recogniser failed, keeping <tag>: <err>` | it *is* installed but the engine would not build |
+
+- **Read stderr, because success is silent and so is one class of regression.** An Apply whose
+  language is unchanged returns early and prints nothing at all. That silence is fine here, but it
+  means a future edit that reintroduced a hardcoded language at the reload site would be completely
+  invisible whenever the hardcoded value happened to match — no message, no crash, no failing test.
+  If you are testing this after touching the reload path, switch to a language you can *see* fail.
+  The keep/swap/no-pack **decision** is now pure and unit-tested (`language_action`), so inverting
+  that guard fails the suite; what is still unwitnessed by any test is the wiring around it — that
+  `apply_settings` is handed the language the user picked, and that a swap really rebuilds.
+
+### 1.16 The startup language fallback — **added 2026-08-11, not run**
+
+**Nothing witnesses this path today.** `startup_language` is unit-tested as a pure function, and
+its wiring at `src/app.rs:1557-1565` is not; the behaviour is described only in BACKLOG 13. It
+decides whether a user whose language pack was uninstalled between runs gets a working app or a
+silent no-op, so leaving it unexercised is not a small gap.
+
+1. Quit chibipop (`Get-Process chibipop` returns nothing).
+2. In `chibipop.toml` beside the exe, set `language` under `[ocr]` to a tag with **no pack
+   installed on this machine** — `ko` on the 2026-08-11 machine, which had only `ja` and `en-US`.
+   Confirm the tag really is absent first: 1.15's dropdown renders an uninstalled tag as
+   `<tag> (not installed)`.
+3. Launch **from a terminal**, not by double-click:
+
+```bash
+./target/release/chibipop.exe run
+```
+
+- **Expect on stderr, once, before the tray icon appears:**
+  `chibipop: no ko OCR recogniser installed; starting with ja` (`src/app.rs:1561`).
+- **Expect Japanese lookup to work.** That is the actual acceptance, not the message. Before this
+  fallback, `OcrTextSource::new` returned `Err`, `run` bailed, and a double-clicked chibipop did
+  **nothing at all** — the error went to a hidden console and a double-click launch never reaches
+  the settings window, so there was no in-app way back.
+- Restore the language afterwards, in Settings or in the file.
+
+**Launching from a terminal is load-bearing, not convenience.** `main` calls `console::hide()`
+unconditionally, but `own_console` returns a window only when this process is the console's *sole*
+owner (`GetConsoleProcessList != 1` → `None`, `src/ui/console.rs:13-30`), so a shell's console is
+left alone and stderr stays readable. A double-click owns its console and hides it — which is
+precisely the condition that makes this whole class of failure invisible in normal use. BACKLOG 13,
+limit 3: the fallback fixes "does nothing", not "says nothing".
+
+- **This is a third message, and it is not either of 1.15's.** `installed; starting with` is the
+  startup substitution; the two lines in 1.15's table are reload-path only. Confusing them means
+  reporting on a path you did not test.
+- **Settings will show the tag you configured, not the one that is running** — the dropdown reads
+  `ko (not installed)` while OCR runs `ja`. `from_config` seeds it from `cfg.ocr.language`
+  (`src/settings.rs:254`) and the substitution is a local in the worker thread that never writes
+  the config back. Expected, not a failure.
+- **Not covered by this step:** a language that *is* listed but whose engine will not build. That
+  still aborts startup exactly as before, and cannot be fixed without splitting
+  `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
+
 ---
 
 ## Tier 2 — mostly automatable (~5 min)
@@ -273,8 +653,41 @@ That is the one number still outstanding.
     with **`IsWindowVisible` = False** while `ChibipopSettingsClass` is True. That is
     `own_console()` hiding a console it owns alone. A visible black box here means
     `GetConsoleProcessList` returned something other than 1.
-11b. **`chibipop settings`** → the same window, captioned **"Apply"** and "Restart chibipop to use
-    them" rather than "Apply & Restart". A caption mismatch means the `restarts` flag is wrong.
+11b. **The Apply button's caption and hint.** Two processes open the same window and only one of
+    them varies its caption. What the code does, as of 2026-08-09
+    (`apply_caption`/`apply_hint`, `src/ui/settings_window.rs:772`):
+
+| Opened by | Dictionary staged? | Caption | Hint |
+|---|---|---|---|
+| `chibipop run` | no | **Apply** | "Applying saves your settings and uses them right away." |
+| `chibipop run` | yes | **Apply & Restart** | "Applying saves your settings and restarts chibipop." |
+| `chibipop settings` | either | **Apply & Restart** | "Applying saves your settings and restarts chibipop." |
+
+   The varying row is new with the hot-reload branch; `chibipop settings` is unchanged and does not
+   vary. In the source the caption reads `"Apply && Restart"` — `&&` renders as one `&`, and a
+   single `&` would render as an accelerator underline instead (see the traps table).
+
+> [!warning] Corrected 2026-08-09 — this entry described behaviour that has never existed
+> It asserted `chibipop settings` shows caption **"Apply"** plus a hint "Restart chibipop to use
+> them", and blamed a `restarts` flag when they did not match. Three things were checked against
+> the source, and all three came back against the entry:
+>
+> - That hint string appears **nowhere in `src/`**. It exists only in this branch's plan and design
+>   spec, which are working notes and are not published with the repo.
+> - There is **no `restarts` flag** anywhere in the codebase.
+> - The caption has been a hardcoded "Apply & Restart" in **both** processes for its entire history.
+>
+> So **11b could not have passed on any commit, before this branch or after it** — it was a
+> checklist item written from a design document rather than from the program, and every run that
+> "passed" it passed it by not looking.
+>
+> The ruling was to **fix the doc, not the behaviour**: changing what `chibipop settings` says is a
+> product decision, not a regression fix. The open question — that window says "Apply & Restart"
+> and then restarts nothing — is recorded as **BACKLOG 9**.
+>
+> **The lesson is the general one.** A checklist item copied from a spec asserts what someone
+> intended; only an item written against the program asserts what it does. When they disagree the
+> spec is not automatically wrong, but the checklist is not evidence either way.
 11e. **Close via the X (`WM_CLOSE`), not Escape or a button.** In `settings_only`
     (`chibipop settings`, or `chibipop run` before a dictionary exists) it fully exits
     chibipop, same as "Quit chibipop" — there is no tray to fall back on, so `wndproc`'s
@@ -355,7 +768,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **`&` in a button caption is an accelerator** | "Apply & Restart" renders "Apply ‗Restart". Double it. |
 | **Nested message pumps eat `WM_TIMER`** | `TrackPopupMenuEx`, `MessageBoxW`, `DialogBoxParamW`, caption drag. The wheel arm latches. Disarm before any of them. |
 | **`display_order` holds substrings, not names** | Order works today, silently stops after the next dictionary rebuild. Never write live names back. |
-| **A task that adds a field must be the task that reads it** | `field never read` = a 6th clippy error against a 5-error gate. |
+| **A task that adds a field must be the task that reads it** | `field never read` is a dead-code error, and the gate asserts an exact count — one extra breaks it. (Caught once as a 6th error against the 5-error gate of the day; the gate is 3 now, the trap is unchanged.) |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
 | **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so `chibipop run` cannot have the new database renamed over the one its worker is holding. It builds to `<out>.new` and swaps it in **after** the worker is joined, on the way to the restart. Measured, and pinned by `tests/rebuild.rs`. |
 | **Never delete an archive before the rebuild proves out** | The user's `.zip` files are 50–200 MB downloads chibipop may not redistribute. Apply moves removals to `library/.removed/`, which `build-dict` cannot see because it scans top-level `*.zip` only, and deletes them only after the new database is in place. Every failure path calls `Pending::rollback`. |

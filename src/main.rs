@@ -135,10 +135,12 @@ fn main() -> Result<()> {
                 y: ys.trim().parse().context("Y in --at is not an integer")?,
             };
 
-            let source = chibipop::text::ocr::OcrTextSource::new(tiles, false)?;
+            let capture = probe_capture_size();
+            let source =
+                chibipop::text::ocr::OcrTextSource::new(tiles, false, capture, true, "ja")?;
             let region_was_default = region.is_none();
             let region = match region {
-                None => chibipop::text::layout::region_around(cursor, false),
+                None => chibipop::text::layout::region_around(cursor, false, capture),
                 Some(spec) => {
                     let (ws, hs) = spec
                         .split_once(',')
@@ -177,7 +179,7 @@ fn main() -> Result<()> {
                         dump_bmp(path, &cap.buf, cap.w, cap.h)?;
                         println!("dump:    wrote {}x{} to {}", cap.w, cap.h, path.display());
                     }
-                    let resolved = chibipop::text::layout::resolve(&lines, cursor);
+                    let resolved = chibipop::text::layout::resolve(&lines, cursor, true);
                     (lines, resolved, cap.source, cap.dxgi_error)
                 }
                 None => {
@@ -301,7 +303,13 @@ fn main() -> Result<()> {
         Command::Watch { dict, rules, tiles } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
-            let source = chibipop::text::ocr::OcrTextSource::new(tiles, false)?;
+            let source = chibipop::text::ocr::OcrTextSource::new(
+                tiles,
+                false,
+                chibipop::text::layout::CaptureSize::default(),
+                true,
+                "ja",
+            )?;
             let dictionary = SqliteDictionary::open(&dict)?;
             let engine = LookupEngine::new(Deconjugator::new(load_rules(&rules)?));
 
@@ -473,6 +481,20 @@ fn file_name(path: &Path) -> String {
 /// Beside the running exe.
 fn default_config_path() -> PathBuf {
     chibipop::paths::beside_exe("chibipop.toml")
+}
+
+/// Probe's box, from config.
+fn probe_capture_size() -> chibipop::text::layout::CaptureSize {
+    match chibipop::config::load_or_create(&default_config_path()) {
+        Ok(cfg) => chibipop::text::layout::CaptureSize {
+            w: cfg.ocr.capture_width,
+            h: cfg.ocr.capture_height,
+        },
+        Err(e) => {
+            eprintln!("chibipop: config unreadable, using the default capture size: {e:#}");
+            chibipop::text::layout::CaptureSize::default()
+        }
+    }
 }
 
 /// Keeps a window painted.
