@@ -428,7 +428,24 @@ construction, not by convention.)*
 The **OCR language** dropdown is the first row of the **OCR / Debug** group.
 
 Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — that is the test of
-"no restart", not a proxy — then hover text in the new language and confirm it resolves.
+"no restart", not a proxy — then hover the **same Japanese text you were resolving a moment ago**
+and confirm it now resolves **nothing at all**. Switch back, Apply again, and confirm it resolves
+again. That pair — Japanese stopping, then returning — is what discriminates "the engine really
+swapped" from "the engine did not"; the unchanged PID alone does not, because a reload that
+silently kept the old engine also leaves the PID alone.
+
+> [!warning] Do not confirm the swap by hovering text in the **new** language — it can never resolve
+> Lookup is an exact match on a Japanese headword against the `term` table
+> (`src/lookup/sqlite.rs:53`, `WHERE surface = ?1`), and the shipped dictionaries are Japanese. So
+> with `en-US` selected, the recognizer can read a line of English perfectly and **still raise no
+> popup**, because there is no row to match — the OCR half succeeded and the lookup half had
+> nothing to do. A positive resolve in the new language would require a dictionary **for that
+> language**, which chibipop neither ships nor builds.
+>
+> This step used to read "hover text in the new language and confirm it resolves." It could only
+> ever be failed, and the next person to clear this debt would have seen nothing and filed a false
+> regression against a feature that was working. The 2026-08-11 run silently substituted the
+> negative observable instead of following the step as written, which is how the defect surfaced.
 
 - The dropdown lists the installed recognizers — the list comes from
   `OcrEngine::AvailableRecognizerLanguages()` — **plus the configured one when it is not among
