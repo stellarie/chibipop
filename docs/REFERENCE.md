@@ -212,9 +212,14 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**416 tests** across six targets.
+**710 tests** across six targets, one of them ignored. Re-measured
+2026-08-11.
 
-**58 tests.**
+Tier 0 of [`REGRESSION.md`](REGRESSION.md) is the authority on this number
+and on what a change to it means — a *lower* total is the thing to explain.
+Keep the two in step, in the same commit that moves either. This page read
+**416**: it was missed on both of the v0.7.0 round's re-baselines
+(670 → 698 → 710) and on every one before them.
 
 **After any large change, work through [`REGRESSION.md`](REGRESSION.md)** — a
 cheapest-first checklist: the automated gate, then what can be verified
