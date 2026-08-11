@@ -567,4 +567,7 @@ question applies to every other `eprintln!` on the startup path.
 `startup_language` — the keep/substitute decision — is pure and unit-tested for all four
 outcomes, including that the default language never substitutes itself and never queries WinRT.
 The wiring (that `worker_main` builds with the language the decision returned) is **not** tested;
-it needs a real `OcrEngine`. Tier 1 §1.15 is where that gets exercised by hand.
+it needs a real `OcrEngine`. Tier 1 **§1.16** is where that gets exercised by hand, and it has
+**not been run** — so as of 2026-08-11 the wiring is witnessed by nothing at all. This line used
+to point at §1.15, which does not exercise the startup path: §1.15 is the *reload* path, and no
+step for the startup fallback existed anywhere until §1.16 was written on 2026-08-11.
