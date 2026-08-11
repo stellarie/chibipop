@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Width cap, % of monitor.
@@ -180,6 +181,9 @@ fn default_scroll_popup() -> bool {
 pub struct DictionariesConfig {
     /// Substrings, priority order.
     pub display_order: Vec<String>,
+    /// Per language, ordered.
+    #[serde(default)]
+    pub per_language: BTreeMap<String, Vec<String>>,
 }
 
 /// `[ocr]`. Optional section.
@@ -342,6 +346,7 @@ impl Default for Config {
             },
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
+                per_language: BTreeMap::new(),
             },
             ocr: OcrConfig::default(),
             debug: DebugConfig::default(),
@@ -1202,5 +1207,38 @@ mod tests {
         let c = load_or_create(&p).unwrap();
         assert!(!c.trigger.per_character_lookup);
         assert_eq!("ja", c.ocr.language);
+    }
+
+    #[test]
+    fn per_language_defaults_to_empty() {
+        assert!(Config::default().dictionaries.per_language.is_empty());
+    }
+
+    #[test]
+    fn a_config_without_per_language_still_loads() {
+        let p = tmp("no_per_language");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[ocr]\nmax_ocr_passes = 1\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        assert!(c.dictionaries.per_language.is_empty());
+        assert_eq!(vec!["大辞林".to_string()], c.dictionaries.display_order);
+    }
+
+    #[test]
+    fn per_language_round_trips_through_toml() {
+        let p = tmp("per_language_round_trip");
+        let mut c = Config::default();
+        c.dictionaries.per_language.insert(
+            "zh-Hans-CN".to_string(),
+            vec!["中日大辞典".to_string()],
+        );
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(c.dictionaries.per_language, back.dictionaries.per_language);
     }
 }
