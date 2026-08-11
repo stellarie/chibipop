@@ -475,6 +475,50 @@ silently kept the old engine also leaves the PID alone.
   that guard fails the suite; what is still unwitnessed by any test is the wiring around it — that
   `apply_settings` is handed the language the user picked, and that a swap really rebuilds.
 
+### 1.16 The startup language fallback — **added 2026-08-11, not run**
+
+**Nothing witnesses this path today.** `startup_language` is unit-tested as a pure function, and
+its wiring at `src/app.rs:1557-1565` is not; the behaviour is described only in BACKLOG 13. It
+decides whether a user whose language pack was uninstalled between runs gets a working app or a
+silent no-op, so leaving it unexercised is not a small gap.
+
+1. Quit chibipop (`Get-Process chibipop` returns nothing).
+2. In `chibipop.toml` beside the exe, set `language` under `[ocr]` to a tag with **no pack
+   installed on this machine** — `ko` on the 2026-08-11 machine, which had only `ja` and `en-US`.
+   Confirm the tag really is absent first: 1.15's dropdown renders an uninstalled tag as
+   `<tag> (not installed)`.
+3. Launch **from a terminal**, not by double-click:
+
+```bash
+./target/release/chibipop.exe run
+```
+
+- **Expect on stderr, once, before the tray icon appears:**
+  `chibipop: no ko OCR recogniser installed; starting with ja` (`src/app.rs:1561`).
+- **Expect Japanese lookup to work.** That is the actual acceptance, not the message. Before this
+  fallback, `OcrTextSource::new` returned `Err`, `run` bailed, and a double-clicked chibipop did
+  **nothing at all** — the error went to a hidden console and a double-click launch never reaches
+  the settings window, so there was no in-app way back.
+- Restore the language afterwards, in Settings or in the file.
+
+**Launching from a terminal is load-bearing, not convenience.** `main` calls `console::hide()`
+unconditionally, but `own_console` returns a window only when this process is the console's *sole*
+owner (`GetConsoleProcessList != 1` → `None`, `src/ui/console.rs:13-30`), so a shell's console is
+left alone and stderr stays readable. A double-click owns its console and hides it — which is
+precisely the condition that makes this whole class of failure invisible in normal use. BACKLOG 13,
+limit 3: the fallback fixes "does nothing", not "says nothing".
+
+- **This is a third message, and it is not either of 1.15's.** `installed; starting with` is the
+  startup substitution; the two lines in 1.15's table are reload-path only. Confusing them means
+  reporting on a path you did not test.
+- **Settings will show the tag you configured, not the one that is running** — the dropdown reads
+  `ko (not installed)` while OCR runs `ja`. `from_config` seeds it from `cfg.ocr.language`
+  (`src/settings.rs:254`) and the substitution is a local in the worker thread that never writes
+  the config back. Expected, not a failure.
+- **Not covered by this step:** a language that *is* listed but whose engine will not build. That
+  still aborts startup exactly as before, and cannot be fixed without splitting
+  `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
+
 ---
 
 ## Tier 2 — mostly automatable (~5 min)
