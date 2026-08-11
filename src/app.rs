@@ -771,7 +771,16 @@ pub fn run(
     println!("chibipop: right-click the tray icon to change mode or quit.");
 
     let mut next_id: u64 = 0;
-    let mut latest_dispatched = RequestId(0);
+    // Spawned before dicts existed.
+    let (order, restrict) = resolve_dict_filter(&cfg, &dicts);
+    live.present_cfg.dict_order = order;
+    live.present_cfg.restrict_to_order = restrict;
+    next_id += 1;
+    let mut latest_dispatched = RequestId(next_id);
+    let _ = trigger_tx.send(Trigger {
+        kind: TriggerKind::Reload(Box::new(worker_settings(&live))),
+        id: latest_dispatched,
+    });
     // Visible just before the Hide.
     //
     // Cleared by hides elsewhere.
@@ -1148,6 +1157,10 @@ pub fn run(
                                 }
                             } else {
                                 live = derive(&updated);
+                                let (order, restrict) =
+                                    resolve_dict_filter(&updated, &dicts);
+                                live.present_cfg.dict_order = order;
+                                live.present_cfg.restrict_to_order = restrict;
                                 apply_live(&live, &popup, overlay.as_ref(),
                                            anki_button.as_ref(), &mut theme,
                                            &capture_guard_active);
@@ -2359,6 +2372,22 @@ fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -
     }
 }
 
+/// The list this language uses.
+fn resolve_dict_filter(cfg: &Config, dicts: &[DictInfo]) -> (Vec<String>, bool) {
+    let listed = cfg.dictionaries.per_language.get(&cfg.ocr.language);
+    let Some(list) = listed.filter(|l| !l.is_empty()) else {
+        return (cfg.dictionaries.display_order.clone(), false);
+    };
+    let any = dicts
+        .iter()
+        .any(|d| crate::present::dict_order_rank(&d.name, list).is_some());
+    if any {
+        (list.clone(), true)
+    } else {
+        (cfg.dictionaries.display_order.clone(), false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2770,5 +2799,52 @@ mod tests {
                 "row {y} escaped the sticky region",
             );
         }
+    }
+
+    fn di(id: i64, name: &str) -> crate::present::DictInfo {
+        crate::present::DictInfo { dict_id: id, name: name.to_string() }
+    }
+
+    #[test]
+    fn the_active_language_selects_its_own_list() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans-CN".to_string();
+        cfg.dictionaries.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
+        let (order, restrict) = resolve_dict_filter(&cfg, &dicts);
+        assert_eq!(vec!["中日大辞典".to_string()], order);
+        assert!(restrict);
+    }
+
+    #[test]
+    fn a_language_with_no_list_falls_back_to_display_order() {
+        let cfg = Config::default();
+        let dicts = [di(1, "大辞林　第四版")];
+        let (order, restrict) = resolve_dict_filter(&cfg, &dicts);
+        assert_eq!(cfg.dictionaries.display_order, order);
+        assert!(!restrict, "no entry must not restrict");
+    }
+
+    /// A typo must not blank it.
+    #[test]
+    fn a_list_matching_nothing_installed_falls_back() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["Typoo".to_string()]);
+        let dicts = [di(1, "大辞林　第四版")];
+        let (_, restrict) = resolve_dict_filter(&cfg, &dicts);
+        assert!(!restrict, "all patterns missed, so do not restrict");
+    }
+
+    #[test]
+    fn an_empty_list_does_not_restrict() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert("ja".to_string(), Vec::new());
+        let dicts = [di(1, "大辞林　第四版")];
+        let (_, restrict) = resolve_dict_filter(&cfg, &dicts);
+        assert!(!restrict);
     }
 }
