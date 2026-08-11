@@ -488,6 +488,18 @@ silently kept the old engine also leaves the PID alone.
   dropdown displays each language's **display name** while carrying its BCP-47 **tag** in a side
   table, so a display name can never reach `ocr.language` in the TOML — the appended row stores
   the bare tag, not the `(not installed)` label.
+- **Apply rewrites a hand-edited tag to the one Windows reports. That is expected — do not file
+  it.** Since tags match by subtag boundary, `language = "zh-Hans"` selects the installed
+  `zh-Hans-CN` row (`src/ui/settings_window.rs:1794-1797`); `read` then returns **the row's** tag,
+  not the string that was configured (`:1999-2009`), `apply_to` copies it into `ocr.language`
+  (`src/settings.rs:292`), and Apply writes the file with no compare-against-old
+  (`src/app.rs:1162`). So pressing Apply **for any unrelated setting** rewrites `chibipop.toml` to
+  `language = "zh-Hans-CN"`. A bare `zh` resolves the same way, to the **first** matching row in
+  the order `AvailableRecognizerLanguages()` returns — nothing sorts that list — which was
+  `zh-Hans-CN` on the 2026-08-11 machine. The file ends up holding the tag Windows actually
+  reports, which is the intended self-healing. What *would* be a regression is the rewrite landing
+  on a **different language** (`ja` becoming `ko`), or a tag being rewritten while OCR keeps using
+  the old one.
 - If a language pack is removed while selected, lookups must keep working with the **previous**
   recognizer rather than breaking. The engine is rebuilt on the worker thread, and on failure the
   working engine is kept. **Losing OCR entirely is the failure this catches.** There are two
