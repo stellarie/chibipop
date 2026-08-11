@@ -423,6 +423,7 @@ impl Config {
         crate::present::PresentConfig {
             dict_order: self.dictionaries.display_order.clone(),
             summary_chars: self.popup.summary_chars,
+            restrict_to_order: false,
         }
     }
 }
