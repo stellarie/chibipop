@@ -354,27 +354,51 @@ refuse. Before this branch the cached value kept its startup setting for the lif
 so turning exclusion off left the guard off with it, and the popup contaminated the very lookup it
 was displaying.
 
-> [!note] 1.14 and 1.15 were added 2026-08-11 and **partially run the same day**
-> They are the acceptance checks for the per-character-retrigger / OCR-language branch. Both are
-> *live-apply* checks, the class no unit test can reach: the unit tests prove the new freeze rect
-> and the new engine are **computed**, never that a running instance started obeying them.
+> [!note] 1.14–1.16 were added 2026-08-11; 1.14 and 1.15 ran **in part**, 1.16 **not at all**
+> They are the acceptance checks for the per-character-retrigger / OCR-language branch. All three
+> are *live-apply* checks, the class no unit test can reach: the unit tests prove the new freeze
+> rect and the new engine are **computed**, never that a running instance started obeying them.
+>
+> **Read the pass list as the whole of what was covered.** Anything in 1.14–1.16 not named below as
+> passing is still owed, whether or not the NOT-list bothers to repeat it. This callout was
+> previously read the other way round — as if the NOT-list were the complete debt — which quietly
+> promoted everything it forgot to mention.
 >
 > **Run on 2026-08-11, horizontal text, one machine (100% DPI, `ja` + `en-US` installed):**
-> - **1.14 core — passes.** With the toggle on and mode Live, hovering 経 of 経験人数 showed 経
->   entries; moving one character right to 験 changed the popup to 験〔げん〕, freq 42368, without
->   leaving the line.
-> - **1.15 — passes, both directions.** Switching Japanese → English (United States) → Japanese
->   left the **PID unchanged** each time (18080 throughout, identical start time), persisted to
->   `chibipop.toml`, and the engine genuinely swapped: with `en-US` active the same Japanese text
->   stopped resolving entirely, and resolved again on switching back.
+> - **1.14's retrigger, with the toggle ON — passes.** With the toggle on and mode Live, hovering
+>   経 of 経験人数 showed 経 entries; moving one character right to 験 changed the popup to
+>   験〔げん〕, freq 42368, without leaving the line.
+> - **1.14's no-restart property — passes, for the enabling Apply only.** The Apply that turned the
+>   toggle on left the **PID unchanged** (18080, identical start time). That is a real observation:
+>   1.14's PID bullet says "across either Apply" and this discharges one of the two. The other
+>   Apply is in the NOT-list below, because it was never pressed.
+> - **1.15's switch path — passes, both directions.** Switching Japanese → English (United States)
+>   → Japanese left the **PID unchanged** each time (18080 throughout, identical start time),
+>   persisted to `chibipop.toml`, and the engine genuinely swapped: with `en-US` active the same
+>   Japanese text stopped resolving entirely, and resolved again on switching back.
 > - The dropdown listed exactly the two installed recognizers by display name, and the corrected
->   caption rendered on one line, unclipped.
+>   caption rendered on one line, unclipped. The settings window measured 486×633, **unchanged from
+>   v0.6.0** — which is what BACKLOG 11's shipped row requires, the checkbox having been moved to
+>   OCR / Debug precisely so the window would not grow.
 >
 > **NOT exercised, and still owed — do not read these as passing:**
+> - **1.14's toggle-OFF half was never performed.** The procedure's second half — "Turn the setting
+>   off, press Apply, and repeat: the popup must now hold on 経験" — was not run. Nothing has
+>   witnessed the toggle *stopping* the retrigger, only starting it, and that is the direction
+>   "default-off = default-unchanged" actually rests on. It also carries the second of the two
+>   Applies in 1.14's PID bullet.
+> - **1.14's already-visible-popup property was not witnessed.** The run pressed Apply *first* and
+>   hovered afterwards, so every popup it saw was raised under the new setting. The claim that it
+>   "applies to an **already-visible** popup the moment Apply lands — you do not need a fresh lookup
+>   to see it take effect" is therefore unverified. **The distinction matters:** a PID *was*
+>   observed across that Apply and it *was* unchanged, so this is not a missing PID. What is missing
+>   is the ordering — hover first, leave the popup on screen, *then* Apply, and watch that same
+>   popup start retriggering without a fresh lookup.
 > - the **tategaki** case in 1.14, which is the path this branch broke and repaired;
-> - that the toggle is inert in hold-key mode;
+> - that the toggle is inert in hold-key mode, and that the checkbox greys out with it;
 > - that drill-down and wheel-scroll still work with the toggle on, in either orientation;
-> - 1.15's missing-recognizer path, and the startup fallback, which need a pack uninstalled.
+> - 1.15's missing-recognizer path, and **the whole of 1.16** — both need a machine with a language
+>   pack absent.
 
 ### 1.14 Per-character retrigger
 
