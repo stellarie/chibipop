@@ -134,9 +134,10 @@ struct TcItemW {
 }
 
 /// What a rebuild disables.
-const WHILE_BUSY: [i32; 13] = [
+const WHILE_BUSY: [i32; 14] = [
     ID_APPLY,
     ID_QUIT,
+    ID_OCR_LANG,
     ID_DICTS,
     ID_DICT_UP,
     ID_DICT_DOWN,
@@ -650,12 +651,15 @@ unsafe fn update_list_buttons(hwnd: HWND) {
         let divider = |i: isize| list_row(dicts, i).as_deref() == Some(DICT_DIVIDER);
         let picked = cur >= 0 && !divider(cur);
         let can_move = |t: isize| picked && t >= 0 && t < count && !divider(t);
+        // Never search nothing.
+        let searched = (0..count).position(&divider).unwrap_or(count.max(0) as usize);
+        let can_toggle = picked && !(searched == 1 && cur == 0);
         // Focus must not be orphaned.
         let focused = GetFocus();
         for (id, list, enable) in [
             (ID_DICT_UP, dicts, can_move(cur - 1)),
             (ID_DICT_DOWN, dicts, can_move(cur + 1)),
-            (ID_DICT_TOGGLE, dicts, picked),
+            (ID_DICT_TOGGLE, dicts, can_toggle),
             (ID_DICT_REMOVE, dicts, picked),
             (ID_FREQ_REMOVE, freqs, freq_cur >= 0),
         ] {
@@ -1043,6 +1047,10 @@ impl SettingsWindow {
             // the window opened with no way to accept anything. Measuring the
             // content means that cannot recur, at any DPI or font size.
             let content_h = win.build(form, stale)?;
+            // Both sides from one vector.
+            if let Some(tag) = win.selected_language() {
+                win.staged.borrow_mut().dict_list_language = tag;
+            }
             // Sizes AND shows - see `fit_to` for why showing cannot go
             // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
@@ -1568,8 +1576,9 @@ impl SettingsWindow {
     /// Stage whatever was picked.
     unsafe fn add_picked(&self) {
         // SAFETY: `pick_archives` owns every buffer it hands the dialog;
-        // `target.list_id()` names a live child of `self.hwnd`, and the
-        // string each `LB_ADDSTRING` copies outlives that call.
+        // `id` names a live child of `self.hwnd`, and the string each
+        // `LB_ADDSTRING` copies outlives that call. `list_rows` and
+        // `fill_dict_list` each state their own contract.
         unsafe {
             let picked = pick_archives(self.hwnd);
             for path in picked {
@@ -1590,6 +1599,18 @@ impl SettingsWindow {
                 let Ok(list) = GetDlgItem(Some(self.hwnd), id) else {
                     continue;
                 };
+                let rebuilt = (id == ID_DICTS)
+                    .then(|| list_rows(self.hwnd, ID_DICTS))
+                    .flatten()
+                    .map(|rows| rows_with_added(&rows, &name));
+                // LB_SETCURSEL scrolls it in.
+                if let Some(rows) = rebuilt {
+                    fill_dict_list(list, &rows);
+                    if let Some(at) = rows.iter().position(|r| *r == name) {
+                        SendMessageW(list, LB_SETCURSEL, Some(WPARAM(at)), None);
+                    }
+                    continue;
+                }
                 SendMessageW(list, LB_ADDSTRING, None, Some(LPARAM(wide(&name).as_ptr() as isize)));
                 if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
                     SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
@@ -2325,9 +2346,20 @@ fn split_dict_rows(rows: &[String]) -> (Vec<String>, Vec<String>) {
     }
 }
 
+/// Add above the divider.
+fn rows_with_added(rows: &[String], name: &str) -> Vec<String> {
+    let (mut active, excluded) = split_dict_rows(rows);
+    active.push(name.to_string());
+    dict_rows(&active, &excluded)
+}
+
 /// Move one row across.
 fn toggle_dict(active: &mut Vec<String>, excluded: &mut Vec<String>, name: &str) {
     if let Some(i) = active.iter().position(|n| n == name) {
+        // Never search nothing.
+        if active.len() == 1 {
+            return;
+        }
         excluded.push(active.remove(i));
     } else if let Some(i) = excluded.iter().position(|n| n == name) {
         active.push(excluded.remove(i));
@@ -2965,6 +2997,44 @@ mod tests {
         toggle_dict(&mut active, &mut excluded, "A");
         assert_eq!(vec!["B".to_string(), "A".to_string()], active);
         assert!(excluded.is_empty());
+    }
+
+    /// Never search nothing.
+    #[test]
+    fn the_last_searched_row_will_not_cross() {
+        let mut active = vec!["A".to_string()];
+        let mut excluded = vec!["B".to_string()];
+        toggle_dict(&mut active, &mut excluded, "A");
+        assert_eq!(vec!["A".to_string()], active);
+        assert_eq!(vec!["B".to_string()], excluded);
+    }
+
+    #[test]
+    fn re_including_still_works_with_one_searched_row() {
+        let mut active = vec!["A".to_string()];
+        let mut excluded = vec!["B".to_string()];
+        toggle_dict(&mut active, &mut excluded, "B");
+        assert_eq!(vec!["A".to_string(), "B".to_string()], active);
+        assert!(excluded.is_empty());
+    }
+
+    // ---- adding ----
+
+    /// Added rows are searched.
+    #[test]
+    fn an_added_row_lands_above_the_divider() {
+        let rows = dict_rows(&["A".to_string()], &["B".to_string()]);
+        assert_eq!(
+            vec!["A".to_string(), "C".to_string(), DICT_DIVIDER.to_string(),
+                 "B".to_string()],
+            rows_with_added(&rows, "C"),
+        );
+    }
+
+    #[test]
+    fn an_added_row_needs_no_divider_when_none_is_excluded() {
+        let rows = vec!["A".to_string()];
+        assert_eq!(vec!["A".to_string(), "C".to_string()], rows_with_added(&rows, "C"));
     }
 
     // ---- re-scoping ----
