@@ -2046,6 +2046,7 @@ impl SettingsWindow {
                 exclude_from_capture: checked(ID_EXCLUDE),
                 dict_names,
                 dict_excluded: template.dict_excluded.clone(),
+                dict_list_language: template.dict_list_language.clone(),
                 per_language: template.per_language.clone(),
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
                                      template.max_ocr_passes as i64) as u8,

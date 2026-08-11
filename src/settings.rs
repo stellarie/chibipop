@@ -30,6 +30,7 @@ pub struct SettingsForm {
     /// Live names, not substrings.
     pub dict_names: Vec<String>,
     pub dict_excluded: Vec<String>,
+    pub dict_list_language: String,
     pub per_language: BTreeMap<String, Vec<String>>,
     pub max_ocr_passes: u8,
     pub prefer_vertical: bool,
@@ -132,14 +133,26 @@ pub fn shown_name(source: &Path) -> Option<String> {
     source.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
+/// Split still trustworthy?
+fn is_scoped(form: &SettingsForm) -> bool {
+    form.dict_list_language == form.ocr_language
+        && (form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty())
+}
+
 /// Show the library's lists.
 ///
 /// Unreadable files are listed.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
     form.freq_names = named(lib, Kind::Frequency);
+    let to_excluded = is_scoped(&form);
     // Built first, then the rest.
     for name in named(lib, Kind::Term) {
-        if !form.dict_names.contains(&name) {
+        if form.dict_names.contains(&name) || form.dict_excluded.contains(&name) {
+            continue;
+        }
+        if to_excluded {
+            form.dict_excluded.push(name);
+        } else {
             form.dict_names.push(name);
         }
     }
@@ -268,6 +281,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         exclude_from_capture: cfg.popup.exclude_from_capture,
         dict_names,
         dict_excluded,
+        dict_list_language: cfg.ocr.language.clone(),
         per_language: cfg.dictionaries.per_language.clone(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
@@ -336,10 +350,8 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.dictionaries.display_order =
         keyed_names(&full, &form.unreadable, &cfg.dictionaries.display_order);
 
-    let scoped =
-        form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty();
     let mut per_language = form.per_language.clone();
-    if scoped {
+    if is_scoped(form) {
         let existing = cfg
             .dictionaries
             .per_language
@@ -736,6 +748,34 @@ mod tests {
             vec!["中日大辞典".to_string()],
             out.dictionaries.per_language["zh-Hans-CN"],
             "the other language's list must survive",
+        );
+    }
+
+    /// Merge must not undo scoping.
+    #[test]
+    fn with_library_keeps_the_exclusion_scoped() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = with_library(from_config(&cfg, &dicts()), &library());
+        assert!(!form.dict_names.iter().any(|n| n.contains("Jitendex")));
+        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+    }
+
+    /// A stale list must not win.
+    #[test]
+    fn apply_to_does_not_write_a_stale_dict_list_language() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_language = "zh-Hans-CN".to_string();
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["中日大辞典".to_string()],
+            out.dictionaries.per_language["zh-Hans-CN"],
+            "a stale dict list must not overwrite the real one",
         );
     }
 
