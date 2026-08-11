@@ -38,14 +38,14 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **710** total across **6** targets, 1 ignored (was 698; re-measured 2026-08-11) |
+| Rust tests | **all green**, **726** total across **6** targets, 1 ignored (was 710; re-measured 2026-08-11) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
 **The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total; **710** is what this machine
+silently not running must. CI asserts `≥ 400` and prints the total; **726** is what this machine
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
 
@@ -64,6 +64,13 @@ could not be reached without a real `OcrEngine`), four for `startup_language`, o
 inside an existing test — `recogniser_available` on an upper-cased tag — which pins case folding
 without moving the count. The clippy counts did **not** move here either: still 3 raw and 0 on the
 bin target, at the same three sites.
+
+**710 → 726 is a third re-baseline in the same round, also not a finding.** The BCP-47 tag-matching
+fix added 16 tests and removed none: nine for `tag_matches` in `src/text/ocr.rs` (equality, case
+folding, either side more specific, a differing script, symmetry, and the `zh-Han` vs `zh-Hans-CN`
+boundary that a raw `starts_with` would have got wrong) and seven for `language_choices` /
+`language_index` in `src/ui/settings_window.rs`, against a four-language installed list. The clippy
+counts did **not** move here either: still 3 raw and 0 on the bin target, at the same three sites.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no

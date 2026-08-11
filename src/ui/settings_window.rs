@@ -5,6 +5,7 @@
 
 use crate::library::Kind;
 use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+use crate::text::ocr::tag_matches;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -501,7 +502,7 @@ fn language_choices(installed: Vec<(String, String)>, configured: &str)
     -> Vec<(String, String)> {
     let mut out = installed;
     if !configured.is_empty()
-        && !out.iter().any(|(_, tag)| tag.eq_ignore_ascii_case(configured))
+        && !out.iter().any(|(_, tag)| tag_matches(tag, configured))
     {
         out.push((format!("{configured} (not installed)"), configured.to_string()));
     }
@@ -513,7 +514,7 @@ fn language_index(rows: &[(String, String)], configured: &str) -> Option<usize> 
     if configured.is_empty() {
         return None;
     }
-    rows.iter().position(|(_, tag)| tag.eq_ignore_ascii_case(configured))
+    rows.iter().position(|(_, tag)| tag_matches(tag, configured))
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -2663,5 +2664,67 @@ mod tests {
     #[test]
     fn nothing_is_selected_when_no_language_is_configured() {
         assert_eq!(None, language_index(&installed(), ""));
+    }
+
+    fn installed_four() -> Vec<(String, String)> {
+        vec![
+            ("English (United States)".to_string(), "en-US".to_string()),
+            ("Japanese".to_string(), "ja".to_string()),
+            ("Chinese (Simplified)".to_string(), "zh-Hans-CN".to_string()),
+            ("Chinese (Traditional)".to_string(), "zh-Hant-TW".to_string()),
+        ]
+    }
+
+    #[test]
+    fn a_configured_prefix_is_not_appended_as_a_phantom_row() {
+        assert_eq!(installed_four(), language_choices(installed_four(), "zh-Hans"));
+    }
+
+    #[test]
+    fn a_configured_prefix_selects_the_specific_installed_row() {
+        let rows = language_choices(installed_four(), "zh-Hans");
+        assert_eq!(Some(2), language_index(&rows, "zh-Hans"));
+        assert_eq!("zh-Hans-CN", rows[2].1);
+    }
+
+    #[test]
+    fn a_more_specific_configured_tag_selects_the_bare_row() {
+        let rows = language_choices(installed_four(), "ja-JP");
+        assert_eq!(installed_four(), rows);
+        assert_eq!(Some(1), language_index(&rows, "ja-JP"));
+    }
+
+    /// FIX 1 behaviour, still live.
+    #[test]
+    fn a_genuinely_absent_language_is_still_appended_and_read_back() {
+        let rows = language_choices(installed_four(), "ko");
+        assert_eq!(5, rows.len());
+        assert_eq!(("ko (not installed)".to_string(), "ko".to_string()), rows[4]);
+        assert_eq!(Some(4), language_index(&rows, "ko"));
+    }
+
+    /// Boundary, not starts_with.
+    #[test]
+    fn a_partial_subtag_is_treated_as_absent() {
+        let rows = language_choices(installed_four(), "zh-Han");
+        assert_eq!(5, rows.len());
+        assert_eq!(Some(4), language_index(&rows, "zh-Han"));
+        assert_eq!("zh-Han", rows[4].1);
+    }
+
+    /// First match wins; arbitrary.
+    #[test]
+    fn an_ambiguous_prefix_picks_the_first_installed_match() {
+        let rows = language_choices(installed_four(), "zh");
+        assert_eq!(installed_four(), rows);
+        assert_eq!(Some(2), language_index(&rows, "zh"));
+        assert_eq!("zh-Hans-CN", rows[2].1);
+    }
+
+    #[test]
+    fn a_configured_prefix_matches_whatever_its_case() {
+        let rows = language_choices(installed_four(), "ZH-hans");
+        assert_eq!(installed_four(), rows);
+        assert_eq!(Some(2), language_index(&rows, "ZH-hans"));
     }
 }

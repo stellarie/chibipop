@@ -180,6 +180,18 @@ impl SettingsSnapshot {
     }
 }
 
+fn extends_at_boundary(long: &str, short: &str) -> bool {
+    let (long, short) = (long.as_bytes(), short.as_bytes());
+    long.len() >= short.len()
+        && long[..short.len()].eq_ignore_ascii_case(short)
+        && (long.len() == short.len() || long[short.len()] == b'-')
+}
+
+/// Subtag-boundary tag match.
+pub fn tag_matches(reported: &str, wanted: &str) -> bool {
+    extends_at_boundary(reported, wanted) || extends_at_boundary(wanted, reported)
+}
+
 /// Is this recogniser installed?
 pub fn recogniser_available(tag: &str) -> bool {
     let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
@@ -187,7 +199,7 @@ pub fn recogniser_available(tag: &str) -> bool {
     };
     langs.into_iter().any(|l| {
         l.LanguageTag()
-            .map(|t| t.to_string().eq_ignore_ascii_case(tag))
+            .map(|t| tag_matches(&t.to_string(), tag))
             .unwrap_or(false)
     })
 }
@@ -627,5 +639,67 @@ mod tests {
             return;
         };
         assert_eq!(langs.Size().unwrap_or(0) as usize, installed_recognisers().len());
+    }
+
+    #[test]
+    fn an_identical_tag_matches() {
+        assert!(tag_matches("ja", "ja"));
+        assert!(tag_matches("zh-Hans-CN", "zh-Hans-CN"));
+    }
+
+    #[test]
+    fn a_tag_matches_whatever_its_case() {
+        assert!(tag_matches("en-US", "EN-us"));
+        assert!(tag_matches("ZH-HANS-CN", "zh-hans"));
+    }
+
+    #[test]
+    fn a_more_specific_reported_tag_matches() {
+        assert!(tag_matches("zh-Hans-CN", "zh-Hans"));
+        assert!(tag_matches("en-US", "en"));
+        assert!(tag_matches("zh-Hans-CN", "zh"));
+    }
+
+    #[test]
+    fn a_more_specific_wanted_tag_matches() {
+        assert!(tag_matches("ja", "ja-JP"));
+        assert!(tag_matches("zh", "zh-Hant-TW"));
+    }
+
+    #[test]
+    fn a_different_script_does_not_match() {
+        assert!(!tag_matches("zh-Hant-TW", "zh-Hans"));
+        assert!(!tag_matches("zh-Hans-CN", "zh-Hant"));
+    }
+
+    /// Boundary, not starts_with.
+    #[test]
+    fn a_partial_subtag_does_not_match() {
+        assert!(!tag_matches("zh-Hans-CN", "zh-Han"));
+        assert!(!tag_matches("zh-Han", "zh-Hans-CN"));
+        assert!(!tag_matches("jav", "ja"));
+        assert!(!tag_matches("ja", "jav"));
+    }
+
+    #[test]
+    fn an_unrelated_tag_does_not_match() {
+        assert!(!tag_matches("ja", "ko"));
+        assert!(!tag_matches("en-US", "ja"));
+    }
+
+    #[test]
+    fn an_empty_tag_matches_nothing_real() {
+        assert!(!tag_matches("ja", ""));
+        assert!(!tag_matches("", "ja"));
+    }
+
+    #[test]
+    fn matching_is_symmetric() {
+        let tags = ["ja", "ja-JP", "en", "en-US", "zh", "zh-Hans", "zh-Hans-CN", "zh-Hant-TW"];
+        for a in tags {
+            for b in tags {
+                assert_eq!(tag_matches(a, b), tag_matches(b, a), "{a} vs {b}");
+            }
+        }
     }
 }
