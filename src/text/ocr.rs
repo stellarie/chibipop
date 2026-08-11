@@ -195,6 +195,9 @@ pub fn tag_matches(reported: &str, wanted: &str) -> bool {
 
 /// Is this recogniser installed?
 pub fn recogniser_available(tag: &str) -> bool {
+    if !Language::IsWellFormed(&HSTRING::from(tag)).unwrap_or(false) {
+        return false;
+    }
     let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
         return false;
     };
@@ -724,5 +727,13 @@ mod tests {
         assert!(!tag_matches("ja", "-ja"));
         assert!(!tag_matches("-ja", "ja"));
         assert!(!tag_matches("en-US", "-US"));
+    }
+
+    /// True on any machine.
+    #[test]
+    fn a_malformed_tag_is_never_available() {
+        for t in ["ja-", "ja--JP", "ja--", "ja---", "JA--jp", "-ja", "-", "", "ja-JP-"] {
+            assert!(!recogniser_available(t), "{t:?}");
+        }
     }
 }

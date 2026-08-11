@@ -212,7 +212,7 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**729 tests** across six targets, one of them ignored. Re-measured
+**730 tests** across six targets, one of them ignored. Re-measured
 2026-08-12.
 
 Tier 0 of [`REGRESSION.md`](REGRESSION.md) is the authority on this number
@@ -221,7 +221,8 @@ Keep the two in step, in the same commit that moves either. This page was
 missed on all three of the v0.7.0 round's earlier re-baselines
 (670 → 698 → 710 → 726), and on every one before them: it read **416**
 until the first two were caught up, then **710** while Tier 0 already
-read **726**. The fourth, 726 → 729, moved both pages at once.
+read **726**. The fourth, 726 → 729, moved both pages at once, as did the
+fifth, 729 → 730.
 
 **After any large change, work through [`REGRESSION.md`](REGRESSION.md)** — a
 cheapest-first checklist: the automated gate, then what can be verified
