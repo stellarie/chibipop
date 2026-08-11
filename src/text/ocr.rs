@@ -184,7 +184,8 @@ fn extends_at_boundary(long: &str, short: &str) -> bool {
     let (long, short) = (long.as_bytes(), short.as_bytes());
     long.len() >= short.len()
         && long[..short.len()].eq_ignore_ascii_case(short)
-        && (long.len() == short.len() || long[short.len()] == b'-')
+        && (long.len() == short.len()
+            || (long.len() > short.len() + 1 && long[short.len()] == b'-'))
 }
 
 /// Subtag-boundary tag match.
@@ -701,5 +702,27 @@ mod tests {
                 assert_eq!(tag_matches(a, b), tag_matches(b, a), "{a} vs {b}");
             }
         }
+    }
+
+    #[test]
+    fn a_trailing_hyphen_does_not_match() {
+        assert!(!tag_matches("ja", "ja-"));
+        assert!(!tag_matches("ja-", "ja"));
+        assert!(!tag_matches("JA", "ja-"));
+        assert!(!tag_matches("zh-Hans", "zh-Hans-"));
+        assert!(!tag_matches("zh-Hans-", "zh-Hans"));
+    }
+
+    #[test]
+    fn a_lone_hyphen_matches_nothing() {
+        assert!(!tag_matches("-", ""));
+        assert!(!tag_matches("", "-"));
+    }
+
+    #[test]
+    fn a_leading_hyphen_does_not_match() {
+        assert!(!tag_matches("ja", "-ja"));
+        assert!(!tag_matches("-ja", "ja"));
+        assert!(!tag_matches("en-US", "-US"));
     }
 }

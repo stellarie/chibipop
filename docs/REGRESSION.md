@@ -38,14 +38,14 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **726** total across **6** targets, 1 ignored (was 710; re-measured 2026-08-11) |
+| Rust tests | **all green**, **729** total across **6** targets, 1 ignored (was 726; re-measured 2026-08-12) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
 **The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total; **726** is what this machine
+silently not running must. CI asserts `≥ 400` and prints the total; **729** is what this machine
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
 
@@ -71,6 +71,13 @@ folding, either side more specific, a differing script, symmetry, and the `zh-Ha
 boundary that a raw `starts_with` would have got wrong) and seven for `language_choices` /
 `language_index` in `src/ui/settings_window.rs`, against a four-language installed list. The clippy
 counts did **not** move here either: still 3 raw and 0 on the bin target, at the same three sites.
+
+**726 → 729 is a fourth re-baseline in the same round, also not a finding.** The trailing-hyphen
+guard in `extends_at_boundary` added three `tag_matches` tests and removed none: a trailing hyphen,
+a lone hyphen against the empty string, and a leading hyphen. The first two were **red before the
+guard and green after** — `tag_matches("ja", "ja-")` and `tag_matches("-", "")` both returned true
+until it. The third was already green; it pins a case the guard does not change. The clippy counts
+did **not** move here either: still 3 raw and 0 on the bin target, at the same three sites.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
