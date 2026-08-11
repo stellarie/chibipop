@@ -134,7 +134,7 @@ pub fn shown_name(source: &Path) -> Option<String> {
 }
 
 /// Split still trustworthy?
-fn is_scoped(form: &SettingsForm) -> bool {
+pub(crate) fn is_scoped(form: &SettingsForm) -> bool {
     form.dict_list_language == form.ocr_language
         && (form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty())
 }
@@ -305,7 +305,11 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     }
 }
 
-fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> Vec<String> {
+pub(crate) fn keyed_names(
+    names: &[String],
+    unreadable: &[String],
+    existing: &[String],
+) -> Vec<String> {
     names
         .iter()
         .filter(|name| !unreadable.iter().any(|u| u == *name))
