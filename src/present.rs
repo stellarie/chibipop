@@ -194,6 +194,11 @@ pub fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> 
         .position(|s| !s.trim().is_empty() && lower.contains(&s.to_lowercase()))
 }
 
+/// Does the list name one?
+pub fn any_listed(dicts: &[DictInfo], list: &[String]) -> bool {
+    dicts.iter().any(|d| dict_order_rank(&d.name, list).is_some())
+}
+
 /// Searched for this language?
 pub fn keeps_dict(dict_name: &str, dict_order: &[String], restrict: bool) -> bool {
     if !restrict || dict_order.is_empty() {
@@ -362,6 +367,15 @@ mod tests {
         let hits = vec![hit("A", "あ", 1, "short"), hit("B", "い", 1, "also short")];
         let p = build(&hits, &dicts(), &cfg());
         assert_eq!("also short", p.collapsed[0].summary);
+    }
+
+    /// One predicate, two readers.
+    #[test]
+    fn any_listed_answers_for_the_whole_library() {
+        assert!(any_listed(&dicts(), &["大辞林".to_string()]));
+        assert!(!any_listed(&dicts(), &["Daijirin".to_string()]));
+        assert!(!any_listed(&dicts(), &[]));
+        assert!(!any_listed(&[], &["大辞林".to_string()]));
     }
 
     #[test]

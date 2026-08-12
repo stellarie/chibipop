@@ -2378,10 +2378,7 @@ fn resolve_dict_filter(cfg: &Config, dicts: &[DictInfo]) -> (Vec<String>, bool) 
     let Some(list) = listed.filter(|l| !l.is_empty()) else {
         return (cfg.dictionaries.display_order.clone(), false);
     };
-    let any = dicts
-        .iter()
-        .any(|d| crate::present::dict_order_rank(&d.name, list).is_some());
-    if any {
+    if crate::present::any_listed(dicts, list) {
         (list.clone(), true)
     } else {
         (cfg.dictionaries.display_order.clone(), false)

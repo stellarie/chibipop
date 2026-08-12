@@ -265,6 +265,9 @@ thread_local! {
 
     // Pending OCR-language switch.
     static LANG_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
+
+    // Unreadable rows, by `HWND`.
+    static UNREADABLE: RefCell<Option<(isize, Vec<String>)>> = const { RefCell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -288,6 +291,18 @@ fn record_click(hwnd: HWND, click: SettingsClick) {
 
 fn record_field_map_toggle(hwnd: HWND) {
     FIELD_MAP_TOGGLE.with(|c| c.set(Some(hwnd.0 as isize)));
+}
+
+fn remember_unreadable(hwnd: HWND, files: &[String]) {
+    UNREADABLE.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, files.to_vec())));
+}
+
+/// Rows carrying no name.
+fn unreadable_rows(hwnd: HWND) -> Vec<String> {
+    UNREADABLE.with(|c| match &*c.borrow() {
+        Some((h, u)) if *h == hwnd.0 as isize => u.clone(),
+        _ => Vec::new(),
+    })
 }
 
 fn record_language_change(hwnd: HWND) {
@@ -734,7 +749,7 @@ unsafe fn toggle_selected(hwnd: HWND) {
         }
         let Some(rows) = list_rows(hwnd, ID_DICTS) else { return };
         let (mut active, mut excluded) = split_dict_rows(&rows);
-        toggle_dict(&mut active, &mut excluded, &name);
+        toggle_dict(&mut active, &mut excluded, &unreadable_rows(hwnd), &name);
         let rows = dict_rows(&active, &excluded);
         fill_dict_list(list, &rows);
         if let Some(at) = rows.iter().position(|r| *r == name) {
@@ -1051,6 +1066,7 @@ impl SettingsWindow {
             if let Some(tag) = win.selected_language() {
                 win.staged.borrow_mut().dict_list_language = tag;
             }
+            remember_unreadable(hwnd, &form.unreadable);
             // Sizes AND shows - see `fit_to` for why showing cannot go
             // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
@@ -1282,9 +1298,11 @@ impl SettingsWindow {
             staged.ocr_language = prev.clone();
             if crate::settings::is_scoped(&staged) {
                 let existing = staged.per_language.get(&prev).cloned().unwrap_or_default();
-                let keyed = crate::settings::keyed_names(
+                let keyed = crate::settings::scoped_entry(
                     &staged.dict_names, &staged.unreadable, &existing);
-                staged.per_language.insert(prev, keyed);
+                if let Some(keys) = keyed {
+                    staged.per_language.insert(prev, keys);
+                }
             }
             let all: Vec<String> =
                 staged.dict_names.iter().chain(staged.dict_excluded.iter()).cloned().collect();
@@ -2354,10 +2372,16 @@ fn rows_with_added(rows: &[String], name: &str) -> Vec<String> {
 }
 
 /// Move one row across.
-fn toggle_dict(active: &mut Vec<String>, excluded: &mut Vec<String>, name: &str) {
+fn toggle_dict(
+    active: &mut Vec<String>,
+    excluded: &mut Vec<String>,
+    unreadable: &[String],
+    name: &str,
+) {
     if let Some(i) = active.iter().position(|n| n == name) {
+        let readable = |n: &String| !unreadable.iter().any(|u| u == n);
         // Never search nothing.
-        if active.len() == 1 {
+        if !active.iter().enumerate().any(|(j, n)| j != i && readable(n)) {
             return;
         }
         excluded.push(active.remove(i));
@@ -2991,10 +3015,10 @@ mod tests {
     fn toggling_moves_a_row_across() {
         let mut active = vec!["A".to_string(), "B".to_string()];
         let mut excluded: Vec<String> = Vec::new();
-        toggle_dict(&mut active, &mut excluded, "A");
+        toggle_dict(&mut active, &mut excluded, &[], "A");
         assert_eq!(vec!["B".to_string()], active);
         assert_eq!(vec!["A".to_string()], excluded);
-        toggle_dict(&mut active, &mut excluded, "A");
+        toggle_dict(&mut active, &mut excluded, &[], "A");
         assert_eq!(vec!["B".to_string(), "A".to_string()], active);
         assert!(excluded.is_empty());
     }
@@ -3004,7 +3028,7 @@ mod tests {
     fn the_last_searched_row_will_not_cross() {
         let mut active = vec!["A".to_string()];
         let mut excluded = vec!["B".to_string()];
-        toggle_dict(&mut active, &mut excluded, "A");
+        toggle_dict(&mut active, &mut excluded, &[], "A");
         assert_eq!(vec!["A".to_string()], active);
         assert_eq!(vec!["B".to_string()], excluded);
     }
@@ -3013,9 +3037,41 @@ mod tests {
     fn re_including_still_works_with_one_searched_row() {
         let mut active = vec!["A".to_string()];
         let mut excluded = vec!["B".to_string()];
-        toggle_dict(&mut active, &mut excluded, "B");
+        toggle_dict(&mut active, &mut excluded, &[], "B");
         assert_eq!(vec!["A".to_string(), "B".to_string()], active);
         assert!(excluded.is_empty());
+    }
+
+    /// Rows above it can be junk.
+    #[test]
+    fn the_last_readable_searched_row_will_not_cross() {
+        let mut active = vec!["bad.zip".to_string(), "A".to_string()];
+        let mut excluded = vec!["B".to_string()];
+        let unreadable = vec!["bad.zip".to_string()];
+        toggle_dict(&mut active, &mut excluded, &unreadable, "A");
+        assert_eq!(vec!["bad.zip".to_string(), "A".to_string()], active);
+        assert_eq!(vec!["B".to_string()], excluded);
+    }
+
+    #[test]
+    fn an_unreadable_row_does_not_block_a_real_move() {
+        let mut active = vec!["bad.zip".to_string(), "A".to_string(), "B".to_string()];
+        let mut excluded: Vec<String> = Vec::new();
+        let unreadable = vec!["bad.zip".to_string()];
+        toggle_dict(&mut active, &mut excluded, &unreadable, "A");
+        assert_eq!(vec!["bad.zip".to_string(), "B".to_string()], active);
+        assert_eq!(vec!["A".to_string()], excluded);
+    }
+
+    /// It contributes no name.
+    #[test]
+    fn an_unreadable_row_may_leave_the_searched_half() {
+        let mut active = vec!["bad.zip".to_string(), "A".to_string()];
+        let mut excluded: Vec<String> = Vec::new();
+        let unreadable = vec!["bad.zip".to_string()];
+        toggle_dict(&mut active, &mut excluded, &unreadable, "bad.zip");
+        assert_eq!(vec!["A".to_string()], active);
+        assert_eq!(vec!["bad.zip".to_string()], excluded);
     }
 
     // ---- adding ----

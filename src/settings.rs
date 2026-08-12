@@ -247,7 +247,11 @@ fn sorted_by_order<'a>(dicts: &'a [DictInfo], order: &[String]) -> Vec<&'a DictI
 /// Flatten, in popup order.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     let ordered = sorted_by_order(dicts, &cfg.dictionaries.display_order);
-    let active = cfg.dictionaries.per_language.get(&cfg.ocr.language).filter(|l| !l.is_empty());
+    let active = cfg
+        .dictionaries
+        .per_language
+        .get(&cfg.ocr.language)
+        .filter(|l| !l.is_empty() && crate::present::any_listed(dicts, l.as_slice()));
     let (dict_names, dict_excluded) = match active {
         Some(list) => {
             let matching = sorted_by_order(dicts, list);
@@ -305,16 +309,22 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     }
 }
 
-pub(crate) fn keyed_names(
-    names: &[String],
-    unreadable: &[String],
-    existing: &[String],
-) -> Vec<String> {
+fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> Vec<String> {
     names
         .iter()
         .filter(|name| !unreadable.iter().any(|u| u == *name))
         .map(|name| order_key(name, existing))
         .collect()
+}
+
+/// `None`: leave the entry be.
+pub(crate) fn scoped_entry(
+    names: &[String],
+    unreadable: &[String],
+    existing: &[String],
+) -> Option<Vec<String>> {
+    let keyed = keyed_names(names, unreadable, existing);
+    (!keyed.is_empty()).then_some(keyed)
 }
 
 /// Substrings, not live names.
@@ -362,10 +372,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
             .get(&form.ocr_language)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
-        per_language.insert(
-            form.ocr_language.clone(),
-            keyed_names(&form.dict_names, &form.unreadable, existing),
-        );
+        if let Some(keyed) = scoped_entry(&form.dict_names, &form.unreadable, existing) {
+            per_language.insert(form.ocr_language.clone(), keyed);
+        }
     }
     out.dictionaries.per_language = per_language;
     out
@@ -781,6 +790,84 @@ mod tests {
             out.dictionaries.per_language["zh-Hans-CN"],
             "a stale dict list must not overwrite the real one",
         );
+    }
+
+    /// One helper, two writers.
+    #[test]
+    fn a_keyed_empty_entry_is_never_written() {
+        assert_eq!(None, scoped_entry(&[], &[], &[]));
+        assert_eq!(
+            None,
+            scoped_entry(&["bad.zip".to_string()], &["bad.zip".to_string()], &[]),
+        );
+        assert_eq!(
+            Some(vec!["大辞林".to_string()]),
+            scoped_entry(&["大辞林　第四版".to_string()], &[], &["大辞林".to_string()]),
+        );
+    }
+
+    /// I2-a: nothing left searched.
+    #[test]
+    fn apply_to_will_not_erase_a_list_when_nothing_is_searched() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = Vec::new();
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林".to_string()],
+            out.dictionaries.per_language["ja"],
+            "an empty split must leave the entry alone",
+        );
+    }
+
+    /// I2-b: only unreadable rows.
+    #[test]
+    fn apply_to_will_not_erase_a_list_for_an_unreadable_row() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["bad.zip".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        form.unreadable = vec!["bad.zip".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林".to_string()],
+            out.dictionaries.per_language["ja"],
+            "a keyed-empty split must leave the entry alone",
+        );
+    }
+
+    /// Matches nothing: search all.
+    #[test]
+    fn from_config_ignores_a_list_matching_nothing_installed() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["Daijirin".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
+            form.dict_names,
+            "the tab must match resolve_dict_filter's fallback",
+        );
+        assert!(form.dict_excluded.is_empty());
+    }
+
+    #[test]
+    fn from_config_still_splits_a_list_that_matches_one() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(vec!["大辞林　第四版".to_string()], form.dict_names);
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], form.dict_excluded);
     }
 
     fn staged_form() -> SettingsForm {
