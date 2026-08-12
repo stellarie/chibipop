@@ -8,6 +8,7 @@ use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RA
 use crate::text::ocr::tag_matches;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -1174,6 +1175,11 @@ impl SettingsWindow {
         self.staged.borrow_mut().clear_staged();
     }
 
+    /// Take what Apply just wrote.
+    pub fn reseed_per_language(&self, written: &BTreeMap<String, Vec<String>>) {
+        self.staged.borrow_mut().reseed_per_language(written);
+    }
+
     /// Say what Apply is doing.
     pub fn set_status(&self, text: &str) {
         // SAFETY: `ID_STATUS` is a live child of `self.hwnd`, created in
@@ -2331,6 +2337,12 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
+        UNREADABLE.with(|c| {
+            let mut slot = c.borrow_mut();
+            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
+                *slot = None;
+            }
+        });
         // SAFETY: the window is this struct's own, still live, and destroyed
         // exactly once. The font outlives every control that used it because
         // the window (and therefore its children) is destroyed first.
@@ -2344,7 +2356,7 @@ impl Drop for SettingsWindow {
 }
 
 /// Splits searched from not.
-pub const DICT_DIVIDER: &str = "──────── not searched ────────";
+const DICT_DIVIDER: &str = "──────── not searched ────────";
 
 /// Active, divider, excluded.
 fn dict_rows(active: &[String], excluded: &[String]) -> Vec<String> {
@@ -2396,12 +2408,12 @@ fn scope_rows(
     list: &[String],
     unreadable: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    if list.is_empty() {
+    let readable = |n: &String| !unreadable.iter().any(|u| u == n);
+    let installed = all.iter().filter(|n| readable(n)).map(String::as_str);
+    if !crate::present::any_listed(installed, list) {
         return (all.to_vec(), Vec::new());
     }
-    let keep = |n: &String| {
-        unreadable.iter().any(|u| u == n) || crate::present::dict_order_rank(n, list).is_some()
-    };
+    let keep = |n: &String| !readable(n) || crate::present::dict_order_rank(n, list).is_some();
     let mut active: Vec<String> = all.iter().filter(|n| keep(n)).cloned().collect();
     active.sort_by_key(|n| crate::present::dict_order_rank(n, list).unwrap_or(usize::MAX));
     (active, all.iter().filter(|n| !keep(n)).cloned().collect())
@@ -3126,6 +3138,39 @@ mod tests {
             active
         );
         assert!(excluded.is_empty());
+    }
+
+    /// Stale list: nothing hidden.
+    #[test]
+    fn a_list_matching_nothing_installed_leaves_every_row_active() {
+        let list = vec!["Daijirin".to_string()];
+        assert_eq!(
+            (installed_two(), Vec::new()),
+            scope_rows(&installed_two(), &list, &[])
+        );
+    }
+
+    /// Blanks pin nothing.
+    #[test]
+    fn a_blank_only_list_leaves_every_row_active() {
+        let list = vec![String::new()];
+        assert_eq!(
+            (installed_two(), Vec::new()),
+            scope_rows(&installed_two(), &list, &[])
+        );
+    }
+
+    /// Unreadable names cannot scope.
+    #[test]
+    fn a_list_naming_only_an_unreadable_row_leaves_every_row_active() {
+        let mut rows = installed_two();
+        rows.push("broken.zip".to_string());
+        let unreadable = vec!["broken.zip".to_string()];
+        let list = vec!["broken".to_string()];
+        assert_eq!(
+            (rows.clone(), Vec::new()),
+            scope_rows(&rows, &list, &unreadable)
+        );
     }
 
     /// It must stay removable.

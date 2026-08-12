@@ -39,14 +39,14 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **767** total across **6** targets, 1 ignored (was 730; re-measured 2026-08-12) |
+| Rust tests | **all green**, **772** total across **6** targets, 1 ignored (was 767; re-measured 2026-08-12) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
 **The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total; **767** is what this machine
+silently not running must. CI asserts `≥ 400` and prints the total; **772** is what this machine
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
 
@@ -93,7 +93,7 @@ three sites.
 **730 → 767 is a re-baseline, not a finding**, and it is recorded here in the commit that moves it,
 per the rule in the callout below. It is the first entry of a **new round**: the per-language
 dictionary lists branch, five tasks and two fix rounds on top of the v0.7.0 release commit. It
-added **37** tests and removed **none** — `git diff 5124d2d..HEAD -- src/` is **+37 `#[test]`, −0**,
+added **37** tests and removed **none** — `git diff 5124d2d..9d477d7 -- src/` is **+37 `#[test]`, −0**,
 which is exactly the gap, so no test was replaced by another and none was deleted. Counted from
 that diff, the per-commit split is 3, 4, 4, 3, 0, 2, 8 across the five tasks and 4, 9 across the two
 fix rounds; the one commit contributing 0 was a fix that changed `apply_to`'s behaviour under tests
@@ -102,6 +102,16 @@ one commit means one test.** The three runs above the table reported **767, 767,
 which is the point of running it three times — over six targets splitting 755 + 0 + 1 + 2 + 9 + 0,
 with **0 failed** and the same **1 ignored** as before. The clippy counts did **not** move: still 3
 raw and 0 on the bin target, at the same three sites.
+
+**767 → 772 is the second entry of that round, and also not a finding.** The branch was reviewed
+whole, and the fix wave that closed that review added **5** tests and removed none —
+`git diff 9d477d7..HEAD -- src/` is **+5 `#[test]`, −0**. Three pin `scope_rows`' new
+all-patterns-miss fallback — a stale list, a blank-only list, and a list naming only an unreadable
+archive, each leaving every row searched, which is what the runtime does with the same input. One
+pins that a second Apply rewrites the `per_language` key an earlier Apply wrote instead of dropping
+it, and one pins that a list is not applied when its own recognizer is not the one running. The six
+targets split **760 + 0 + 1 + 2 + 9 + 0**, with **0 failed** and the same **1 ignored**. The clippy
+counts did **not** move: still 3 raw and 0 on the bin target, at the same three sites.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
@@ -589,8 +599,17 @@ limit 3: the fallback fixes "does nothing", not "says nothing".
   reporting on a path you did not test.
 - **Settings will show the tag you configured, not the one that is running** — the dropdown reads
   `ko (not installed)` while OCR runs `ja`. `from_config` seeds it from `cfg.ocr.language`
-  (`src/settings.rs:254`) and the substitution is a local in the worker thread that never writes
+  (`src/settings.rs:302`) and the substitution is a local in the worker thread that never writes
   the config back. Expected, not a failure.
+- **A per-language dictionary list is not applied while the pack is missing** — the list belongs to
+  the tag you configured, and the tag that is *running* is the fallback, so lookups search every
+  dictionary by `display_order` instead. Deliberate as of 2026-08-12: filtering the fallback's
+  Japanese hits through a list written for the missing language returns an **empty popup with no
+  error at all**, which is worse than an unfiltered one. The main thread makes the same
+  `startup_language` + `recogniser_available` call the worker does (`configured_recogniser_runs`,
+  `src/app.rs:2379`), so the two cannot disagree about whether the pack is there. If the entry is
+  for a language you can see results in, add it to `[dictionaries.per_language]` and confirm every
+  dictionary still answers.
 - **Not covered by this step:** a language that *is* listed but whose engine will not build. That
   still aborts startup exactly as before, and cannot be fixed without splitting
   `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
@@ -635,15 +654,21 @@ Set the first language's list to one dictionary and the second language's to the
    the same guard: **Remove** that last row instead, Apply, and confirm the language's entry in
    `chibipop.toml` **still names it** and has **not** become `[]`. An empty list is read as "no
    list" by both readers, so writing one would silently re-enable every dictionary.
-4. **A stale list degrades to searching everything.** Quit, hand-edit the current language's entry
-   to name a dictionary you have not installed (`ja = ["Daijirin"]`), start, open **Dictionaries**.
-   **Every dictionary is above the divider, with no divider at all** — and every one of them still
-   answers hovers. The tab and the runtime must agree; the tab showing them all *below* while all
-   of them answered was a defect on this branch. Step 3's aftermath is the same rule reached from
-   the other direction: the removed dictionary's name is still in the list, matches nothing
-   installed, and so everything answers again.
+4. **A stale list degrades to searching everything — on both routes into it.** Quit, hand-edit the
+   current language's entry to name a dictionary you have not installed (`ja = ["Daijirin"]`),
+   start, open **Dictionaries**. **Every dictionary is above the divider, with no divider at all**
+   — and every one of them still answers hovers. The tab and the runtime must agree; the tab
+   showing them all *below* while all of them answered was a defect on this branch. **Then the
+   second route, which is the one that was actually broken:** give the stale entry to the language
+   you are *not* on, start, and switch **OCR language** to it on **OCR / Debug** before opening
+   **Dictionaries**. Same expectation — no divider at row 0 with the whole library beneath it.
+   The two routes run different code (`from_config` when the window opens, `scope_rows` on the
+   switch) and only the first was guarded until 2026-08-12, so running the open route alone passes
+   while the switch route is live. Step 3's aftermath is the same rule reached from a third
+   direction: the removed dictionary's name is still in the list, matches nothing installed, and so
+   everything answers again.
 
-> [!note] Two things on this screen are expected — do not file either
+> [!note] Three things on this screen are expected — do not file any of them
 > **Pressing Apply on step 4's screen rewrites the hand-edited entry** to the dictionaries actually
 > installed, discarding the `Daijirin` you typed. Known limitation, not fixed in v0.7.1: configure
 > the list *after* importing the dictionary. See `per_language` in
@@ -653,6 +678,11 @@ Set the first language's list to one dictionary and the second language's to the
 > when clicked.** The button greys on row count while the guard counts *readable* rows, so the row
 > simply does not move — which is the correct outcome. Cosmetic only; the enforcement is the guard,
 > not the greying.
+>
+> **A language whose recognizer pack is missing ignores its list entirely** — the tab keeps showing
+> it while every dictionary answers, because OCR is running the fallback language and not the one
+> the list was written for. See §1.16 and `per_language` in [`REFERENCE.md`](REFERENCE.md). This is
+> the one state where the tab deliberately does not match the runtime.
 
 ---
 

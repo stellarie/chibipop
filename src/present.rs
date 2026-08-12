@@ -195,8 +195,8 @@ pub fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> 
 }
 
 /// Does the list name one?
-pub fn any_listed(dicts: &[DictInfo], list: &[String]) -> bool {
-    dicts.iter().any(|d| dict_order_rank(&d.name, list).is_some())
+pub fn any_listed<'a>(names: impl IntoIterator<Item = &'a str>, list: &[String]) -> bool {
+    names.into_iter().any(|n| dict_order_rank(n, list).is_some())
 }
 
 /// Searched for this language?
@@ -372,10 +372,12 @@ mod tests {
     /// One predicate, two readers.
     #[test]
     fn any_listed_answers_for_the_whole_library() {
-        assert!(any_listed(&dicts(), &["大辞林".to_string()]));
-        assert!(!any_listed(&dicts(), &["Daijirin".to_string()]));
-        assert!(!any_listed(&dicts(), &[]));
-        assert!(!any_listed(&[], &["大辞林".to_string()]));
+        let all = dicts();
+        let names = || all.iter().map(|d| d.name.as_str());
+        assert!(any_listed(names(), &["大辞林".to_string()]));
+        assert!(!any_listed(names(), &["Daijirin".to_string()]));
+        assert!(!any_listed(names(), &[]));
+        assert!(!any_listed(std::iter::empty(), &["大辞林".to_string()]));
     }
 
     #[test]

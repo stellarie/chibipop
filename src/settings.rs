@@ -110,6 +110,11 @@ impl SettingsForm {
         self.staged_removes.clear();
     }
 
+    /// Take what Apply wrote.
+    pub fn reseed_per_language(&mut self, written: &BTreeMap<String, Vec<String>>) {
+        self.per_language = written.clone();
+    }
+
     /// Is this row a pending import?
     pub fn is_staged_add(&self, name: &str) -> bool {
         self.staged_adds.iter().any(|a| a.name == name)
@@ -247,11 +252,12 @@ fn sorted_by_order<'a>(dicts: &'a [DictInfo], order: &[String]) -> Vec<&'a DictI
 /// Flatten, in popup order.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     let ordered = sorted_by_order(dicts, &cfg.dictionaries.display_order);
+    let installed = || dicts.iter().map(|d| d.name.as_str());
     let active = cfg
         .dictionaries
         .per_language
         .get(&cfg.ocr.language)
-        .filter(|l| !l.is_empty() && crate::present::any_listed(dicts, l.as_slice()));
+        .filter(|l| !l.is_empty() && crate::present::any_listed(installed(), l.as_slice()));
     let (dict_names, dict_excluded) = match active {
         Some(list) => {
             let matching = sorted_by_order(dicts, list);
@@ -761,6 +767,31 @@ mod tests {
             vec!["中日大辞典".to_string()],
             out.dictionaries.per_language["zh-Hans-CN"],
             "the other language's list must survive",
+        );
+    }
+
+    /// Re-include keeps the key.
+    #[test]
+    fn a_second_apply_rewrites_the_key_the_first_one_wrote() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let first = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            first.dictionaries.per_language["ja"],
+        );
+        form.reseed_per_language(&first.dictionaries.per_language);
+        form.dict_names =
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()];
+        form.dict_excluded = Vec::new();
+        let second = apply_to(&form, &first);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org".to_string()],
+            second.dictionaries.per_language["ja"],
+            "the second Apply must rewrite the key, never drop it",
         );
     }
 

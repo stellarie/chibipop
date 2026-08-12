@@ -235,10 +235,23 @@ A typo, or a dictionary you have not imported yet, therefore never silently
 kills lookups — the fallback is "search everything", not "search nothing". The
 Dictionaries tab shows the same thing the runtime does in that state (every
 dictionary above the divider, no divider at all), and that agreement is
-deliberate: the tab must not claim a scoping the lookups are not applying. The
-same rule is why **excluding everything is not representable**: an empty list
-means the same as no entry, so a language whose list ends up matching nothing
-gets every dictionary back rather than none.
+deliberate: in that state the tab must not claim a scoping the lookups are not
+applying. It holds however you arrive there, including switching the OCR
+language to one whose list has gone stale. The same rule is why **excluding
+everything is not representable**: an empty list means the same as no entry, so
+a language whose list ends up matching nothing gets every dictionary back
+rather than none.
+
+**A list is applied only while its own recognizer is the one running.** If the
+selected language's pack is not installed, chibipop OCRs with the fallback
+recognizer — it says so on stderr at startup — and the list is then not applied
+at all: everything is searched by `display_order`, exactly as for a language
+with no entry. Otherwise the popup would filter the fallback's hits through a
+list written for a language that is not reading the screen, and come back empty
+with no error at all. This is the one state where the Dictionaries tab does not
+match the runtime, and deliberately: the tab keeps showing the list you
+configured, because that is what you are editing, and the OCR language dropdown
+already labels the tag `(not installed)`.
 
 **A hand-written entry naming a not-yet-installed dictionary is replaced on
 the next Apply.** Write `"ja" = ["Daijirin"]` before importing Daijirin, open
@@ -250,11 +263,14 @@ nothing — does not look at `per_language`, so nothing reports this to you.
 
 **A language's list cannot be cleared from the settings window.** Once a
 language has an entry, the window never removes the key: re-including every
-dictionary writes a full explicit list instead. That behaves identically for
-your current library, but differs later — an explicit list will not pick up a
-dictionary imported after it was written, where no entry would have. To return
-a language to "no entry", delete the key from the file by hand with chibipop
-stopped.
+dictionary writes a full explicit list instead. That covers an entry an earlier
+Apply in the same session wrote, not just one that was already in the file when
+the window opened — after each Apply the window takes back what was written, so
+the next Apply rewrites the key rather than dropping it. It behaves
+identically for your current library, but differs later — an explicit list
+will not pick up a dictionary imported after it was written, where no entry
+would have. To return a language to "no entry", delete the key from the file
+by hand with chibipop stopped.
 
 **Re-including a dictionary puts it last.** Excluding and re-including does
 not restore its former priority; move it back up with **Move up**.
@@ -277,7 +293,7 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**767 tests** across six targets, one of them ignored. Re-measured
+**772 tests** across six targets, one of them ignored. Re-measured
 2026-08-12.
 
 Tier 0 of [`REGRESSION.md`](REGRESSION.md) is the authority on this number
@@ -289,7 +305,8 @@ until the first two were caught up, then **710** while Tier 0 already
 read **726**. The fourth, 726 → 729, moved both pages at once, as did the
 fifth, 729 → 730, and so does 730 → 767 — the per-language dictionary lists
 round, which added 37 tests across five tasks and two fix rounds and removed
-none.
+none. 767 → 772 is that round's branch review being closed out: five tests
+across its three fixes, and again none removed.
 
 **After any large change, work through [`REGRESSION.md`](REGRESSION.md)** — a
 cheapest-first checklist: the automated gate, then what can be verified

@@ -579,7 +579,7 @@ step for the startup fallback existed anywhere until §1.16 was written on 2026-
 **Raised 2026-08-12 by the per-language-dictionary-lists branch. The cheapest real improvement
 available to that feature, and deliberately not taken in v0.7.1.**
 
-`stale_order_entries` (`src/settings.rs:426`) walks `cfg.dictionaries.display_order` and returns
+`stale_order_entries` (`src/settings.rs:432`) walks `cfg.dictionaries.display_order` and returns
 the entries matching no installed dictionary, so the settings window can name the one that would
 otherwise just sort last. It never reads `cfg.dictionaries.per_language`, which means a typo in a
 per-language list — or a dictionary named before it was imported — is reported by nothing at all.
@@ -609,12 +609,42 @@ The settings window captures which archives are unreadable when the window opens
 recompute it after a library rebuild. Import a corrupt archive mid-session and it is treated as
 readable until the window is reopened — the row's own state is stale, not the list's.
 
-**The consequence is bounded to cosmetics**, because the guard that matters counts readable rows
-at the moment of the click rather than trusting the cached set. So the visible symptom is
-`Include / exclude` looking enabled on a row that will not move, which `docs/REGRESSION.md` §1.17
-documents as expected. Nothing is written wrong and no list is emptied; the empty-list guard
-catches the consequence that would have mattered.
+**The consequence is bounded to cosmetics**, because the reader and the writer share the one stale
+set: `toggle_selected` re-reads the rows at click time but classifies them with the cached
+`unreadable` (`src/ui/settings_window.rs:753`), and `read` hands that same cached set to
+`apply_to` (`:2258`), which keys the list through it. The two therefore agree with each other even
+while both are stale, so the visible symptom is `Include / exclude` looking enabled on a row that
+will not move, which `docs/REGRESSION.md` §1.17 documents as expected. Nothing is written wrong
+and no list is emptied; the empty-list guard catches the consequence that would have mattered.
+
+**The reachable trigger is a rebuild that *fails*** and leaves the window open — an import that
+succeeds ends in a restart, which reopens the window and recaptures the set.
 
 **If picked up:** the fix is to recompute the set at the same point the rebuilt library is handed
 back to the window, not to make the button smarter — the greying and the guard disagreeing is the
 actual defect, and there is one place where the two inputs are both in scope.
+
+---
+
+## 16. The dictionary filter trusts `recogniser_available`, not the engine that was built
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch review, inside the fix that closed
+the missing-pack half of it. Narrow: it needs a tag Windows lists but will not build.**
+
+`resolve_dict_filter` (`src/app.rs:2386`) honours a language's list only when
+`configured_recogniser_runs` (`:2379`) says the configured tag will really run — the same
+`startup_language` + `recogniser_available` decision the worker makes. That closes the reachable
+case: with the pack uninstalled the worker substitutes `ja`, and without the guard the popup would
+filter Japanese hits through the Chinese list and come back **empty**.
+
+**One case it does not close.** `recogniser_available` can report a tag as installed while
+`make_engine` still fails on it; `apply_settings` then prints
+`chibipop: <tag> recogniser failed, keeping <tag>` and holds the previous engine
+(`src/text/ocr.rs:291-294`). The filter was resolved against the configured tag before that, so OCR
+runs one language while the lookups are scoped to another's list — the empty popup again, one
+layer down. `docs/REGRESSION.md` §1.16 already names this engine-will-not-build case as uncovered.
+
+**If picked up:** the honest fix is for the worker to report the tag it ended up with, which is
+exactly the cross-thread plumbing this round declined to add — a field on the startup message and
+on the reload path, plus somewhere on the main thread to hold it. Anything cheaper is another
+mirror of a decision taken on the other thread, which is what this item exists to warn about.

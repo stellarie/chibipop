@@ -772,7 +772,8 @@ pub fn run(
 
     let mut next_id: u64 = 0;
     // Spawned before dicts existed.
-    let (order, restrict) = resolve_dict_filter(&cfg, &dicts);
+    let (order, restrict) =
+        resolve_dict_filter(&cfg, &dicts, || configured_recogniser_runs(&cfg));
     live.present_cfg.dict_order = order;
     live.present_cfg.restrict_to_order = restrict;
     next_id += 1;
@@ -1157,8 +1158,9 @@ pub fn run(
                                 }
                             } else {
                                 live = derive(&updated);
-                                let (order, restrict) =
-                                    resolve_dict_filter(&updated, &dicts);
+                                let (order, restrict) = resolve_dict_filter(
+                                    &updated, &dicts,
+                                    || configured_recogniser_runs(&updated));
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
                                 apply_live(&live, &popup, overlay.as_ref(),
@@ -1171,6 +1173,7 @@ pub fn run(
                                     id: latest_dispatched,
                                 });
                                 let clamped = settings::clamp_notice(&edited, &updated);
+                                w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
                                 save_in_background(&mut save_job, updated,
                                                    config_path.to_path_buf(),
@@ -2372,13 +2375,25 @@ fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -
     }
 }
 
+/// Will the configured tag run?
+fn configured_recogniser_runs(cfg: &Config) -> bool {
+    let fallback = crate::config::default_ocr_language();
+    let tag = &cfg.ocr.language;
+    startup_language(tag, &fallback, || recogniser_available(tag)).is_none()
+}
+
 /// The list this language uses.
-fn resolve_dict_filter(cfg: &Config, dicts: &[DictInfo]) -> (Vec<String>, bool) {
+fn resolve_dict_filter(
+    cfg: &Config,
+    dicts: &[DictInfo],
+    engine_runs: impl FnOnce() -> bool,
+) -> (Vec<String>, bool) {
     let listed = cfg.dictionaries.per_language.get(&cfg.ocr.language);
     let Some(list) = listed.filter(|l| !l.is_empty()) else {
         return (cfg.dictionaries.display_order.clone(), false);
     };
-    if crate::present::any_listed(dicts, list) {
+    let installed = dicts.iter().map(|d| d.name.as_str());
+    if crate::present::any_listed(installed, list) && engine_runs() {
         (list.clone(), true)
     } else {
         (cfg.dictionaries.display_order.clone(), false)
@@ -2809,7 +2824,7 @@ mod tests {
         cfg.dictionaries.per_language.insert(
             "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
-        let (order, restrict) = resolve_dict_filter(&cfg, &dicts);
+        let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert_eq!(vec!["中日大辞典".to_string()], order);
         assert!(restrict);
     }
@@ -2818,7 +2833,7 @@ mod tests {
     fn a_language_with_no_list_falls_back_to_display_order() {
         let cfg = Config::default();
         let dicts = [di(1, "大辞林　第四版")];
-        let (order, restrict) = resolve_dict_filter(&cfg, &dicts);
+        let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert_eq!(cfg.dictionaries.display_order, order);
         assert!(!restrict, "no entry must not restrict");
     }
@@ -2831,8 +2846,21 @@ mod tests {
         cfg.dictionaries.per_language.insert(
             "ja".to_string(), vec!["Typoo".to_string()]);
         let dicts = [di(1, "大辞林　第四版")];
-        let (_, restrict) = resolve_dict_filter(&cfg, &dicts);
+        let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert!(!restrict, "all patterns missed, so do not restrict");
+    }
+
+    /// Wrong engine: no filter.
+    #[test]
+    fn a_substituted_recogniser_ignores_the_language_list() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans-CN".to_string();
+        cfg.dictionaries.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
+        let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || false);
+        assert_eq!(cfg.dictionaries.display_order, order);
+        assert!(!restrict, "the engine is not running this language");
     }
 
     #[test]
@@ -2841,7 +2869,7 @@ mod tests {
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries.per_language.insert("ja".to_string(), Vec::new());
         let dicts = [di(1, "大辞林　第四版")];
-        let (_, restrict) = resolve_dict_filter(&cfg, &dicts);
+        let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert!(!restrict);
     }
 }
