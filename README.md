@@ -65,6 +65,12 @@ A few worth knowing about:
   Windows Settings → Time & language → Language & region. If the recognizer you
   chose is gone by the time chibipop next starts, it starts in Japanese instead
   of refusing to start, and says so on stderr.
+- **A dictionary list per language** (on the *Dictionaries* tab) — each OCR
+  language can have its own dictionaries in its own order, so switching to
+  Chinese searches your Chinese dictionaries rather than your Japanese ones.
+  The tab always shows the list for the language selected on *OCR / Debug*. **A
+  language you have not given a list searches all of your dictionaries**, which
+  is what everything does until you change it.
 
 ---
 

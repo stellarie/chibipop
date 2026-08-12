@@ -7,7 +7,7 @@ Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed 
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
-**Three exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
+**Four exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
 2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Items
 **1.14–1.16** were added 2026-08-11 with the per-character-retrigger / OCR-language branch:
 **1.16 has not been run at all**, and 1.14 and 1.15 were **run only in part** the same day. What
@@ -15,8 +15,9 @@ passed, on one machine in horizontal text, was 1.14's retrigger with the toggle 
 **switch path** — not all of 1.14, and not all of 1.15. Everything else in the three is still
 owed, 1.14's toggle-OFF half and 1.15's missing-recognizer path among it. **The callout above 1.14
 is the authority on the split; this sentence is a summary and is not the shorter list.** Item
-**11b** was corrected 2026-08-09, having described behaviour that never existed in any version of
-the program.
+**1.17** was added 2026-08-12 with the per-language-dictionary-lists branch and **has not been run
+at all** — not one clause of it. Item **11b** was corrected 2026-08-09, having described behaviour
+that never existed in any version of the program.
 
 ---
 
@@ -38,14 +39,14 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **730** total across **6** targets, 1 ignored (was 729; re-measured 2026-08-12) |
+| Rust tests | **all green**, **767** total across **6** targets, 1 ignored (was 730; re-measured 2026-08-12) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
 **The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total; **730** is what this machine
+silently not running must. CI asserts `≥ 400` and prints the total; **767** is what this machine
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
 
@@ -88,6 +89,19 @@ the hyphen and `-` is a byte. That tag then reached `Language::CreateLanguage`, 
 well-formedness is checked before the installed list, so it holds on a runner with no recognisers.
 The clippy counts did **not** move here either: still 3 raw and 0 on the bin target, at the same
 three sites.
+
+**730 → 767 is a re-baseline, not a finding**, and it is recorded here in the commit that moves it,
+per the rule in the callout below. It is the first entry of a **new round**: the per-language
+dictionary lists branch, five tasks and two fix rounds on top of the v0.7.0 release commit. It
+added **37** tests and removed **none** — `git diff 5124d2d..HEAD -- src/` is **+37 `#[test]`, −0**,
+which is exactly the gap, so no test was replaced by another and none was deleted. Counted from
+that diff, the per-commit split is 3, 4, 4, 3, 0, 2, 8 across the five tasks and 4, 9 across the two
+fix rounds; the one commit contributing 0 was a fix that changed `apply_to`'s behaviour under tests
+that already existed. **The 0-contributing commit is the reason to read the diff rather than assume
+one commit means one test.** The three runs above the table reported **767, 767, 767** — identical,
+which is the point of running it three times — over six targets splitting 755 + 0 + 1 + 2 + 9 + 0,
+with **0 failed** and the same **1 ignored** as before. The clippy counts did **not** move: still 3
+raw and 0 on the bin target, at the same three sites.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
@@ -580,6 +594,65 @@ limit 3: the fallback fixes "does nothing", not "says nothing".
 - **Not covered by this step:** a language that *is* listed but whose engine will not build. That
   still aborts startup exactly as before, and cannot be fixed without splitting
   `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
+
+### 1.17 Per-language dictionary lists — **added 2026-08-12, not run**
+
+**Nothing witnesses any of this today.** `resolve_dict_filter`, the row split and the include /
+exclude round-trip are unit-tested as pure functions; that a *running* instance re-scopes its
+lookups, and that the tab re-renders on the dropdown alone, is reachable only by hand. **Needs two
+installed recognizers and at least two dictionaries** — with one of either, most of this entry is
+unfalsifiable rather than passing.
+
+Set the first language's list to one dictionary and the second language's to the other, then switch
+**OCR language** and press Apply.
+
+- The **PID is unchanged** (`Get-Process chibipop`) — that is the test of "no restart", not a proxy.
+- The Dictionaries tab re-scopes **as soon as the language dropdown changes**, before Apply. The
+  excluded ones sit below a row reading `──────── not searched ────────`, and the static under the
+  group title reads `Dictionaries searched for the selected OCR language.`
+- Hovering the same word is answered by a **different dictionary set**. That is the acceptance; the
+  tab agreeing with itself is not, and neither is the unchanged PID alone.
+- Edit one language's list, switch language, switch back **without pressing Apply**: the edit is
+  still there. Losing it is the failure this design exists to prevent.
+- A language with **no** list still searches everything, exactly as v0.7.0 did.
+- After Apply, `chibipop.toml` shows `[dictionaries.per_language]` with an entry per visited
+  language holding **short substrings** (`Jitendex`) — **not** full titles with date stamps
+  (`Jitendex.org [2026-07-09]`). Full titles there means the keying regressed, and the entry will
+  quietly stop matching the next time that dictionary is rebuilt.
+
+**Four checks that each cost a fix round on this branch. If time is short, run these.**
+
+1. **`Add…` lands above the divider.** Exclude something, then import a dictionary. The new row
+   appears in the **searched** half and is selected. Landing below it was a Critical — an import
+   that silently went un-searched.
+2. **The divider is inert.** Select the divider row itself: **Move up, Move down, Include /
+   exclude and Remove all grey out.** Press each anyway — it must not move, toggle, or delete, and
+   no dictionary may cross. Then select the dictionary directly *above* it and press **Move down**,
+   and the one directly *below* it and press **Move up**: nothing happens either time. Crossing is
+   the toggle's job, not Move's.
+3. **The last searched dictionary cannot be excluded, and cannot be erased by Remove either.**
+   With one row left above the divider, `Include / exclude` greys out. Now check the other half of
+   the same guard: **Remove** that last row instead, Apply, and confirm the language's entry in
+   `chibipop.toml` **still names it** and has **not** become `[]`. An empty list is read as "no
+   list" by both readers, so writing one would silently re-enable every dictionary.
+4. **A stale list degrades to searching everything.** Quit, hand-edit the current language's entry
+   to name a dictionary you have not installed (`ja = ["Daijirin"]`), start, open **Dictionaries**.
+   **Every dictionary is above the divider, with no divider at all** — and every one of them still
+   answers hovers. The tab and the runtime must agree; the tab showing them all *below* while all
+   of them answered was a defect on this branch. Step 3's aftermath is the same rule reached from
+   the other direction: the removed dictionary's name is still in the list, matches nothing
+   installed, and so everything answers again.
+
+> [!note] Two things on this screen are expected — do not file either
+> **Pressing Apply on step 4's screen rewrites the hand-edited entry** to the dictionaries actually
+> installed, discarding the `Daijirin` you typed. Known limitation, not fixed in v0.7.1: configure
+> the list *after* importing the dictionary. See `per_language` in
+> [`REFERENCE.md`](REFERENCE.md).
+>
+> **With a corrupt archive above the divider, `Include / exclude` can look enabled and do nothing
+> when clicked.** The button greys on row count while the guard counts *readable* rows, so the row
+> simply does not move — which is the correct outcome. Cosmetic only; the enforcement is the guard,
+> not the greying.
 
 ---
 

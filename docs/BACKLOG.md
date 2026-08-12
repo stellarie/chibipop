@@ -571,3 +571,50 @@ it needs a real `OcrEngine`. Tier 1 **§1.16** is where that gets exercised by h
 **not been run** — so as of 2026-08-11 the wiring is witnessed by nothing at all. This line used
 to point at §1.15, which does not exercise the startup path: §1.15 is the *reload* path, and no
 step for the startup fallback existed anywhere until §1.16 was written on 2026-08-11.
+
+---
+
+## 14. `stale_order_entries` does not look at `per_language`
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch. The cheapest real improvement
+available to that feature, and deliberately not taken in v0.7.1.**
+
+`stale_order_entries` (`src/settings.rs:426`) walks `cfg.dictionaries.display_order` and returns
+the entries matching no installed dictionary, so the settings window can name the one that would
+otherwise just sort last. It never reads `cfg.dictionaries.per_language`, which means a typo in a
+per-language list — or a dictionary named before it was imported — is reported by nothing at all.
+
+**What that costs is two documented behaviours staying silent rather than visible.**
+`docs/REFERENCE.md` under `per_language` has to tell users that a list naming nothing installed is
+ignored, and that a hand-written entry naming a not-yet-installed dictionary is overwritten by the
+next Apply. Both are only *surprising* because there is no warning; a stale-entry notice naming the
+unmatched string would turn each from a silent surprise into a visible one, without changing any
+behaviour.
+
+**If picked up:** the function already takes `&[DictInfo]`, so the extension is to fold the map's
+values into the same filter and return the language tag alongside the entry — the caller renders a
+string, so the return type is the only real decision. Note that the per-language case has a
+legitimate transient the `display_order` case does not: a list is stale for the whole window
+between configuring it and importing the dictionary, so the notice must read as informational
+rather than as an error.
+
+---
+
+## 15. The settings window's `unreadable` set is not refreshed after a library rebuild
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch. Narrow, no data loss, recorded
+because the symptom is a button that looks wrong rather than anything that fails.**
+
+The settings window captures which archives are unreadable when the window opens, and does not
+recompute it after a library rebuild. Import a corrupt archive mid-session and it is treated as
+readable until the window is reopened — the row's own state is stale, not the list's.
+
+**The consequence is bounded to cosmetics**, because the guard that matters counts readable rows
+at the moment of the click rather than trusting the cached set. So the visible symptom is
+`Include / exclude` looking enabled on a row that will not move, which `docs/REGRESSION.md` §1.17
+documents as expected. Nothing is written wrong and no list is emptied; the empty-list guard
+catches the consequence that would have mattered.
+
+**If picked up:** the fix is to recompute the set at the same point the rebuilt library is handed
+back to the window, not to make the button smarter — the greying and the guard disagreeing is the
+actual defect, and there is one place where the two inputs are both in scope.

@@ -95,6 +95,10 @@ scroll_popup = true     # let the wheel scroll a popup that overflows
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
 
+[dictionaries.per_language]              # optional; keyed by OCR recognizer tag
+"ja"         = ["大辞林", "Jitendex"]    # these, in this order, and nothing else
+"zh-Hans-CN" = ["中日大辞典"]
+
 [ocr]
 max_ocr_passes = 1      # 1-5; 1 = no forward tiling (the default)
 
@@ -182,6 +186,10 @@ there is more even though you cannot reach it.
 
 ### `display_order`
 
+**As of v0.7.1 this is the fallback**, used for any OCR language that has no
+entry under `per_language`. With no `per_language` at all — the shipped state
+— it is still what orders every lookup, exactly as before.
+
 Matched by **name substring**, and the settings window says so. The TOML
 stores case-insensitive substrings rather than full names, because a rebuilt
 Jitendex changes its own name — the release date is part of it.
@@ -193,6 +201,63 @@ sorting last.
 
 Blank entries are ignored: an empty string is a substring of every name, so
 one would silently pin the whole order.
+
+**One consequence worth knowing before it surprises you.** Pressing Apply
+while a language that *has* a list is on screen rewrites `display_order` from
+that language's split, because the settings window keeps one visible list and
+writes both. So the popup ordering of a language with **no** list can change
+because of which language happened to be selected when you pressed Apply. It
+is only an ordering, never a filter — nothing stops being searched — but if
+you care about the fallback order, set it with an unscoped language selected.
+
+### `per_language`
+
+Each OCR recognizer language gets its own ordered dictionary list. A language
+**with** an entry searches only those dictionaries, in that order; a language
+with **no** entry searches everything by `display_order`, which is v0.7.0's
+behaviour and still the default. Entries are matched by name substring,
+exactly as `display_order` is.
+
+Set this in the settings window — the **Dictionaries** tab is scoped to the
+OCR language selected on **OCR / Debug**, and shows that language's list above
+a `not searched` divider with the rest below it. Changing the language
+re-scopes the tab immediately, before Apply.
+
+**The keys must match the recognizer tag exactly.** `ocr.language` itself is
+matched loosely — `zh-Hans` selects an installed `zh-Hans-CN` — but these keys
+are looked up by exact string equality, so `"zh-Hans"` here does **not** cover
+a running `zh-Hans-CN` and its list is silently unused. The app always
+*writes* the canonical tag, so this only bites a hand-edit. Configure the list
+in the UI, or copy the tag the app wrote into the file.
+
+**A list naming nothing installed is ignored, and everything is searched.**
+A typo, or a dictionary you have not imported yet, therefore never silently
+kills lookups — the fallback is "search everything", not "search nothing". The
+Dictionaries tab shows the same thing the runtime does in that state (every
+dictionary above the divider, no divider at all), and that agreement is
+deliberate: the tab must not claim a scoping the lookups are not applying. The
+same rule is why **excluding everything is not representable**: an empty list
+means the same as no entry, so a language whose list ends up matching nothing
+gets every dictionary back rather than none.
+
+**A hand-written entry naming a not-yet-installed dictionary is replaced on
+the next Apply.** Write `"ja" = ["Daijirin"]` before importing Daijirin, open
+Settings, press Apply *for any reason at all*, and the entry becomes the
+current library's list — the name you typed is gone. **Configure the list
+after importing the dictionary.** Known limitation as of v0.7.1, and note that
+`stale_order_entries` — which warns about a `display_order` entry matching
+nothing — does not look at `per_language`, so nothing reports this to you.
+
+**A language's list cannot be cleared from the settings window.** Once a
+language has an entry, the window never removes the key: re-including every
+dictionary writes a full explicit list instead. That behaves identically for
+your current library, but differs later — an explicit list will not pick up a
+dictionary imported after it was written, where no entry would have. To return
+a language to "no entry", delete the key from the file by hand with chibipop
+stopped.
+
+**Re-including a dictionary puts it last.** Excluding and re-including does
+not restore its former priority; move it back up with **Move up**.
 
 ### `show_scan_region`
 
@@ -212,7 +277,7 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**730 tests** across six targets, one of them ignored. Re-measured
+**767 tests** across six targets, one of them ignored. Re-measured
 2026-08-12.
 
 Tier 0 of [`REGRESSION.md`](REGRESSION.md) is the authority on this number
@@ -222,7 +287,9 @@ missed on all three of the v0.7.0 round's earlier re-baselines
 (670 → 698 → 710 → 726), and on every one before them: it read **416**
 until the first two were caught up, then **710** while Tier 0 already
 read **726**. The fourth, 726 → 729, moved both pages at once, as did the
-fifth, 729 → 730.
+fifth, 729 → 730, and so does 730 → 767 — the per-language dictionary lists
+round, which added 37 tests across five tasks and two fix rounds and removed
+none.
 
 **After any large change, work through [`REGRESSION.md`](REGRESSION.md)** — a
 cheapest-first checklist: the automated gate, then what can be verified
