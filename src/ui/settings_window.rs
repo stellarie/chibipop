@@ -8,6 +8,7 @@ use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RA
 use crate::text::ocr::tag_matches;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -95,6 +96,7 @@ const ID_CAPTURE_H: i32 = 137;
 const ID_SCAN_ALNUM: i32 = 138;
 const ID_PER_CHAR: i32 = 139;
 const ID_OCR_LANG: i32 = 140;
+const ID_DICT_TOGGLE: i32 = 141;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -133,12 +135,14 @@ struct TcItemW {
 }
 
 /// What a rebuild disables.
-const WHILE_BUSY: [i32; 12] = [
+const WHILE_BUSY: [i32; 14] = [
     ID_APPLY,
     ID_QUIT,
+    ID_OCR_LANG,
     ID_DICTS,
     ID_DICT_UP,
     ID_DICT_DOWN,
+    ID_DICT_TOGGLE,
     ID_DICT_ADD,
     ID_DICT_REMOVE,
     ID_FREQS,
@@ -155,7 +159,8 @@ const PAD: i32 = 14;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
 const GROUP_GAP: i32 = 10;
-const BTN_W: i32 = 92;
+/// Fits "Include / exclude".
+const BTN_W: i32 = 120;
 const BTN_PITCH: i32 = ROW_H + 4;
 const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
@@ -258,6 +263,12 @@ thread_local! {
 
     // Field-map toggle click, by `HWND`.
     static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
+
+    // Pending OCR-language switch.
+    static LANG_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
+
+    // Unreadable rows, by `HWND`.
+    static UNREADABLE: RefCell<Option<(isize, Vec<String>)>> = const { RefCell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -281,6 +292,30 @@ fn record_click(hwnd: HWND, click: SettingsClick) {
 
 fn record_field_map_toggle(hwnd: HWND) {
     FIELD_MAP_TOGGLE.with(|c| c.set(Some(hwnd.0 as isize)));
+}
+
+fn remember_unreadable(hwnd: HWND, files: &[String]) {
+    UNREADABLE.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, files.to_vec())));
+}
+
+/// Rows carrying no name.
+fn unreadable_rows(hwnd: HWND) -> Vec<String> {
+    UNREADABLE.with(|c| match &*c.borrow() {
+        Some((h, u)) if *h == hwnd.0 as isize => u.clone(),
+        _ => Vec::new(),
+    })
+}
+
+fn record_language_change(hwnd: HWND) {
+    LANG_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
+    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
+    // live for the duration of this call. WM_NULL carries no payload and is
+    // discarded by `DefWindowProcW`; posting it only ends the caller's
+    // `GetMessageW` block so `pump` re-scopes the list without waiting for
+    // other input.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+    }
 }
 
 /// Starts capture mode.
@@ -329,6 +364,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 unsafe { update_list_buttons(hwnd) };
                 return LRESULT(0);
             }
+            if id == ID_OCR_LANG && notify == CBN_SELCHANGE as u16 {
+                record_language_change(hwnd);
+                return LRESULT(0);
+            }
             match id {
                 // 1 is IDOK: Enter, not the id.
                 ID_APPLY | 1 => record_outcome(hwnd, SettingsOutcome::Apply),
@@ -337,6 +376,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
                 ID_DICT_UP => unsafe { move_selected(hwnd, -1) },
                 ID_DICT_DOWN => unsafe { move_selected(hwnd, 1) },
+                ID_DICT_TOGGLE => unsafe { toggle_selected(hwnd) },
                 ID_DICT_ADD => record_action(hwnd, Action::Add),
                 ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
                 ID_FREQ_ADD => record_action(hwnd, Action::Add),
@@ -582,6 +622,12 @@ unsafe fn move_selected(hwnd: HWND, delta: i32) {
         if cur < 0 || target < 0 || target >= count {
             return;
         }
+        // A LISTBOX row always picks.
+        if list_row(list, cur).as_deref() == Some(DICT_DIVIDER)
+            || list_row(list, target).as_deref() == Some(DICT_DIVIDER)
+        {
+            return;
+        }
         let len = SendMessageW(list, LB_GETTEXTLEN, Some(WPARAM(cur as usize)), None).0;
         if len <= 0 {
             return;
@@ -618,12 +664,19 @@ unsafe fn update_list_buttons(hwnd: HWND) {
         let count = SendMessageW(dicts, LB_GETCOUNT, None, None).0;
         let cur = SendMessageW(dicts, LB_GETCURSEL, None, None).0;
         let freq_cur = SendMessageW(freqs, LB_GETCURSEL, None, None).0;
+        let divider = |i: isize| list_row(dicts, i).as_deref() == Some(DICT_DIVIDER);
+        let picked = cur >= 0 && !divider(cur);
+        let can_move = |t: isize| picked && t >= 0 && t < count && !divider(t);
+        // Never search nothing.
+        let searched = (0..count).position(&divider).unwrap_or(count.max(0) as usize);
+        let can_toggle = picked && !(searched == 1 && cur == 0);
         // Focus must not be orphaned.
         let focused = GetFocus();
         for (id, list, enable) in [
-            (ID_DICT_UP, dicts, cur > 0),
-            (ID_DICT_DOWN, dicts, cur >= 0 && cur < count - 1),
-            (ID_DICT_REMOVE, dicts, cur >= 0),
+            (ID_DICT_UP, dicts, can_move(cur - 1)),
+            (ID_DICT_DOWN, dicts, can_move(cur + 1)),
+            (ID_DICT_TOGGLE, dicts, can_toggle),
+            (ID_DICT_REMOVE, dicts, picked),
             (ID_FREQ_REMOVE, freqs, freq_cur >= 0),
         ] {
             if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
@@ -665,6 +718,45 @@ unsafe fn list_rows(hwnd: HWND, id: i32) -> Option<Vec<String>> {
         let list = GetDlgItem(Some(hwnd), id).ok()?;
         let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
         Some((0..count.max(0)).filter_map(|i| list_row(list, i)).collect())
+    }
+}
+
+/// Refill, selecting the top.
+unsafe fn fill_dict_list(list: HWND, rows: &[String]) {
+    // SAFETY: `list` is a live listbox owned by the caller; each string is
+    // copied by `LB_ADDSTRING` during the call, so every temporary outlives
+    // its only use.
+    unsafe {
+        SendMessageW(list, LB_RESETCONTENT, None, None);
+        for row in rows {
+            SendMessageW(list, LB_ADDSTRING, None,
+                Some(LPARAM(wide(row).as_ptr() as isize)));
+        }
+        SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+    }
+}
+
+/// Cross the divider.
+unsafe fn toggle_selected(hwnd: HWND) {
+    // SAFETY: `ID_DICTS` is a live child of `hwnd`, created in `build`;
+    // `list_row`, `list_rows` and `fill_dict_list` each state their own
+    // contract, and the handle is checked before any of them is called.
+    unsafe {
+        let Ok(list) = GetDlgItem(Some(hwnd), ID_DICTS) else { return };
+        let cur = SendMessageW(list, LB_GETCURSEL, None, None).0;
+        let Some(name) = list_row(list, cur) else { return };
+        if name == DICT_DIVIDER {
+            return;
+        }
+        let Some(rows) = list_rows(hwnd, ID_DICTS) else { return };
+        let (mut active, mut excluded) = split_dict_rows(&rows);
+        toggle_dict(&mut active, &mut excluded, &unreadable_rows(hwnd), &name);
+        let rows = dict_rows(&active, &excluded);
+        fill_dict_list(list, &rows);
+        if let Some(at) = rows.iter().position(|r| *r == name) {
+            SendMessageW(list, LB_SETCURSEL, Some(WPARAM(at)), None);
+        }
+        update_list_buttons(hwnd);
     }
 }
 
@@ -971,6 +1063,11 @@ impl SettingsWindow {
             // the window opened with no way to accept anything. Measuring the
             // content means that cannot recur, at any DPI or font size.
             let content_h = win.build(form, stale)?;
+            // Both sides from one vector.
+            if let Some(tag) = win.selected_language() {
+                win.staged.borrow_mut().dict_list_language = tag;
+            }
+            remember_unreadable(hwnd, &form.unreadable);
             // Sizes AND shows - see `fit_to` for why showing cannot go
             // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
@@ -1046,6 +1143,9 @@ impl SettingsWindow {
     ///
     /// Callback precedes a picker.
     pub fn pump(&self, before_blocking: impl FnOnce()) {
+        if self.take_language_change() {
+            self.rescope_dicts();
+        }
         let action = ACTION.with(|c| match c.get() {
             Some((h, a)) if h == self.hwnd.0 as isize => {
                 c.set(None);
@@ -1073,6 +1173,11 @@ impl SettingsWindow {
     /// Forget what Apply just did.
     pub fn clear_staged(&self) {
         self.staged.borrow_mut().clear_staged();
+    }
+
+    /// Take what Apply just wrote.
+    pub fn reseed_per_language(&self, written: &BTreeMap<String, Vec<String>>) {
+        self.staged.borrow_mut().reseed_per_language(written);
     }
 
     /// Say what Apply is doing.
@@ -1150,6 +1255,75 @@ impl SettingsWindow {
             }
             _ => None,
         })
+    }
+
+    /// Pending switch, if any.
+    fn take_language_change(&self) -> bool {
+        LANG_CHANGED.with(|c| match c.get() {
+            Some(h) if h == self.hwnd.0 as isize => {
+                c.set(None);
+                true
+            }
+            _ => false,
+        })
+    }
+
+    /// The language combo's own tag.
+    fn selected_language(&self) -> Option<String> {
+        // SAFETY: `ID_OCR_LANG` is a live child of `self.hwnd`, created in
+        // `build`; a missing one yields `Err` here rather than a handle.
+        let i = unsafe {
+            GetDlgItem(Some(self.hwnd), ID_OCR_LANG)
+                .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
+                .unwrap_or(-1)
+        };
+        if i < 0 {
+            return None;
+        }
+        self.ocr_langs.get(i as usize).cloned()
+    }
+
+    /// Re-split for the combo.
+    ///
+    /// Snapshots the old one first.
+    fn rescope_dicts(&self) {
+        let Some(next) = self.selected_language() else { return };
+        let mut staged = self.staged.borrow_mut();
+        let prev = staged.dict_list_language.clone();
+        if prev == next {
+            return;
+        }
+        // SAFETY: `ID_DICTS` is a live child of `self.hwnd`, created in
+        // `build`; `list_rows` and `fill_dict_list` state their own contracts
+        // and every handle is checked before it is used.
+        unsafe {
+            let Some(rows) = list_rows(self.hwnd, ID_DICTS) else { return };
+            let (active, excluded) = split_dict_rows(&rows);
+            staged.dict_names = active;
+            staged.dict_excluded = excluded;
+            staged.ocr_language = prev.clone();
+            if crate::settings::is_scoped(&staged) {
+                let existing = staged.per_language.get(&prev).cloned().unwrap_or_default();
+                let keyed = crate::settings::scoped_entry(
+                    &staged.dict_names, &staged.unreadable, &existing);
+                if let Some(keys) = keyed {
+                    staged.per_language.insert(prev, keys);
+                }
+            }
+            let all: Vec<String> =
+                staged.dict_names.iter().chain(staged.dict_excluded.iter()).cloned().collect();
+            let list = staged.per_language.get(&next).cloned().unwrap_or_default();
+            let (active, excluded) = scope_rows(&all, &list, &staged.unreadable);
+            staged.dict_names = active;
+            staged.dict_excluded = excluded;
+            staged.dict_list_language = next.clone();
+            staged.ocr_language = next;
+            let rows = dict_rows(&staged.dict_names, &staged.dict_excluded);
+            if let Ok(list) = GetDlgItem(Some(self.hwnd), ID_DICTS) {
+                fill_dict_list(list, &rows);
+            }
+            update_list_buttons(self.hwnd);
+        }
     }
 
     /// Pending fold toggle, if any.
@@ -1408,6 +1582,9 @@ impl SettingsWindow {
             let Some(name) = list_row(list, cur) else {
                 return;
             };
+            if name == DICT_DIVIDER {
+                return;
+            }
             SendMessageW(list, LB_DELETESTRING, Some(WPARAM(cur as usize)), None);
             let left = SendMessageW(list, LB_GETCOUNT, None, None).0;
             if left > 0 {
@@ -1423,8 +1600,9 @@ impl SettingsWindow {
     /// Stage whatever was picked.
     unsafe fn add_picked(&self) {
         // SAFETY: `pick_archives` owns every buffer it hands the dialog;
-        // `target.list_id()` names a live child of `self.hwnd`, and the
-        // string each `LB_ADDSTRING` copies outlives that call.
+        // `id` names a live child of `self.hwnd`, and the string each
+        // `LB_ADDSTRING` copies outlives that call. `list_rows` and
+        // `fill_dict_list` each state their own contract.
         unsafe {
             let picked = pick_archives(self.hwnd);
             for path in picked {
@@ -1445,6 +1623,18 @@ impl SettingsWindow {
                 let Ok(list) = GetDlgItem(Some(self.hwnd), id) else {
                     continue;
                 };
+                let rebuilt = (id == ID_DICTS)
+                    .then(|| list_rows(self.hwnd, ID_DICTS))
+                    .flatten()
+                    .map(|rows| rows_with_added(&rows, &name));
+                // LB_SETCURSEL scrolls it in.
+                if let Some(rows) = rebuilt {
+                    fill_dict_list(list, &rows);
+                    if let Some(at) = rows.iter().position(|r| *r == name) {
+                        SendMessageW(list, LB_SETCURSEL, Some(WPARAM(at)), None);
+                    }
+                    continue;
+                }
                 SendMessageW(list, LB_ADDSTRING, None, Some(LPARAM(wide(&name).as_ptr() as isize)));
                 if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
                     SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
@@ -1694,26 +1884,28 @@ impl SettingsWindow {
 
             // ---- Dictionaries ----
             y = content_y;
-            let bx = WIN_W - PAD - 100;
-            let list_w = WIN_W - 2 * PAD - 110;
+            let bx = WIN_W - PAD - BTN_W - 8;
+            let list_w = bx - 2 * PAD + 4;
             let hint_h = 28;
-            // Four buttons set the height.
-            let dict_span = 3 * BTN_PITCH + ROW_H;
-            let dict_h = 20 + dict_span + ROW_GAP + hint_h + 8;
+            let scope_h = 20;
+            // Five buttons set the height.
+            let dict_span = 4 * BTN_PITCH + ROW_H;
+            let dict_h = 20 + scope_h + dict_span + ROW_GAP + hint_h + 8;
             dict.push(group("Dictionaries — topmost is shown first", y, dict_h)?);
             y += 20;
+            dict.push(child(h, w!("STATIC"),
+                "Dictionaries searched for the selected OCR language.",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, scope_h, 0, f)?);
+            y += scope_h;
             let list = child(h, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                 PAD, y, list_w, dict_span, ID_DICTS, f)?;
             dict.push(list);
-            for name in &form.dict_names {
-                SendMessageW(list, LB_ADDSTRING, None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)));
-            }
-            SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+            fill_dict_list(list, &dict_rows(&form.dict_names, &form.dict_excluded));
             for (i, (text, id)) in [
                 ("Move up", ID_DICT_UP),
                 ("Move down", ID_DICT_DOWN),
+                ("Include / exclude", ID_DICT_TOGGLE),
                 ("Add…", ID_DICT_ADD),
                 ("Remove", ID_DICT_REMOVE),
             ]
@@ -1981,8 +2173,10 @@ impl SettingsWindow {
             let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
             // Empty is not missing.
-            let dict_names =
-                list_rows(h, ID_DICTS).unwrap_or_else(|| template.dict_names.clone());
+            let (dict_names, dict_excluded) = match list_rows(h, ID_DICTS) {
+                Some(rows) => split_dict_rows(&rows),
+                None => (template.dict_names.clone(), template.dict_excluded.clone()),
+            };
             let freq_names =
                 list_rows(h, ID_FREQS).unwrap_or_else(|| template.freq_names.clone());
             let staged = self.staged.borrow();
@@ -2045,6 +2239,9 @@ impl SettingsWindow {
                 side_panel: checked(ID_SIDE_PANEL),
                 exclude_from_capture: checked(ID_EXCLUDE),
                 dict_names,
+                dict_excluded,
+                dict_list_language: staged.dict_list_language.clone(),
+                per_language: staged.per_language.clone(),
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
                                      template.max_ocr_passes as i64) as u8,
                 prefer_vertical: checked(ID_PREFER_VERT),
@@ -2114,6 +2311,11 @@ impl Drop for SettingsWindow {
                 c.set(None);
             }
         });
+        LANG_CHANGED.with(|c| {
+            if c.get().is_some_and(|h| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
         CAPTURING.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
@@ -2135,6 +2337,12 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
+        UNREADABLE.with(|c| {
+            let mut slot = c.borrow_mut();
+            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
+                *slot = None;
+            }
+        });
         // SAFETY: the window is this struct's own, still live, and destroyed
         // exactly once. The font outlives every control that used it because
         // the window (and therefore its children) is destroyed first.
@@ -2145,6 +2353,70 @@ impl Drop for SettingsWindow {
             }
         }
     }
+}
+
+/// Splits searched from not.
+const DICT_DIVIDER: &str = "──────── not searched ────────";
+
+/// Active, divider, excluded.
+fn dict_rows(active: &[String], excluded: &[String]) -> Vec<String> {
+    let mut out = active.to_vec();
+    if !excluded.is_empty() {
+        out.push(DICT_DIVIDER.to_string());
+        out.extend(excluded.iter().cloned());
+    }
+    out
+}
+
+/// Undo `dict_rows`.
+fn split_dict_rows(rows: &[String]) -> (Vec<String>, Vec<String>) {
+    match rows.iter().position(|r| r == DICT_DIVIDER) {
+        Some(i) => (rows[..i].to_vec(), rows[i + 1..].to_vec()),
+        None => (rows.to_vec(), Vec::new()),
+    }
+}
+
+/// Add above the divider.
+fn rows_with_added(rows: &[String], name: &str) -> Vec<String> {
+    let (mut active, excluded) = split_dict_rows(rows);
+    active.push(name.to_string());
+    dict_rows(&active, &excluded)
+}
+
+/// Move one row across.
+fn toggle_dict(
+    active: &mut Vec<String>,
+    excluded: &mut Vec<String>,
+    unreadable: &[String],
+    name: &str,
+) {
+    if let Some(i) = active.iter().position(|n| n == name) {
+        let readable = |n: &String| !unreadable.iter().any(|u| u == n);
+        // Never search nothing.
+        if !active.iter().enumerate().any(|(j, n)| j != i && readable(n)) {
+            return;
+        }
+        excluded.push(active.remove(i));
+    } else if let Some(i) = excluded.iter().position(|n| n == name) {
+        active.push(excluded.remove(i));
+    }
+}
+
+/// Re-split for one language.
+fn scope_rows(
+    all: &[String],
+    list: &[String],
+    unreadable: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let readable = |n: &String| !unreadable.iter().any(|u| u == n);
+    let installed = all.iter().filter(|n| readable(n)).map(String::as_str);
+    if !crate::present::any_listed(installed, list) {
+        return (all.to_vec(), Vec::new());
+    }
+    let keep = |n: &String| !readable(n) || crate::present::dict_order_rank(n, list).is_some();
+    let mut active: Vec<String> = all.iter().filter(|n| keep(n)).cloned().collect();
+    active.sort_by_key(|n| crate::present::dict_order_rank(n, list).unwrap_or(usize::MAX));
+    (active, all.iter().filter(|n| !keep(n)).cloned().collect())
 }
 
 #[cfg(test)]
@@ -2726,5 +2998,193 @@ mod tests {
         let rows = language_choices(installed_four(), "ZH-hans");
         assert_eq!(installed_four(), rows);
         assert_eq!(Some(2), language_index(&rows, "ZH-hans"));
+    }
+
+    // ---- the divider ----
+
+    #[test]
+    fn the_rows_put_the_divider_between_the_two_lists() {
+        let rows = dict_rows(&["A".to_string()], &["B".to_string()]);
+        assert_eq!(vec!["A", DICT_DIVIDER, "B"], rows);
+    }
+
+    #[test]
+    fn no_excluded_means_no_divider() {
+        assert_eq!(vec!["A".to_string()], dict_rows(&["A".to_string()], &[]));
+    }
+
+    #[test]
+    fn split_rows_round_trips() {
+        let rows = dict_rows(&["A".to_string()], &["B".to_string()]);
+        assert_eq!(
+            (vec!["A".to_string()], vec!["B".to_string()]),
+            split_dict_rows(&rows),
+        );
+    }
+
+    /// A row moves across.
+    #[test]
+    fn toggling_moves_a_row_across() {
+        let mut active = vec!["A".to_string(), "B".to_string()];
+        let mut excluded: Vec<String> = Vec::new();
+        toggle_dict(&mut active, &mut excluded, &[], "A");
+        assert_eq!(vec!["B".to_string()], active);
+        assert_eq!(vec!["A".to_string()], excluded);
+        toggle_dict(&mut active, &mut excluded, &[], "A");
+        assert_eq!(vec!["B".to_string(), "A".to_string()], active);
+        assert!(excluded.is_empty());
+    }
+
+    /// Never search nothing.
+    #[test]
+    fn the_last_searched_row_will_not_cross() {
+        let mut active = vec!["A".to_string()];
+        let mut excluded = vec!["B".to_string()];
+        toggle_dict(&mut active, &mut excluded, &[], "A");
+        assert_eq!(vec!["A".to_string()], active);
+        assert_eq!(vec!["B".to_string()], excluded);
+    }
+
+    #[test]
+    fn re_including_still_works_with_one_searched_row() {
+        let mut active = vec!["A".to_string()];
+        let mut excluded = vec!["B".to_string()];
+        toggle_dict(&mut active, &mut excluded, &[], "B");
+        assert_eq!(vec!["A".to_string(), "B".to_string()], active);
+        assert!(excluded.is_empty());
+    }
+
+    /// Rows above it can be junk.
+    #[test]
+    fn the_last_readable_searched_row_will_not_cross() {
+        let mut active = vec!["bad.zip".to_string(), "A".to_string()];
+        let mut excluded = vec!["B".to_string()];
+        let unreadable = vec!["bad.zip".to_string()];
+        toggle_dict(&mut active, &mut excluded, &unreadable, "A");
+        assert_eq!(vec!["bad.zip".to_string(), "A".to_string()], active);
+        assert_eq!(vec!["B".to_string()], excluded);
+    }
+
+    #[test]
+    fn an_unreadable_row_does_not_block_a_real_move() {
+        let mut active = vec!["bad.zip".to_string(), "A".to_string(), "B".to_string()];
+        let mut excluded: Vec<String> = Vec::new();
+        let unreadable = vec!["bad.zip".to_string()];
+        toggle_dict(&mut active, &mut excluded, &unreadable, "A");
+        assert_eq!(vec!["bad.zip".to_string(), "B".to_string()], active);
+        assert_eq!(vec!["A".to_string()], excluded);
+    }
+
+    /// It contributes no name.
+    #[test]
+    fn an_unreadable_row_may_leave_the_searched_half() {
+        let mut active = vec!["bad.zip".to_string(), "A".to_string()];
+        let mut excluded: Vec<String> = Vec::new();
+        let unreadable = vec!["bad.zip".to_string()];
+        toggle_dict(&mut active, &mut excluded, &unreadable, "bad.zip");
+        assert_eq!(vec!["A".to_string()], active);
+        assert_eq!(vec!["bad.zip".to_string()], excluded);
+    }
+
+    // ---- adding ----
+
+    /// Added rows are searched.
+    #[test]
+    fn an_added_row_lands_above_the_divider() {
+        let rows = dict_rows(&["A".to_string()], &["B".to_string()]);
+        assert_eq!(
+            vec!["A".to_string(), "C".to_string(), DICT_DIVIDER.to_string(),
+                 "B".to_string()],
+            rows_with_added(&rows, "C"),
+        );
+    }
+
+    #[test]
+    fn an_added_row_needs_no_divider_when_none_is_excluded() {
+        let rows = vec!["A".to_string()];
+        assert_eq!(vec!["A".to_string(), "C".to_string()], rows_with_added(&rows, "C"));
+    }
+
+    // ---- re-scoping ----
+
+    fn installed_two() -> Vec<String> {
+        vec!["Jitendex.org [2026-07-09]".to_string(), "大辞林　第四版".to_string()]
+    }
+
+    /// No list: everything searched.
+    #[test]
+    fn an_empty_language_list_leaves_every_row_active() {
+        assert_eq!(
+            (installed_two(), Vec::new()),
+            scope_rows(&installed_two(), &[], &[])
+        );
+    }
+
+    /// Substrings, not live names.
+    #[test]
+    fn a_language_list_splits_and_orders_the_rows() {
+        let (active, excluded) =
+            scope_rows(&installed_two(), &["大辞林".to_string()], &[]);
+        assert_eq!(vec!["大辞林　第四版".to_string()], active);
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], excluded);
+    }
+
+    #[test]
+    fn the_list_order_wins_over_the_row_order() {
+        let list = vec!["大辞林".to_string(), "Jitendex".to_string()];
+        let (active, excluded) = scope_rows(&installed_two(), &list, &[]);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
+            active
+        );
+        assert!(excluded.is_empty());
+    }
+
+    /// Stale list: nothing hidden.
+    #[test]
+    fn a_list_matching_nothing_installed_leaves_every_row_active() {
+        let list = vec!["Daijirin".to_string()];
+        assert_eq!(
+            (installed_two(), Vec::new()),
+            scope_rows(&installed_two(), &list, &[])
+        );
+    }
+
+    /// Blanks pin nothing.
+    #[test]
+    fn a_blank_only_list_leaves_every_row_active() {
+        let list = vec![String::new()];
+        assert_eq!(
+            (installed_two(), Vec::new()),
+            scope_rows(&installed_two(), &list, &[])
+        );
+    }
+
+    /// Unreadable rows cannot scope.
+    #[test]
+    fn a_list_naming_only_an_unreadable_row_leaves_every_row_active() {
+        let mut rows = installed_two();
+        rows.push("broken.zip".to_string());
+        let unreadable = vec!["broken.zip".to_string()];
+        let list = vec!["broken".to_string()];
+        assert_eq!(
+            (rows.clone(), Vec::new()),
+            scope_rows(&rows, &list, &unreadable)
+        );
+    }
+
+    /// It must stay removable.
+    #[test]
+    fn an_unreadable_row_stays_on_the_searched_side() {
+        let mut rows = installed_two();
+        rows.push("broken.zip".to_string());
+        let unreadable = vec!["broken.zip".to_string()];
+        let (active, excluded) =
+            scope_rows(&rows, &["大辞林".to_string()], &unreadable);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "broken.zip".to_string()],
+            active
+        );
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], excluded);
     }
 }

@@ -4,6 +4,7 @@ use crate::config::{Config, FieldMapping, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Re-exported for config.rs.
@@ -28,6 +29,9 @@ pub struct SettingsForm {
     pub exclude_from_capture: bool,
     /// Live names, not substrings.
     pub dict_names: Vec<String>,
+    pub dict_excluded: Vec<String>,
+    pub dict_list_language: String,
+    pub per_language: BTreeMap<String, Vec<String>>,
     pub max_ocr_passes: u8,
     pub prefer_vertical: bool,
     pub capture_width: i32,
@@ -106,6 +110,11 @@ impl SettingsForm {
         self.staged_removes.clear();
     }
 
+    /// Take what Apply wrote.
+    pub fn reseed_per_language(&mut self, written: &BTreeMap<String, Vec<String>>) {
+        self.per_language = written.clone();
+    }
+
     /// Is this row a pending import?
     pub fn is_staged_add(&self, name: &str) -> bool {
         self.staged_adds.iter().any(|a| a.name == name)
@@ -129,14 +138,26 @@ pub fn shown_name(source: &Path) -> Option<String> {
     source.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
+/// Split still trustworthy?
+pub(crate) fn is_scoped(form: &SettingsForm) -> bool {
+    form.dict_list_language == form.ocr_language
+        && (form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty())
+}
+
 /// Show the library's lists.
 ///
 /// Unreadable files are listed.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
     form.freq_names = named(lib, Kind::Frequency);
+    let to_excluded = is_scoped(&form);
     // Built first, then the rest.
     for name in named(lib, Kind::Term) {
-        if !form.dict_names.contains(&name) {
+        if form.dict_names.contains(&name) || form.dict_excluded.contains(&name) {
+            continue;
+        }
+        if to_excluded {
+            form.dict_excluded.push(name);
+        } else {
             form.dict_names.push(name);
         }
     }
@@ -222,15 +243,39 @@ fn mutate(
     lib.save(dir)
 }
 
+fn sorted_by_order<'a>(dicts: &'a [DictInfo], order: &[String]) -> Vec<&'a DictInfo> {
+    let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
+    ordered.sort_by_key(|d| (dict_order_rank(&d.name, order).unwrap_or(usize::MAX), d.dict_id));
+    ordered
+}
+
 /// Flatten, in popup order.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
-    let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
-    ordered.sort_by_key(|d| {
-        (
-            dict_order_rank(&d.name, &cfg.dictionaries.display_order).unwrap_or(usize::MAX),
-            d.dict_id,
-        )
-    });
+    let ordered = sorted_by_order(dicts, &cfg.dictionaries.display_order);
+    let installed = || dicts.iter().map(|d| d.name.as_str());
+    let active = cfg
+        .dictionaries
+        .per_language
+        .get(&cfg.ocr.language)
+        .filter(|l| !l.is_empty() && crate::present::any_listed(installed(), l.as_slice()));
+    let (dict_names, dict_excluded) = match active {
+        Some(list) => {
+            let matching = sorted_by_order(dicts, list);
+            (
+                matching
+                    .into_iter()
+                    .filter(|d| dict_order_rank(&d.name, list).is_some())
+                    .map(|d| d.name.clone())
+                    .collect(),
+                ordered
+                    .iter()
+                    .filter(|d| dict_order_rank(&d.name, list).is_none())
+                    .map(|d| d.name.clone())
+                    .collect(),
+            )
+        }
+        None => (ordered.iter().map(|d| d.name.clone()).collect(), Vec::new()),
+    };
 
     SettingsForm {
         mode: cfg.trigger.mode,
@@ -244,7 +289,10 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         scroll_popup: cfg.popup.scroll_popup,
         side_panel: cfg.popup.side_panel,
         exclude_from_capture: cfg.popup.exclude_from_capture,
-        dict_names: ordered.iter().map(|d| d.name.clone()).collect(),
+        dict_names,
+        dict_excluded,
+        dict_list_language: cfg.ocr.language.clone(),
+        per_language: cfg.dictionaries.per_language.clone(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
         capture_width: cfg.ocr.capture_width,
@@ -265,6 +313,24 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
     }
+}
+
+fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| !unreadable.iter().any(|u| u == *name))
+        .map(|name| order_key(name, existing))
+        .collect()
+}
+
+/// `None`: leave the entry be.
+pub(crate) fn scoped_entry(
+    names: &[String],
+    unreadable: &[String],
+    existing: &[String],
+) -> Option<Vec<String>> {
+    let keyed = keyed_names(names, unreadable, existing);
+    (!keyed.is_empty()).then_some(keyed)
 }
 
 /// Substrings, not live names.
@@ -299,12 +365,24 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
-    out.dictionaries.display_order = form
-        .dict_names
-        .iter()
-        .filter(|name| !form.unreadable.iter().any(|u| u == *name))
-        .map(|name| order_key(name, &cfg.dictionaries.display_order))
-        .collect();
+    let full: Vec<String> =
+        form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
+    out.dictionaries.display_order =
+        keyed_names(&full, &form.unreadable, &cfg.dictionaries.display_order);
+
+    let mut per_language = form.per_language.clone();
+    if is_scoped(form) {
+        let existing = cfg
+            .dictionaries
+            .per_language
+            .get(&form.ocr_language)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        if let Some(keyed) = scoped_entry(&form.dict_names, &form.unreadable, existing) {
+            per_language.insert(form.ocr_language.clone(), keyed);
+        }
+    }
+    out.dictionaries.per_language = per_language;
     out
 }
 
@@ -648,6 +726,179 @@ mod tests {
         cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
         assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+    }
+
+    #[test]
+    fn from_config_splits_active_from_excluded() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert!(form.dict_names.iter().all(|n| n.contains("大辞林")));
+        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+    }
+
+    #[test]
+    fn apply_to_writes_the_visible_list_into_its_language() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            out.dictionaries.per_language["ja"],
+        );
+    }
+
+    /// Others must survive.
+    #[test]
+    fn apply_to_preserves_other_languages() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["中日大辞典".to_string()],
+            out.dictionaries.per_language["zh-Hans-CN"],
+            "the other language's list must survive",
+        );
+    }
+
+    /// Re-include keeps the key.
+    #[test]
+    fn a_second_apply_rewrites_the_key_the_first_one_wrote() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let first = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            first.dictionaries.per_language["ja"],
+        );
+        form.reseed_per_language(&first.dictionaries.per_language);
+        form.dict_names =
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()];
+        form.dict_excluded = Vec::new();
+        let second = apply_to(&form, &first);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org".to_string()],
+            second.dictionaries.per_language["ja"],
+            "the second Apply must rewrite the key, never drop it",
+        );
+    }
+
+    /// Merge must not undo scoping.
+    #[test]
+    fn with_library_keeps_the_exclusion_scoped() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = with_library(from_config(&cfg, &dicts()), &library());
+        assert!(!form.dict_names.iter().any(|n| n.contains("Jitendex")));
+        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+    }
+
+    /// A stale list must not win.
+    #[test]
+    fn apply_to_does_not_write_a_stale_dict_list_language() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_language = "zh-Hans-CN".to_string();
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["中日大辞典".to_string()],
+            out.dictionaries.per_language["zh-Hans-CN"],
+            "a stale dict list must not overwrite the real one",
+        );
+    }
+
+    /// One helper, two writers.
+    #[test]
+    fn a_keyed_empty_entry_is_never_written() {
+        assert_eq!(None, scoped_entry(&[], &[], &[]));
+        assert_eq!(
+            None,
+            scoped_entry(&["bad.zip".to_string()], &["bad.zip".to_string()], &[]),
+        );
+        assert_eq!(
+            Some(vec!["大辞林".to_string()]),
+            scoped_entry(&["大辞林　第四版".to_string()], &[], &["大辞林".to_string()]),
+        );
+    }
+
+    /// I2-a: nothing left searched.
+    #[test]
+    fn apply_to_will_not_erase_a_list_when_nothing_is_searched() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = Vec::new();
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林".to_string()],
+            out.dictionaries.per_language["ja"],
+            "an empty split must leave the entry alone",
+        );
+    }
+
+    /// I2-b: only unreadable rows.
+    #[test]
+    fn apply_to_will_not_erase_a_list_for_an_unreadable_row() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["bad.zip".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        form.unreadable = vec!["bad.zip".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林".to_string()],
+            out.dictionaries.per_language["ja"],
+            "a keyed-empty split must leave the entry alone",
+        );
+    }
+
+    /// Matches nothing: search all.
+    #[test]
+    fn from_config_ignores_a_list_matching_nothing_installed() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["Daijirin".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
+            form.dict_names,
+            "the tab must match resolve_dict_filter's fallback",
+        );
+        assert!(form.dict_excluded.is_empty());
+    }
+
+    #[test]
+    fn from_config_still_splits_a_list_that_matches_one() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(vec!["大辞林　第四版".to_string()], form.dict_names);
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], form.dict_excluded);
     }
 
     fn staged_form() -> SettingsForm {

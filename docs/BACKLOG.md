@@ -571,3 +571,110 @@ it needs a real `OcrEngine`. Tier 1 **§1.16** is where that gets exercised by h
 **not been run** — so as of 2026-08-11 the wiring is witnessed by nothing at all. This line used
 to point at §1.15, which does not exercise the startup path: §1.15 is the *reload* path, and no
 step for the startup fallback existed anywhere until §1.16 was written on 2026-08-11.
+
+---
+
+## 14. `stale_order_entries` does not look at `per_language`
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch. The cheapest real improvement
+available to that feature, and deliberately not taken in v0.7.1.**
+
+`stale_order_entries` (`src/settings.rs:432`) walks `cfg.dictionaries.display_order` and returns
+the entries matching no installed dictionary, so the settings window can name the one that would
+otherwise just sort last. It never reads `cfg.dictionaries.per_language`, which means a typo in a
+per-language list — or a dictionary named before it was imported — is reported by nothing at all.
+
+**What that costs is two documented behaviours staying silent rather than visible.**
+`docs/REFERENCE.md` under `per_language` has to tell users that a list naming nothing installed is
+ignored, and that a hand-written entry naming a not-yet-installed dictionary is overwritten by the
+next Apply. Both are only *surprising* because there is no warning; a stale-entry notice naming the
+unmatched string would turn each from a silent surprise into a visible one, without changing any
+behaviour.
+
+**If picked up:** the function already takes `&[DictInfo]`, so the extension is to fold the map's
+values into the same filter and return the language tag alongside the entry — the caller renders a
+string, so the return type is the only real decision. Note that the per-language case has a
+legitimate transient the `display_order` case does not: a list is stale for the whole window
+between configuring it and importing the dictionary, so the notice must read as informational
+rather than as an error.
+
+---
+
+## 15. The settings window's `unreadable` set is not refreshed after a library rebuild
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch. Narrow, no data loss, recorded
+because the symptom is a button that looks wrong rather than anything that fails.**
+
+The settings window captures which archives are unreadable when the window opens, and does not
+recompute it after a library rebuild. Import a corrupt archive mid-session and it is treated as
+readable until the window is reopened — the row's own state is stale, not the list's.
+
+**The consequence is bounded to cosmetics**, because the reader and the writer share the one stale
+set: `toggle_selected` re-reads the rows at click time but classifies them with the cached
+`unreadable` (`src/ui/settings_window.rs:753`), and `read` hands that same cached set to
+`apply_to` (`:2258`), which keys the list through it. The two therefore agree with each other even
+while both are stale, so the visible symptom is `Include / exclude` looking enabled on a row that
+will not move, which `docs/REGRESSION.md` §1.17 documents as expected. Nothing is written wrong
+and no list is emptied; the empty-list guard catches the consequence that would have mattered.
+
+**The reachable trigger is a rebuild that *fails*** and leaves the window open — an import that
+succeeds ends in a restart, which reopens the window and recaptures the set.
+
+**If picked up:** the fix is to recompute the set at the same point the rebuilt library is handed
+back to the window, not to make the button smarter — the greying and the guard disagreeing is the
+actual defect, and there is one place where the two inputs are both in scope.
+
+---
+
+## 16. The dictionary filter trusts `recogniser_available`, not the engine that was built
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch review, inside the fix that closed
+the missing-pack half of it. Narrow: it needs a tag Windows lists but will not build.**
+
+`resolve_dict_filter` (`src/app.rs:2386`) honours a language's list only when
+`configured_recogniser_runs` (`:2379`) says the configured tag will really run — the same
+`startup_language` + `recogniser_available` decision the worker makes. That closes the reachable
+case: with the pack uninstalled the worker substitutes `ja`, and without the guard the popup would
+filter Japanese hits through the Chinese list and come back **empty**.
+
+**One case it does not close.** `recogniser_available` can report a tag as installed while
+`make_engine` still fails on it; `apply_settings` then prints
+`chibipop: <tag> recogniser failed, keeping <tag>` and holds the previous engine
+(`src/text/ocr.rs:291-294`). The filter was resolved against the configured tag before that, so OCR
+runs one language while the lookups are scoped to another's list — the empty popup again, one
+layer down. `docs/REGRESSION.md` §1.16 already names this engine-will-not-build case as uncovered.
+
+**If picked up:** the honest fix is for the worker to report the tag it ended up with, which is
+exactly the cross-thread plumbing this round declined to add — a field on the startup message and
+on the reload path, plus somewhere on the main thread to hold it. Anything cheaper is another
+mirror of a decision taken on the other thread, which is what this item exists to warn about.
+
+---
+
+## 17. The main-thread WinRT probe relies on an undocumented `windows-core` fallback
+
+**Raised 2026-08-12 by the re-review of the per-language-dictionary-lists fix wave, which proved
+the current behaviour by execution rather than by reading. Not a defect today.**
+
+`configured_recogniser_runs` (`src/app.rs:2379`) calls into WinRT from the **main** thread, at
+startup and on Apply. `RoInitialize` appears exactly once in the tree (`src/text/ocr.rs:271`) and
+runs only on the **worker** thread; apartment initialisation is per-thread, so the main thread's
+apartment is never initialised by us.
+
+It works anyway because `windows-core`'s `load_factory` falls back to `CoIncrementMTAUsage` when a
+factory lookup returns `CO_E_NOTINITIALIZED`, then retries. Measured in a process where no thread
+ever called `RoInitialize`: `AvailableRecognizerLanguages()` returned `Ok(size=4)` in 3.77 ms and
+`recogniser_available("ja")` was true in 284 us — the same as after `RoInitialize`. The probe is
+also double-short-circuited, so a config with no `per_language` never reaches WinRT at all.
+
+**Why it is worth writing down.** If a future `windows` bump drops that fallback, the probe starts
+answering "the configured recogniser will not run" for every tag, and `resolve_dict_filter` then
+declines to apply **every** per-language list. That fails safe — everything is searched — but it is
+silent: no error, no stderr line, and the release's headline feature simply stops doing anything.
+Nothing in the test suite would catch it, because the tests exercise the pure resolver rather than
+the probe.
+
+**If picked up:** either initialise the main thread's apartment explicitly at startup and stop
+depending on the fallback, or have the probe report failure distinguishably from "not installed" so
+the silent path becomes a visible one. The second is cheaper and is what makes the failure
+diagnosable.
