@@ -591,6 +591,74 @@ fn service_settings_click(
     }
 }
 
+/// What the worker needs.
+struct WorkerSpawn {
+    dict_path: PathBuf,
+    rules_path: PathBuf,
+    w_present_cfg: PresentConfig,
+    w_max_ocr_passes: u8,
+    w_prefer_vertical: bool,
+    w_capture: CaptureSize,
+    w_scan_alphanumeric: bool,
+    w_language: String,
+    w_scan_display: ScanDisplay,
+    main_tid: u32,
+    trigger_rx: mpsc::Receiver<Trigger>,
+    result_tx: mpsc::Sender<WorkerResult>,
+    worker_running: Arc<AtomicBool>,
+    worker_capture_guard_active: Arc<AtomicBool>,
+    capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
+}
+
+/// Spawn it, await startup.
+fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>)> {
+    let WorkerSpawn {
+        dict_path,
+        rules_path,
+        w_present_cfg,
+        w_max_ocr_passes,
+        w_prefer_vertical,
+        w_capture,
+        w_scan_alphanumeric,
+        w_language,
+        w_scan_display,
+        main_tid,
+        trigger_rx,
+        result_tx,
+        worker_running,
+        worker_capture_guard_active,
+        capture_guard_tx,
+    } = w;
+    let (startup_tx, startup_rx) = mpsc::channel::<Result<Vec<DictInfo>>>();
+
+    let worker = thread::spawn(move || {
+        worker_main(
+            dict_path,
+            rules_path,
+            w_present_cfg,
+            w_max_ocr_passes,
+            w_prefer_vertical,
+            w_capture,
+            w_scan_alphanumeric,
+            w_language,
+            w_scan_display,
+            main_tid,
+            trigger_rx,
+            result_tx,
+            worker_running,
+            startup_tx,
+            worker_capture_guard_active,
+            capture_guard_tx,
+        );
+    });
+
+    let dicts: Vec<DictInfo> = startup_rx
+        .recv()
+        .context("worker thread ended before completing startup")??;
+
+    Ok((worker, dicts))
+}
+
 /// Run until the user quits.
 pub fn run(
     mut cfg: Config,
@@ -613,7 +681,6 @@ pub fn run(
     let running = Arc::new(AtomicBool::new(true));
     let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
-    let (startup_tx, startup_rx) = mpsc::channel::<Result<Vec<DictInfo>>>();
     // Unknown until Popup::create.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
     let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
@@ -632,31 +699,24 @@ pub fn run(
     let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
-    let _worker = thread::spawn(move || {
-        worker_main(
-            dict_path,
-            rules_path,
-            w_present_cfg,
-            w_max_ocr_passes,
-            w_prefer_vertical,
-            w_capture,
-            w_scan_alphanumeric,
-            w_language,
-            w_scan_display,
-            main_tid,
-            trigger_rx,
-            result_tx,
-            worker_running,
-            startup_tx,
-            worker_capture_guard_active,
-            capture_guard_tx,
-        );
-    });
-
     // Contract 3: DPI before GDI.
-    let dicts: Vec<DictInfo> = startup_rx
-        .recv()
-        .context("worker thread ended before completing startup")??;
+    let (_worker, dicts) = spawn_worker(WorkerSpawn {
+        dict_path,
+        rules_path,
+        w_present_cfg,
+        w_max_ocr_passes,
+        w_prefer_vertical,
+        w_capture,
+        w_scan_alphanumeric,
+        w_language,
+        w_scan_display,
+        main_tid,
+        trigger_rx,
+        result_tx,
+        worker_running,
+        worker_capture_guard_active,
+        capture_guard_tx,
+    })?;
 
     let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
