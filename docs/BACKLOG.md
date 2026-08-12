@@ -648,3 +648,33 @@ layer down. `docs/REGRESSION.md` §1.16 already names this engine-will-not-build
 exactly the cross-thread plumbing this round declined to add — a field on the startup message and
 on the reload path, plus somewhere on the main thread to hold it. Anything cheaper is another
 mirror of a decision taken on the other thread, which is what this item exists to warn about.
+
+---
+
+## 17. The main-thread WinRT probe relies on an undocumented `windows-core` fallback
+
+**Raised 2026-08-12 by the re-review of the per-language-dictionary-lists fix wave, which proved
+the current behaviour by execution rather than by reading. Not a defect today.**
+
+`configured_recogniser_runs` (`src/app.rs:2379`) calls into WinRT from the **main** thread, at
+startup and on Apply. `RoInitialize` appears exactly once in the tree (`src/text/ocr.rs:271`) and
+runs only on the **worker** thread; apartment initialisation is per-thread, so the main thread's
+apartment is never initialised by us.
+
+It works anyway because `windows-core`'s `load_factory` falls back to `CoIncrementMTAUsage` when a
+factory lookup returns `CO_E_NOTINITIALIZED`, then retries. Measured in a process where no thread
+ever called `RoInitialize`: `AvailableRecognizerLanguages()` returned `Ok(size=4)` in 3.77 ms and
+`recogniser_available("ja")` was true in 284 us — the same as after `RoInitialize`. The probe is
+also double-short-circuited, so a config with no `per_language` never reaches WinRT at all.
+
+**Why it is worth writing down.** If a future `windows` bump drops that fallback, the probe starts
+answering "the configured recogniser will not run" for every tag, and `resolve_dict_filter` then
+declines to apply **every** per-language list. That fails safe — everything is searched — but it is
+silent: no error, no stderr line, and the release's headline feature simply stops doing anything.
+Nothing in the test suite would catch it, because the tests exercise the pure resolver rather than
+the probe.
+
+**If picked up:** either initialise the main thread's apartment explicitly at startup and stop
+depending on the fallback, or have the probe report failure distinguishably from "not installed" so
+the silent path becomes a visible one. The second is cheaper and is what makes the failure
+diagnosable.

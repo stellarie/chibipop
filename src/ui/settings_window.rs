@@ -3160,7 +3160,7 @@ mod tests {
         );
     }
 
-    /// Unreadable names cannot scope.
+    /// Unreadable rows cannot scope.
     #[test]
     fn a_list_naming_only_an_unreadable_row_leaves_every_row_active() {
         let mut rows = installed_two();

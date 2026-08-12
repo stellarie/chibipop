@@ -243,10 +243,11 @@ a language whose list ends up matching nothing gets every dictionary back
 rather than none.
 
 **A list is applied only while its own recognizer is the one running.** If the
-selected language's pack is not installed, chibipop OCRs with the fallback
-recognizer — it says so on stderr at startup — and the list is then not applied
-at all: everything is searched by `display_order`, exactly as for a language
-with no entry. Otherwise the popup would filter the fallback's hits through a
+selected language's pack is not installed, chibipop goes on OCRing with a
+different recognizer — at startup the fallback, which it names on stderr; on
+Apply whichever language was already running, which it also reports — and the
+list is then not applied at all: everything is searched by `display_order`,
+exactly as for a language with no entry. Otherwise the popup would filter the fallback's hits through a
 list written for a language that is not reading the screen, and come back empty
 with no error at all. This is the one state where the Dictionaries tab does not
 match the runtime, and deliberately: the tab keeps showing the list you

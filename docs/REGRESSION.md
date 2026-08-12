@@ -635,9 +635,10 @@ Set the first language's list to one dictionary and the second language's to the
   still there. Losing it is the failure this design exists to prevent.
 - A language with **no** list still searches everything, exactly as v0.7.0 did.
 - After Apply, `chibipop.toml` shows `[dictionaries.per_language]` with an entry per visited
-  language holding **short substrings** (`Jitendex`) — **not** full titles with date stamps
-  (`Jitendex.org [2026-07-09]`). Full titles there means the keying regressed, and the entry will
-  quietly stop matching the next time that dictionary is rebuilt.
+  language. Each name is stored cut at its first `[` or `(`, so `Jitendex.org [2026-07-09]` must
+  appear as `Jitendex.org`. **A surviving date stamp means the keying regressed**, and the entry
+  will quietly stop matching the next time that dictionary is rebuilt. A title that contains no
+  bracket (`大辞林　第四版`, `中日大辞典`) is stored whole and is **correct** — do not file it.
 
 **Four checks that each cost a fix round on this branch. If time is short, run these.**
 
