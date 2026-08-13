@@ -7,7 +7,7 @@ Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed 
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
-**Four exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
+**Five exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
 2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Items
 **1.14–1.16** were added 2026-08-11 with the per-character-retrigger / OCR-language branch:
 **1.16 has not been run at all**, and 1.14 and 1.15 were **run only in part** the same day. What
@@ -15,9 +15,12 @@ passed, on one machine in horizontal text, was 1.14's retrigger with the toggle 
 **switch path** — not all of 1.14, and not all of 1.15. Everything else in the three is still
 owed, 1.14's toggle-OFF half and 1.15's missing-recognizer path among it. **The callout above 1.14
 is the authority on the split; this sentence is a summary and is not the shorter list.** Item
-**1.17** was added 2026-08-12 with the per-language-dictionary-lists branch and **has not been run
-at all** — not one clause of it. Item **11b** was corrected 2026-08-09, having described behaviour
-that never existed in any version of the program.
+**1.17** was added 2026-08-12 with the per-language-dictionary-lists branch and **rewritten
+2026-08-13** for the two-box Dictionaries tab; it **has not been run at all in either form** — not
+one clause of it. Item **1.18** was added 2026-08-13 with the rebuild-promotion branch and **has
+not been run**; it is the acceptance for a rebuild taking effect without a restart, which is the
+thing that has never once worked. Item **11b** was corrected 2026-08-09, having described
+behaviour that never existed in any version of the program.
 
 ---
 
@@ -39,16 +42,21 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **772** total across **6** targets, 1 ignored (was 767; re-measured 2026-08-12) |
+| Rust tests | **all green**, **794** total across **6** targets, 1 ignored (was 772; re-measured 2026-08-13) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
 **The test count is a floor, not an equality.** Adding a test must not break CI; a whole target
-silently not running must. CI asserts `≥ 400` and prints the total; **772** is what this machine
+silently not running must. CI asserts `≥ 400` and prints the total; **794** is what this machine
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
+
+**A lower number is not automatically a finding either — it is a debt to explain.** The
+772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
+account of it is arithmetic, not reassurance: name what was removed, name what still covers the
+behaviour, and show the subtraction.
 
 **670 → 698 is a re-baseline, not a finding**, and it is recorded here in the commit that moves it,
 per the rule in the callout below. The per-character-retrigger / OCR-language branch added 28 tests
@@ -112,6 +120,27 @@ pins that a second Apply rewrites the `per_language` key an earlier Apply wrote 
 it, and one pins that a list is not applied when its own recognizer is not the one running. The six
 targets split **760 + 0 + 1 + 2 + 9 + 0**, with **0 failed** and the same **1 ignored**. The clippy
 counts did **not** move: still 3 raw and 0 on the bin target, at the same three sites.
+
+**772 → 794 is a re-baseline, not a finding — and it is the first entry here that goes *down*
+before it goes up.** It is the first entry of a **new round**: the rebuild-promotion / two-box
+Dictionaries branch, six tasks on top of the v0.7.1 merge (`4b3fe6a`). `git diff 4b3fe6a..HEAD --
+src/` is **+33 `#[test]`, −11**, a net **+22** — which is exactly 794 − 772. Per commit the split
+is 0, 1, 6, 3, 15, then **+8 −11** in the last one, so every deletion happened in one commit and
+the arithmetic is `797 − 11 + 8 = 794`.
+
+**The −11 is a demolition, not a regression.** All eleven tested `DICT_DIVIDER`, the fake row that
+used to split the one dictionary listbox — nine under `// ---- the divider ----` and two under
+`// ---- adding ----` — and the divider was deleted along with the tab that hosted it (§1.17). A
+test whose subject no longer exists cannot be kept green honestly. What they asserted that
+*outlives* the divider — the last searched dictionary will not cross out, an unreadable archive
+does not count toward that rule, `Add…` lands among the searched ones — is re-asserted by the 15
+pure move tests added one commit earlier, against two `Vec<String>` instead of one list and a
+sentinel. `scope_rows`' five tests were untouched.
+
+The three runs above the table reported **794, 794, 794** — identical, which is the point of
+running it three times — over six targets splitting **782 + 0 + 1 + 2 + 9 + 0**, with **0 failed**
+and the same **1 ignored**. The clippy counts did **not** move: still 3 raw and 0 on the bin
+target, at the same three sites.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
@@ -614,21 +643,29 @@ limit 3: the fallback fixes "does nothing", not "says nothing".
   still aborts startup exactly as before, and cannot be fixed without splitting
   `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
 
-### 1.17 Per-language dictionary lists — **added 2026-08-12, not run**
+### 1.17 Per-language dictionary lists — **added 2026-08-12, rewritten 2026-08-13 for the two boxes, not run**
 
-**Nothing witnesses any of this today.** `resolve_dict_filter`, the row split and the include /
-exclude round-trip are unit-tested as pure functions; that a *running* instance re-scopes its
-lookups, and that the tab re-renders on the dropdown alone, is reachable only by hand. **Needs two
-installed recognizers and at least two dictionaries** — with one of either, most of this entry is
+**Nothing witnesses any of this today.** `resolve_dict_filter`, the box-to-box move
+(`dict_move` / `dict_move_target`) and the which-box-is-acting decision (`acting_box`) are
+unit-tested as pure functions; the Win32 layout, the selection tracking, every button path, and
+that a *running* instance re-scopes its lookups are reachable only by hand. **Needs two installed
+recognizers and at least two dictionaries** — with one of either, most of this entry is
 unfalsifiable rather than passing.
+
+**The tab is two listboxes as of 2026-08-13**, *Searched* above *Not searched*, with one
+**Move up** / **Move down** pair that reorders inside a box and crosses between them at the
+boundary. The single list split by a `──── not searched ────` row is gone, and so is the
+`Include / exclude` button — **four** buttons only. Every step below is written against that
+shape; a divider row appearing anywhere is a failure, not a stale checklist.
 
 Set the first language's list to one dictionary and the second language's to the other, then switch
 **OCR language** and press Apply.
 
 - The **PID is unchanged** (`Get-Process chibipop`) — that is the test of "no restart", not a proxy.
-- The Dictionaries tab re-scopes **as soon as the language dropdown changes**, before Apply. The
-  excluded ones sit below a row reading `──────── not searched ────────`, and the static under the
-  group title reads `Dictionaries searched for the selected OCR language.`
+- The Dictionaries tab re-scopes **as soon as the language dropdown changes**, before Apply: both
+  boxes refill, the new language's list in *Searched* and the rest in *Not searched*. The caption
+  above the top box reads `Searched — for the selected OCR language`; the one above the bottom box
+  reads `Not searched`.
 - Hovering the same word is answered by a **different dictionary set**. That is the acceptance; the
   tab agreeing with itself is not, and neither is the unchanged PID alone.
 - Edit one language's list, switch language, switch back **without pressing Apply**: the edit is
@@ -640,50 +677,150 @@ Set the first language's list to one dictionary and the second language's to the
   will quietly stop matching the next time that dictionary is rebuilt. A title that contains no
   bracket (`大辞林　第四版`, `中日大辞典`) is stored whole and is **correct** — do not file it.
 
-**Four checks that each cost a fix round on this branch. If time is short, run these.**
+**Five checks that each cost a fix round, or a redesign. If time is short, run these.**
 
-1. **`Add…` lands above the divider.** Exclude something, then import a dictionary. The new row
-   appears in the **searched** half and is selected. Landing below it was a Critical — an import
-   that silently went un-searched.
-2. **The divider is inert.** Select the divider row itself: **Move up, Move down, Include /
-   exclude and Remove all grey out.** Press each anyway — it must not move, toggle, or delete, and
-   no dictionary may cross. Then select the dictionary directly *above* it and press **Move down**,
-   and the one directly *below* it and press **Move up**: nothing happens either time. Crossing is
-   the toggle's job, not Move's.
-3. **The last searched dictionary cannot be excluded, and cannot be erased by Remove either.**
-   With one row left above the divider, `Include / exclude` greys out. Now check the other half of
-   the same guard: **Remove** that last row instead, Apply, and confirm the language's entry in
+1. **The boundary crosses, and only at the boundary.** Click a middle row in *Searched* and press
+   **Move up** / **Move down**: it reorders *within* the box and the highlight follows it. Click
+   the **bottom** row of *Searched* and press **Move down**: it lands at the **top** of *Not
+   searched*, highlighted there, and *Searched* loses its highlight. Click the **top** row of *Not
+   searched* and press **Move up**: it lands at the **bottom** of *Searched*. At the far ends —
+   top of *Searched* with **Move up**, bottom of *Not searched* with **Move down** — the button is
+   **greyed**; press it anyway and nothing moves. Crossing is what the deleted `Include / exclude`
+   button used to do; if a row cannot leave its box, the tab is back to being one list in two
+   halves.
+2. **The buttons follow the box you last selected in, not always the top one.** Select a row in
+   *Not searched*, then press **Move up** — it must act on *that* row. A Win32 listbox keeps its
+   selection when it loses focus, so both boxes normally hold one; if the buttons silently act on
+   *Searched* regardless, the second box is decorative and every step above passes by accident.
+   **Remove** obeys the same rule and must work from either box.
+3. **The last searched dictionary cannot be moved out, and cannot be erased by Remove either.**
+   With one row left in *Searched*, **Move down** greys out and stays greyed. With one readable row
+   plus an **unreadable archive** (a corrupt `.zip`, listed under its file name) in the box, Move
+   down on the readable one is **still greyed** — the rule counts readable names, not rows — while
+   the unreadable archive itself can be moved down out of *Searched*. Now the other half of the
+   same guard: **Remove** the last readable row instead, Apply, and confirm the language's entry in
    `chibipop.toml` **still names it** and has **not** become `[]`. An empty list is read as "no
    list" by both readers, so writing one would silently re-enable every dictionary.
-4. **A stale list degrades to searching everything — on both routes into it.** Quit, hand-edit the
+4. **`Add…` appends to *Searched*.** With something sitting in *Not searched*, import a dictionary.
+   The new row appears at the **bottom of *Searched***, selected and scrolled into view, and *Not
+   searched* loses its highlight. Landing in the wrong box was a Critical — an import that
+   silently went un-searched.
+5. **A stale list degrades to searching everything — on both routes into it.** Quit, hand-edit the
    current language's entry to name a dictionary you have not installed (`ja = ["Daijirin"]`),
-   start, open **Dictionaries**. **Every dictionary is above the divider, with no divider at all**
+   start, open **Dictionaries**. **Every dictionary is in *Searched* and *Not searched* is empty**
    — and every one of them still answers hovers. The tab and the runtime must agree; the tab
-   showing them all *below* while all of them answered was a defect on this branch. **Then the
+   showing them all as excluded while all of them answered was a defect on this branch. **Then the
    second route, which is the one that was actually broken:** give the stale entry to the language
    you are *not* on, start, and switch **OCR language** to it on **OCR / Debug** before opening
-   **Dictionaries**. Same expectation — no divider at row 0 with the whole library beneath it.
+   **Dictionaries**. Same expectation — a full *Searched* box and an empty *Not searched* one.
    The two routes run different code (`from_config` when the window opens, `scope_rows` on the
    switch) and only the first was guarded until 2026-08-12, so running the open route alone passes
    while the switch route is live. Step 3's aftermath is the same rule reached from a third
    direction: the removed dictionary's name is still in the list, matches nothing installed, and so
    everything answers again.
 
-> [!note] Three things on this screen are expected — do not file any of them
-> **Pressing Apply on step 4's screen rewrites the hand-edited entry** to the dictionaries actually
+**The layout, which only eyes can check.** Each box shows **four full rows** without scrolling —
+add a fifth dictionary and confirm a scrollbar appears rather than a row being half-drawn. Neither
+caption is clipped (the *Searched* one is the longer; its tail, "OCR language", must be visible),
+and the hint under both boxes reads whole on **one** line: `Order is matched by dictionary name.
+Check both lists after a rebuild.` **Apply and Quit must still be on screen at the tab's tallest**
+— which needs *both* conditional warnings at once, the library-less notice and a stale order
+entry. If both cannot be produced, check with one at 150% DPI: `BACKLOG.md` §11 records that case
+as having roughly no headroom, and this tab is the one that governs the window's height when both
+warnings show.
+
+> [!note] Four things on this screen are expected — do not file any of them
+> **Pressing Apply on step 5's screen rewrites the hand-edited entry** to the dictionaries actually
 > installed, discarding the `Daijirin` you typed. Known limitation, not fixed in v0.7.1: configure
 > the list *after* importing the dictionary. See `per_language` in
 > [`REFERENCE.md`](REFERENCE.md).
 >
-> **With a corrupt archive above the divider, `Include / exclude` can look enabled and do nothing
-> when clicked.** The button greys on row count while the guard counts *readable* rows, so the row
-> simply does not move — which is the correct outcome. Cosmetic only; the enforcement is the guard,
-> not the greying.
+> **Tabbing into a box does not retarget the buttons; selecting in it does.** Tracking follows a
+> selection change, so Tab alone leaves the buttons pointed at the box you last clicked or arrowed
+> in. The first arrow key inside the newly focused box retargets them.
+>
+> **Emptying the acting box greys all three of Move up, Move down and Remove** until you click a
+> row somewhere. Nothing is selected anywhere at that moment, and that is the same behaviour the
+> single list had when it emptied.
 >
 > **A language whose recognizer pack is missing ignores its list entirely** — the tab keeps showing
 > it while every dictionary answers, because OCR is running the fallback language and not the one
 > the list was written for. See §1.16 and `per_language` in [`REFERENCE.md`](REFERENCE.md). This is
 > the one state where the tab deliberately does not match the runtime.
+
+### 1.18 A rebuilt dictionary lands without a restart — **added 2026-08-13, not run**
+
+**This is the acceptance for v0.7.2, and it is the one thing that has never once worked.** In the
+live app the promotion was a `std::fs::rename` onto a database the worker thread was holding open,
+under `if let Ok(()) =` — so it failed, every time, and said nothing. What it left behind was a
+complete `data/chibipop.sqlite.new` sitting beside a live `data/chibipop.sqlite` twelve days older,
+with no error on screen, none on stderr, and no rollback. Three separately reported symptoms — an
+excluded dictionary still answering, a removed one still answering, and the Dictionaries tab
+looking reverted — were all that one stale file. The worker is now stopped and **joined** before
+the rename (the join is what proves its SQLite handle closed), then respawned on the promoted
+database.
+
+The decision this hangs on is unit-tested as a pure state machine over (rebuild ok?, promote ok?);
+the stop / promote / respawn cycle around it is not testable at all and is entirely what this entry
+covers.
+
+1. Start `chibipop run` **from a terminal**, so stderr is readable (§1.16 explains why a
+   double-click hides it). **Record the PID** (`Get-Process chibipop`). Hover Japanese text and
+   confirm a popup answers. If `data/chibipop.sqlite.new` exists, one stderr line names it — see
+   the callout after step 10, and do not treat that line, or the file surviving, as a failure.
+2. Settings → **Dictionaries** → `Add…` a dictionary that is not installed yet. Press **Apply** —
+   the button reads **Apply**, not "Apply & Restart", and the hint says it *rebuilds your
+   dictionary*.
+3. The window stays **busy** for the whole rebuild, running through the progress lines, and ends on
+   `Dictionaries rebuilt.`
+4. **The PID is unchanged and no window flickered.** That is the acceptance for the whole release —
+   everything else in this entry is consistent with a fast restart, and only the PID rules one out.
+5. **Hover text the new dictionary covers. It answers** — without reopening Settings and without a
+   second Apply. That second half is its own check: the dictionary filter is re-resolved after the
+   respawn, and if that step were skipped a freshly imported dictionary would stay unscoped until
+   the next Apply, which is the exact bug class this release exists to remove.
+6. `data/chibipop.sqlite` carries the new mtime, `data/chibipop.sqlite.new` is **gone**, and
+   `library/.removed/` is empty.
+7. **Apply both a dictionary and something else at once** — stage an import *and* change the popup
+   font or a hotkey in the same Apply. **Both** must take effect. The old restart was what carried
+   the non-dictionary half; removing it nearly dropped those changes silently.
+8. **The promote-failure path.** Hold `data/chibipop.sqlite` open from another process and Apply a
+   dictionary change. Expect the status `Another chibipop is running. Close it, then Apply again.`,
+   a stderr line naming both files with the OS error and saying your dictionary archives were put
+   back, the archive back in `library/`, no `.new` left behind, and **hovers still answering from
+   the old database**.
+9. Quit from the tray: it still exits within about a second. The quit now joins the worker first,
+   which is a behaviour change even though it is bounded.
+10. Read stderr across the whole run for `hide was not acknowledged`. It should not appear around a
+    rebuild any more; a lookup already inside the capture guard when Apply lands can still print it
+    once, and that one is expected.
+
+> [!important] A leftover `.new` at startup is reported and deliberately left alone
+> **Expect this on stderr at step 1**, before the tray icon: `chibipop: a leftover staged rebuild
+> is at <path>; it is not in use and will not be adopted - the next rebuild overwrites it.` There
+> is a real 404 MB leftover on this machine, so on this machine that line is the normal case rather
+> than a symptom.
+>
+> **Startup neither adopts it nor deletes it, and the file must still be there afterwards.** Do not
+> read "the `.new` is still on disk after chibipop started" as a failure — it is the designed
+> behaviour. `<db>.sqlite.new` is a reliable marker that a build *finished* and no marker at all
+> that it is *recent*, so adopting one silently could install a months-old database; and deleting
+> someone's built 400 MB file is not ours to do.
+>
+> **That is also why step 6 finds no `.new` and step 1 does.** A rebuild builds into that same
+> path, overwriting whatever was there, and the promotion then renames it onto the live database —
+> so the file is consumed by the *rebuild*, never by startup.
+>
+> Both startup paths print the line (`chibipop run`, and the settings-only path that `run` falls
+> into when there is no database at all), and neither prints it twice.
+
+> [!note] Two things here are expected — do not file either
+> **A settings window that is already open is not re-rendered after a rebuild.** Its stale-order
+> warning and its library-empty notice are whatever they were when it opened. The list rows already
+> show what you just typed, so this is cosmetic.
+>
+> **A popup left on screen from before the rebuild still shows the old database's answer** until
+> the next hover. Nothing repaints it in place.
 
 ---
 
@@ -758,18 +895,22 @@ Set the first language's list to one dictionary and the second language's to the
     `own_console()` hiding a console it owns alone. A visible black box here means
     `GetConsoleProcessList` returned something other than 1.
 11b. **The Apply button's caption and hint.** Two processes open the same window and only one of
-    them varies its caption. What the code does, as of 2026-08-09
-    (`apply_caption`/`apply_hint`, `src/ui/settings_window.rs:772`):
+    them promises a restart. What the code does, as of 2026-08-13
+    (`apply_caption` `src/ui/settings_window.rs:954`, `apply_hint` `:959`):
 
 | Opened by | Dictionary staged? | Caption | Hint |
 |---|---|---|---|
 | `chibipop run` | no | **Apply** | "Applying saves your settings and uses them right away." |
-| `chibipop run` | yes | **Apply & Restart** | "Applying saves your settings and restarts chibipop." |
+| `chibipop run` | yes | **Apply** | "Applying saves your settings and rebuilds your dictionary." |
 | `chibipop settings` | either | **Apply & Restart** | "Applying saves your settings and restarts chibipop." |
 
-   The varying row is new with the hot-reload branch; `chibipop settings` is unchanged and does not
-   vary. In the source the caption reads `"Apply && Restart"` — `&&` renders as one `&`, and a
-   single `&` would render as an accelerator underline instead (see the traps table).
+   **Row 2 changed on 2026-08-13** and this table moved with it, which is the whole lesson of the
+   correction below. `chibipop run` used to read **Apply & Restart** with a restart hint when a
+   dictionary was staged; it no longer restarts, so it no longer says so. The caption now varies
+   only by `ApplyMode` — `apply_caption` lost its `staged` parameter entirely — while the hint
+   still varies by both. `chibipop settings` is untouched and still hands off to a fresh process.
+   In the source that caption reads `"Apply && Restart"` — `&&` renders as one `&`, and a single
+   `&` would render as an accelerator underline instead (see the traps table).
 
 > [!warning] Corrected 2026-08-09 — this entry described behaviour that has never existed
 > It asserted `chibipop settings` shows caption **"Apply"** plus a hint "Restart chibipop to use
@@ -874,7 +1015,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **`display_order` holds substrings, not names** | Order works today, silently stops after the next dictionary rebuild. Never write live names back. |
 | **A task that adds a field must be the task that reads it** | `field never read` is a dead-code error, and the gate asserts an exact count — one extra breaks it. (Caught once as a 6th error against the 5-error gate of the day; the gate is 3 now, the trap is unchanged.) |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
-| **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so `chibipop run` cannot have the new database renamed over the one its worker is holding. It builds to `<out>.new` and swaps it in **after** the worker is joined, on the way to the restart. Measured, and pinned by `tests/rebuild.rs`. |
+| **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so `chibipop run` cannot have the new database renamed over the one its worker is holding. It builds to `<out>.new`, **stops and joins the worker**, renames, then respawns it — the join is what proves the handle closed, and no restart is involved. Measured, pinned by `tests/rebuild.rs`. **Until 2026-08-13 that rename ran with the worker still holding the file and its `Err` discarded**, so every live rebuild failed silently. |
 | **Never delete an archive before the rebuild proves out** | The user's `.zip` files are 50–200 MB downloads chibipop may not redistribute. Apply moves removals to `library/.removed/`, which `build-dict` cannot see because it scans top-level `*.zip` only, and deletes them only after the new database is in place. Every failure path calls `Pending::rollback`. |
 | **"Which listbox is it in?" is not "is it a dictionary?"** | The builder decides by reading `index.json`. A frequency list filed under Dictionaries, or a corrupt `.zip`, once satisfied the "you would have no dictionary left" guard and got the last real one deleted. Ask `library::kind_of`. |
 | **Nothing serialises two chibipops** | Both can read the library, both satisfy the guard, both delete a different archive. `lock::LibraryLock` (`CreateMutexW` + `ERROR_ALREADY_EXISTS`, named per library folder) is held for the whole Apply, rebuild included. |

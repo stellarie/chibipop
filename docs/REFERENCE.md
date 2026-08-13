@@ -42,9 +42,19 @@ in a process that idles at 12 MB. It writes to `<out>.tmp` and renames on
 success only, so a failed build leaves the previous database byte-identical.
 
 Windows will not rename over a database that a process still holds open, so a
-running `chibipop run` rebuilds to `<out>.new` and swaps it in as it exits, on
-its way to the restart. `chibipop settings` closes the database before opening
-the window and writes straight to it.
+running `chibipop run` rebuilds to `<out>.new`, then **stops and joins its
+worker thread** — the one thing holding the database — renames the new file
+into place, and respawns the worker on it. **No restart, as of v0.7.2**: the
+process keeps its PID, the settings window stays open, and the newly imported
+dictionaries answer the next hover. If the rename fails anyway the window and
+stderr both say so and the app carries on reading the old database; it is never
+silent. `chibipop settings` closes the database before opening the window and
+writes straight to it.
+
+If a `<out>.new` is found at startup it is **reported on stderr and left
+alone** — never adopted, never deleted. It is a reliable marker that a build
+*finished*, and no marker at all that it is *recent*, so adopting one could
+silently install a months-old database; the next rebuild overwrites it.
 
 `probe` and `watch` both take `--tiles N`, mirroring `[ocr] max_ocr_passes`.
 **Both default to 1, matching the shipped configuration** — a diagnostic that
@@ -204,8 +214,10 @@ one would silently pin the whole order.
 
 **One consequence worth knowing before it surprises you.** Pressing Apply
 while a language that *has* a list is on screen rewrites `display_order` from
-that language's split, because the settings window keeps one visible list and
-writes both. So the popup ordering of a language with **no** list can change
+that language's split, because the settings window shows one split of your
+library — *Searched* then *Not searched* — and writes both the language's list
+and `display_order` from it. So the popup ordering of a language with **no**
+list can change
 because of which language happened to be selected when you pressed Apply. It
 is only an ordering, never a filter — nothing stops being searched — but if
 you care about the fallback order, set it with an unscoped language selected.
@@ -219,9 +231,15 @@ behaviour and still the default. Entries are matched by name substring,
 exactly as `display_order` is.
 
 Set this in the settings window — the **Dictionaries** tab is scoped to the
-OCR language selected on **OCR / Debug**, and shows that language's list above
-a `not searched` divider with the rest below it. Changing the language
-re-scopes the tab immediately, before Apply.
+OCR language selected on **OCR / Debug**, and shows that language's list in a
+**Searched** box with the rest in a **Not searched** box below it. Changing the
+language re-scopes the tab immediately, before Apply.
+
+**Move up** and **Move down** do both jobs: inside a box they set search
+priority, and at the boundary they move a dictionary between the boxes — down
+from the bottom of *Searched* stops it being searched, up from the top of *Not
+searched* starts it again. There is no separate include/exclude control, and no
+divider row; both were replaced by the two boxes in v0.7.2.
 
 **The keys must match the recognizer tag exactly.** `ocr.language` itself is
 matched loosely — `zh-Hans` selects an installed `zh-Hans-CN` — but these keys
@@ -234,7 +252,7 @@ in the UI, or copy the tag the app wrote into the file.
 A typo, or a dictionary you have not imported yet, therefore never silently
 kills lookups — the fallback is "search everything", not "search nothing". The
 Dictionaries tab shows the same thing the runtime does in that state (every
-dictionary above the divider, no divider at all), and that agreement is
+dictionary in *Searched*, *Not searched* empty), and that agreement is
 deliberate: in that state the tab must not claim a scoping the lookups are not
 applying. It holds however you arrive there, including switching the OCR
 language to one whose list has gone stale. The same rule is why **excluding
@@ -263,8 +281,8 @@ after importing the dictionary.** Known limitation as of v0.7.1, and note that
 nothing — does not look at `per_language`, so nothing reports this to you.
 
 **A language's list cannot be cleared from the settings window.** Once a
-language has an entry, the window never removes the key: re-including every
-dictionary writes a full explicit list instead. That covers an entry an earlier
+language has an entry, the window never removes the key: emptying *Not
+searched* writes a full explicit list instead. That covers an entry an earlier
 Apply in the same session wrote, not just one that was already in the file when
 the window opened — after each Apply the window takes back what was written, so
 the next Apply rewrites the key rather than dropping it. It behaves
@@ -273,8 +291,9 @@ will not pick up a dictionary imported after it was written, where no entry
 would have. To return a language to "no entry", delete the key from the file
 by hand with chibipop stopped.
 
-**Re-including a dictionary puts it last.** Excluding and re-including does
-not restore its former priority; move it back up with **Move up**.
+**A dictionary moved back into *Searched* lands last.** It arrives at the
+bottom of the box, and does not recover its former priority; carry on pressing
+**Move up** to put it back.
 
 ### `show_scan_region`
 
@@ -294,8 +313,8 @@ highlight on you get one box, not four.
 cargo test
 ```
 
-**772 tests** across six targets, one of them ignored. Re-measured
-2026-08-12.
+**794 tests** across six targets, one of them ignored. Re-measured
+2026-08-13.
 
 Tier 0 of [`REGRESSION.md`](REGRESSION.md) is the authority on this number
 and on what a change to it means — a *lower* total is the thing to explain.
@@ -308,6 +327,12 @@ fifth, 729 → 730, and so does 730 → 767 — the per-language dictionary list
 round, which added 37 tests across five tasks and two fix rounds and removed
 none. 767 → 772 is that round's branch review being closed out: five tests
 across its three fixes, and again none removed.
+
+**772 → 794 is the first move on this page where a round deleted tests**: the
+rebuild-promotion / two-box Dictionaries round added 33 and removed 11, and the
+eleven all tested the divider row that the two-box tab replaced. Tier 0 carries
+the arithmetic and the reason it is a re-baseline rather than a regression; do
+not read the deletion out of this page's summary alone.
 
 **After any large change, work through [`REGRESSION.md`](REGRESSION.md)** — a
 cheapest-first checklist: the automated gate, then what can be verified

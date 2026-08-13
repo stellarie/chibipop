@@ -337,16 +337,21 @@ reasonable request and it is **not** what the code does.
 
 ### What is actually there
 
-`apply_caption` / `apply_hint` (`src/ui/settings_window.rs:772`) key on
-`ApplyMode` × *dictionary staged*:
+`apply_caption` (`src/ui/settings_window.rs:954`) keys on `ApplyMode` alone; `apply_hint` (`:959`)
+keys on `ApplyMode` × *dictionary staged*:
 
 | Opened by | Staged? | Caption | Hint |
 |---|---|---|---|
 | `run` (`ApplyMode::Live`) | no | Apply | "…uses them right away." |
-| `run` | yes | Apply & Restart | "…restarts chibipop." |
+| `run` | yes | Apply | "…rebuilds your dictionary." |
 | `settings` (`ApplyMode::Standalone`) | either | Apply & Restart | "…restarts chibipop." |
 
-The branch made the `run` rows vary; it left `Standalone` exactly as it found it.
+The hot-reload branch made the `run` rows vary; it left `Standalone` exactly as it found it, and
+so did everything since. **Row 2 changed on 2026-08-13**: v0.7.2 stopped restarting after a
+rebuild, so `run` no longer promises one — `apply_caption` lost its `staged` parameter and the
+`run` caption is now always "Apply". `REGRESSION.md` 11b's table moved in the same commit, which is
+what the "If picked up" note below demands of any change here. **This item is unaffected**: it has
+always been about `Standalone`, which still says "Apply & Restart" and still restarts nothing.
 
 ### Why it was left
 
@@ -357,8 +362,9 @@ needlessly instead of wondering why nothing changed.
 
 ### If picked up
 
-One arm of `apply_caption` and one of `apply_hint`, plus the three assertions at
-`settings_window.rs:2502`. Decide the wording first — "Apply" alone is what the spec asks for, but
+One arm of `apply_caption` and one of `apply_hint`, plus the three tests under
+`// ---- apply caption ----` (`settings_window.rs:2962-2987`). Decide the wording first —
+"Apply" alone is what the spec asks for, but
 "Saved. Restart chibipop to use them." carries more information and is what
 `docs/REGRESSION.md` 11b spent its whole life believing was there. Whatever is chosen, **11b's
 table must move with it**; that item was wrong for months precisely because a caption and a
@@ -399,10 +405,10 @@ nothing will warn.
 
 Three facts compose into the problem:
 
-- **The bottom block sits at the tallest tab.** `settings_window.rs:1907` is
+- **The bottom block sits at the tallest tab.** `settings_window.rs:2169` is
   `y = y_general.max(y_dict).max(y_ocr).max(y_ank)`, and the Apply / Cancel / Quit row is placed
   from that `y`. So a tab growing taller pushes the buttons down on **every** tab, not just its own.
-- **`fit_to` clamps to the work area** (`settings_window.rs:1478-1480`): `outer_h.min(cap)`, where
+- **`fit_to` clamps to the work area** (`settings_window.rs:1738-1740`): `outer_h.min(cap)`, where
   `cap` is `work_area_height`. When the content is taller than the screen allows, the window is
   silently made shorter than its content.
 - **There is no scrolling.** `grep -c "WM_VSCROLL\|SetScrollInfo" src/ui/settings_window.rs`
@@ -410,7 +416,7 @@ Three facts compose into the problem:
   scrollbars, not a scrollable window.) So the clamp does not hide content behind a scrollbar; it
   truncates it, and what is at the bottom is the row containing **Apply**.
 
-That failure has shipped once already. The comment at `settings_window.rs:965-971` records the
+That failure has shipped once already. The comment at `settings_window.rs:1122-1128` records the
 first version of the file passing a hand-tuned height to `CreateWindowExW` — which takes the
 *outer* size — so 39px of caption and frame ate Apply and Cancel and the window opened with no way
 to accept anything. Measuring the content fixed *that* cause. It does not protect against this one.
@@ -426,15 +432,31 @@ by group:
 
 | | `y_general` | `y_dict` | `y_ocr` | `y_ank` | governing `max()` | client height |
 |---|---|---|---|---|---|---|
-| v0.6.0 | **426** | 316 (400 worst case) | 280 | 260 | **426** | **594** |
-| Task 7's first attempt — **discarded, never shipped** | **484** | 316 (400 worst case) | 328 | 260 | **484** | **652** |
-| shipped v0.7.0 | **426** | 316 (400 worst case) | **380** | 260 | **426** | **594** |
+| v0.6.0 | **426** | 316 (400 worst case) — *stale, see below* | 280 | 260 | **426** | **594** |
+| Task 7's first attempt — **discarded, never shipped** | **484** | 316 (400 worst case) — *stale* | 328 | 260 | **484** | **652** |
+| shipped v0.7.0 | **426** | 316 (400 worst case) — *stale* | **380** | 260 | **426** | **594** |
+| shipped v0.7.1 and v0.7.2 — **re-walked 2026-08-13** | **426** | **364** (**448** worst case) | **380** | 260 | **426**, or **448** with both warnings | **594**, or **616** |
 
-**Only `y_ocr` moved between v0.6.0 and v0.7.0**; the other four columns are identical across all
-three rows, which is exactly why the governing `max()` and the client height did not move. The
-bottom block and padding add a constant 168px below the governing `max()`, which is why every row
-is internally consistent (426 + 168 = 594; 484 + 168 = 652). **426 is the number to budget
-against**; 484 only ever existed on the discarded attempt.
+**Only `y_ocr` moved between v0.6.0 and v0.7.0**; the other four columns are identical across the
+first three rows, which is exactly why the governing `max()` and the client height did not move.
+The bottom block and padding add a constant 168px below the governing `max()`, which is why every
+row is internally consistent (426 + 168 = 594; 484 + 168 = 652; 448 + 168 = 616). 484 only ever
+existed on the discarded attempt.
+
+> [!warning] Corrected 2026-08-13 — the `y_dict` column was stale, and it is the column that
+> governs the worst case
+> Re-walked from the layout constants: the Dictionaries tab is **364** with no conditional warning
+> and **448** with both, not 316 / 400. The three historical rows are left as they were written,
+> because nothing re-measured them at the time and inventing a date for the drift would be worse
+> than marking it; the figure was already stale before the two-box rewrite, and that rewrite did
+> **not** move it — `dict_group_h()` is 218 both before and after, so 364 / 448 holds across v0.7.1
+> and v0.7.2 alike.
+>
+> **The consequence is that 426 is not always the number to budget against.** With both conditional
+> warnings visible, `y_dict` (448) exceeds `y_general` (426), *Dictionaries* becomes the governing
+> tab, and the client height is **616** rather than 594. That is 22px worse than the "headroom is
+> ~0 at 150%" estimate below assumed, and it is the state `REGRESSION.md` §1.17's layout paragraph
+> asks a human to reproduce.
 
 - **On oniichan's machine this is not a problem and would not have been.** 96 dpi / 100% scaling,
   work area 2560x1050. The ~702px figure measured during the branch was against the **652** client
@@ -610,15 +632,21 @@ recompute it after a library rebuild. Import a corrupt archive mid-session and i
 readable until the window is reopened — the row's own state is stale, not the list's.
 
 **The consequence is bounded to cosmetics**, because the reader and the writer share the one stale
-set: `toggle_selected` re-reads the rows at click time but classifies them with the cached
-`unreadable` (`src/ui/settings_window.rs:753`), and `read` hands that same cached set to
-`apply_to` (`:2258`), which keys the list through it. The two therefore agree with each other even
-while both are stale, so the visible symptom is `Include / exclude` looking enabled on a row that
-will not move, which `docs/REGRESSION.md` §1.17 documents as expected. Nothing is written wrong
-and no list is emptied; the empty-list guard catches the consequence that would have mattered.
+set: the move handler and the button greying both classify rows through the same cached
+`unreadable` — they now share one predicate, `dict_move_target` — and `read` hands that same cached
+set to `apply_to`, which keys the list through it. The two therefore agree with each other even
+while both are stale. Nothing is written wrong and no list is emptied; the empty-list guard catches
+the consequence that would have mattered.
 
-**The reachable trigger is a rebuild that *fails*** and leaves the window open — an import that
-succeeds ends in a restart, which reopens the window and recaptures the set.
+**Updated 2026-08-13, and the trigger is now wider, not narrower.** This item used to say the
+reachable trigger was a rebuild that *fails* and leaves the window open, "an import that succeeds
+ends in a restart, which reopens the window and recaptures the set". v0.7.2 removed that restart:
+a **successful** import now leaves the same window open with the same stale set, so both outcomes
+reach it. The window is also not re-rendered after a rebuild at all, which is the same gap seen
+from the other side. It stays cosmetic — the greying and the guard cannot disagree any more, since
+the two-box rewrite gave them one shared predicate, so the old symptom (a button that looked
+enabled and did nothing) is gone and what remains is a row classified from an out-of-date reading
+of disk.
 
 **If picked up:** the fix is to recompute the set at the same point the rebuilt library is handed
 back to the window, not to make the button smarter — the greying and the guard disagreeing is the
@@ -678,3 +706,108 @@ the probe.
 depending on the fallback, or have the probe report failure distinguishably from "not installed" so
 the silent path becomes a visible one. The second is cheaper and is what makes the failure
 diagnosable.
+
+---
+
+## 18. Two dictionaries with the same name cannot be told apart by anything the config can say
+
+**Raised 2026-08-13 by the rebuild-promotion round. Observed, not hypothetical: the staged database
+built on the user's machine that day held six dictionaries, and 白水社中国語辞典 was one of them
+twice.** Nothing refused the second import and nothing said a word.
+
+**Every ordering and scoping rule in the program keys on the name.** `dict_order_rank`
+(`src/present.rs:189`) lower-cases the dictionary's name and asks whether any `display_order` entry
+is a **substring** of it; `sorted_by_order` (`src/settings.rs:246`) sorts on that rank and breaks
+ties with `dict_id`. So one entry matches both duplicates, at the same rank, and their relative
+priority is settled by the order their archives happened to be built in. `any_listed`
+(`src/present.rs:198`) collapses them the same way, so a `per_language` list cannot include one and
+exclude the other either.
+
+**`keyed_names` can manufacture the collision out of two names that differ.** It cuts each name at
+its first `[` or `(` before writing it (`src/settings.rs:318`) — the deliberate fix for
+`Jitendex.org [2026-07-09]` renaming itself on every rebuild — so two builds of one dictionary
+whose full titles differ only by a date stamp key to the same string.
+
+**The library never checks.** `reconcile`'s stray-adoption loop keys on the archive's **file** name
+(`src/library.rs:79-96`), so two different files carrying the same `index.json` title are two
+ordinary entries. In the Dictionaries tab they are two identical rows, and the only gesture that
+distinguishes them is **Remove**, which acts on the row rather than on the name.
+
+**What it costs is bounded but real:** no data loss and nothing silently unsearched — both copies
+are in the database and both are reachable — but the user cannot order them, cannot scope one away,
+and cannot tell which row is which.
+
+**If picked up: there is no obviously right key, and that is the interesting part.** `dict_id` is
+assigned by filename order at build time, so it moves whenever the library does; the archive
+filename is stable but the codebase deliberately keeps filenames out of the config
+(`a filename must never reach display_order`, `src/settings.rs`). The cheapest honest step is
+therefore to **detect and report** the collision rather than to re-key anything — the settings
+window already has somewhere to put a stale-entry notice — so the user can rename or remove one
+archive instead of wondering why one of two identical rows will not move on its own. Note the
+interaction with item 14: both want the same warning surface.
+
+---
+
+## 19. A quarantine that outlives its transaction comes back at the bottom of the order
+
+**Raised 2026-08-13 by the rebuild-promotion round, which found it while tracing why a failed
+promotion left `.removed/` populated. Not the bug that round fixed — a consequence one layer down,
+and still open.**
+
+`Library::load` calls `reconcile` (`src/library.rs:71`), which calls `restore_quarantined`
+(`:278`) **unconditionally, on every load, in every process** — the behaviour is deliberate and
+pinned by `a_quarantine_left_by_a_dead_process_is_restored_on_load` (`:488`). `Pending`
+(`:197`) is in-memory only: nothing on disk records that a removal is halfway through.
+
+So an interrupted removal is undone, which is the intent — but it is undone **badly**.
+`library.json` was written without those archives, so when they reappear on disk `reconcile`'s
+retain pass drops nothing and the stray-adoption loop (`:79-96`) re-adopts them by `push`, at the
+**end** of `entries`. The dictionaries come back last in the order, with no message anywhere. The
+user's priority is silently rewritten by a failure they were told nothing about.
+
+**v0.7.2 narrowed the window without closing it.** The promote and the commit-or-rollback are now
+one synchronous block with no restart in the middle, so an ordinary failed promote rolls the
+quarantine back properly rather than leaving it for the next load. What remains is a process that
+dies inside that block — and the general fact that the restore is unconditional in every process,
+so the recovery path is reached without anyone deciding it should be.
+
+**If picked up:** the fix is to make the restore *re-rank* rather than re-adopt — the manifest still
+holds the surviving entries' order, and a restored archive's original position is recoverable if
+`quarantine` records it. Failing that, the honest cheap version is to say so: one stderr line
+naming what was restored, so a silently reordered library becomes a visible one. Do **not** make
+the restore conditional without replacing it with something on disk; the unconditional restore is
+what stops a killed process from eating someone's 200 MB download.
+
+---
+
+## 20. Four comments cite design documents that do not exist
+
+**Raised 2026-08-13 across the rebuild-promotion round's tasks. Trivial to fix, recorded because it
+is the kind of thing that reads as authoritative until someone tries to follow it.**
+
+Four comments in `src/app.rs` cite a numbered decision or contract:
+
+| Site | Comment |
+|---|---|
+| `:754` | `// Contract 3: DPI before GDI.` |
+| `:769` | `// Contract 2: report all three.` |
+| `:1693` | `// Shutdown, decision 5's order.` |
+| `:1780` | `// Decision 2: read once.` |
+
+**No such document is in the repository.** Grepping `docs/` and `README.md` for `Contract 2`,
+`Contract 3`, `Decision 2` and `decision 5` returns nothing. They point at a working spec that was
+never published — `.superpowers/` is gitignored — so a reader cannot check whether the cited rule
+still holds, or even what it said.
+
+**The house comment limit is what makes this a trap rather than a nit.** Comments are capped at 30
+characters, which is exactly enough room to cite a document and not enough to state the rule, so
+the citation habit is a pressure the standard creates. Two of the four survive the removal of the
+citation with their meaning intact — "DPI before GDI" and "report all three" say something
+checkable. The other two say nothing at all once the phantom document is taken away.
+
+**If picked up:** delete the citations and keep the assertions, writing an assertion where there is
+none — `// Decision 2: read once.` sits above the worker's one `dict.dicts()` call, and the
+shutdown comment sits above a `KillTimer` that precedes the worker join, so in both cases what the
+comment is *for* is legible from three lines of context and the citation adds nothing. Anything
+that genuinely needs more than 30 characters to explain belongs in `docs/`, where it can be cited
+by name.
