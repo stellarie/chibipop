@@ -385,6 +385,8 @@ const STATUS_NO_LOOKUPS: &str = "The dictionary could not be reopened. Restart c
 
 const STATUS_SAVE_FAILED: &str = "Dictionaries rebuilt, but the settings could not be saved.";
 
+const STATUS_NO_HOOKS: &str = "Hover detection could not be restored. Restart chibipop.";
+
 /// A change and its rebuild.
 struct InFlight {
     pending: Pending,
@@ -855,7 +857,7 @@ pub fn run(
         crate::ui::console::show();
     }
 
-    let _hooks = Hooks::install().context("installing the low-level input hooks")?;
+    let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
     Hooks::set_mode(live.trigger_mode);
     if let Some(vk) = crate::config::parse_trigger_key(&live.trigger_key) {
         Hooks::set_trigger_key(vk);
@@ -1202,6 +1204,8 @@ pub fn run(
                                     pending_cfg.take().unwrap_or_else(|| cfg.clone());
                                 // No ack while we block.
                                 capture_guard_active.store(false, Ordering::SeqCst);
+                                // No hooks while we block.
+                                drop(hooks.take());
                                 let (fresh_tx, fresh_rx) = mpsc::channel::<Trigger>();
                                 let old_tx = std::mem::replace(&mut trigger_tx, fresh_tx);
                                 match worker.take() {
@@ -1254,6 +1258,20 @@ pub fn run(
                                         false
                                     }
                                 };
+                                let rehooked = match Hooks::install() {
+                                    Ok(h) => {
+                                        hooks = Some(h);
+                                        true
+                                    }
+                                    Err(e) => {
+                                        eprintln!("chibipop: reinstalling the input \
+                                                   hooks failed: {e:#}");
+                                        eprintln!("chibipop: hover, scroll and the \
+                                                   hotkeys are off until you restart \
+                                                   chibipop.");
+                                        false
+                                    }
+                                };
                                 let (order, restrict) = resolve_dict_filter(
                                     &cfg, &dicts, || configured_recogniser_runs(&cfg));
                                 live.present_cfg.dict_order = order;
@@ -1283,10 +1301,11 @@ pub fn run(
                                     }
                                 }
                                 w.set_busy(false);
-                                w.set_status(match (reopened, saved) {
-                                    (false, _) => STATUS_NO_LOOKUPS,
-                                    (true, false) => STATUS_SAVE_FAILED,
-                                    (true, true) => d.status,
+                                w.set_status(match (reopened, rehooked, saved) {
+                                    (false, _, _) => STATUS_NO_LOOKUPS,
+                                    (_, false, _) => STATUS_NO_HOOKS,
+                                    (_, _, false) => STATUS_SAVE_FAILED,
+                                    _ => d.status,
                                 });
                             }
                             (Err(e), Some(flight)) => {
@@ -1694,6 +1713,10 @@ pub fn run(
     unsafe {
         let _ = KillTimer(None, timer_id);
     }
+    // No hooks while we block.
+    drop(hooks.take());
+    // No ack while we block.
+    capture_guard_active.store(false, Ordering::SeqCst);
     if let Some(h) = worker.take() {
         if let Err(e) = stop_worker(trigger_tx, h) {
             eprintln!("chibipop: {e:#}");

@@ -811,3 +811,77 @@ shutdown comment sits above a `KillTimer` that precedes the worker join, so in b
 comment is *for* is legible from three lines of context and the citation adds nothing. Anything
 that genuinely needs more than 30 characters to explain belongs in `docs/`, where it can be cited
 by name.
+
+---
+
+## 21. `settings_only`'s message loop spins at 100% CPU on a `GetMessage` error
+
+**Found 2026-08-13 while root-causing the quit freeze. Not that bug — filed because it is a real
+hang and the two loops in this file already disagree about it.**
+
+`src/app.rs:234` is the settings-only path's pump:
+
+```rust
+while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+```
+
+`GetMessage` has **three** return values, not two: `> 0` for a message, `0` for `WM_QUIT`, and
+**`-1` on error**. `BOOL(-1).as_bool()` is `self.0 != 0`, so an error is **true** and the loop keeps
+calling `GetMessage` on a queue that has already failed — a 100%-CPU spin with no exit.
+
+`run` gets this right at `src/app.rs:987`, which reads the value once and breaks on `<= 0`. The
+same file therefore contains both the correct and the incorrect reading of the same API, three
+hundred lines apart, which is what makes this worth a number rather than a passing note.
+
+**If picked up:** give `settings_only` the same shape as `run` — bind the `BOOL`, `break` on
+`got.0 <= 0`. No test seam: `GetMessage` cannot be made to return `-1` from a unit test, and a test
+over `as_bool()` would only restate the `windows` crate.
+
+---
+
+## 22. `settings_only` has no way out while a rebuild is running
+
+**Found 2026-08-13 alongside 21. The severity is entirely about which path you are on.**
+
+`src/app.rs:279-281` discards `window.take_outcome()` for as long as `rebuild.is_some()`, exactly
+as `run` does. In `run` that is safe, because the tray icon is a second, ungated exit
+(`TrayCommand::Quit` sits on a different message and is not behind the busy check). **`settings_only`
+has no tray.** It is the path taken when there is no database to open at all, so if the builder
+child ever wedges — a stalled archive read, a full disk, a network path that stops answering — the
+only control the user has left is Task Manager.
+
+The window is also `set_busy(true)` for the whole rebuild, so `ID_QUIT` is greyed; the X produces
+an outcome that the same three lines throw away.
+
+**If picked up:** the cheap version is a Cancel that kills the child (`Child::kill`) and rolls the
+`Pending` back, which is a real feature rather than a one-line fix — hence the number. The honest
+interim is a documented note that the settings-only rebuild cannot be interrupted.
+
+---
+
+## 23. Quitting during a rebuild orphans the `build-dict` child
+
+**Found 2026-08-13 alongside 21 and 22. This one keeps burning the user's machine after chibipop is
+gone, which is why it is filed even though it is not a hang in chibipop itself.**
+
+`src/app.rs:1727` ends `run` with `std::process::exit(0)`. That does not run destructors and does
+not touch child processes, so the `chibipop.exe build-dict` spawned at `src/rebuild.rs:59-71` keeps
+running: it keeps writing `<db>.new.tmp`, and it keeps its CPU and disk load. On the 400 MB library
+on this machine that is **minutes of invisible work by a process the user believes they closed**,
+with no window and no tray icon to find it by.
+
+It is worth noting explicitly that this makes the orphan an **independent candidate for "chibipop
+slowed my machine down"** in any incident where a rebuild had actually started — a different
+mechanism from the unserviced input hooks fixed on 2026-08-13, and one that outlives the process
+rather than ending with it.
+
+The same `exit(0)` also drops the in-flight `Pending` without `rollback()`, leaving the user's
+archives in `library/.removed`. That half **self-heals**: `Library::load` → `reconcile` →
+`restore_quarantined` (`src/library.rs:278-290`) puts them back on the next launch. See item 19 for
+what the restored order looks like.
+
+**If picked up:** the child handle would have to outlive `InFlight` far enough for the shutdown
+block to `kill()` and `wait()` it before `exit(0)`. Note that killing a builder mid-write leaves a
+partial `<db>.new.tmp`, which is already handled — `rebuild::run` removes an existing `tmp` before
+starting (`src/rebuild.rs:55-57`), and a complete leftover `.new` is reported at startup and left
+alone, as `docs/REGRESSION.md` §1.18's callout spells out.

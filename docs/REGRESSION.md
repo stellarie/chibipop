@@ -19,8 +19,10 @@ is the authority on the split; this sentence is a summary and is not the shorter
 2026-08-13** for the two-box Dictionaries tab; it **has not been run at all in either form** — not
 one clause of it. Item **1.18** was added 2026-08-13 with the rebuild-promotion branch and **has
 not been run**; it is the acceptance for a rebuild taking effect without a restart, which is the
-thing that has never once worked. Item **11b** was corrected 2026-08-09, having described
-behaviour that never existed in any version of the program.
+thing that has never once worked, and it **gained a step 11 later the same day** — the desktop-wide
+input stall the rebuild-promotion branch introduced with its two blocking joins, fixed and never
+run. Item **11b** was corrected 2026-08-09, having described behaviour that never existed in any
+version of the program.
 
 ---
 
@@ -767,7 +769,7 @@ covers.
 1. Start `chibipop run` **from a terminal**, so stderr is readable (§1.16 explains why a
    double-click hides it). **Record the PID** (`Get-Process chibipop`). Hover Japanese text and
    confirm a popup answers. If `data/chibipop.sqlite.new` exists, one stderr line names it — see
-   the callout after step 10, and do not treat that line, or the file surviving, as a failure.
+   the callout after step 11, and do not treat that line, or the file surviving, as a failure.
 2. Settings → **Dictionaries** → `Add…` a dictionary that is not installed yet. Press **Apply** —
    the button reads **Apply**, not "Apply & Restart", and the hint says it *rebuilds your
    dictionary*.
@@ -794,6 +796,23 @@ covers.
 10. Read stderr across the whole run for `hide was not acknowledged`. It should not appear around a
     rebuild any more; a lookup already inside the capture guard when Apply lands can still print it
     once, and that one is expected.
+11. **The whole desktop stays responsive — added 2026-08-13, and it is the acceptance for that
+    day's fix.** Keep the mouse moving continuously **for the whole of step 3's Apply**, and again
+    **through step 9's quit**, watching the cursor rather than chibipop's window: it must never
+    stutter, jump or crawl, and typing in another window must stay instant. Both of those joins
+    used to run with `WH_MOUSE_LL` and `WH_KEYBOARD_LL` still installed on a main thread that had
+    stopped pumping, which serialises **every mouse move and keystroke on the entire desktop**
+    behind chibipop for up to `LowLevelHooksTimeout` — 300 ms by default — per event. The hooks are
+    now removed before each join and reinstalled after the respawn, so **step 9's quit must be run
+    in the same session as the rebuild**, never from a fresh launch, or it only tests the removal.
+    **Step 5 is the proof the reinstall happened**: a hover that answers needs the mouse hook live,
+    so had the reinstall been skipped, nothing would respond at all and the status would read
+    `Hover detection could not be restored. Restart chibipop.` A pause in *chibipop's own* window
+    while it rebuilds is expected; a pause anywhere else on the desktop is the failure this covers.
+    **Watch for the other shape of it too.** Windows may respond to a hook that misses its timeout
+    by dropping it rather than by waiting again — see the 2026-07-27 spike finding — in which case
+    the symptom is not a slow desktop but hover going quietly dead after the Apply, with nothing on
+    stderr. Either one fails this step, and step 5 is what catches the second.
 
 > [!important] A leftover `.new` at startup is reported and deliberately left alone
 > **Expect this on stderr at step 1**, before the tray icon: `chibipop: a leftover staged rebuild
