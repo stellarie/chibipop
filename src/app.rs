@@ -218,6 +218,7 @@ pub fn settings_only(
 
     // A run may hold it open.
     let staged_db = rebuild::staging_path(dict_path);
+    report_staged_leftover(&staged_db);
     let mut rebuild: Option<InFlight> = None;
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
@@ -487,6 +488,24 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
+/// A staged build left behind.
+fn staged_notice(staged: &Path) -> Option<String> {
+    staged.exists().then(|| {
+        format!(
+            "chibipop: a leftover staged rebuild is at {}; it is not in use and will not \
+             be adopted - the next rebuild overwrites it.",
+            staged.display()
+        )
+    })
+}
+
+/// Report it, never adopt it.
+fn report_staged_leftover(staged: &Path) {
+    if let Some(line) = staged_notice(staged) {
+        eprintln!("{line}");
+    }
+}
+
 /// Which one gets opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Database {
@@ -717,6 +736,7 @@ pub fn run(
     let library = library_dir();
     // The worker holds it open.
     let staged_db = rebuild::staging_path(dict_path);
+    report_staged_leftover(&staged_db);
     let db_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
@@ -3096,5 +3116,58 @@ mod tests {
             "Another chibipop is running. Close it, then Apply again.",
             promote_outcome(true, false).status,
         );
+    }
+
+    struct ScratchDir(PathBuf);
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Never beside the real data.
+    fn scratch(test_name: &str) -> (PathBuf, ScratchDir) {
+        let dir = std::env::temp_dir()
+            .join("chibipop_staged_notice")
+            .join(format!("t_{}_{test_name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.clone(), ScratchDir(dir))
+    }
+
+    #[test]
+    fn a_leftover_staged_database_is_announced_by_name() {
+        let (dir, _guard) = scratch("announced");
+        let staged = rebuild::staging_path(&dir.join("chibipop.sqlite"));
+        std::fs::write(&staged, b"a complete build nobody noticed").unwrap();
+        let notice = staged_notice(&staged).expect("a staged file must be announced");
+        assert!(
+            notice.contains(&staged.display().to_string()),
+            "the notice must name the file, got: {notice}"
+        );
+    }
+
+    #[test]
+    fn no_staged_database_means_no_notice() {
+        let (dir, _guard) = scratch("silent");
+        let staged = rebuild::staging_path(&dir.join("chibipop.sqlite"));
+        assert_eq!(None, staged_notice(&staged));
+    }
+
+    /// Reported, never adopted.
+    #[test]
+    fn announcing_a_staged_database_leaves_it_untouched() {
+        let (dir, _guard) = scratch("untouched");
+        let live = dir.join("chibipop.sqlite");
+        std::fs::write(&live, b"the database in use").unwrap();
+        let staged = rebuild::staging_path(&live);
+        std::fs::write(&staged, b"a complete build nobody noticed").unwrap();
+        let _ = staged_notice(&staged);
+        assert_eq!(
+            b"a complete build nobody noticed".to_vec(),
+            std::fs::read(&staged).expect("the staged file must survive being announced")
+        );
+        assert_eq!(b"the database in use".to_vec(), std::fs::read(&live).unwrap());
     }
 }
