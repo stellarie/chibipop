@@ -52,7 +52,8 @@ CREATE TABLE meta (
 ";
 
 const INDEXES: &str = "
-CREATE INDEX idx_term_surface ON term(surface);
+CREATE INDEX IF NOT EXISTS idx_term_surface ON term(surface);
+CREATE INDEX IF NOT EXISTS idx_term_entry_id ON term(entry_id);
 ";
 
 /// Row counts a build wrote.
@@ -244,7 +245,7 @@ fn build_into(
 
     write_meta(&tx, terms, freqs)?;
     on_progress("building  creating index");
-    tx.execute_batch(INDEXES)?;
+    ensure_indexes(&tx)?;
     tx.commit()?;
     conn.execute_batch("ANALYZE;")?;
 
@@ -334,6 +335,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
         "INSERT INTO meta (k, v) VALUES ('schema_version', ?1)",
         params![SCHEMA_VERSION.to_string()],
     )?;
+    Ok(())
+}
+
+/// Creates any missing index.
+///
+/// Needs a writable connection.
+pub fn ensure_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(INDEXES).context("creating the term indexes")?;
     Ok(())
 }
 
@@ -553,6 +562,7 @@ fn civil_from_days(z_in: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OpenFlags;
     use serde_json::json;
 
     struct TempDbGuard(PathBuf);
@@ -801,5 +811,57 @@ mod tests {
         for table in ["dict", "entry", "term"] {
             assert_eq!(count(&c1, table), count(&c2, table), "{table} row count mismatch");
         }
+    }
+
+    fn index_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name")
+            .unwrap();
+        let names = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        names.collect::<rusqlite::Result<Vec<String>>>().unwrap()
+    }
+
+    #[test]
+    fn a_fresh_build_indexes_term_entry_id() {
+        let (conn, _guard) = build_fixture_db("fresh_build_entry_id_index");
+        let names = index_names(&conn);
+        assert!(
+            names.iter().any(|n| n == "idx_term_entry_id"),
+            "a new database must carry the entry_id index: {names:?}"
+        );
+    }
+
+    #[test]
+    fn the_ensure_adds_the_entry_id_index_and_repeats_cleanly() {
+        let (conn, _guard) = build_fixture_db("ensure_adds_entry_id_index");
+        conn.execute_batch("DROP INDEX idx_term_entry_id;").unwrap();
+        assert!(
+            !index_names(&conn).iter().any(|n| n == "idx_term_entry_id"),
+            "a database built before v0.8.0 has no entry_id index"
+        );
+
+        ensure_indexes(&conn).unwrap();
+        let after = index_names(&conn);
+        assert!(after.iter().any(|n| n == "idx_term_entry_id"), "not created: {after:?}");
+
+        ensure_indexes(&conn).expect("a second ensure must not error");
+        assert_eq!(after, index_names(&conn), "a second ensure must change nothing");
+    }
+
+    /// Never the lookup connection.
+    #[test]
+    fn the_ensure_refuses_a_read_only_connection() {
+        let (conn, guard) = build_fixture_db("ensure_read_only");
+        conn.execute_batch("DROP INDEX idx_term_entry_id;").unwrap();
+
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let read_only = Connection::open_with_flags(&guard.0, flags).unwrap();
+
+        let err = ensure_indexes(&read_only).expect_err("a read-only connection cannot index");
+        let chain = format!("{err:#}").to_lowercase();
+        assert!(
+            chain.contains("readonly"),
+            "the ensure needs a writable connection: {chain}"
+        );
     }
 }
