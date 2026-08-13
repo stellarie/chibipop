@@ -33,9 +33,13 @@ Everything is in the settings window — you shouldn't need to edit any files.
 
 Pressing **Apply** saves your settings and starts using them straight away.
 chibipop keeps running and the window stays open, so you can change something,
-hover a word to see how it feels, and change it again. If you added or removed
-a dictionary the button reads **Apply & Restart** instead — swapping the
-dictionary out needs a restart, and that takes a couple of seconds.
+hover a word to see how it feels, and change it again.
+
+That includes adding and removing dictionaries. chibipop rebuilds its
+dictionary in place — a minute or so, with the window busy while it works — and
+the new one starts answering as soon as it is done. **It does not restart**,
+and if the swap cannot be made it tells you instead of quietly carrying on with
+the old one.
 
 Your settings live in `chibipop.toml` beside `chibipop.exe`, and you can edit
 that by hand if you prefer.
@@ -71,6 +75,11 @@ A few worth knowing about:
   The tab always shows the list for the language selected on *OCR / Debug*. **A
   language you have not given a list searches all of your dictionaries**, which
   is what everything does until you change it.
+
+  The tab holds two lists, **Searched** and **Not searched**. **Move up** and
+  **Move down** set the priority within a list, and at the top and bottom edges
+  they carry a dictionary from one list to the other — move it down out of
+  *Searched* to stop searching it, up out of *Not searched* to start again.
 
 ---
 
