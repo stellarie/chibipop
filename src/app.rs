@@ -23,7 +23,7 @@ use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashSet;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -605,7 +605,6 @@ struct WorkerSpawn {
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
-    worker_running: Arc<AtomicBool>,
     worker_capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 }
@@ -625,7 +624,6 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
         main_tid,
         trigger_rx,
         result_tx,
-        worker_running,
         worker_capture_guard_active,
         capture_guard_tx,
     } = w;
@@ -645,7 +643,6 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
             main_tid,
             trigger_rx,
             result_tx,
-            worker_running,
             startup_tx,
             worker_capture_guard_active,
             capture_guard_tx,
@@ -657,6 +654,13 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
         .context("worker thread ended before completing startup")??;
 
     Ok((worker, dicts))
+}
+
+/// Stop it; the DB closes.
+fn stop_worker(trigger_tx: mpsc::Sender<Trigger>, worker: thread::JoinHandle<()>) -> Result<()> {
+    // Drop first, or join hangs.
+    drop(trigger_tx);
+    worker.join().map_err(|_| anyhow!("the worker thread panicked"))
 }
 
 /// Run until the user quits.
@@ -678,7 +682,6 @@ pub fn run(
     let dict_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
-    let running = Arc::new(AtomicBool::new(true));
     let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     // Unknown until Popup::create.
@@ -696,11 +699,10 @@ pub fn run(
     let w_scan_alphanumeric = live.scan_alphanumeric;
     let w_language = live.language.clone();
     let w_scan_display = live.scan_display;
-    let worker_running = Arc::clone(&running);
     let worker_capture_guard_active = Arc::clone(&capture_guard_active);
 
     // Contract 3: DPI before GDI.
-    let (_worker, dicts) = spawn_worker(WorkerSpawn {
+    let (worker, dicts) = spawn_worker(WorkerSpawn {
         dict_path,
         rules_path,
         w_present_cfg,
@@ -713,7 +715,6 @@ pub fn run(
         main_tid,
         trigger_rx,
         result_tx,
-        worker_running,
         worker_capture_guard_active,
         capture_guard_tx,
     })?;
@@ -1580,6 +1581,9 @@ pub fn run(
     unsafe {
         let _ = KillTimer(None, timer_id);
     }
+    if let Err(e) = stop_worker(trigger_tx, worker) {
+        eprintln!("chibipop: {e:#}");
+    }
     if let Some(staged) = promote {
         if let Ok(()) = rebuild::promote(&staged, &db_path) {
             if let Some(flight) = &applied {
@@ -1625,7 +1629,6 @@ fn worker_main(
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
-    running: Arc<AtomicBool>,
     startup_tx: mpsc::Sender<Result<Vec<DictInfo>>>,
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
@@ -1698,9 +1701,6 @@ fn worker_main(
             );
             present_cfg = s.present_cfg;
             scan_display = s.scan_display;
-        }
-        if !running.load(Ordering::SeqCst) {
-            break;
         }
         let Some(trigger) = hover else {
             continue;
@@ -2931,5 +2931,40 @@ mod tests {
         let dicts = [di(1, "大辞林　第四版")];
         let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert!(!restrict);
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn stop_worker_wakes_a_blocked_loop_and_joins_after_its_state_is_gone() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let by_disconnect = Arc::new(AtomicBool::new(false));
+        let held = Arc::clone(&dropped);
+        let why = Arc::clone(&by_disconnect);
+        let worker = thread::spawn(move || {
+            let _state = DropFlag(held);
+            let reason = loop {
+                if let Err(e) = rx.recv_timeout(Duration::from_secs(5)) {
+                    break e;
+                }
+            };
+            why.store(matches!(reason, mpsc::RecvTimeoutError::Disconnected), Ordering::SeqCst);
+        });
+        stop_worker(tx, worker).expect("the loop should have exited cleanly");
+        assert!(
+            by_disconnect.load(Ordering::SeqCst),
+            "the loop timed out instead of being woken by the dropped sender"
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "join() returned while the loop still owned its state"
+        );
     }
 }
