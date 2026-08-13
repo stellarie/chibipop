@@ -889,16 +889,16 @@ fn field_map_toggle_label(collapsed: bool) -> &'static str {
 }
 
 /// `&&` renders one `&`.
-fn apply_caption(mode: ApplyMode, staged: bool) -> &'static str {
-    if mode == ApplyMode::Live && !staged { "Apply" } else { "Apply && Restart" }
+fn apply_caption(mode: ApplyMode) -> &'static str {
+    if mode == ApplyMode::Live { "Apply" } else { "Apply && Restart" }
 }
 
 /// What that button will do.
 fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
-    if mode == ApplyMode::Live && !staged {
-        "Applying saves your settings and uses them right away."
-    } else {
-        "Applying saves your settings and restarts chibipop."
+    match (mode, staged) {
+        (ApplyMode::Live, false) => "Applying saves your settings and uses them right away.",
+        (ApplyMode::Live, true) => "Applying saves your settings and rebuilds your dictionary.",
+        (ApplyMode::Standalone, _) => "Applying saves your settings and restarts chibipop.",
     }
 }
 
@@ -1215,7 +1215,7 @@ impl SettingsWindow {
         // call, so the temporaries below outlive every use.
         unsafe {
             if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_APPLY) {
-                let caption = wide(apply_caption(self.apply_mode, staged));
+                let caption = wide(apply_caption(self.apply_mode));
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
             if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
@@ -2119,7 +2119,7 @@ impl SettingsWindow {
                 PAD, y, WIN_W - 2 * PAD - 16, STATUS_H, ID_STATUS, f)?;
             bottom.push((status, PAD, y));
             y += STATUS_H + 2;
-            let apply_btn = child(h, w!("BUTTON"), apply_caption(self.apply_mode, staged),
+            let apply_btn = child(h, w!("BUTTON"), apply_caption(self.apply_mode),
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                   WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
             bottom.push((apply_btn, WIN_W - PAD - 144, y));
@@ -2847,21 +2847,24 @@ mod tests {
     /// Only `run` applies live.
     #[test]
     fn a_live_window_with_nothing_staged_just_applies() {
-        assert_eq!("Apply", apply_caption(ApplyMode::Live, false));
+        assert_eq!("Apply", apply_caption(ApplyMode::Live));
         assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
     }
 
+    /// It rebuilds in place now.
     #[test]
-    fn a_staged_dictionary_still_promises_a_restart() {
-        assert_eq!("Apply && Restart", apply_caption(ApplyMode::Live, true));
-        assert!(apply_hint(ApplyMode::Live, true).contains("restarts chibipop"));
+    fn a_staged_dictionary_promises_a_rebuild_not_a_restart() {
+        assert_eq!("Apply", apply_caption(ApplyMode::Live));
+        let hint = apply_hint(ApplyMode::Live, true);
+        assert!(hint.contains("rebuilds your dictionary"), "{hint}");
+        assert!(!hint.contains("restart"), "{hint}");
     }
 
     /// It reloads no other process.
     #[test]
     fn a_standalone_window_never_promises_a_live_apply() {
+        assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone));
         for staged in [false, true] {
-            assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone, staged));
             assert!(apply_hint(ApplyMode::Standalone, staged).contains("restarts chibipop"));
         }
     }
