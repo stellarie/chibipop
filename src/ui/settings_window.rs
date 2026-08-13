@@ -2419,6 +2419,95 @@ fn scope_rows(
     (active, all.iter().filter(|n| !keep(n)).cloned().collect())
 }
 
+/// Which listbox a row is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DictBox {
+    Searched,
+    NotSearched,
+}
+
+/// Never search nothing.
+fn another_readable_row(searched: &[String], unreadable: &[String], index: usize) -> bool {
+    let readable = |n: &String| !unreadable.iter().any(|u| u == n);
+    searched.iter().enumerate().any(|(j, n)| j != index && readable(n))
+}
+
+/// Where a move would land.
+pub fn dict_move_target(
+    searched: &[String],
+    not_searched: &[String],
+    unreadable: &[String],
+    from: DictBox,
+    index: usize,
+    up: bool,
+) -> Option<(DictBox, usize)> {
+    match (from, up) {
+        (DictBox::Searched, true) => {
+            if index > 0 && index < searched.len() {
+                Some((DictBox::Searched, index - 1))
+            } else {
+                None
+            }
+        }
+        (DictBox::Searched, false) => {
+            if index + 1 < searched.len() {
+                Some((DictBox::Searched, index + 1))
+            } else if index < searched.len()
+                && another_readable_row(searched, unreadable, index)
+            {
+                Some((DictBox::NotSearched, 0))
+            } else {
+                None
+            }
+        }
+        (DictBox::NotSearched, true) => {
+            if index == 0 && !not_searched.is_empty() {
+                Some((DictBox::Searched, searched.len()))
+            } else if index < not_searched.len() {
+                Some((DictBox::NotSearched, index - 1))
+            } else {
+                None
+            }
+        }
+        (DictBox::NotSearched, false) => {
+            if index + 1 < not_searched.len() {
+                Some((DictBox::NotSearched, index + 1))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Move; returns the landing.
+pub fn dict_move(
+    searched: &mut Vec<String>,
+    not_searched: &mut Vec<String>,
+    unreadable: &[String],
+    from: DictBox,
+    index: usize,
+    up: bool,
+) -> Option<(DictBox, usize)> {
+    let landed = dict_move_target(searched, not_searched, unreadable, from, index, up)?;
+    match (from, landed.0) {
+        (DictBox::Searched, DictBox::Searched) => searched.swap(index, landed.1),
+        (DictBox::NotSearched, DictBox::NotSearched) => not_searched.swap(index, landed.1),
+        (DictBox::Searched, DictBox::NotSearched) => {
+            not_searched.insert(landed.1, searched.remove(index));
+        }
+        (DictBox::NotSearched, DictBox::Searched) => {
+            searched.insert(landed.1, not_searched.remove(index));
+        }
+    }
+    Some(landed)
+}
+
+/// Append; returns its index.
+pub fn add_dict(searched: &mut Vec<String>, name: &str) -> usize {
+    searched.push(name.to_string());
+    searched.len() - 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3189,5 +3278,184 @@ mod tests {
             active
         );
         assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], excluded);
+    }
+
+    // ---- the two-box move ----
+
+    fn names(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn up_on_the_top_of_not_searched_crosses_to_the_bottom_of_searched() {
+        let mut searched = names(&["A", "B"]);
+        let mut not = names(&["C", "D"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 0, true);
+        assert_eq!(Some((DictBox::Searched, 2)), landed);
+        assert_eq!(names(&["A", "B", "C"]), searched);
+        assert_eq!(names(&["D"]), not);
+    }
+
+    #[test]
+    fn down_on_the_bottom_of_searched_crosses_to_the_top_of_not_searched() {
+        let mut searched = names(&["A", "B"]);
+        let mut not = names(&["C"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 1, false);
+        assert_eq!(Some((DictBox::NotSearched, 0)), landed);
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["B", "C"]), not);
+    }
+
+    #[test]
+    fn up_on_the_top_of_searched_does_nothing() {
+        let mut searched = names(&["A", "B"]);
+        let mut not = names(&["C"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 0, true);
+        assert_eq!(None, landed);
+        assert_eq!(names(&["A", "B"]), searched);
+        assert_eq!(names(&["C"]), not);
+    }
+
+    #[test]
+    fn down_on_the_bottom_of_not_searched_does_nothing() {
+        let mut searched = names(&["A"]);
+        let mut not = names(&["B", "C"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 1, false);
+        assert_eq!(None, landed);
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["B", "C"]), not);
+    }
+
+    /// Never search nothing.
+    #[test]
+    fn the_last_searched_row_will_not_cross_down() {
+        let mut searched = names(&["A"]);
+        let mut not = names(&["B"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 0, false);
+        assert_eq!(None, landed);
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["B"]), not);
+    }
+
+    /// keyed_names strips it first.
+    #[test]
+    fn an_unreadable_row_does_not_count_toward_the_last_searched_rule() {
+        let mut searched = names(&["bad.zip", "A"]);
+        let mut not = names(&["B"]);
+        let bad = names(&["bad.zip"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &bad, DictBox::Searched, 1, false);
+        assert_eq!(None, landed);
+        assert_eq!(names(&["bad.zip", "A"]), searched);
+        assert_eq!(names(&["B"]), not);
+    }
+
+    #[test]
+    fn adding_appends_to_searched() {
+        let mut searched = names(&["A", "B"]);
+        assert_eq!(2, add_dict(&mut searched, "C"));
+        assert_eq!(names(&["A", "B", "C"]), searched);
+    }
+
+    #[test]
+    fn up_inside_searched_reorders_without_crossing() {
+        let mut searched = names(&["A", "B", "C"]);
+        let mut not = names(&["D"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 2, true);
+        assert_eq!(Some((DictBox::Searched, 1)), landed);
+        assert_eq!(names(&["A", "C", "B"]), searched);
+        assert_eq!(names(&["D"]), not);
+    }
+
+    #[test]
+    fn down_inside_searched_reorders_without_crossing() {
+        let mut searched = names(&["A", "B", "C"]);
+        let mut not = names(&["D"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 0, false);
+        assert_eq!(Some((DictBox::Searched, 1)), landed);
+        assert_eq!(names(&["B", "A", "C"]), searched);
+        assert_eq!(names(&["D"]), not);
+    }
+
+    #[test]
+    fn up_inside_not_searched_reorders_without_crossing() {
+        let mut searched = names(&["A"]);
+        let mut not = names(&["B", "C", "D"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 2, true);
+        assert_eq!(Some((DictBox::NotSearched, 1)), landed);
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["B", "D", "C"]), not);
+    }
+
+    #[test]
+    fn down_inside_not_searched_reorders_without_crossing() {
+        let mut searched = names(&["A"]);
+        let mut not = names(&["B", "C", "D"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 0, false);
+        assert_eq!(Some((DictBox::NotSearched, 1)), landed);
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["C", "B", "D"]), not);
+    }
+
+    /// It contributes no name.
+    #[test]
+    fn an_unreadable_row_may_itself_cross_down() {
+        let mut searched = names(&["A", "bad.zip"]);
+        let mut not: Vec<String> = Vec::new();
+        let bad = names(&["bad.zip"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &bad, DictBox::Searched, 1, false);
+        assert_eq!(Some((DictBox::NotSearched, 0)), landed);
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["bad.zip"]), not);
+    }
+
+    /// Remove can empty the box.
+    #[test]
+    fn a_row_crosses_up_into_an_empty_searched_box() {
+        let mut searched: Vec<String> = Vec::new();
+        let mut not = names(&["A", "B"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 0, true);
+        assert_eq!(Some((DictBox::Searched, 0)), landed);
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["B"]), not);
+    }
+
+    #[test]
+    fn a_move_from_beyond_the_last_row_does_nothing() {
+        let mut searched = names(&["A", "B"]);
+        let mut not = names(&["C"]);
+        let landed =
+            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 2, true);
+        assert_eq!(None, landed);
+        assert_eq!(names(&["A", "B"]), searched);
+        assert_eq!(names(&["C"]), not);
+    }
+
+    /// Greying asks without moving.
+    #[test]
+    fn the_target_refuses_exactly_what_the_move_refuses() {
+        let searched = names(&["A"]);
+        let not = names(&["B"]);
+        assert_eq!(
+            None,
+            dict_move_target(&searched, &not, &[], DictBox::Searched, 0, false)
+        );
+        assert_eq!(
+            Some((DictBox::Searched, 1)),
+            dict_move_target(&searched, &not, &[], DictBox::NotSearched, 0, true)
+        );
+        assert_eq!(names(&["A"]), searched);
+        assert_eq!(names(&["B"]), not);
     }
 }
