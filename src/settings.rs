@@ -441,6 +441,40 @@ pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
         .collect()
 }
 
+/// Drop a removed dictionary.
+///
+/// An emptied list is removed.
+pub fn dictionary_removed(cfg: &mut Config, name: &str) {
+    let claims = |entry: &String| dict_order_rank(name, std::slice::from_ref(entry)).is_some();
+    cfg.dictionaries.display_order.retain(|entry| !claims(entry));
+    cfg.dictionaries.per_language.retain(|_, list| {
+        list.retain(|entry| !claims(entry));
+        !list.is_empty()
+    });
+}
+
+/// List an added dictionary.
+///
+/// Never makes a language list.
+pub fn dictionary_added(cfg: &mut Config, name: &str) {
+    if name.trim().is_empty() {
+        return;
+    }
+    append_key(name, &mut cfg.dictionaries.display_order);
+    let listed = cfg.dictionaries.per_language.get_mut(&cfg.ocr.language);
+    if let Some(list) = listed.filter(|l| !l.is_empty()) {
+        append_key(name, list);
+    }
+}
+
+/// Only if nothing claims it.
+fn append_key(name: &str, entries: &mut Vec<String>) {
+    if dict_order_rank(name, entries).is_none() {
+        let key = order_key(name, entries);
+        entries.push(key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,6 +1471,181 @@ mod tests {
         };
         let form = with_library(from_config(&Config::default(), &[]), &lib);
         assert!(form.dict_names.contains(&"DroppedIn".to_string()), "{form:?}");
+    }
+
+    // ---- incremental ----
+
+    fn strs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn with_list(mut cfg: Config, lang: &str, list: &[&str]) -> Config {
+        cfg.dictionaries.per_language.insert(lang.to_string(), strs(list));
+        cfg
+    }
+
+    #[test]
+    fn a_removed_dictionary_loses_its_order_entry() {
+        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
+    }
+
+    #[test]
+    fn a_removal_drops_the_name_from_every_language_list() {
+        let mut cfg = with_list(
+            with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林", "Jitendex"]),
+            "zh-Hans-CN",
+            &["大辞林", "中日大辞典"],
+        );
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+        assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
+    }
+
+    /// `[]` searches everything.
+    #[test]
+    fn a_language_list_left_empty_loses_its_key() {
+        let mut cfg = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(
+            !cfg.dictionaries.per_language.contains_key("ja"),
+            "an emptied entry must be removed, not written as []: {:?}",
+            cfg.dictionaries.per_language
+        );
+    }
+
+    /// Why `[]` is not written.
+    #[test]
+    fn an_empty_list_left_behind_would_scope_the_language() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(!is_scoped(&from_config(&cfg, &[])), "the language must be unscoped again");
+
+        let blanked = with_list(cfg_with(&["Jitendex"]), "ja", &[]);
+        assert!(
+            is_scoped(&from_config(&blanked, &[])),
+            "[] keeps the language scoped and pins it at the next Apply",
+        );
+    }
+
+    /// A blank claims nothing.
+    #[test]
+    fn a_removal_leaves_a_blank_entry_alone() {
+        let mut cfg = cfg_with(&["", "大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&[""]), cfg.dictionaries.display_order);
+    }
+
+    /// A frequency name too.
+    #[test]
+    fn a_removal_naming_no_entry_changes_nothing() {
+        let before = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        let mut cfg = before.clone();
+        dictionary_removed(&mut cfg, "jiten_freq_global");
+        assert_eq!(before, cfg);
+    }
+
+    /// Recorded, not desired.
+    #[test]
+    fn a_substring_two_dictionaries_share_is_dropped_by_either_removal() {
+        let mut cfg = cfg_with(&["大辞"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(cfg.dictionaries.display_order.is_empty(), "大辞泉 loses its place too");
+    }
+
+    #[test]
+    fn a_list_that_was_already_empty_is_removed_too() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "zh-Hans-CN", &[]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(cfg.dictionaries.per_language.is_empty());
+    }
+
+    #[test]
+    fn an_added_dictionary_is_appended_with_a_derived_key() {
+        let mut cfg = cfg_with(&["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.display_order);
+    }
+
+    #[test]
+    fn an_added_dictionary_joins_a_language_that_has_a_list() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// No entry: search all.
+    #[test]
+    fn an_added_dictionary_never_creates_a_language_list() {
+        let mut cfg = cfg_with(&["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert!(
+            cfg.dictionaries.per_language.is_empty(),
+            "creating an entry would pin the language: {:?}",
+            cfg.dictionaries.per_language
+        );
+    }
+
+    /// `[]` is not a list.
+    #[test]
+    fn an_added_dictionary_never_fills_an_empty_language_list() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &[]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert!(
+            cfg.dictionaries.per_language["ja"].is_empty(),
+            "filling [] would scope ja to the new dictionary alone",
+        );
+    }
+
+    #[test]
+    fn an_added_dictionary_leaves_the_other_languages_alone() {
+        let mut cfg = with_list(
+            with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]),
+            "zh-Hans-CN",
+            &["中日大辞典"],
+        );
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
+    }
+
+    /// It is already ordered.
+    #[test]
+    fn an_entry_that_already_claims_the_name_is_not_duplicated() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["Jitendex"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// A blank pins everything.
+    #[test]
+    fn a_dictionary_with_no_title_adds_no_entry() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
+        dictionary_added(&mut cfg, "");
+        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// Two writers, one result.
+    #[test]
+    fn an_incremental_removal_agrees_with_a_full_apply() {
+        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let kept = vec![DictInfo { dict_id: 1, name: "Jitendex.org [2026-07-09]".into() }];
+        let full = apply_to(&from_config(&cfg, &kept), &cfg);
+        let mut incremental = cfg.clone();
+        dictionary_removed(&mut incremental, "大辞林　第四版");
+        assert_eq!(full.dictionaries, incremental.dictionaries);
+    }
+
+    /// Two writers, one result.
+    #[test]
+    fn an_incremental_addition_agrees_with_a_full_apply() {
+        let cfg = cfg_with(&["大辞林"]);
+        let full = apply_to(&from_config(&cfg, &dicts()), &cfg);
+        let mut incremental = cfg.clone();
+        dictionary_added(&mut incremental, "Jitendex.org [2026-07-09]");
+        assert_eq!(full.dictionaries, incremental.dictionaries);
     }
 }
 
