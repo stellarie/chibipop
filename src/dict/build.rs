@@ -144,16 +144,7 @@ fn build_into(
     out: &Path,
     on_progress: &dyn Fn(&str),
 ) -> Result<BuildCounts> {
-    let mut freq_table = FreqTable::new();
-    for fa in freqs {
-        // Per archive, then overwrite.
-        let mut one = FreqTable::new();
-        for_each_freq_row(fa, |row| {
-            merge_freq_row(&mut one, &row);
-            Ok(())
-        })?;
-        freq_table.extend(one);
-    }
+    let freq_table = load_freqs(freqs)?;
 
     let mut conn = Connection::open(out).with_context(|| format!("creating {}", out.display()))?;
     conn.execute_batch(
@@ -163,85 +154,19 @@ fn build_into(
     )?;
     create_schema(&conn)?;
 
-    let mut entry_id: i64 = 0;
+    let mut entries: i64 = 0;
     let mut term_rows: i64 = 0;
-    let mut json_buf = Vec::with_capacity(512);
-    let mut entry_batch: Vec<(i64, i64, String)> = Vec::with_capacity(BATCH_ROWS);
-    let mut term_batch: Vec<TermBatchRow> = Vec::with_capacity(BATCH_ROWS);
+    let mut batches = Batches::new();
 
     let tx = conn.transaction()?;
-    {
-        let mut insert_dict =
-            tx.prepare("INSERT INTO dict (dict_id, name, priority) VALUES (?1, ?2, ?3)")?;
-
-        for (i, archive) in terms.iter().enumerate() {
-            let dict_id = i as i64 + 1;
-            let priority = i as i64;
-            let title = dict_title(archive)?;
-            insert_dict.execute(params![dict_id, title, priority])?;
-
-            for_each_term(archive, |t| {
-                let glosses = flatten_glossary(&t.glossary);
-                if glosses.is_empty() {
-                    return Ok(());
-                }
-                entry_id += 1;
-                if entry_id % 5000 == 0 {
-                    on_progress(&format!("progress  {entry_id} / ?"));
-                }
-                let sense = Sense { glosses, pos: extract_pos(&t.glossary), misc: Vec::new() };
-                json_buf.clear();
-                {
-                    let mut ser = serde_json::Serializer::with_formatter(&mut json_buf, PySpaced);
-                    [&sense].serialize(&mut ser)?;
-                }
-                let senses_json =
-                    std::str::from_utf8(&json_buf).context("json output was not utf-8")?;
-                entry_batch.push((entry_id, dict_id, senses_json.to_string()));
-                if entry_batch.len() >= BATCH_ROWS {
-                    flush_entries(&tx, &mut entry_batch)?;
-                }
-
-                let written: &str = &t.term;
-                let reading: &str = if t.reading.is_empty() { &t.term } else { &t.reading };
-                let rank = lookup_freq(&freq_table, written, Some(reading));
-                let same = written == reading;
-
-                term_batch.push((
-                    reading.to_string(),
-                    if same { None } else { Some(written.to_string()) },
-                    reading.to_string(),
-                    t.rules.clone(),
-                    rank,
-                    entry_id,
-                    dict_id,
-                ));
-                term_rows += 1;
-
-                if !same {
-                    term_batch.push((
-                        written.to_string(),
-                        Some(written.to_string()),
-                        reading.to_string(),
-                        t.rules.clone(),
-                        rank,
-                        entry_id,
-                        dict_id,
-                    ));
-                    term_rows += 1;
-                }
-
-                if term_batch.len() >= BATCH_ROWS {
-                    // Flush entries first.
-                    flush_entries(&tx, &mut entry_batch)?;
-                    flush_terms(&tx, &mut term_batch)?;
-                }
-                Ok(())
-            })?;
-        }
-        flush_entries(&tx, &mut entry_batch)?;
-        flush_terms(&tx, &mut term_batch)?;
+    for (i, archive) in terms.iter().enumerate() {
+        let slot =
+            Slot { dict_id: i as i64 + 1, priority: i as i64, first_entry_id: entries + 1 };
+        let one = insert_archive(&tx, archive, &slot, &freq_table, &mut batches, on_progress)?;
+        entries += one.entries;
+        term_rows += one.terms;
     }
+    batches.flush(&tx)?;
 
     write_meta(&tx, terms, freqs)?;
     on_progress("building  creating index");
@@ -249,7 +174,141 @@ fn build_into(
     tx.commit()?;
     conn.execute_batch("ANALYZE;")?;
 
-    Ok(BuildCounts { entries: entry_id, terms: term_rows })
+    Ok(BuildCounts { entries, terms: term_rows })
+}
+
+/// Merges the freq archives.
+pub(crate) fn load_freqs(freqs: &[PathBuf]) -> Result<FreqTable> {
+    let mut table = FreqTable::new();
+    for fa in freqs {
+        // Per archive, then overwrite.
+        let mut one = FreqTable::new();
+        for_each_freq_row(fa, |row| {
+            merge_freq_row(&mut one, &row);
+            Ok(())
+        })?;
+        table.extend(one);
+    }
+    Ok(table)
+}
+
+/// Where one archive lands.
+pub(crate) struct Slot {
+    pub(crate) dict_id: i64,
+    pub(crate) priority: i64,
+    pub(crate) first_entry_id: i64,
+}
+
+/// What one archive contributed.
+pub(crate) struct Loaded {
+    pub(crate) name: String,
+    pub(crate) entries: i64,
+    pub(crate) terms: i64,
+}
+
+/// Buffers shared by archives.
+pub(crate) struct Batches {
+    json_buf: Vec<u8>,
+    entries: Vec<(i64, i64, String)>,
+    terms: Vec<TermBatchRow>,
+}
+
+impl Batches {
+    pub(crate) fn new() -> Batches {
+        Batches {
+            json_buf: Vec::with_capacity(512),
+            entries: Vec::with_capacity(BATCH_ROWS),
+            terms: Vec::with_capacity(BATCH_ROWS),
+        }
+    }
+
+    /// Writes what is buffered.
+    pub(crate) fn flush(&mut self, tx: &rusqlite::Transaction) -> Result<()> {
+        flush_entries(tx, &mut self.entries)?;
+        flush_terms(tx, &mut self.terms)
+    }
+}
+
+/// One archive into one slot.
+pub(crate) fn insert_archive(
+    tx: &rusqlite::Transaction,
+    archive: &Path,
+    slot: &Slot,
+    freqs: &FreqTable,
+    batches: &mut Batches,
+    on_progress: &dyn Fn(&str),
+) -> Result<Loaded> {
+    let dict_id = slot.dict_id;
+    let name = dict_title(archive)?;
+    tx.execute(
+        "INSERT INTO dict (dict_id, name, priority) VALUES (?1, ?2, ?3)",
+        params![dict_id, name, slot.priority],
+    )?;
+
+    let mut entry_id = slot.first_entry_id - 1;
+    let mut term_rows: i64 = 0;
+
+    for_each_term(archive, |t| {
+        let glosses = flatten_glossary(&t.glossary);
+        if glosses.is_empty() {
+            return Ok(());
+        }
+        entry_id += 1;
+        if entry_id % 5000 == 0 {
+            on_progress(&format!("progress  {entry_id} / ?"));
+        }
+        let sense = Sense { glosses, pos: extract_pos(&t.glossary), misc: Vec::new() };
+        batches.json_buf.clear();
+        {
+            let mut ser = serde_json::Serializer::with_formatter(&mut batches.json_buf, PySpaced);
+            [&sense].serialize(&mut ser)?;
+        }
+        let senses_json = std::str::from_utf8(&batches.json_buf)
+            .context("json output was not utf-8")?
+            .to_string();
+        batches.entries.push((entry_id, dict_id, senses_json));
+        if batches.entries.len() >= BATCH_ROWS {
+            flush_entries(tx, &mut batches.entries)?;
+        }
+
+        let written: &str = &t.term;
+        let reading: &str = if t.reading.is_empty() { &t.term } else { &t.reading };
+        let rank = lookup_freq(freqs, written, Some(reading));
+        let same = written == reading;
+
+        batches.terms.push((
+            reading.to_string(),
+            if same { None } else { Some(written.to_string()) },
+            reading.to_string(),
+            t.rules.clone(),
+            rank,
+            entry_id,
+            dict_id,
+        ));
+        term_rows += 1;
+
+        if !same {
+            batches.terms.push((
+                written.to_string(),
+                Some(written.to_string()),
+                reading.to_string(),
+                t.rules.clone(),
+                rank,
+                entry_id,
+                dict_id,
+            ));
+            term_rows += 1;
+        }
+
+        if batches.terms.len() >= BATCH_ROWS {
+            // Flush entries first.
+            flush_entries(tx, &mut batches.entries)?;
+            flush_terms(tx, &mut batches.terms)?;
+        }
+        Ok(())
+    })?;
+
+    Ok(Loaded { name, entries: entry_id + 1 - slot.first_entry_id, terms: term_rows })
 }
 
 /// Flushes buffered entry rows.
@@ -367,11 +426,7 @@ fn write_meta(conn: &Connection, terms: &[PathBuf], freqs: &[PathBuf]) -> Result
 
     let mut sources = Vec::new();
     for path in terms.iter().chain(freqs.iter()) {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        let bytes = std::fs::metadata(path)
-            .with_context(|| format!("stat {}", path.display()))?
-            .len();
-        sources.push(SourceHash { name, bytes, sha256: hash_file(path)? });
+        sources.push(source_hash(path)?);
     }
     conn.execute(
         "INSERT OR REPLACE INTO meta (k, v) VALUES ('source_hashes', ?1)",
@@ -382,10 +437,19 @@ fn write_meta(conn: &Connection, terms: &[PathBuf], freqs: &[PathBuf]) -> Result
 
 /// One source's hash record.
 #[derive(Serialize)]
-struct SourceHash {
+pub(crate) struct SourceHash {
     name: String,
     bytes: u64,
     sha256: String,
+}
+
+/// One archive's meta record.
+pub(crate) fn source_hash(path: &Path) -> Result<SourceHash> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+    let bytes = std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    Ok(SourceHash { name, bytes, sha256: hash_file(path)? })
 }
 
 /// SHA-256 of a file's bytes.
@@ -811,6 +875,69 @@ mod tests {
         for table in ["dict", "entry", "term"] {
             assert_eq!(count(&c1, table), count(&c2, table), "{table} row count mismatch");
         }
+    }
+
+    fn ints(conn: &Connection, sql: &str) -> Vec<i64> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let got = stmt.query_map([], |r| r.get(0)).unwrap();
+        got.collect::<rusqlite::Result<Vec<i64>>>().unwrap()
+    }
+
+    fn cells(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let width = stmt.column_count();
+        let got = stmt
+            .query_map([], |r| {
+                let row: Vec<String> =
+                    (0..width).map(|i| format!("{:?}", r.get_ref_unwrap(i))).collect();
+                Ok(row.join("|"))
+            })
+            .unwrap();
+        got.collect::<rusqlite::Result<Vec<String>>>().unwrap()
+    }
+
+    /// Pins the per-archive seam.
+    #[test]
+    fn a_two_archive_build_numbers_each_archive_after_the_last() {
+        let out = out_path("two_archive_seam");
+        let _guard = TempDbGuard(out.clone());
+        let terms = [fixture("terms.zip"), fixture("terms.zip")];
+
+        let counts = build(&terms, &[fixture("freq.zip")], &out, &|_| {}).unwrap();
+
+        assert_eq!(6, counts.entries);
+        assert_eq!(10, counts.terms);
+        let conn = Connection::open(&out).unwrap();
+        assert_eq!(vec![1, 2], ints(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
+        assert_eq!(vec![0, 1], ints(&conn, "SELECT priority FROM dict ORDER BY dict_id"));
+        assert_eq!(
+            vec![1, 2, 3],
+            ints(&conn, "SELECT entry_id FROM entry WHERE dict_id = 1 ORDER BY entry_id")
+        );
+        assert_eq!(
+            vec![4, 5, 6],
+            ints(&conn, "SELECT entry_id FROM entry WHERE dict_id = 2 ORDER BY entry_id")
+        );
+        assert_eq!(
+            (1..=5).collect::<Vec<i64>>(),
+            ints(&conn, "SELECT rowid FROM term WHERE dict_id = 1 ORDER BY rowid")
+        );
+        assert_eq!(
+            (6..=10).collect::<Vec<i64>>(),
+            ints(&conn, "SELECT rowid FROM term WHERE dict_id = 2 ORDER BY rowid")
+        );
+
+        let cols = "surface, written, reading, pos, freq";
+        assert_eq!(
+            cells(&conn, &format!("SELECT {cols} FROM term WHERE dict_id = 1 ORDER BY rowid")),
+            cells(&conn, &format!("SELECT {cols} FROM term WHERE dict_id = 2 ORDER BY rowid")),
+            "the same archive twice must parse to the same term rows"
+        );
+        assert_eq!(
+            cells(&conn, "SELECT senses FROM entry WHERE dict_id = 1 ORDER BY entry_id"),
+            cells(&conn, "SELECT senses FROM entry WHERE dict_id = 2 ORDER BY entry_id"),
+            "and to the same senses"
+        );
     }
 
     fn index_names(conn: &Connection) -> Vec<String> {

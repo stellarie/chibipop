@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Base id for an empty table.
 const FIRST_ID: i64 = 1;
@@ -26,6 +26,83 @@ fn next_id(conn: &Connection, sql: &str) -> Result<i64> {
         None => Ok(FIRST_ID),
         Some(id) => id.checked_add(1).with_context(|| format!("id space is full at {id}: {sql}")),
     }
+}
+
+/// Rows one addition inserted.
+#[derive(Debug)]
+pub struct Added {
+    pub dict_id: i64,
+    pub name: String,
+    pub entries: i64,
+    pub terms: i64,
+    pub first_entry_id: i64,
+}
+
+/// Inserts one dictionary.
+///
+/// Ids come from MAX + 1.
+pub fn add_dictionary(
+    conn: &mut Connection,
+    archive: &Path,
+    freqs: &[PathBuf],
+    on_progress: &dyn Fn(&str),
+) -> Result<Added> {
+    if crate::dict::archive::is_frequency_archive(archive) {
+        anyhow::bail!("{} is a frequency archive, not a dictionary", archive.display());
+    }
+    let table = crate::dict::build::load_freqs(freqs)?;
+
+    let tx = conn.transaction().context("opening the addition transaction")?;
+    let dict_id = next_dict_id(&tx)?;
+    let slot = crate::dict::build::Slot {
+        dict_id,
+        // build-dict's own relation.
+        priority: dict_id - 1,
+        first_entry_id: next_entry_id(&tx)?,
+    };
+    let mut batches = crate::dict::build::Batches::new();
+    let made = crate::dict::build::insert_archive(
+        &tx,
+        archive,
+        &slot,
+        &table,
+        &mut batches,
+        on_progress,
+    )?;
+    batches.flush(&tx)?;
+    record_source(&tx, archive)?;
+    refresh_stats(&tx)?;
+
+    tx.commit().context("committing the addition")?;
+    Ok(Added {
+        dict_id,
+        name: made.name,
+        entries: made.entries,
+        terms: made.terms,
+        first_entry_id: slot.first_entry_id,
+    })
+}
+
+/// Adds one archive to meta.
+fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
+    let record = serde_json::to_value(crate::dict::build::source_hash(archive)?)
+        .context("encoding the source record")?;
+    let raw: Option<String> = conn
+        .query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
+        .optional()
+        .context("reading meta.source_hashes")?;
+
+    let mut listed: Vec<Value> = match raw {
+        None => Vec::new(),
+        Some(raw) => serde_json::from_str(&raw).context("parsing meta.source_hashes")?,
+    };
+    listed.retain(|rec| rec["name"] != record["name"]);
+    listed.push(record);
+
+    let text = serde_json::to_string(&listed).context("writing meta.source_hashes")?;
+    conn.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('source_hashes', ?1)", params![text])
+        .context("updating meta.source_hashes")?;
+    Ok(())
 }
 
 /// Rows one removal deleted.
@@ -482,5 +559,237 @@ mod tests {
 
         assert_eq!(before, snapshot(&conn, 1), "the term deletes must roll back too");
         assert_eq!(sources, source_names(&conn));
+    }
+
+    fn terms_zip() -> PathBuf {
+        fixture("terms.zip")
+    }
+
+    fn freq_zip() -> Vec<PathBuf> {
+        vec![fixture("freq.zip")]
+    }
+
+    /// terms.zip under a new name.
+    fn copied_archive(test_name: &str, as_name: &str) -> (PathBuf, TempDbGuard) {
+        let dir = std::env::temp_dir().join("chibipop_edit_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join(format!("a_{}_{test_name}_{as_name}", std::process::id()));
+        std::fs::copy(terms_zip(), &dest).unwrap();
+        let guard = TempDbGuard(dest.clone());
+        (dest, guard)
+    }
+
+    fn source_record(conn: &Connection, name: &str) -> Value {
+        let raw: String = conn
+            .query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&raw).unwrap();
+        let found = parsed.as_array().unwrap().iter().find(|v| v["name"] == name).cloned();
+        found.unwrap_or_else(|| panic!("no source record named {name} in {raw}"))
+    }
+
+    fn of_dict(conn: &Connection, sql: &str, dict_id: i64) -> Vec<String> {
+        rows(conn, &sql.replace("{d}", &dict_id.to_string()))
+    }
+
+    #[test]
+    fn adding_a_dictionary_leaves_every_existing_row_byte_identical() {
+        let (mut conn, _guard) = fixture_db("add_leaves_others_intact");
+        add_second_dictionary(&conn);
+        let one = snapshot(&conn, 1);
+        let two = snapshot(&conn, 2);
+
+        let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+
+        assert_eq!(one, snapshot(&conn, 1), "the built dictionary's bytes must not move");
+        assert_eq!(two, snapshot(&conn, 2), "nor the synthetic one's");
+        assert_eq!(3, made.entries);
+        assert_eq!(5, made.terms);
+        assert_eq!(3, count(&conn, "SELECT COUNT(*) FROM entry WHERE dict_id = 3"));
+        assert_eq!(5, count(&conn, "SELECT COUNT(*) FROM term WHERE dict_id = 3"));
+    }
+
+    #[test]
+    fn an_added_dictionary_lands_above_every_existing_id() {
+        let (mut conn, _guard) = fixture_db("add_allocates_above_max");
+        populate(&conn);
+        assert_eq!(7, count(&conn, "SELECT MAX(dict_id) FROM dict"));
+        assert_eq!(41, count(&conn, "SELECT MAX(entry_id) FROM entry"));
+
+        let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+
+        assert_eq!(8, made.dict_id, "MAX(dict_id) + 1, not the dictionary count");
+        assert_eq!(42, made.first_entry_id);
+        assert_eq!(vec![42, 43, 44], ids(&conn, "SELECT entry_id FROM entry WHERE dict_id = 8"));
+    }
+
+    #[test]
+    fn an_addition_never_lands_on_an_existing_entry_id() {
+        let (mut conn, _guard) = fixture_db("add_never_reuses_an_entry_id");
+        let before = rows(&conn, "SELECT entry_id, dict_id, senses FROM entry ORDER BY entry_id");
+        assert_eq!(3, before.len());
+
+        let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+
+        let after = rows(&conn, "SELECT entry_id, dict_id, senses FROM entry WHERE dict_id = 1 \
+                                 ORDER BY entry_id");
+        assert_eq!(before, after, "no existing entry row may change");
+        assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM entry"), "3 kept + 3 inserted");
+        assert_eq!(
+            6,
+            count(&conn, "SELECT COUNT(DISTINCT entry_id) FROM entry"),
+            "an overwrite keeps the count constant; distinct ids catch it"
+        );
+        let sql = "SELECT COUNT(*) FROM entry WHERE dict_id = {d} AND entry_id <= 3";
+        assert_eq!(vec!["Integer(0)"], of_dict(&conn, sql, made.dict_id));
+    }
+
+    #[test]
+    fn the_added_rows_match_a_full_build_of_the_same_archive() {
+        let (reference, _rguard) = fixture_db("add_reference_build");
+        let (mut conn, _guard) = fixture_db("add_matches_a_full_build");
+
+        let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+
+        let cols = "SELECT surface, written, reading, pos, freq FROM term";
+        assert_eq!(
+            rows(&reference, &format!("{cols} ORDER BY rowid")),
+            of_dict(&conn, &format!("{cols} WHERE dict_id = {{d}} ORDER BY rowid"), made.dict_id),
+            "an incremental add must write exactly what a rebuild writes"
+        );
+        assert_eq!(
+            rows(&reference, "SELECT senses FROM entry ORDER BY entry_id"),
+            of_dict(
+                &conn,
+                "SELECT senses FROM entry WHERE dict_id = {d} ORDER BY entry_id",
+                made.dict_id
+            ),
+        );
+        assert_eq!("FixtureTerms", made.name, "the name comes from index.json's title");
+        let stored: String = conn
+            .query_row("SELECT name FROM dict WHERE dict_id = ?1", [made.dict_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!("FixtureTerms", stored, "and is what lands in dict.name");
+    }
+
+    #[test]
+    fn only_a_frequency_archive_ranks_the_added_dictionary() {
+        let (mut ranked, _g1) = fixture_db("add_with_freq");
+        let with = add_dictionary(&mut ranked, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+        let sql = "SELECT freq FROM term WHERE dict_id = {d} AND surface = '食べる'";
+        assert_eq!(vec!["Integer(7)"], of_dict(&ranked, sql, with.dict_id), "freq.zip ranks it");
+
+        let (mut bare, _g2) = fixture_db("add_without_freq");
+        let without = add_dictionary(&mut bare, &terms_zip(), &[], &|_| {}).unwrap();
+        assert_eq!(vec!["Null"], of_dict(&bare, sql, without.dict_id), "no archive, no rank");
+    }
+
+    #[test]
+    fn an_added_dictionary_keeps_the_builders_priority_relation() {
+        let (mut conn, _guard) = fixture_db("add_priority_relation");
+        populate(&conn);
+
+        let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+
+        assert_eq!(8, made.dict_id);
+        let sql = "SELECT priority FROM dict WHERE dict_id = {d}";
+        assert_eq!(vec!["Integer(7)"], of_dict(&conn, sql, made.dict_id), "one below dict_id");
+        assert_eq!(vec!["Integer(0)"], of_dict(&conn, sql, 1), "as build-dict itself writes");
+    }
+
+    #[test]
+    fn the_added_archive_is_recorded_in_source_hashes() {
+        let (mut conn, _guard) = fixture_db("add_appends_a_source");
+        let (extra, _eguard) = copied_archive("add_appends_a_source", "extra.zip");
+        let name = extra.file_name().unwrap().to_str().unwrap().to_string();
+        assert_eq!(vec!["terms.zip", "freq.zip"], source_names(&conn));
+
+        add_dictionary(&mut conn, &extra, &[], &|_| {}).unwrap();
+
+        assert_eq!(vec!["terms.zip".to_string(), "freq.zip".to_string(), name.clone()],
+                   source_names(&conn), "the new archive is appended, the old ones stay");
+        let rec = source_record(&conn, &name);
+        assert_eq!(
+            Some("b1a8876d676bcea6accb3e1f0c1c20b539cebad7652723108b0b2538ab4056a6"),
+            rec["sha256"].as_str(),
+            "the same hash build-dict records for terms.zip"
+        );
+        assert_eq!(Some(std::fs::metadata(&extra).unwrap().len()), rec["bytes"].as_u64());
+    }
+
+    #[test]
+    fn re_adding_a_listed_archive_does_not_duplicate_its_source_record() {
+        let (mut conn, _guard) = fixture_db("add_replaces_a_source");
+
+        add_dictionary(&mut conn, &terms_zip(), &[], &|_| {}).unwrap();
+
+        assert_eq!(
+            vec!["freq.zip", "terms.zip"],
+            source_names(&conn),
+            "one record per archive name, however often it is added"
+        );
+    }
+
+    #[test]
+    fn adding_to_an_emptied_database_starts_at_the_builders_base() {
+        let (mut conn, _guard) = fixture_db("add_to_an_empty_database");
+        conn.execute_batch("DELETE FROM term; DELETE FROM entry; DELETE FROM dict;").unwrap();
+
+        let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+
+        assert_eq!(1, made.dict_id, "the empty-table base is 1, as the builder writes");
+        assert_eq!(1, made.first_entry_id);
+        assert_eq!(vec![1, 2, 3], ids(&conn, "SELECT entry_id FROM entry ORDER BY entry_id"));
+        assert_eq!(0, count(&conn, "SELECT priority FROM dict WHERE dict_id = 1"));
+    }
+
+    #[test]
+    fn a_frequency_archive_is_refused_rather_than_added_as_an_empty_dictionary() {
+        let (mut conn, _guard) = fixture_db("add_refuses_a_freq_archive");
+        let sources = source_names(&conn);
+
+        let err = add_dictionary(&mut conn, &fixture("freq.zip"), &[], &|_| {})
+            .expect_err("a frequency archive is not a dictionary");
+
+        assert!(format!("{err:#}").contains("frequency"), "got: {err:#}");
+        assert_eq!(vec![1], ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
+        assert_eq!(sources, source_names(&conn));
+    }
+
+    #[test]
+    fn a_failure_part_way_through_rolls_the_whole_addition_back() {
+        let (mut conn, _guard) = fixture_db("add_rolls_back");
+        let before = snapshot(&conn, 1);
+        let sources = source_names(&conn);
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER burst BEFORE INSERT ON term WHEN NEW.surface = 'ねこ'
+             BEGIN SELECT RAISE(ABORT, 'burst'); END;",
+        )
+        .unwrap();
+
+        let err = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {})
+            .expect_err("an aborted insert must fail the addition");
+
+        assert!(format!("{err:#}").contains("burst"), "got: {err:#}");
+        assert_eq!(vec![1], ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"),
+                   "the dict row goes in first and must roll back with the rest");
+        assert_eq!(3, count(&conn, "SELECT COUNT(*) FROM entry"));
+        assert_eq!(5, count(&conn, "SELECT COUNT(*) FROM term"));
+        assert_eq!(before, snapshot(&conn, 1));
+        assert_eq!(sources, source_names(&conn), "a rolled-back add records no source");
+    }
+
+    #[test]
+    fn an_addition_refreshes_grossly_stale_planner_statistics() {
+        let (mut conn, _guard) = fixture_db("add_refreshes_stats");
+        add_bulk_dictionary(&conn, 2, 3_000);
+        assert_eq!("5 2", term_stat(&conn), "the build's ANALYZE saw 5 term rows");
+
+        add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
+
+        let after = term_stat(&conn);
+        let seen: i64 = after.split(' ').next().unwrap().parse().unwrap();
+        assert_eq!(6_010, count(&conn, "SELECT COUNT(*) FROM term"), "5 built + 6,000 + 5 added");
+        assert!(seen > 1_000, "an edit must not leave the planner reading {after}");
     }
 }
