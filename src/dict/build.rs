@@ -257,12 +257,14 @@ pub(crate) fn insert_archive(
         if entry_id % 5000 == 0 {
             on_progress(&format!("progress  {entry_id} / ?"));
         }
+
         let sense = Sense {
             glosses,
             glosses_html: render_glossary_html(&t.glossary),
             pos: extract_pos(&t.glossary),
             misc: Vec::new(),
         };
+
         batches.json_buf.clear();
         {
             let mut ser = serde_json::Serializer::with_formatter(&mut batches.json_buf, PySpaced);
