@@ -35,11 +35,34 @@ Pressing **Apply** saves your settings and starts using them straight away.
 chibipop keeps running and the window stays open, so you can change something,
 hover a word to see how it feels, and change it again.
 
-That includes adding and removing dictionaries. chibipop rebuilds its
-dictionary in place — a minute or so, with the window busy while it works — and
-the new one starts answering as soon as it is done. **It does not restart**,
-and if the swap cannot be made it tells you instead of quietly carrying on with
-the old one.
+That includes adding and removing dictionaries. **As of v0.8.0 chibipop edits
+its dictionary database in place instead of rebuilding it**, so a change costs
+about as much as the change itself — usually under a second, a couple of seconds
+for a very large dictionary — rather than the minute-plus it used to take to
+rebuild everything. **It does not restart, and it does not go deaf while it
+works**: hovering keeps answering right through the import, and the new
+dictionary starts answering the moment it lands. If a change cannot be made it
+tells you and leaves everything as it was.
+
+**Frequency lists are the exception.** A frequency list ranks words across every
+dictionary at once, so adding or removing one really does need the whole
+database rebuilt, and chibipop cannot do that to a database it is holding open.
+It will tell you so and give you the command to run — quit chibipop, run it,
+start chibipop again:
+
+```
+chibipop build-dict --library "<your library folder>" --out "<your database>"
+```
+
+You will also want that command for a first run, after upgrading to a build
+with a new dictionary format, or if the database is ever damaged.
+
+**Because changes are made in place, the database can drift from your library
+folder** — for instance if you drop a `.zip` in by hand rather than using
+**Add…**. chibipop notices and says so when you open the settings window,
+naming what is missing from which side. Nothing is broken when it does; your
+lookups keep working, and the dictionaries the database has keep answering. It
+**never** starts a rebuild on its own — running the command above is your call.
 
 Your settings live in `chibipop.toml` beside `chibipop.exe`, and you can edit
 that by hand if you prefer.

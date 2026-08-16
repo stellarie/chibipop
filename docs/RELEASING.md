@@ -24,6 +24,21 @@ executable on first run.
 1. **Decide the version.** Update `version` in `Cargo.toml`.
 2. **Run tier 0 locally** — [`REGRESSION.md`](REGRESSION.md). Do not tag a
    commit you have not gated.
+
+> [!warning] **v0.7.2 is deliberately never tagged. Do not tag it later.**
+> Its headline feature was the rebuild-and-promote path — stage a
+> `chibipop.sqlite.new`, stop and `join()` the worker, rename, respawn — and
+> that path **deadlocks**: the worker's closure completed, `join()` never
+> returned, and the main thread stopped pumping the messages its low-level
+> input hooks are serviced from. Windows then serialises every mouse move and
+> keystroke on the machine behind it. It froze the user's whole desktop twice.
+> v0.7.2 is merged (`036e4fd`) and is the base v0.8.0 was built on, so its
+> history is not going anywhere — but there is no build of it anyone should
+> run, and a tag would invite one. **v0.8.0 deletes that path**, which is what
+> makes the deadlock unreachable; see [`BACKLOG.md`](BACKLOG.md) §24.
+>
+> The release workflow would refuse a `v0.7.2` tag anyway now that `Cargo.toml`
+> reads `0.8.0`, but that is a backstop, not the reason.
 3. **Commit** the version bump.
 4. **Tag and push:**
    ```bash
@@ -62,8 +77,15 @@ The release workflow additionally refuses to build if the tag disagrees with
 Everything in `REGRESSION.md` tiers 1 and 2 — anything needing real pixels or
 a real hand on the mouse. A GitHub runner has no Japanese OCR recognizer and
 no screen, so `tests/golden.rs` and `tests/ocr_fixture.rs` **self-skip** there
-rather than fail. They still count as passing, which is why the test-count
-floor stays honest.
+rather than fail. They still count as passing, which is what keeps the
+test-count floor from tripping on a runner.
+
+**That is a trade, not a free win, and it is worth naming.** A self-skip is an
+early `return`, and a `#[test]` that returns is a pass — so the totals in
+`REGRESSION.md` include tests that asserted nothing, in CI *and* in any local
+tree without a built database. `golden_corpus` is the one that matters: it is
+the only check of real deconjugation against a real dictionary, and it is
+silently the one that never runs. See [`BACKLOG.md`](BACKLOG.md) §27.
 
 That means a green CI badge means "the pure logic is sound and it compiles",
 not "the popup works". Tier 2 is still a human, every time.

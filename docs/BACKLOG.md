@@ -771,6 +771,13 @@ quarantine back properly rather than leaving it for the next load. What remains 
 dies inside that block — and the general fact that the restore is unconditional in every process,
 so the recovery path is reached without anyone deciding it should be.
 
+**v0.8.0 narrowed it further, again without closing it.** There is no promote left; the quarantine
+now sits open only for the duration of the edit itself — `Pending::commit` runs immediately after
+the last transaction and the last `library.save` (`src/app.rs:668-669`), and that whole span is
+measured in hundreds of milliseconds rather than the minutes a full rebuild took. A process that
+dies inside *that* window still comes back with its archives re-adopted at the end of the order,
+silently, exactly as described above.
+
 **If picked up:** the fix is to make the restore *re-rank* rather than re-adopt — the manifest still
 holds the surviving entries' order, and a restored archive's original position is recoverable if
 `quarantine` records it. Failing that, the honest cheap version is to say so: one stderr line
@@ -857,6 +864,12 @@ an outcome that the same three lines throw away.
 `Pending` back, which is a real feature rather than a one-line fix — hence the number. The honest
 interim is a documented note that the settings-only rebuild cannot be interrupted.
 
+**Amended 2026-08-16, v0.8.0 — still open, and now the *only* place it happens.** The phrase
+"exactly as `run` does" above is no longer true: `run` has no rebuild to gate on, so its copy of
+those three lines is deleted along with the rest of the rebuild-and-promote path. `settings_only`
+keeps its rebuild (first run genuinely needs one) and keeps this gate, so the item stands unchanged
+in substance and narrows in scope to the one path that has no tray icon to escape through.
+
 ---
 
 ## 23. Quitting during a rebuild orphans the `build-dict` child
@@ -883,5 +896,196 @@ what the restored order looks like.
 **If picked up:** the child handle would have to outlive `InFlight` far enough for the shutdown
 block to `kill()` and `wait()` it before `exit(0)`. Note that killing a builder mid-write leaves a
 partial `<db>.new.tmp`, which is already handled — `rebuild::run` removes an existing `tmp` before
-starting (`src/rebuild.rs:55-57`), and a complete leftover `.new` is reported at startup and left
-alone, as `docs/REGRESSION.md` §1.18's callout spells out.
+starting (`src/rebuild.rs:55-57`).
+
+**Amended 2026-08-16, v0.8.0 — mostly, but not entirely, overtaken.** `run` no longer spawns
+`build-dict` at all: dictionary changes edit the live database on a background thread and the whole
+rebuild-from-`run` path is deleted, so the scenario as written — quit the tray icon while `run`'s
+rebuild child is working — **is unreachable**. `std::process::exit(0)` is still there
+(`src/app.rs:1815`, moved from 1727) and still runs no destructors, so the *general* hazard stands
+wherever a child does exist: that is now `settings_only` only, where item 22's gate means the user
+cannot reach Quit mid-build anyway and Task Manager is the only exit. The `.new` staging this item's
+last paragraph described is gone with the rest; `rebuild::run`'s `<out>.tmp` is what a killed
+builder leaves now.
+
+---
+
+## 24. The `join()` deadlock was never fixed — only made unreachable
+
+**Raised 2026-08-16 by the v0.8.0 incremental-dictionary round. Read this before reintroducing any
+`JoinHandle::join()` on the worker. It is filed as a backlog item rather than a note because the
+underlying defect is still there and nobody has diagnosed it past the symptom.**
+
+**What happened.** v0.7.2's rebuild promoted a staged database by stopping the worker, `join()`ing
+it to prove its SQLite handle had closed, renaming, then respawning. The join never returned. The
+trace is unambiguous: the worker logged `worker.thread.end` — its closure *completed* — and
+`join()` still blocked, while the main thread pumped **zero** messages for the rest of the run. The
+main thread is the one that owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows serialises every
+mouse move and keystroke on the entire desktop behind a hook whose owner is not pumping. **The
+user's whole machine froze, twice.**
+
+**The leading hypothesis, unconfirmed.** WinRT/COM apartment teardown on the worker needs a message
+pump that the blocked main thread cannot give it, so the thread cannot finish exiting and the join
+cannot complete — a circular wait between `join()` and the pump. That was never proven, because:
+
+**What was actually done.** The user's decision was to delete the path that reaches it rather than
+debug it. v0.8.0 edits the live database in place, so no promote and no respawn exist; and the
+demolition also deleted the **shutdown** `stop_worker` call, which existed only because a
+`dead_code` warning had forced v0.7.2 to give the function a caller. `spawn_worker`'s handle is now
+bound as `_worker` and never touched again. **No `JoinHandle::join()` on the worker survives
+anywhere in the crate** — the only two `.join()` calls left are `join_save`'s config-save thread
+and the builder's stdout reader, neither of which runs on the hook-owning thread while hooks are
+installed. Verified by a zero-reference grep over 21 deleted identifiers plus a clean
+`cargo check --all-targets`.
+
+**So the defect is dormant, not dead.** Reintroducing a worker join — for a clean shutdown, for a
+schema migration, for anything — reintroduces a whole-desktop freeze, and it will not look like a
+chibipop bug when it does: the symptom is the *user's mouse* going syrupy, with chibipop's window
+looking merely busy.
+
+**If picked up**, in increasing order of cost: (a) never join the worker, and say so in a comment at
+`spawn_worker` — the current state, undocumented in the source; (b) if a join is genuinely needed,
+**remove the hooks first and pump while waiting** (`join` in a loop against a timeout, servicing
+messages between attempts), never a bare blocking join; (c) actually diagnose it — spawn the worker
+with an explicit COM apartment model and see whether the teardown still needs the pump. Note that
+Windows may answer a hook that misses `LowLevelHooksTimeout` by **dropping** it rather than waiting
+again, in which case the symptom is not a slow desktop but hover going silently dead — see the
+2026-07-27 spike finding. Both shapes are covered by `docs/REGRESSION.md` §1.18 step 14.
+
+---
+
+## 25. A combined remove + add can rename the incoming archive to `terms (2).zip`
+
+**Raised 2026-08-16 by the v0.8.0 round. Traced through the source, not reproduced — the conditions
+below are read off the code, and no test exercises a removal and an addition in one Apply.**
+
+`Library::free_name` (`src/library.rs:164-188`) appends ` (2)`, ` (3)` … when the incoming file name
+is already `taken`, and `taken` (`:190-192`) is `dir.join(file).exists() || entries.any(|e| e.file
+== file)`. On the ordinary combined path this is harmless: `apply_edits` runs **all removals before
+any addition** (`src/app.rs:651-666`), and each removal quarantines its archive into
+`library/.removed/` (`remove_one`, `:690`) before the additions loop calls `import`. The old file is
+out of `dir` by then, so re-adding the same file name reuses it.
+
+**Two reachable paths break that ordering guarantee**, and both leave the old file sitting in `dir`
+while the add runs:
+
+1. **The removal fails.** `remove_one` returns early on any error from `remove_dictionary`, and on
+   the "dictionary was no longer in the database" bail (`:686`) — **both before the quarantine**.
+   The loop records it in `report.failed` and carries straight on to the additions.
+2. **The removal cannot name its archive.** `removal.file` is `None` whenever
+   `settings::removed_files` could not resolve one (see item 26), so the rows are deleted and the
+   `.zip` is never moved.
+
+In both, the incoming archive lands as `terms (2).zip`, `library.json` records a name the user did
+not choose, and — because `dict.name` comes from `index.json` and not from the file name — nothing
+on screen explains where the `(2)` came from.
+
+**If picked up:** the cheap correct fix is to make `free_name` ignore names the *current* `Pending`
+has already quarantined, which is exactly the information `Pending.held` carries. The failure-path
+half wants a decision first: an addition that follows a failed removal of the same file is arguably
+a case Apply should refuse rather than half-do.
+
+---
+
+## 26. `settings::removed_files` cannot resolve a removal whose archive has an empty title
+
+**Raised 2026-08-16 by the v0.8.0 round. Pre-existing — the two namespaces have disagreed since the
+library was introduced; incremental removal is only what made it reachable.**
+
+Two different things are both called a dictionary's "name", and they are populated by two functions
+that do not agree on one input:
+
+| | source | empty title |
+|---|---|---|
+| `dict.name` (database) | `build::dict_title` | kept as `""` |
+| `library::Entry.name` | `library::title_of` | falls back to the file **stem** |
+
+`title_of` filters `!t.is_empty()`; `dict_title` does not. So an archive whose `index.json` carries
+`"title": ""` is `""` in the database and `terms` in the library. The staged-removal list carries the
+**database** name (it comes from `from_config`), while `settings::removed_files`
+(`src/settings.rs:181`) matches on **library** names — and for that archive neither it nor
+`plan_edits` finds the file. **The rows are deleted and the `.zip` stays in `library/`**, which then
+reads as drift (§1.19) forever, and feeds item 25's second path.
+
+**If picked up:** the honest fix is to stop having two name functions — give `dict_title` the same
+`!t.is_empty()` filter and rebuild, or key the removal on something that is not a title at all.
+`meta.source_hashes[].name` is the archive **file** name and would join cleanly to `Entry.file`,
+which is what §1.19's drift detection already does; the removal path could use the same join. Note
+that `dict.name` is what `DictInfo` and `present.rs` match on, so changing it is a behaviour change
+for anyone whose config names a `""` dictionary — which is nobody, since `""` cannot be typed into
+the order list usefully.
+
+---
+
+## 27. `golden_corpus` reports `ok` without asserting anything, and is counted as a pass
+
+**Raised 2026-08-16 by the v0.8.0 round, after four consecutive tasks re-reported it. Pre-existing,
+and it quietly inflates every test total this project has ever published.**
+
+`tests/golden.rs:31-34` early-returns when `data/chibipop.sqlite` is absent:
+
+```rust
+if !db.exists() {
+    eprintln!("SKIP golden_corpus: {} not built", db.display());
+    return;
+}
+```
+
+A `#[test]` that returns is a **pass**. It is not `#[ignore]`d and does not appear in the `1 ignored`
+beside the total, so on any tree without a built 242 MB database — every fresh clone, every git
+worktree, and CI — the suite reports one more passing test than it ran. Every number in Tier 0 of
+`docs/REGRESSION.md`, from **416** through **873**, includes it.
+
+The cost is not the arithmetic; it is that **the one test that checks real deconjugation against a
+real dictionary is the one test that silently does not run**, and it does not run in exactly the
+environment where a regression would be cheapest to catch.
+
+**If picked up:** three options, in increasing honesty and cost. (a) `#[ignore]` it and require
+`--ignored` locally — the count then tells the truth and the test never runs in CI either.
+(b) `panic!` on a missing database and give CI a small committed fixture instead of the real
+242 MB file, which is the only option that actually makes the corpus run somewhere.
+(c) Leave it and subtract, which is what `docs/REGRESSION.md`'s Tier 0 callout now does in prose.
+**(b) is the one worth the money** — the golden corpus is 30-odd deconjugation cases and does not
+need the real database, only *a* database containing those words.
+
+---
+
+## 28. Four rebuild-era strings that no live code path can now honour
+
+**Raised 2026-08-16 by the v0.8.0 round. Two are pre-existing dead ends; two were made wrong by
+this release. They are one item because the fix is one decision: which route does the app tell you
+to take when a rebuild really is needed?**
+
+v0.8.0 set a precedent — the frequency refusal (`app.rs:467`) and the drift notice
+(`settings.rs:542`) both name the literal command, with the user's real paths substituted, and both
+say "quit chibipop first" because `build::build` renames onto `<out>` and that rename fails against
+an open database. **These four have not caught up:**
+
+1. **`src/lookup/sqlite.rs:41`** — a schema mismatch says *"rebuild the dictionary from the settings
+   window"*. **That window is unreachable from this error.** `chibipop run` dies in `spawn_worker`
+   and `chibipop settings` dies at `SqliteDictionary::open` (`src/main.rs:369`) **before**
+   `settings_only` is ever called. Verified: the CLI is the only route. Pre-existing, and the
+   friendliest-sounding of the four.
+2. **`src/main.rs:370`** — *"opening {} - rebuild it in the settings window"*, the same dead end
+   reached from the other side, and the comment two lines above it (*"A rebuild renames onto it"*)
+   now describes a path that only `settings_only` takes.
+3. **`src/ui/settings_window.rs:1997-1999`** — *"chibipop is using a dictionary built outside the
+   app. Adding or removing here rebuilds from this list only — import your original .zip files
+   first."* **Made false in live mode by this release.** Its whole content is a warning that Apply
+   will rebuild from the library and therefore drop the dictionaries the library does not have —
+   and Apply no longer rebuilds from anything. Removing a dictionary now deletes exactly the rows
+   asked for and touches nothing else. It stays **true for `chibipop settings`**, which still
+   rebuilds, so this is not a deletion: it is a mode split the string does not currently make.
+   Left alone deliberately in the v0.8.0 doc task, because gating it on `ApplyMode` means writing
+   new copy for the live half and that is a product decision, not a documentation fix.
+   `self.apply_mode` is already in scope at that call site, so the mechanics are one condition.
+4. **`src/app.rs:555-556`** — the WAL refusal says *"Rebuild the dictionary to convert it"* without
+   saying with what. New in this release, reachable only for a legacy `delete`-mode file, and the
+   one of the four where the instruction is at least *correct* — `build.rs` sets `journal_mode=WAL`,
+   so a rebuild does convert it.
+
+**If picked up:** decide once, then apply it to all four — either every "you need a rebuild" message
+names `chibipop build-dict --library "<lib>" --out "<db>"` with real paths and a "quit chibipop
+first", matching the two that already do, or a `rebuild_instruction(library, db)` helper is written
+once and called from all six sites. The second is the better shape and is why this is an item rather
+than a one-line fix.
