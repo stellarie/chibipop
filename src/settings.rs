@@ -4,6 +4,7 @@ use crate::config::{Config, FieldMapping, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Re-exported for config.rs.
@@ -28,6 +29,9 @@ pub struct SettingsForm {
     pub exclude_from_capture: bool,
     /// Live names, not substrings.
     pub dict_names: Vec<String>,
+    pub dict_excluded: Vec<String>,
+    pub dict_list_language: String,
+    pub per_language: BTreeMap<String, Vec<String>>,
     pub max_ocr_passes: u8,
     pub prefer_vertical: bool,
     pub capture_width: i32,
@@ -106,6 +110,11 @@ impl SettingsForm {
         self.staged_removes.clear();
     }
 
+    /// Take what Apply wrote.
+    pub fn reseed_per_language(&mut self, written: &BTreeMap<String, Vec<String>>) {
+        self.per_language = written.clone();
+    }
+
     /// Is this row a pending import?
     pub fn is_staged_add(&self, name: &str) -> bool {
         self.staged_adds.iter().any(|a| a.name == name)
@@ -129,14 +138,26 @@ pub fn shown_name(source: &Path) -> Option<String> {
     source.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
+/// Split still trustworthy?
+pub(crate) fn is_scoped(form: &SettingsForm) -> bool {
+    form.dict_list_language == form.ocr_language
+        && (form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty())
+}
+
 /// Show the library's lists.
 ///
 /// Unreadable files are listed.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
     form.freq_names = named(lib, Kind::Frequency);
+    let to_excluded = is_scoped(&form);
     // Built first, then the rest.
     for name in named(lib, Kind::Term) {
-        if !form.dict_names.contains(&name) {
+        if form.dict_names.contains(&name) || form.dict_excluded.contains(&name) {
+            continue;
+        }
+        if to_excluded {
+            form.dict_excluded.push(name);
+        } else {
             form.dict_names.push(name);
         }
     }
@@ -222,15 +243,39 @@ fn mutate(
     lib.save(dir)
 }
 
+fn sorted_by_order<'a>(dicts: &'a [DictInfo], order: &[String]) -> Vec<&'a DictInfo> {
+    let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
+    ordered.sort_by_key(|d| (dict_order_rank(&d.name, order).unwrap_or(usize::MAX), d.dict_id));
+    ordered
+}
+
 /// Flatten, in popup order.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
-    let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
-    ordered.sort_by_key(|d| {
-        (
-            dict_order_rank(&d.name, &cfg.dictionaries.display_order).unwrap_or(usize::MAX),
-            d.dict_id,
-        )
-    });
+    let ordered = sorted_by_order(dicts, &cfg.dictionaries.display_order);
+    let installed = || dicts.iter().map(|d| d.name.as_str());
+    let active = cfg
+        .dictionaries
+        .per_language
+        .get(&cfg.ocr.language)
+        .filter(|l| !l.is_empty() && crate::present::any_listed(installed(), l.as_slice()));
+    let (dict_names, dict_excluded) = match active {
+        Some(list) => {
+            let matching = sorted_by_order(dicts, list);
+            (
+                matching
+                    .into_iter()
+                    .filter(|d| dict_order_rank(&d.name, list).is_some())
+                    .map(|d| d.name.clone())
+                    .collect(),
+                ordered
+                    .iter()
+                    .filter(|d| dict_order_rank(&d.name, list).is_none())
+                    .map(|d| d.name.clone())
+                    .collect(),
+            )
+        }
+        None => (ordered.iter().map(|d| d.name.clone()).collect(), Vec::new()),
+    };
 
     SettingsForm {
         mode: cfg.trigger.mode,
@@ -244,7 +289,10 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         scroll_popup: cfg.popup.scroll_popup,
         side_panel: cfg.popup.side_panel,
         exclude_from_capture: cfg.popup.exclude_from_capture,
-        dict_names: ordered.iter().map(|d| d.name.clone()).collect(),
+        dict_names,
+        dict_excluded,
+        dict_list_language: cfg.ocr.language.clone(),
+        per_language: cfg.dictionaries.per_language.clone(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
         capture_width: cfg.ocr.capture_width,
@@ -265,6 +313,24 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
     }
+}
+
+fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| !unreadable.iter().any(|u| u == *name))
+        .map(|name| order_key(name, existing))
+        .collect()
+}
+
+/// `None`: leave the entry be.
+pub(crate) fn scoped_entry(
+    names: &[String],
+    unreadable: &[String],
+    existing: &[String],
+) -> Option<Vec<String>> {
+    let keyed = keyed_names(names, unreadable, existing);
+    (!keyed.is_empty()).then_some(keyed)
 }
 
 /// Substrings, not live names.
@@ -299,12 +365,24 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
-    out.dictionaries.display_order = form
-        .dict_names
-        .iter()
-        .filter(|name| !form.unreadable.iter().any(|u| u == *name))
-        .map(|name| order_key(name, &cfg.dictionaries.display_order))
-        .collect();
+    let full: Vec<String> =
+        form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
+    out.dictionaries.display_order =
+        keyed_names(&full, &form.unreadable, &cfg.dictionaries.display_order);
+
+    let mut per_language = form.per_language.clone();
+    if is_scoped(form) {
+        let existing = cfg
+            .dictionaries
+            .per_language
+            .get(&form.ocr_language)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        if let Some(keyed) = scoped_entry(&form.dict_names, &form.unreadable, existing) {
+            per_language.insert(form.ocr_language.clone(), keyed);
+        }
+    }
+    out.dictionaries.per_language = per_language;
     out
 }
 
@@ -361,6 +439,115 @@ pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
         })
         .cloned()
         .collect()
+}
+
+/// Drop a removed dictionary.
+///
+/// An emptied list is removed.
+pub fn dictionary_removed(cfg: &mut Config, name: &str) {
+    let claims = |entry: &String| dict_order_rank(name, std::slice::from_ref(entry)).is_some();
+    cfg.dictionaries.display_order.retain(|entry| !claims(entry));
+    cfg.dictionaries.per_language.retain(|_, list| {
+        list.retain(|entry| !claims(entry));
+        !list.is_empty()
+    });
+}
+
+/// List an added dictionary.
+///
+/// Never makes a language list.
+pub fn dictionary_added(cfg: &mut Config, name: &str) {
+    if name.trim().is_empty() {
+        return;
+    }
+    append_key(name, &mut cfg.dictionaries.display_order);
+    let listed = cfg.dictionaries.per_language.get_mut(&cfg.ocr.language);
+    if let Some(list) = listed.filter(|l| !l.is_empty()) {
+        append_key(name, list);
+    }
+}
+
+/// Only if nothing claims it.
+fn append_key(name: &str, entries: &mut Vec<String>) {
+    if dict_order_rank(name, entries).is_none() {
+        let key = order_key(name, entries);
+        entries.push(key);
+    }
+}
+
+/// Where the two sides differ.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Drift {
+    /// In the library, never built.
+    unbuilt: Vec<String>,
+    /// Built from, now gone.
+    orphaned: Vec<String>,
+}
+
+/// Library vs source_hashes.
+///
+/// Parsed: the bytes vary.
+fn drift(sources: Option<&str>, lib: &Library) -> Drift {
+    let Some(raw) = sources else { return Drift::default() };
+    let Ok(listed) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return Drift::default();
+    };
+    let recorded: Vec<String> =
+        listed.iter().filter_map(|rec| rec["name"].as_str()).map(str::to_string).collect();
+    // write_meta skips unreadables.
+    let built: Vec<String> = lib
+        .entries
+        .iter()
+        .filter(|e| e.kind != Kind::Unreadable)
+        .map(|e| e.file.clone())
+        .collect();
+    Drift { unbuilt: only_in(&built, &recorded), orphaned: only_in(&recorded, &built) }
+}
+
+/// Names in one list only.
+fn only_in(these: &[String], those: &[String]) -> Vec<String> {
+    these.iter().filter(|name| !those.contains(name)).cloned().collect()
+}
+
+/// Offer a rebuild, or not.
+///
+/// CRLF: the box is an EDIT.
+pub fn drift_notice(
+    sources: Option<&str>,
+    lib: &Library,
+    dir: &Path,
+    db: &Path,
+) -> Option<String> {
+    // build-dict needs a term zip.
+    if !lib.entries.iter().any(|e| e.kind == Kind::Term) {
+        return None;
+    }
+    let found = drift(sources, lib);
+    let mut parts = Vec::new();
+    if !found.unbuilt.is_empty() {
+        parts.push(format!(
+            "In your library but not in the database: {}.",
+            found.unbuilt.join(", ")
+        ));
+    }
+    if !found.orphaned.is_empty() {
+        parts.push(format!(
+            "In the database but no longer in your library: {}.",
+            found.orphaned.join(", ")
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Your library and your dictionary database no longer match. {} Nothing is broken \
+         and lookups still work, but a dictionary the database does not have cannot answer. \
+         To make them match, quit chibipop, then run this in a terminal, and start chibipop \
+         again when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
+        parts.join(" "),
+        dir.display(),
+        db.display()
+    ))
 }
 
 #[cfg(test)]
@@ -648,6 +835,179 @@ mod tests {
         cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
         assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+    }
+
+    #[test]
+    fn from_config_splits_active_from_excluded() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert!(form.dict_names.iter().all(|n| n.contains("大辞林")));
+        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+    }
+
+    #[test]
+    fn apply_to_writes_the_visible_list_into_its_language() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            out.dictionaries.per_language["ja"],
+        );
+    }
+
+    /// Others must survive.
+    #[test]
+    fn apply_to_preserves_other_languages() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["中日大辞典".to_string()],
+            out.dictionaries.per_language["zh-Hans-CN"],
+            "the other language's list must survive",
+        );
+    }
+
+    /// Re-include keeps the key.
+    #[test]
+    fn a_second_apply_rewrites_the_key_the_first_one_wrote() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["大辞林　第四版".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let first = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            first.dictionaries.per_language["ja"],
+        );
+        form.reseed_per_language(&first.dictionaries.per_language);
+        form.dict_names =
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()];
+        form.dict_excluded = Vec::new();
+        let second = apply_to(&form, &first);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org".to_string()],
+            second.dictionaries.per_language["ja"],
+            "the second Apply must rewrite the key, never drop it",
+        );
+    }
+
+    /// Merge must not undo scoping.
+    #[test]
+    fn with_library_keeps_the_exclusion_scoped() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = with_library(from_config(&cfg, &dicts()), &library());
+        assert!(!form.dict_names.iter().any(|n| n.contains("Jitendex")));
+        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+    }
+
+    /// A stale list must not win.
+    #[test]
+    fn apply_to_does_not_write_a_stale_dict_list_language() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.per_language.insert(
+            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_language = "zh-Hans-CN".to_string();
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["中日大辞典".to_string()],
+            out.dictionaries.per_language["zh-Hans-CN"],
+            "a stale dict list must not overwrite the real one",
+        );
+    }
+
+    /// One helper, two writers.
+    #[test]
+    fn a_keyed_empty_entry_is_never_written() {
+        assert_eq!(None, scoped_entry(&[], &[], &[]));
+        assert_eq!(
+            None,
+            scoped_entry(&["bad.zip".to_string()], &["bad.zip".to_string()], &[]),
+        );
+        assert_eq!(
+            Some(vec!["大辞林".to_string()]),
+            scoped_entry(&["大辞林　第四版".to_string()], &[], &["大辞林".to_string()]),
+        );
+    }
+
+    /// I2-a: nothing left searched.
+    #[test]
+    fn apply_to_will_not_erase_a_list_when_nothing_is_searched() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = Vec::new();
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林".to_string()],
+            out.dictionaries.per_language["ja"],
+            "an empty split must leave the entry alone",
+        );
+    }
+
+    /// I2-b: only unreadable rows.
+    #[test]
+    fn apply_to_will_not_erase_a_list_for_an_unreadable_row() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let mut form = from_config(&cfg, &dicts());
+        form.dict_names = vec!["bad.zip".to_string()];
+        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        form.unreadable = vec!["bad.zip".to_string()];
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            vec!["大辞林".to_string()],
+            out.dictionaries.per_language["ja"],
+            "a keyed-empty split must leave the entry alone",
+        );
+    }
+
+    /// Matches nothing: search all.
+    #[test]
+    fn from_config_ignores_a_list_matching_nothing_installed() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["Daijirin".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
+            form.dict_names,
+            "the tab must match resolve_dict_filter's fallback",
+        );
+        assert!(form.dict_excluded.is_empty());
+    }
+
+    #[test]
+    fn from_config_still_splits_a_list_that_matches_one() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert(
+            "ja".to_string(), vec!["大辞林".to_string()]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(vec!["大辞林　第四版".to_string()], form.dict_names);
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], form.dict_excluded);
     }
 
     fn staged_form() -> SettingsForm {
@@ -1186,6 +1546,342 @@ mod tests {
         };
         let form = with_library(from_config(&Config::default(), &[]), &lib);
         assert!(form.dict_names.contains(&"DroppedIn".to_string()), "{form:?}");
+    }
+
+    // ---- incremental ----
+
+    fn strs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn with_list(mut cfg: Config, lang: &str, list: &[&str]) -> Config {
+        cfg.dictionaries.per_language.insert(lang.to_string(), strs(list));
+        cfg
+    }
+
+    #[test]
+    fn a_removed_dictionary_loses_its_order_entry() {
+        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
+    }
+
+    #[test]
+    fn a_removal_drops_the_name_from_every_language_list() {
+        let mut cfg = with_list(
+            with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林", "Jitendex"]),
+            "zh-Hans-CN",
+            &["大辞林", "中日大辞典"],
+        );
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+        assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
+    }
+
+    /// `[]` searches everything.
+    #[test]
+    fn a_language_list_left_empty_loses_its_key() {
+        let mut cfg = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(
+            !cfg.dictionaries.per_language.contains_key("ja"),
+            "an emptied entry must be removed, not written as []: {:?}",
+            cfg.dictionaries.per_language
+        );
+    }
+
+    /// Why `[]` is not written.
+    #[test]
+    fn an_empty_list_left_behind_would_scope_the_language() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(!is_scoped(&from_config(&cfg, &[])), "the language must be unscoped again");
+
+        let blanked = with_list(cfg_with(&["Jitendex"]), "ja", &[]);
+        assert!(
+            is_scoped(&from_config(&blanked, &[])),
+            "[] keeps the language scoped and pins it at the next Apply",
+        );
+    }
+
+    /// A blank claims nothing.
+    #[test]
+    fn a_removal_leaves_a_blank_entry_alone() {
+        let mut cfg = cfg_with(&["", "大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&[""]), cfg.dictionaries.display_order);
+    }
+
+    /// A frequency name too.
+    #[test]
+    fn a_removal_naming_no_entry_changes_nothing() {
+        let before = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        let mut cfg = before.clone();
+        dictionary_removed(&mut cfg, "jiten_freq_global");
+        assert_eq!(before, cfg);
+    }
+
+    /// Recorded, not desired.
+    #[test]
+    fn a_substring_two_dictionaries_share_is_dropped_by_either_removal() {
+        let mut cfg = cfg_with(&["大辞"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(cfg.dictionaries.display_order.is_empty(), "大辞泉 loses its place too");
+    }
+
+    #[test]
+    fn a_list_that_was_already_empty_is_removed_too() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "zh-Hans-CN", &[]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(cfg.dictionaries.per_language.is_empty());
+    }
+
+    #[test]
+    fn an_added_dictionary_is_appended_with_a_derived_key() {
+        let mut cfg = cfg_with(&["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.display_order);
+    }
+
+    #[test]
+    fn an_added_dictionary_joins_a_language_that_has_a_list() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// No entry: search all.
+    #[test]
+    fn an_added_dictionary_never_creates_a_language_list() {
+        let mut cfg = cfg_with(&["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert!(
+            cfg.dictionaries.per_language.is_empty(),
+            "creating an entry would pin the language: {:?}",
+            cfg.dictionaries.per_language
+        );
+    }
+
+    /// `[]` is not a list.
+    #[test]
+    fn an_added_dictionary_never_fills_an_empty_language_list() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &[]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert!(
+            cfg.dictionaries.per_language["ja"].is_empty(),
+            "filling [] would scope ja to the new dictionary alone",
+        );
+    }
+
+    #[test]
+    fn an_added_dictionary_leaves_the_other_languages_alone() {
+        let mut cfg = with_list(
+            with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]),
+            "zh-Hans-CN",
+            &["中日大辞典"],
+        );
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
+    }
+
+    /// It is already ordered.
+    #[test]
+    fn an_entry_that_already_claims_the_name_is_not_duplicated() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["Jitendex"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// A blank pins everything.
+    #[test]
+    fn a_dictionary_with_no_title_adds_no_entry() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
+        dictionary_added(&mut cfg, "");
+        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// Two writers, one result.
+    #[test]
+    fn an_incremental_removal_agrees_with_a_full_apply() {
+        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let kept = vec![DictInfo { dict_id: 1, name: "Jitendex.org [2026-07-09]".into() }];
+        let full = apply_to(&from_config(&cfg, &kept), &cfg);
+        let mut incremental = cfg.clone();
+        dictionary_removed(&mut incremental, "大辞林　第四版");
+        assert_eq!(full.dictionaries, incremental.dictionaries);
+    }
+
+    /// Two writers, one result.
+    #[test]
+    fn an_incremental_addition_agrees_with_a_full_apply() {
+        let cfg = cfg_with(&["大辞林"]);
+        let full = apply_to(&from_config(&cfg, &dicts()), &cfg);
+        let mut incremental = cfg.clone();
+        dictionary_added(&mut incremental, "Jitendex.org [2026-07-09]");
+        assert_eq!(full.dictionaries, incremental.dictionaries);
+    }
+
+    // ---- drift ----
+
+    const LIB_DIR: &str = r"C:\chibipop\library";
+    const DB_FILE: &str = r"C:\chibipop\data\chibipop.sqlite";
+
+    /// build.rs, json.dumps spacing.
+    const BUILT_JSON: &str = concat!(
+        r#"[{"name": "jitendex.zip", "bytes": 462, "sha256": "b1a8"}, "#,
+        r#"{"name": "daijirin.zip", "bytes": 385, "sha256": "d49c"}, "#,
+        r#"{"name": "freq.zip", "bytes": 12, "sha256": "0f0f"}]"#
+    );
+
+    /// edit.rs, keys sorted.
+    const EDITED_JSON: &str = concat!(
+        r#"[{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"},"#,
+        r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"},"#,
+        r#"{"bytes":12,"name":"freq.zip","sha256":"0f0f"}]"#
+    );
+
+    fn notice(sources: &str, lib: &Library) -> Option<String> {
+        drift_notice(Some(sources), lib, Path::new(LIB_DIR), Path::new(DB_FILE))
+    }
+
+    fn entry(file: &str, kind: Kind) -> crate::library::Entry {
+        crate::library::Entry { file: file.into(), name: file.into(), kind }
+    }
+
+    #[test]
+    fn a_library_that_matches_the_source_list_reports_no_drift() {
+        assert_eq!(None, notice(EDITED_JSON, &library()));
+    }
+
+    /// THE trap: different bytes.
+    #[test]
+    fn the_builders_own_json_reports_no_drift() {
+        assert_ne!(BUILT_JSON, EDITED_JSON, "same bytes proves nothing");
+        assert_eq!(None, notice(BUILT_JSON, &library()));
+    }
+
+    #[test]
+    fn a_source_list_in_another_order_reports_no_drift() {
+        let shuffled = concat!(
+            r#"[{"bytes":12,"name":"freq.zip","sha256":"0f0f"},"#,
+            r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"},"#,
+            r#"{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"}]"#
+        );
+        assert_eq!(None, notice(shuffled, &library()));
+    }
+
+    /// A hand-dropped archive.
+    #[test]
+    fn an_archive_the_database_never_built_from_is_drift() {
+        let mut lib = library();
+        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        let text = notice(EDITED_JSON, &lib).expect("a dropped-in archive is drift");
+        assert!(text.contains("dropped-in.zip"), "{text}");
+    }
+
+    /// A hand-deleted archive.
+    #[test]
+    fn an_archive_the_library_no_longer_has_is_drift() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "daijirin.zip");
+        let text = notice(EDITED_JSON, &lib).expect("a deleted archive is drift");
+        assert!(text.contains("daijirin.zip"), "{text}");
+    }
+
+    #[test]
+    fn drift_names_each_side_in_its_own_list() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "daijirin.zip");
+        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        let found = drift(Some(EDITED_JSON), &lib);
+        assert_eq!(strs(&["dropped-in.zip"]), found.unbuilt);
+        assert_eq!(strs(&["daijirin.zip"]), found.orphaned);
+    }
+
+    /// The builder skips these.
+    #[test]
+    fn an_unreadable_archive_is_not_drift() {
+        let mut lib = library();
+        lib.entries.push(entry("broken.zip", Kind::Unreadable));
+        assert_eq!(None, notice(EDITED_JSON, &lib));
+    }
+
+    /// write_meta hashes freqs.
+    #[test]
+    fn a_frequency_archive_is_compared_like_any_other() {
+        let partial = concat!(
+            r#"[{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"},"#,
+            r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"}]"#
+        );
+        let text = notice(partial, &library()).expect("freq.zip is in neither list");
+        assert!(text.contains("freq.zip"), "{text}");
+    }
+
+    /// Absence is not disagreement.
+    #[test]
+    fn a_database_with_no_source_list_reports_no_drift() {
+        let none = drift_notice(None, &library(), Path::new(LIB_DIR), Path::new(DB_FILE));
+        assert_eq!(None, none);
+    }
+
+    /// Legacy files must not fail.
+    #[test]
+    fn a_source_list_that_will_not_parse_reports_no_drift() {
+        assert_eq!(None, notice("not json at all", &library()));
+    }
+
+    /// An unfamiliar record shape.
+    #[test]
+    fn a_source_record_with_no_name_is_ignored() {
+        let odd = concat!(
+            r#"[{"bytes":1},{"name":"jitendex.zip"},"#,
+            r#"{"name":"daijirin.zip"},{"name":"freq.zip"}]"#
+        );
+        assert_eq!(None, notice(odd, &library()));
+    }
+
+    /// Task 7's precedent.
+    #[test]
+    fn the_notice_names_the_rebuild_command_with_real_paths() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "freq.zip");
+        let text = notice(EDITED_JSON, &lib).unwrap();
+        let command = "\r\nchibipop build-dict \
+             --library \"C:\\chibipop\\library\" \
+             --out \"C:\\chibipop\\data\\chibipop.sqlite\"";
+        assert!(text.ends_with(command), "{text}");
+    }
+
+    /// build-dict would refuse.
+    #[test]
+    fn a_library_with_no_archives_offers_no_rebuild() {
+        assert_eq!(None, notice(EDITED_JSON, &Library::default()));
+    }
+
+    /// Frequency builds nothing.
+    #[test]
+    fn a_library_with_no_term_archive_offers_no_rebuild() {
+        let lib = Library { entries: vec![entry("freq.zip", Kind::Frequency)] };
+        assert_eq!(None, notice(EDITED_JSON, &lib));
+    }
+
+    /// The offer, not the fact.
+    #[test]
+    fn drift_is_still_seen_when_no_rebuild_is_offered() {
+        let found = drift(Some(EDITED_JSON), &Library::default());
+        assert_eq!(strs(&["jitendex.zip", "daijirin.zip", "freq.zip"]), found.orphaned);
+    }
+
+    /// One side, one sentence.
+    #[test]
+    fn the_notice_omits_the_side_that_agrees() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "freq.zip");
+        let text = notice(EDITED_JSON, &lib).unwrap();
+        assert!(text.contains("no longer in your library: freq.zip"), "{text}");
+        assert!(!text.contains("not in the database"), "{text}");
     }
 }
 

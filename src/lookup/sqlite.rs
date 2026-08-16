@@ -11,7 +11,7 @@ pub struct SqliteDictionary {
 }
 
 /// Must match schema.py.
-const EXPECTED_SCHEMA_VERSION: i64 = 3;
+const EXPECTED_SCHEMA_VERSION: i64 = 2;
 
 impl SqliteDictionary {
     pub fn open(path: &Path) -> Result<Self> {
@@ -150,7 +150,7 @@ mod tests {
             "INSERT INTO dict VALUES (1,'d',0);
              INSERT INTO entry VALUES (1,1,'[{\"glosses\":[\"to eat\"],\"pos\":[\"v1\"],\"misc\":[]}]');
              INSERT INTO term VALUES ('食べる','食べる','たべる','v1',500,1,1);
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','2');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -179,7 +179,7 @@ mod tests {
             "INSERT INTO dict VALUES (2,'d',0);
              INSERT INTO entry VALUES (2,2,'[{\"glosses\":[\"very\"],\"pos\":[],\"misc\":[]}]');
              INSERT INTO term VALUES ('とても',NULL,'とても','',NULL,2,2);
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','2');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
