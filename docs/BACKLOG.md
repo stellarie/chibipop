@@ -337,16 +337,21 @@ reasonable request and it is **not** what the code does.
 
 ### What is actually there
 
-`apply_caption` / `apply_hint` (`src/ui/settings_window.rs:772`) key on
-`ApplyMode` × *dictionary staged*:
+`apply_caption` (`src/ui/settings_window.rs:954`) keys on `ApplyMode` alone; `apply_hint` (`:959`)
+keys on `ApplyMode` × *dictionary staged*:
 
 | Opened by | Staged? | Caption | Hint |
 |---|---|---|---|
 | `run` (`ApplyMode::Live`) | no | Apply | "…uses them right away." |
-| `run` | yes | Apply & Restart | "…restarts chibipop." |
+| `run` | yes | Apply | "…rebuilds your dictionary." |
 | `settings` (`ApplyMode::Standalone`) | either | Apply & Restart | "…restarts chibipop." |
 
-The branch made the `run` rows vary; it left `Standalone` exactly as it found it.
+The hot-reload branch made the `run` rows vary; it left `Standalone` exactly as it found it, and
+so did everything since. **Row 2 changed on 2026-08-13**: v0.7.2 stopped restarting after a
+rebuild, so `run` no longer promises one — `apply_caption` lost its `staged` parameter and the
+`run` caption is now always "Apply". `REGRESSION.md` 11b's table moved in the same commit, which is
+what the "If picked up" note below demands of any change here. **This item is unaffected**: it has
+always been about `Standalone`, which still says "Apply & Restart" and still restarts nothing.
 
 ### Why it was left
 
@@ -357,8 +362,9 @@ needlessly instead of wondering why nothing changed.
 
 ### If picked up
 
-One arm of `apply_caption` and one of `apply_hint`, plus the three assertions at
-`settings_window.rs:2502`. Decide the wording first — "Apply" alone is what the spec asks for, but
+One arm of `apply_caption` and one of `apply_hint`, plus the three tests under
+`// ---- apply caption ----` (`settings_window.rs:2962-2987`). Decide the wording first —
+"Apply" alone is what the spec asks for, but
 "Saved. Restart chibipop to use them." carries more information and is what
 `docs/REGRESSION.md` 11b spent its whole life believing was there. Whatever is chosen, **11b's
 table must move with it**; that item was wrong for months precisely because a caption and a
@@ -399,10 +405,10 @@ nothing will warn.
 
 Three facts compose into the problem:
 
-- **The bottom block sits at the tallest tab.** `settings_window.rs:1907` is
+- **The bottom block sits at the tallest tab.** `settings_window.rs:2169` is
   `y = y_general.max(y_dict).max(y_ocr).max(y_ank)`, and the Apply / Cancel / Quit row is placed
   from that `y`. So a tab growing taller pushes the buttons down on **every** tab, not just its own.
-- **`fit_to` clamps to the work area** (`settings_window.rs:1478-1480`): `outer_h.min(cap)`, where
+- **`fit_to` clamps to the work area** (`settings_window.rs:1738-1740`): `outer_h.min(cap)`, where
   `cap` is `work_area_height`. When the content is taller than the screen allows, the window is
   silently made shorter than its content.
 - **There is no scrolling.** `grep -c "WM_VSCROLL\|SetScrollInfo" src/ui/settings_window.rs`
@@ -410,7 +416,7 @@ Three facts compose into the problem:
   scrollbars, not a scrollable window.) So the clamp does not hide content behind a scrollbar; it
   truncates it, and what is at the bottom is the row containing **Apply**.
 
-That failure has shipped once already. The comment at `settings_window.rs:965-971` records the
+That failure has shipped once already. The comment at `settings_window.rs:1122-1128` records the
 first version of the file passing a hand-tuned height to `CreateWindowExW` — which takes the
 *outer* size — so 39px of caption and frame ate Apply and Cancel and the window opened with no way
 to accept anything. Measuring the content fixed *that* cause. It does not protect against this one.
@@ -426,15 +432,31 @@ by group:
 
 | | `y_general` | `y_dict` | `y_ocr` | `y_ank` | governing `max()` | client height |
 |---|---|---|---|---|---|---|
-| v0.6.0 | **426** | 316 (400 worst case) | 280 | 260 | **426** | **594** |
-| Task 7's first attempt — **discarded, never shipped** | **484** | 316 (400 worst case) | 328 | 260 | **484** | **652** |
-| shipped v0.7.0 | **426** | 316 (400 worst case) | **380** | 260 | **426** | **594** |
+| v0.6.0 | **426** | 316 (400 worst case) — *stale, see below* | 280 | 260 | **426** | **594** |
+| Task 7's first attempt — **discarded, never shipped** | **484** | 316 (400 worst case) — *stale* | 328 | 260 | **484** | **652** |
+| shipped v0.7.0 | **426** | 316 (400 worst case) — *stale* | **380** | 260 | **426** | **594** |
+| shipped v0.7.1 and v0.7.2 — **re-walked 2026-08-13** | **426** | **364** (**448** worst case) | **380** | 260 | **426**, or **448** with both warnings | **594**, or **616** |
 
-**Only `y_ocr` moved between v0.6.0 and v0.7.0**; the other four columns are identical across all
-three rows, which is exactly why the governing `max()` and the client height did not move. The
-bottom block and padding add a constant 168px below the governing `max()`, which is why every row
-is internally consistent (426 + 168 = 594; 484 + 168 = 652). **426 is the number to budget
-against**; 484 only ever existed on the discarded attempt.
+**Only `y_ocr` moved between v0.6.0 and v0.7.0**; the other four columns are identical across the
+first three rows, which is exactly why the governing `max()` and the client height did not move.
+The bottom block and padding add a constant 168px below the governing `max()`, which is why every
+row is internally consistent (426 + 168 = 594; 484 + 168 = 652; 448 + 168 = 616). 484 only ever
+existed on the discarded attempt.
+
+> [!warning] Corrected 2026-08-13 — the `y_dict` column was stale, and it is the column that
+> governs the worst case
+> Re-walked from the layout constants: the Dictionaries tab is **364** with no conditional warning
+> and **448** with both, not 316 / 400. The three historical rows are left as they were written,
+> because nothing re-measured them at the time and inventing a date for the drift would be worse
+> than marking it; the figure was already stale before the two-box rewrite, and that rewrite did
+> **not** move it — `dict_group_h()` is 218 both before and after, so 364 / 448 holds across v0.7.1
+> and v0.7.2 alike.
+>
+> **The consequence is that 426 is not always the number to budget against.** With both conditional
+> warnings visible, `y_dict` (448) exceeds `y_general` (426), *Dictionaries* becomes the governing
+> tab, and the client height is **616** rather than 594. That is 22px worse than the "headroom is
+> ~0 at 150%" estimate below assumed, and it is the state `REGRESSION.md` §1.17's layout paragraph
+> asks a human to reproduce.
 
 - **On oniichan's machine this is not a problem and would not have been.** 96 dpi / 100% scaling,
   work area 2560x1050. The ~702px figure measured during the branch was against the **652** client
@@ -571,3 +593,499 @@ it needs a real `OcrEngine`. Tier 1 **§1.16** is where that gets exercised by h
 **not been run** — so as of 2026-08-11 the wiring is witnessed by nothing at all. This line used
 to point at §1.15, which does not exercise the startup path: §1.15 is the *reload* path, and no
 step for the startup fallback existed anywhere until §1.16 was written on 2026-08-11.
+
+---
+
+## 14. `stale_order_entries` does not look at `per_language`
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch. The cheapest real improvement
+available to that feature, and deliberately not taken in v0.7.1.**
+
+`stale_order_entries` (`src/settings.rs:432`) walks `cfg.dictionaries.display_order` and returns
+the entries matching no installed dictionary, so the settings window can name the one that would
+otherwise just sort last. It never reads `cfg.dictionaries.per_language`, which means a typo in a
+per-language list — or a dictionary named before it was imported — is reported by nothing at all.
+
+**What that costs is two documented behaviours staying silent rather than visible.**
+`docs/REFERENCE.md` under `per_language` has to tell users that a list naming nothing installed is
+ignored, and that a hand-written entry naming a not-yet-installed dictionary is overwritten by the
+next Apply. Both are only *surprising* because there is no warning; a stale-entry notice naming the
+unmatched string would turn each from a silent surprise into a visible one, without changing any
+behaviour.
+
+**If picked up:** the function already takes `&[DictInfo]`, so the extension is to fold the map's
+values into the same filter and return the language tag alongside the entry — the caller renders a
+string, so the return type is the only real decision. Note that the per-language case has a
+legitimate transient the `display_order` case does not: a list is stale for the whole window
+between configuring it and importing the dictionary, so the notice must read as informational
+rather than as an error.
+
+---
+
+## 15. The settings window's `unreadable` set is not refreshed after a library rebuild
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch. Narrow, no data loss, recorded
+because the symptom is a button that looks wrong rather than anything that fails.**
+
+The settings window captures which archives are unreadable when the window opens, and does not
+recompute it after a library rebuild. Import a corrupt archive mid-session and it is treated as
+readable until the window is reopened — the row's own state is stale, not the list's.
+
+**The consequence is bounded to cosmetics**, because the reader and the writer share the one stale
+set: the move handler and the button greying both classify rows through the same cached
+`unreadable` — they now share one predicate, `dict_move_target` — and `read` hands that same cached
+set to `apply_to`, which keys the list through it. The two therefore agree with each other even
+while both are stale. Nothing is written wrong and no list is emptied; the empty-list guard catches
+the consequence that would have mattered.
+
+**Updated 2026-08-13, and the trigger is now wider, not narrower.** This item used to say the
+reachable trigger was a rebuild that *fails* and leaves the window open, "an import that succeeds
+ends in a restart, which reopens the window and recaptures the set". v0.7.2 removed that restart:
+a **successful** import now leaves the same window open with the same stale set, so both outcomes
+reach it. The window is also not re-rendered after a rebuild at all, which is the same gap seen
+from the other side. It stays cosmetic — the greying and the guard cannot disagree any more, since
+the two-box rewrite gave them one shared predicate, so the old symptom (a button that looked
+enabled and did nothing) is gone and what remains is a row classified from an out-of-date reading
+of disk.
+
+**If picked up:** the fix is to recompute the set at the same point the rebuilt library is handed
+back to the window, not to make the button smarter — the greying and the guard disagreeing is the
+actual defect, and there is one place where the two inputs are both in scope.
+
+---
+
+## 16. The dictionary filter trusts `recogniser_available`, not the engine that was built
+
+**Raised 2026-08-12 by the per-language-dictionary-lists branch review, inside the fix that closed
+the missing-pack half of it. Narrow: it needs a tag Windows lists but will not build.**
+
+`resolve_dict_filter` (`src/app.rs:2386`) honours a language's list only when
+`configured_recogniser_runs` (`:2379`) says the configured tag will really run — the same
+`startup_language` + `recogniser_available` decision the worker makes. That closes the reachable
+case: with the pack uninstalled the worker substitutes `ja`, and without the guard the popup would
+filter Japanese hits through the Chinese list and come back **empty**.
+
+**One case it does not close.** `recogniser_available` can report a tag as installed while
+`make_engine` still fails on it; `apply_settings` then prints
+`chibipop: <tag> recogniser failed, keeping <tag>` and holds the previous engine
+(`src/text/ocr.rs:291-294`). The filter was resolved against the configured tag before that, so OCR
+runs one language while the lookups are scoped to another's list — the empty popup again, one
+layer down. `docs/REGRESSION.md` §1.16 already names this engine-will-not-build case as uncovered.
+
+**If picked up:** the honest fix is for the worker to report the tag it ended up with, which is
+exactly the cross-thread plumbing this round declined to add — a field on the startup message and
+on the reload path, plus somewhere on the main thread to hold it. Anything cheaper is another
+mirror of a decision taken on the other thread, which is what this item exists to warn about.
+
+---
+
+## 17. The main-thread WinRT probe relies on an undocumented `windows-core` fallback
+
+**Raised 2026-08-12 by the re-review of the per-language-dictionary-lists fix wave, which proved
+the current behaviour by execution rather than by reading. Not a defect today.**
+
+`configured_recogniser_runs` (`src/app.rs:2379`) calls into WinRT from the **main** thread, at
+startup and on Apply. `RoInitialize` appears exactly once in the tree (`src/text/ocr.rs:271`) and
+runs only on the **worker** thread; apartment initialisation is per-thread, so the main thread's
+apartment is never initialised by us.
+
+It works anyway because `windows-core`'s `load_factory` falls back to `CoIncrementMTAUsage` when a
+factory lookup returns `CO_E_NOTINITIALIZED`, then retries. Measured in a process where no thread
+ever called `RoInitialize`: `AvailableRecognizerLanguages()` returned `Ok(size=4)` in 3.77 ms and
+`recogniser_available("ja")` was true in 284 us — the same as after `RoInitialize`. The probe is
+also double-short-circuited, so a config with no `per_language` never reaches WinRT at all.
+
+**Why it is worth writing down.** If a future `windows` bump drops that fallback, the probe starts
+answering "the configured recogniser will not run" for every tag, and `resolve_dict_filter` then
+declines to apply **every** per-language list. That fails safe — everything is searched — but it is
+silent: no error, no stderr line, and the release's headline feature simply stops doing anything.
+Nothing in the test suite would catch it, because the tests exercise the pure resolver rather than
+the probe.
+
+**If picked up:** either initialise the main thread's apartment explicitly at startup and stop
+depending on the fallback, or have the probe report failure distinguishably from "not installed" so
+the silent path becomes a visible one. The second is cheaper and is what makes the failure
+diagnosable.
+
+---
+
+## 18. Two dictionaries with the same name cannot be told apart by anything the config can say
+
+**Raised 2026-08-13 by the rebuild-promotion round. Observed, not hypothetical: the staged database
+built on the user's machine that day held six dictionaries, and 白水社中国語辞典 was one of them
+twice.** Nothing refused the second import and nothing said a word.
+
+**Every ordering and scoping rule in the program keys on the name.** `dict_order_rank`
+(`src/present.rs:189`) lower-cases the dictionary's name and asks whether any `display_order` entry
+is a **substring** of it; `sorted_by_order` (`src/settings.rs:246`) sorts on that rank and breaks
+ties with `dict_id`. So one entry matches both duplicates, at the same rank, and their relative
+priority is settled by the order their archives happened to be built in. `any_listed`
+(`src/present.rs:198`) collapses them the same way, so a `per_language` list cannot include one and
+exclude the other either.
+
+**`keyed_names` can manufacture the collision out of two names that differ.** It cuts each name at
+its first `[` or `(` before writing it (`src/settings.rs:318`) — the deliberate fix for
+`Jitendex.org [2026-07-09]` renaming itself on every rebuild — so two builds of one dictionary
+whose full titles differ only by a date stamp key to the same string.
+
+**The library never checks.** `reconcile`'s stray-adoption loop keys on the archive's **file** name
+(`src/library.rs:79-96`), so two different files carrying the same `index.json` title are two
+ordinary entries. In the Dictionaries tab they are two identical rows, and the only gesture that
+distinguishes them is **Remove**, which acts on the row rather than on the name.
+
+**What it costs is bounded but real:** no data loss and nothing silently unsearched — both copies
+are in the database and both are reachable — but the user cannot order them, cannot scope one away,
+and cannot tell which row is which.
+
+**If picked up: there is no obviously right key, and that is the interesting part.** `dict_id` is
+assigned by filename order at build time, so it moves whenever the library does; the archive
+filename is stable but the codebase deliberately keeps filenames out of the config
+(`a filename must never reach display_order`, `src/settings.rs`). The cheapest honest step is
+therefore to **detect and report** the collision rather than to re-key anything — the settings
+window already has somewhere to put a stale-entry notice — so the user can rename or remove one
+archive instead of wondering why one of two identical rows will not move on its own. Note the
+interaction with item 14: both want the same warning surface.
+
+---
+
+## 19. A quarantine that outlives its transaction comes back at the bottom of the order
+
+**Raised 2026-08-13 by the rebuild-promotion round, which found it while tracing why a failed
+promotion left `.removed/` populated. Not the bug that round fixed — a consequence one layer down,
+and still open.**
+
+`Library::load` calls `reconcile` (`src/library.rs:71`), which calls `restore_quarantined`
+(`:278`) **unconditionally, on every load, in every process** — the behaviour is deliberate and
+pinned by `a_quarantine_left_by_a_dead_process_is_restored_on_load` (`:488`). `Pending`
+(`:197`) is in-memory only: nothing on disk records that a removal is halfway through.
+
+So an interrupted removal is undone, which is the intent — but it is undone **badly**.
+`library.json` was written without those archives, so when they reappear on disk `reconcile`'s
+retain pass drops nothing and the stray-adoption loop (`:79-96`) re-adopts them by `push`, at the
+**end** of `entries`. The dictionaries come back last in the order, with no message anywhere. The
+user's priority is silently rewritten by a failure they were told nothing about.
+
+**v0.7.2 narrowed the window without closing it.** The promote and the commit-or-rollback are now
+one synchronous block with no restart in the middle, so an ordinary failed promote rolls the
+quarantine back properly rather than leaving it for the next load. What remains is a process that
+dies inside that block — and the general fact that the restore is unconditional in every process,
+so the recovery path is reached without anyone deciding it should be.
+
+**v0.8.0 narrowed it further, again without closing it.** There is no promote left; the quarantine
+now sits open only for the duration of the edit itself — `Pending::commit` runs immediately after
+the last transaction and the last `library.save` (`src/app.rs:668-669`), and that whole span is
+measured in hundreds of milliseconds rather than the minutes a full rebuild took. A process that
+dies inside *that* window still comes back with its archives re-adopted at the end of the order,
+silently, exactly as described above.
+
+**If picked up:** the fix is to make the restore *re-rank* rather than re-adopt — the manifest still
+holds the surviving entries' order, and a restored archive's original position is recoverable if
+`quarantine` records it. Failing that, the honest cheap version is to say so: one stderr line
+naming what was restored, so a silently reordered library becomes a visible one. Do **not** make
+the restore conditional without replacing it with something on disk; the unconditional restore is
+what stops a killed process from eating someone's 200 MB download.
+
+---
+
+## 20. Four comments cite design documents that do not exist
+
+**Raised 2026-08-13 across the rebuild-promotion round's tasks. Trivial to fix, recorded because it
+is the kind of thing that reads as authoritative until someone tries to follow it.**
+
+Four comments in `src/app.rs` cite a numbered decision or contract:
+
+| Site | Comment |
+|---|---|
+| `:754` | `// Contract 3: DPI before GDI.` |
+| `:769` | `// Contract 2: report all three.` |
+| `:1693` | `// Shutdown, decision 5's order.` |
+| `:1780` | `// Decision 2: read once.` |
+
+**No such document is in the repository.** Grepping `docs/` and `README.md` for `Contract 2`,
+`Contract 3`, `Decision 2` and `decision 5` returns nothing. They point at a working spec that was
+never published — `.superpowers/` is gitignored — so a reader cannot check whether the cited rule
+still holds, or even what it said.
+
+**The house comment limit is what makes this a trap rather than a nit.** Comments are capped at 30
+characters, which is exactly enough room to cite a document and not enough to state the rule, so
+the citation habit is a pressure the standard creates. Two of the four survive the removal of the
+citation with their meaning intact — "DPI before GDI" and "report all three" say something
+checkable. The other two say nothing at all once the phantom document is taken away.
+
+**If picked up:** delete the citations and keep the assertions, writing an assertion where there is
+none — `// Decision 2: read once.` sits above the worker's one `dict.dicts()` call, and the
+shutdown comment sits above a `KillTimer` that precedes the worker join, so in both cases what the
+comment is *for* is legible from three lines of context and the citation adds nothing. Anything
+that genuinely needs more than 30 characters to explain belongs in `docs/`, where it can be cited
+by name.
+
+---
+
+## 21. `settings_only`'s message loop spins at 100% CPU on a `GetMessage` error
+
+**Found 2026-08-13 while root-causing the quit freeze. Not that bug — filed because it is a real
+hang and the two loops in this file already disagree about it.**
+
+`src/app.rs:234` is the settings-only path's pump:
+
+```rust
+while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+```
+
+`GetMessage` has **three** return values, not two: `> 0` for a message, `0` for `WM_QUIT`, and
+**`-1` on error**. `BOOL(-1).as_bool()` is `self.0 != 0`, so an error is **true** and the loop keeps
+calling `GetMessage` on a queue that has already failed — a 100%-CPU spin with no exit.
+
+`run` gets this right at `src/app.rs:987`, which reads the value once and breaks on `<= 0`. The
+same file therefore contains both the correct and the incorrect reading of the same API, three
+hundred lines apart, which is what makes this worth a number rather than a passing note.
+
+**If picked up:** give `settings_only` the same shape as `run` — bind the `BOOL`, `break` on
+`got.0 <= 0`. No test seam: `GetMessage` cannot be made to return `-1` from a unit test, and a test
+over `as_bool()` would only restate the `windows` crate.
+
+---
+
+## 22. `settings_only` has no way out while a rebuild is running
+
+**Found 2026-08-13 alongside 21. The severity is entirely about which path you are on.**
+
+`src/app.rs:279-281` discards `window.take_outcome()` for as long as `rebuild.is_some()`, exactly
+as `run` does. In `run` that is safe, because the tray icon is a second, ungated exit
+(`TrayCommand::Quit` sits on a different message and is not behind the busy check). **`settings_only`
+has no tray.** It is the path taken when there is no database to open at all, so if the builder
+child ever wedges — a stalled archive read, a full disk, a network path that stops answering — the
+only control the user has left is Task Manager.
+
+The window is also `set_busy(true)` for the whole rebuild, so `ID_QUIT` is greyed; the X produces
+an outcome that the same three lines throw away.
+
+**If picked up:** the cheap version is a Cancel that kills the child (`Child::kill`) and rolls the
+`Pending` back, which is a real feature rather than a one-line fix — hence the number. The honest
+interim is a documented note that the settings-only rebuild cannot be interrupted.
+
+**Amended 2026-08-16, v0.8.0 — still open, and now the *only* place it happens.** The phrase
+"exactly as `run` does" above is no longer true: `run` has no rebuild to gate on, so its copy of
+those three lines is deleted along with the rest of the rebuild-and-promote path. `settings_only`
+keeps its rebuild (first run genuinely needs one) and keeps this gate, so the item stands unchanged
+in substance and narrows in scope to the one path that has no tray icon to escape through.
+
+---
+
+## 23. Quitting during a rebuild orphans the `build-dict` child
+
+**Found 2026-08-13 alongside 21 and 22. This one keeps burning the user's machine after chibipop is
+gone, which is why it is filed even though it is not a hang in chibipop itself.**
+
+`src/app.rs:1727` ends `run` with `std::process::exit(0)`. That does not run destructors and does
+not touch child processes, so the `chibipop.exe build-dict` spawned at `src/rebuild.rs:59-71` keeps
+running: it keeps writing `<db>.new.tmp`, and it keeps its CPU and disk load. On the 400 MB library
+on this machine that is **minutes of invisible work by a process the user believes they closed**,
+with no window and no tray icon to find it by.
+
+It is worth noting explicitly that this makes the orphan an **independent candidate for "chibipop
+slowed my machine down"** in any incident where a rebuild had actually started — a different
+mechanism from the unserviced input hooks fixed on 2026-08-13, and one that outlives the process
+rather than ending with it.
+
+The same `exit(0)` also drops the in-flight `Pending` without `rollback()`, leaving the user's
+archives in `library/.removed`. That half **self-heals**: `Library::load` → `reconcile` →
+`restore_quarantined` (`src/library.rs:278-290`) puts them back on the next launch. See item 19 for
+what the restored order looks like.
+
+**If picked up:** the child handle would have to outlive `InFlight` far enough for the shutdown
+block to `kill()` and `wait()` it before `exit(0)`. Note that killing a builder mid-write leaves a
+partial `<db>.new.tmp`, which is already handled — `rebuild::run` removes an existing `tmp` before
+starting (`src/rebuild.rs:55-57`).
+
+**Amended 2026-08-16, v0.8.0 — mostly, but not entirely, overtaken.** `run` no longer spawns
+`build-dict` at all: dictionary changes edit the live database on a background thread and the whole
+rebuild-from-`run` path is deleted, so the scenario as written — quit the tray icon while `run`'s
+rebuild child is working — **is unreachable**. `std::process::exit(0)` is still there
+(`src/app.rs:1815`, moved from 1727) and still runs no destructors, so the *general* hazard stands
+wherever a child does exist: that is now `settings_only` only, where item 22's gate means the user
+cannot reach Quit mid-build anyway and Task Manager is the only exit. The `.new` staging this item's
+last paragraph described is gone with the rest; `rebuild::run`'s `<out>.tmp` is what a killed
+builder leaves now.
+
+---
+
+## 24. The `join()` deadlock was never fixed — only made unreachable
+
+**Raised 2026-08-16 by the v0.8.0 incremental-dictionary round. Read this before reintroducing any
+`JoinHandle::join()` on the worker. It is filed as a backlog item rather than a note because the
+underlying defect is still there and nobody has diagnosed it past the symptom.**
+
+**What happened.** v0.7.2's rebuild promoted a staged database by stopping the worker, `join()`ing
+it to prove its SQLite handle had closed, renaming, then respawning. The join never returned. The
+trace is unambiguous: the worker logged `worker.thread.end` — its closure *completed* — and
+`join()` still blocked, while the main thread pumped **zero** messages for the rest of the run. The
+main thread is the one that owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows serialises every
+mouse move and keystroke on the entire desktop behind a hook whose owner is not pumping. **The
+user's whole machine froze, twice.**
+
+**The leading hypothesis, unconfirmed.** WinRT/COM apartment teardown on the worker needs a message
+pump that the blocked main thread cannot give it, so the thread cannot finish exiting and the join
+cannot complete — a circular wait between `join()` and the pump. That was never proven, because:
+
+**What was actually done.** The user's decision was to delete the path that reaches it rather than
+debug it. v0.8.0 edits the live database in place, so no promote and no respawn exist; and the
+demolition also deleted the **shutdown** `stop_worker` call, which existed only because a
+`dead_code` warning had forced v0.7.2 to give the function a caller. `spawn_worker`'s handle is now
+bound as `_worker` and never touched again. **No `JoinHandle::join()` on the worker survives
+anywhere in the crate** — the only two `.join()` calls left are `join_save`'s config-save thread
+and the builder's stdout reader, neither of which runs on the hook-owning thread while hooks are
+installed. Verified by a zero-reference grep over 21 deleted identifiers plus a clean
+`cargo check --all-targets`.
+
+**So the defect is dormant, not dead.** Reintroducing a worker join — for a clean shutdown, for a
+schema migration, for anything — reintroduces a whole-desktop freeze, and it will not look like a
+chibipop bug when it does: the symptom is the *user's mouse* going syrupy, with chibipop's window
+looking merely busy.
+
+**If picked up**, in increasing order of cost: (a) never join the worker, and say so in a comment at
+`spawn_worker` — the current state, undocumented in the source; (b) if a join is genuinely needed,
+**remove the hooks first and pump while waiting** (`join` in a loop against a timeout, servicing
+messages between attempts), never a bare blocking join; (c) actually diagnose it — spawn the worker
+with an explicit COM apartment model and see whether the teardown still needs the pump. Note that
+Windows may answer a hook that misses `LowLevelHooksTimeout` by **dropping** it rather than waiting
+again, in which case the symptom is not a slow desktop but hover going silently dead — see the
+2026-07-27 spike finding. Both shapes are covered by `docs/REGRESSION.md` §1.18 step 14.
+
+---
+
+## 25. A combined remove + add can rename the incoming archive to `terms (2).zip`
+
+**Raised 2026-08-16 by the v0.8.0 round. Traced through the source, not reproduced — the conditions
+below are read off the code, and no test exercises a removal and an addition in one Apply.**
+
+`Library::free_name` (`src/library.rs:164-188`) appends ` (2)`, ` (3)` … when the incoming file name
+is already `taken`, and `taken` (`:190-192`) is `dir.join(file).exists() || entries.any(|e| e.file
+== file)`. On the ordinary combined path this is harmless: `apply_edits` runs **all removals before
+any addition** (`src/app.rs:651-666`), and each removal quarantines its archive into
+`library/.removed/` (`remove_one`, `:690`) before the additions loop calls `import`. The old file is
+out of `dir` by then, so re-adding the same file name reuses it.
+
+**Two reachable paths break that ordering guarantee**, and both leave the old file sitting in `dir`
+while the add runs:
+
+1. **The removal fails.** `remove_one` returns early on any error from `remove_dictionary`, and on
+   the "dictionary was no longer in the database" bail (`:686`) — **both before the quarantine**.
+   The loop records it in `report.failed` and carries straight on to the additions.
+2. **The removal cannot name its archive.** `removal.file` is `None` whenever
+   `settings::removed_files` could not resolve one (see item 26), so the rows are deleted and the
+   `.zip` is never moved.
+
+In both, the incoming archive lands as `terms (2).zip`, `library.json` records a name the user did
+not choose, and — because `dict.name` comes from `index.json` and not from the file name — nothing
+on screen explains where the `(2)` came from.
+
+**If picked up:** the cheap correct fix is to make `free_name` ignore names the *current* `Pending`
+has already quarantined, which is exactly the information `Pending.held` carries. The failure-path
+half wants a decision first: an addition that follows a failed removal of the same file is arguably
+a case Apply should refuse rather than half-do.
+
+---
+
+## 26. `settings::removed_files` cannot resolve a removal whose archive has an empty title
+
+**Raised 2026-08-16 by the v0.8.0 round. Pre-existing — the two namespaces have disagreed since the
+library was introduced; incremental removal is only what made it reachable.**
+
+Two different things are both called a dictionary's "name", and they are populated by two functions
+that do not agree on one input:
+
+| | source | empty title |
+|---|---|---|
+| `dict.name` (database) | `build::dict_title` | kept as `""` |
+| `library::Entry.name` | `library::title_of` | falls back to the file **stem** |
+
+`title_of` filters `!t.is_empty()`; `dict_title` does not. So an archive whose `index.json` carries
+`"title": ""` is `""` in the database and `terms` in the library. The staged-removal list carries the
+**database** name (it comes from `from_config`), while `settings::removed_files`
+(`src/settings.rs:181`) matches on **library** names — and for that archive neither it nor
+`plan_edits` finds the file. **The rows are deleted and the `.zip` stays in `library/`**, which then
+reads as drift (§1.19) forever, and feeds item 25's second path.
+
+**If picked up:** the honest fix is to stop having two name functions — give `dict_title` the same
+`!t.is_empty()` filter and rebuild, or key the removal on something that is not a title at all.
+`meta.source_hashes[].name` is the archive **file** name and would join cleanly to `Entry.file`,
+which is what §1.19's drift detection already does; the removal path could use the same join. Note
+that `dict.name` is what `DictInfo` and `present.rs` match on, so changing it is a behaviour change
+for anyone whose config names a `""` dictionary — which is nobody, since `""` cannot be typed into
+the order list usefully.
+
+---
+
+## 27. `golden_corpus` reports `ok` without asserting anything, and is counted as a pass
+
+**Raised 2026-08-16 by the v0.8.0 round, after four consecutive tasks re-reported it. Pre-existing,
+and it quietly inflates every test total this project has ever published.**
+
+`tests/golden.rs:31-34` early-returns when `data/chibipop.sqlite` is absent:
+
+```rust
+if !db.exists() {
+    eprintln!("SKIP golden_corpus: {} not built", db.display());
+    return;
+}
+```
+
+A `#[test]` that returns is a **pass**. It is not `#[ignore]`d and does not appear in the `1 ignored`
+beside the total, so on any tree without a built 242 MB database — every fresh clone, every git
+worktree, and CI — the suite reports one more passing test than it ran. Every number in Tier 0 of
+`docs/REGRESSION.md`, from **416** through **873**, includes it.
+
+The cost is not the arithmetic; it is that **the one test that checks real deconjugation against a
+real dictionary is the one test that silently does not run**, and it does not run in exactly the
+environment where a regression would be cheapest to catch.
+
+**If picked up:** three options, in increasing honesty and cost. (a) `#[ignore]` it and require
+`--ignored` locally — the count then tells the truth and the test never runs in CI either.
+(b) `panic!` on a missing database and give CI a small committed fixture instead of the real
+242 MB file, which is the only option that actually makes the corpus run somewhere.
+(c) Leave it and subtract, which is what `docs/REGRESSION.md`'s Tier 0 callout now does in prose.
+**(b) is the one worth the money** — the golden corpus is 30-odd deconjugation cases and does not
+need the real database, only *a* database containing those words.
+
+---
+
+## 28. Four rebuild-era strings that no live code path can now honour
+
+**Raised 2026-08-16 by the v0.8.0 round. Two are pre-existing dead ends; two were made wrong by
+this release. They are one item because the fix is one decision: which route does the app tell you
+to take when a rebuild really is needed?**
+
+v0.8.0 set a precedent — the frequency refusal (`app.rs:467`) and the drift notice
+(`settings.rs:542`) both name the literal command, with the user's real paths substituted, and both
+say "quit chibipop first" because `build::build` renames onto `<out>` and that rename fails against
+an open database. **These four have not caught up:**
+
+1. **`src/lookup/sqlite.rs:41`** — a schema mismatch says *"rebuild the dictionary from the settings
+   window"*. **That window is unreachable from this error.** `chibipop run` dies in `spawn_worker`
+   and `chibipop settings` dies at `SqliteDictionary::open` (`src/main.rs:369`) **before**
+   `settings_only` is ever called. Verified: the CLI is the only route. Pre-existing, and the
+   friendliest-sounding of the four.
+2. **`src/main.rs:370`** — *"opening {} - rebuild it in the settings window"*, the same dead end
+   reached from the other side, and the comment two lines above it (*"A rebuild renames onto it"*)
+   now describes a path that only `settings_only` takes.
+3. **`src/ui/settings_window.rs:1997-1999`** — *"chibipop is using a dictionary built outside the
+   app. Adding or removing here rebuilds from this list only — import your original .zip files
+   first."* **Made false in live mode by this release.** Its whole content is a warning that Apply
+   will rebuild from the library and therefore drop the dictionaries the library does not have —
+   and Apply no longer rebuilds from anything. Removing a dictionary now deletes exactly the rows
+   asked for and touches nothing else. It stays **true for `chibipop settings`**, which still
+   rebuilds, so this is not a deletion: it is a mode split the string does not currently make.
+   Left alone deliberately in the v0.8.0 doc task, because gating it on `ApplyMode` means writing
+   new copy for the live half and that is a product decision, not a documentation fix.
+   `self.apply_mode` is already in scope at that call site, so the mechanics are one condition.
+4. **`src/app.rs:555-556`** — the WAL refusal says *"Rebuild the dictionary to convert it"* without
+   saying with what. New in this release, reachable only for a legacy `delete`-mode file, and the
+   one of the four where the instruction is at least *correct* — `build.rs` sets `journal_mode=WAL`,
+   so a rebuild does convert it.
+
+**If picked up:** decide once, then apply it to all four — either every "you need a rebuild" message
+names `chibipop build-dict --library "<lib>" --out "<db>"` with real paths and a "quit chibipop
+first", matching the two that already do, or a `rebuild_instruction(library, db)` helper is written
+once and called from all six sites. The second is the better shape and is why this is an item rather
+than a one-line fix.

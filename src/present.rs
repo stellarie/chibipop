@@ -57,6 +57,8 @@ pub struct PresentConfig {
     pub dict_order: Vec<String>,
     /// Summary cap, in chars.
     pub summary_chars: usize,
+    /// Order also excludes?
+    pub restrict_to_order: bool,
 }
 
 /// One headword group.
@@ -70,6 +72,10 @@ struct Group<'a> {
 pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentation {
     let mut groups: Vec<Group> = Vec::new();
     for hit in hits {
+        let dict_name = dict_name_for(hit.entry.dict_id, dicts);
+        if !keeps_dict(&dict_name, &cfg.dict_order, cfg.restrict_to_order) {
+            continue;
+        }
         match groups
             .iter_mut()
             .find(|g| g.written == hit.written && g.reading == hit.reading)
@@ -188,6 +194,19 @@ pub fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> 
         .position(|s| !s.trim().is_empty() && lower.contains(&s.to_lowercase()))
 }
 
+/// Does the list name one?
+pub fn any_listed<'a>(names: impl IntoIterator<Item = &'a str>, list: &[String]) -> bool {
+    names.into_iter().any(|n| dict_order_rank(n, list).is_some())
+}
+
+/// Searched for this language?
+pub fn keeps_dict(dict_name: &str, dict_order: &[String], restrict: bool) -> bool {
+    if !restrict || dict_order.is_empty() {
+        return true;
+    }
+    dict_order_rank(dict_name, dict_order).is_some()
+}
+
 /// Chars, not bytes.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
@@ -215,6 +234,7 @@ mod tests {
         PresentConfig {
             dict_order: vec!["大辞林".into(), "Jitendex".into()],
             summary_chars: 40,
+            restrict_to_order: false,
         }
     }
 
@@ -236,6 +256,36 @@ mod tests {
                 }],
             },
         }
+    }
+
+    #[test]
+    fn restrict_drops_a_dictionary_outside_the_order() {
+        assert!(!keeps_dict("Jitendex.org", &["大辞林".to_string()], true));
+        assert!(keeps_dict("大辞林　第四版", &["大辞林".to_string()], true));
+    }
+
+    #[test]
+    fn without_restrict_an_unranked_dictionary_is_kept() {
+        assert!(keeps_dict("Jitendex.org", &["大辞林".to_string()], false));
+    }
+
+    #[test]
+    fn restrict_with_an_empty_order_keeps_everything() {
+        assert!(keeps_dict("Jitendex.org", &[], true));
+    }
+
+    #[test]
+    fn an_excluded_dictionary_contributes_no_card() {
+        let hits = vec![hit("猫", "ねこ", 1, "cat"), hit("犬", "いぬ", 2, "dog")];
+        let cfg = PresentConfig {
+            dict_order: vec!["大辞林".to_string()],
+            summary_chars: 40,
+            restrict_to_order: true,
+        };
+        let p = build(&hits, &dicts(), &cfg);
+        assert_eq!(1, p.all_cards.len(), "the excluded dictionary makes no card");
+        assert!(p.all_cards[0].blocks.iter().all(|b| b.dict_name.contains("大辞林")));
+        assert!(!p.all_cards[0].blocks.is_empty(), "and the card is not hollow");
     }
 
     #[test]
@@ -317,6 +367,17 @@ mod tests {
         let hits = vec![hit("A", "あ", 1, "short"), hit("B", "い", 1, "also short")];
         let p = build(&hits, &dicts(), &cfg());
         assert_eq!("also short", p.collapsed[0].summary);
+    }
+
+    /// One predicate, two readers.
+    #[test]
+    fn any_listed_answers_for_the_whole_library() {
+        let all = dicts();
+        let names = || all.iter().map(|d| d.name.as_str());
+        assert!(any_listed(names(), &["大辞林".to_string()]));
+        assert!(!any_listed(names(), &["Daijirin".to_string()]));
+        assert!(!any_listed(names(), &[]));
+        assert!(!any_listed(std::iter::empty(), &["大辞林".to_string()]));
     }
 
     #[test]
