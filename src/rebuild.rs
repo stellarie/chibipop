@@ -101,17 +101,6 @@ fn tmp_path(out: &Path) -> PathBuf {
     with_suffix(out, ".tmp")
 }
 
-/// Where a staged build lands.
-pub fn staging_path(out: &Path) -> PathBuf {
-    with_suffix(out, ".new")
-}
-
-/// Puts a staged build in place.
-pub fn promote(staged: &Path, out: &Path) -> Result<()> {
-    std::fs::rename(staged, out)
-        .with_context(|| format!("replacing {} with {}", out.display(), staged.display()))
-}
-
 /// `<out>` plus `suffix`.
 fn with_suffix(out: &Path, suffix: &str) -> PathBuf {
     let mut name = out.as_os_str().to_os_string();
@@ -198,18 +187,6 @@ mod tests {
     #[test]
     fn a_missing_directory_counts_as_an_error_not_as_zero() {
         assert!(archive_count(Path::new(r"C:\nope\chibipop\nope")).is_err());
-    }
-
-    #[test]
-    fn the_staging_file_sits_beside_the_output() {
-        let staged = staging_path(Path::new(r"C:\a\data\chibipop.sqlite"));
-        assert_eq!(Path::new(r"C:\a\data\chibipop.sqlite.new"), staged);
-    }
-
-    #[test]
-    fn a_staged_build_does_not_share_the_live_temp_name() {
-        let out = Path::new(r"C:\a\data\chibipop.sqlite");
-        assert_ne!(tmp_path(out), tmp_path(&staging_path(out)));
     }
 
     #[test]

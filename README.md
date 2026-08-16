@@ -33,9 +33,36 @@ Everything is in the settings window — you shouldn't need to edit any files.
 
 Pressing **Apply** saves your settings and starts using them straight away.
 chibipop keeps running and the window stays open, so you can change something,
-hover a word to see how it feels, and change it again. If you added or removed
-a dictionary the button reads **Apply & Restart** instead — swapping the
-dictionary out needs a restart, and that takes a couple of seconds.
+hover a word to see how it feels, and change it again.
+
+That includes adding and removing dictionaries. **As of v0.8.0 chibipop edits
+its dictionary database in place instead of rebuilding it**, so a change costs
+about as much as the change itself — usually under a second, a couple of seconds
+for a very large dictionary — rather than the minute-plus it used to take to
+rebuild everything. **It does not restart, and it does not go deaf while it
+works**: hovering keeps answering right through the import, and the new
+dictionary starts answering the moment it lands. If a change cannot be made it
+tells you and leaves everything as it was.
+
+**Frequency lists are the exception.** A frequency list ranks words across every
+dictionary at once, so adding or removing one really does need the whole
+database rebuilt, and chibipop cannot do that to a database it is holding open.
+It will tell you so and give you the command to run — quit chibipop, run it,
+start chibipop again:
+
+```
+chibipop build-dict --library "<your library folder>" --out "<your database>"
+```
+
+You will also want that command for a first run, after upgrading to a build
+with a new dictionary format, or if the database is ever damaged.
+
+**Because changes are made in place, the database can drift from your library
+folder** — for instance if you drop a `.zip` in by hand rather than using
+**Add…**. chibipop notices and says so when you open the settings window,
+naming what is missing from which side. Nothing is broken when it does; your
+lookups keep working, and the dictionaries the database has keep answering. It
+**never** starts a rebuild on its own — running the command above is your call.
 
 Your settings live in `chibipop.toml` beside `chibipop.exe`, and you can edit
 that by hand if you prefer.
@@ -65,6 +92,17 @@ A few worth knowing about:
   Windows Settings → Time & language → Language & region. If the recognizer you
   chose is gone by the time chibipop next starts, it starts in Japanese instead
   of refusing to start, and says so on stderr.
+- **A dictionary list per language** (on the *Dictionaries* tab) — each OCR
+  language can have its own dictionaries in its own order, so switching to
+  Chinese searches your Chinese dictionaries rather than your Japanese ones.
+  The tab always shows the list for the language selected on *OCR / Debug*. **A
+  language you have not given a list searches all of your dictionaries**, which
+  is what everything does until you change it.
+
+  The tab holds two lists, **Searched** and **Not searched**. **Move up** and
+  **Move down** set the priority within a list, and at the top and bottom edges
+  they carry a dictionary from one list to the other — move it down out of
+  *Searched* to stop searching it, up out of *Not searched* to start again.
 
 ---
 
