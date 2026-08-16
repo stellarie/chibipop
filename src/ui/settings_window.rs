@@ -103,8 +103,8 @@ const ID_DICTS_OFF: i32 = 142;
 const ID_FIELD_MAP_BASE: i32 = 200;
 
 /// Field-map combo choices.
-const FIELD_MAP_SOURCES: [&str; 5] =
-    ["(none)", "expression", "reading", "glossary", "frequency"];
+const FIELD_MAP_SOURCES: [&str; 6] =
+    ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html"];
 
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;

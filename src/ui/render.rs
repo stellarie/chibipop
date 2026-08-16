@@ -1007,6 +1007,7 @@ mod tests {
             blocks: vec![GlossBlock {
                 dict_name: "Jitendex".into(),
                 glosses: vec!["chatting".into()],
+                glosses_html: vec![],
             }],
             match_len: 2,
         };
@@ -1297,6 +1298,7 @@ mod tests {
             blocks: vec![GlossBlock {
                 dict_name: "Jitendex".into(),
                 glosses: vec!["chatting".into()],
+                glosses_html: vec![],
             }],
             match_len: 2,
         };

@@ -27,6 +27,14 @@ pub struct TermRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sense {
     pub glosses: Vec<String>,
+    /// Same glosses, HTML-formatted, for callers that want formatting (the
+    /// Anki `glossary_html` field) instead of flattened text. Absent in
+    /// databases built before this field existed - `serde(default)` reads
+    /// those as empty rather than failing, though `SqliteDictionary::open`'s
+    /// schema_version check means that path is only reachable in tests, not
+    /// in a real chibipop.sqlite.
+    #[serde(default)]
+    pub glosses_html: Vec<String>,
     #[serde(default)]
     pub pos: Vec<String>,
     #[serde(default)]
@@ -137,6 +145,14 @@ mod tests {
             serde_json::from_str(r#"[{"glosses":["cat"]}]"#).unwrap();
         assert!(senses[0].pos.is_empty());
         assert!(senses[0].misc.is_empty());
+        assert!(senses[0].glosses_html.is_empty());
+    }
+
+    #[test]
+    fn sense_roundtrips_glosses_html() {
+        let json = r#"[{"glosses":["to eat"],"glosses_html":["<b>to eat</b>"]}]"#;
+        let senses: Vec<Sense> = serde_json::from_str(json).unwrap();
+        assert_eq!(vec!["<b>to eat</b>".to_string()], senses[0].glosses_html);
     }
 
     #[test]
@@ -152,6 +168,7 @@ mod tests {
         let mut d = FakeDictionary::new();
         d.add_entry(1, 1, vec![Sense {
             glosses: vec!["to eat".into()],
+            glosses_html: vec![],
             pos: vec!["v1".into()],
             misc: vec![],
         }]);

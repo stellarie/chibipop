@@ -186,6 +186,13 @@ pub fn add_note(
         .context("addNote did not return a note ID")
 }
 
+/// Minimal escaping for text placed into an HTML-destined Anki field
+/// (currently just the dictionary name, which is arbitrary text pulled from
+/// the Yomitan archive's index.json).
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 /// Fields from a card.
 pub fn fields_from_card(
     card: &crate::present::Card,
@@ -205,10 +212,23 @@ pub fn fields_from_card(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // HTML-formatted counterpart of `glossary`, for a field mapped to a
+    // rich-text Anki field. `\n` is a no-op in most Anki field CSS, so
+    // blocks are joined with `<br>` here instead - the one place this
+    // rendering has to differ from the plain-text one to actually display
+    // right, rather than just carrying markup through.
+    let glossary_html = blocks.iter()
+        .map(|b| {
+            let joined = b.glosses_html.join("; ");
+            format!("{}: {joined}", escape_html(&b.dict_name))
+        })
+        .collect::<Vec<_>>()
+        .join("<br>");
     let mut fields = HashMap::from([
         ("expression".to_string(), expression),
         ("reading".to_string(), reading),
         ("glossary".to_string(), glossary),
+        ("glossary_html".to_string(), glossary_html),
     ]);
     if let Some(freq) = card.freq {
         fields.insert("frequency".to_string(), freq.to_string());
@@ -234,10 +254,12 @@ mod tests {
             crate::present::GlossBlock {
                 dict_name: "大辞林".into(),
                 glosses: vec!["ネコ科の哺乳類。".into()],
+                glosses_html: vec!["ネコ科の<b>哺乳類</b>。".into()],
             },
             crate::present::GlossBlock {
                 dict_name: "Jitendex".into(),
                 glosses: vec!["cat".into(), "feline".into()],
+                glosses_html: vec!["cat".into(), "<i>feline</i>".into()],
             },
         ];
         let f = fields_from_card(&card, &blocks);
@@ -247,7 +269,33 @@ mod tests {
             Some(&"大辞林: ネコ科の哺乳類。\nJitendex: cat; feline".to_string()),
             f.get("glossary"),
         );
+        assert_eq!(
+            Some(&"大辞林: ネコ科の<b>哺乳類</b>。<br>Jitendex: cat; <i>feline</i>".to_string()),
+            f.get("glossary_html"),
+        );
         assert_eq!(Some(&"42".to_string()), f.get("frequency"));
+    }
+
+    #[test]
+    fn glossary_html_escapes_a_dictionary_name_with_markup_looking_characters() {
+        let card = crate::present::Card {
+            written: Some("猫".into()),
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 1,
+        };
+        let blocks = vec![crate::present::GlossBlock {
+            dict_name: "A & B <dict>".into(),
+            glosses: vec!["cat".into()],
+            glosses_html: vec!["cat".into()],
+        }];
+        let f = fields_from_card(&card, &blocks);
+        assert_eq!(
+            Some(&"A &amp; B &lt;dict&gt;: cat".to_string()),
+            f.get("glossary_html"),
+        );
     }
 
     #[test]
