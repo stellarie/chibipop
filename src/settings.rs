@@ -475,6 +475,81 @@ fn append_key(name: &str, entries: &mut Vec<String>) {
     }
 }
 
+/// Where the two sides differ.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Drift {
+    /// In the library, never built.
+    unbuilt: Vec<String>,
+    /// Built from, now gone.
+    orphaned: Vec<String>,
+}
+
+/// Library vs source_hashes.
+///
+/// Parsed: the bytes vary.
+fn drift(sources: Option<&str>, lib: &Library) -> Drift {
+    let Some(raw) = sources else { return Drift::default() };
+    let Ok(listed) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return Drift::default();
+    };
+    let recorded: Vec<String> =
+        listed.iter().filter_map(|rec| rec["name"].as_str()).map(str::to_string).collect();
+    // write_meta skips unreadables.
+    let built: Vec<String> = lib
+        .entries
+        .iter()
+        .filter(|e| e.kind != Kind::Unreadable)
+        .map(|e| e.file.clone())
+        .collect();
+    Drift { unbuilt: only_in(&built, &recorded), orphaned: only_in(&recorded, &built) }
+}
+
+/// Names in one list only.
+fn only_in(these: &[String], those: &[String]) -> Vec<String> {
+    these.iter().filter(|name| !those.contains(name)).cloned().collect()
+}
+
+/// Offer a rebuild, or not.
+///
+/// CRLF: the box is an EDIT.
+pub fn drift_notice(
+    sources: Option<&str>,
+    lib: &Library,
+    dir: &Path,
+    db: &Path,
+) -> Option<String> {
+    // build-dict needs a term zip.
+    if !lib.entries.iter().any(|e| e.kind == Kind::Term) {
+        return None;
+    }
+    let found = drift(sources, lib);
+    let mut parts = Vec::new();
+    if !found.unbuilt.is_empty() {
+        parts.push(format!(
+            "In your library but not in the database: {}.",
+            found.unbuilt.join(", ")
+        ));
+    }
+    if !found.orphaned.is_empty() {
+        parts.push(format!(
+            "In the database but no longer in your library: {}.",
+            found.orphaned.join(", ")
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Your library and your dictionary database no longer match. {} Nothing is broken \
+         and lookups still work, but a dictionary the database does not have cannot answer. \
+         To make them match, quit chibipop, then run this in a terminal, and start chibipop \
+         again when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
+        parts.join(" "),
+        dir.display(),
+        db.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1646,6 +1721,167 @@ mod tests {
         let mut incremental = cfg.clone();
         dictionary_added(&mut incremental, "Jitendex.org [2026-07-09]");
         assert_eq!(full.dictionaries, incremental.dictionaries);
+    }
+
+    // ---- drift ----
+
+    const LIB_DIR: &str = r"C:\chibipop\library";
+    const DB_FILE: &str = r"C:\chibipop\data\chibipop.sqlite";
+
+    /// build.rs, json.dumps spacing.
+    const BUILT_JSON: &str = concat!(
+        r#"[{"name": "jitendex.zip", "bytes": 462, "sha256": "b1a8"}, "#,
+        r#"{"name": "daijirin.zip", "bytes": 385, "sha256": "d49c"}, "#,
+        r#"{"name": "freq.zip", "bytes": 12, "sha256": "0f0f"}]"#
+    );
+
+    /// edit.rs, keys sorted.
+    const EDITED_JSON: &str = concat!(
+        r#"[{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"},"#,
+        r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"},"#,
+        r#"{"bytes":12,"name":"freq.zip","sha256":"0f0f"}]"#
+    );
+
+    fn notice(sources: &str, lib: &Library) -> Option<String> {
+        drift_notice(Some(sources), lib, Path::new(LIB_DIR), Path::new(DB_FILE))
+    }
+
+    fn entry(file: &str, kind: Kind) -> crate::library::Entry {
+        crate::library::Entry { file: file.into(), name: file.into(), kind }
+    }
+
+    #[test]
+    fn a_library_that_matches_the_source_list_reports_no_drift() {
+        assert_eq!(None, notice(EDITED_JSON, &library()));
+    }
+
+    /// THE trap: different bytes.
+    #[test]
+    fn the_builders_own_json_reports_no_drift() {
+        assert_ne!(BUILT_JSON, EDITED_JSON, "same bytes proves nothing");
+        assert_eq!(None, notice(BUILT_JSON, &library()));
+    }
+
+    #[test]
+    fn a_source_list_in_another_order_reports_no_drift() {
+        let shuffled = concat!(
+            r#"[{"bytes":12,"name":"freq.zip","sha256":"0f0f"},"#,
+            r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"},"#,
+            r#"{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"}]"#
+        );
+        assert_eq!(None, notice(shuffled, &library()));
+    }
+
+    /// A hand-dropped archive.
+    #[test]
+    fn an_archive_the_database_never_built_from_is_drift() {
+        let mut lib = library();
+        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        let text = notice(EDITED_JSON, &lib).expect("a dropped-in archive is drift");
+        assert!(text.contains("dropped-in.zip"), "{text}");
+    }
+
+    /// A hand-deleted archive.
+    #[test]
+    fn an_archive_the_library_no_longer_has_is_drift() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "daijirin.zip");
+        let text = notice(EDITED_JSON, &lib).expect("a deleted archive is drift");
+        assert!(text.contains("daijirin.zip"), "{text}");
+    }
+
+    #[test]
+    fn drift_names_each_side_in_its_own_list() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "daijirin.zip");
+        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        let found = drift(Some(EDITED_JSON), &lib);
+        assert_eq!(strs(&["dropped-in.zip"]), found.unbuilt);
+        assert_eq!(strs(&["daijirin.zip"]), found.orphaned);
+    }
+
+    /// The builder skips these.
+    #[test]
+    fn an_unreadable_archive_is_not_drift() {
+        let mut lib = library();
+        lib.entries.push(entry("broken.zip", Kind::Unreadable));
+        assert_eq!(None, notice(EDITED_JSON, &lib));
+    }
+
+    /// write_meta hashes freqs.
+    #[test]
+    fn a_frequency_archive_is_compared_like_any_other() {
+        let partial = concat!(
+            r#"[{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"},"#,
+            r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"}]"#
+        );
+        let text = notice(partial, &library()).expect("freq.zip is in neither list");
+        assert!(text.contains("freq.zip"), "{text}");
+    }
+
+    /// Absence is not disagreement.
+    #[test]
+    fn a_database_with_no_source_list_reports_no_drift() {
+        let none = drift_notice(None, &library(), Path::new(LIB_DIR), Path::new(DB_FILE));
+        assert_eq!(None, none);
+    }
+
+    /// Legacy files must not fail.
+    #[test]
+    fn a_source_list_that_will_not_parse_reports_no_drift() {
+        assert_eq!(None, notice("not json at all", &library()));
+    }
+
+    /// An unfamiliar record shape.
+    #[test]
+    fn a_source_record_with_no_name_is_ignored() {
+        let odd = concat!(
+            r#"[{"bytes":1},{"name":"jitendex.zip"},"#,
+            r#"{"name":"daijirin.zip"},{"name":"freq.zip"}]"#
+        );
+        assert_eq!(None, notice(odd, &library()));
+    }
+
+    /// Task 7's precedent.
+    #[test]
+    fn the_notice_names_the_rebuild_command_with_real_paths() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "freq.zip");
+        let text = notice(EDITED_JSON, &lib).unwrap();
+        let command = "\r\nchibipop build-dict \
+             --library \"C:\\chibipop\\library\" \
+             --out \"C:\\chibipop\\data\\chibipop.sqlite\"";
+        assert!(text.ends_with(command), "{text}");
+    }
+
+    /// build-dict would refuse.
+    #[test]
+    fn a_library_with_no_archives_offers_no_rebuild() {
+        assert_eq!(None, notice(EDITED_JSON, &Library::default()));
+    }
+
+    /// Frequency builds nothing.
+    #[test]
+    fn a_library_with_no_term_archive_offers_no_rebuild() {
+        let lib = Library { entries: vec![entry("freq.zip", Kind::Frequency)] };
+        assert_eq!(None, notice(EDITED_JSON, &lib));
+    }
+
+    /// The offer, not the fact.
+    #[test]
+    fn drift_is_still_seen_when_no_rebuild_is_offered() {
+        let found = drift(Some(EDITED_JSON), &Library::default());
+        assert_eq!(strs(&["jitendex.zip", "daijirin.zip", "freq.zip"]), found.orphaned);
+    }
+
+    /// One side, one sentence.
+    #[test]
+    fn the_notice_omits_the_side_that_agrees() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "freq.zip");
+        let text = notice(EDITED_JSON, &lib).unwrap();
+        assert!(text.contains("no longer in your library: freq.zip"), "{text}");
+        assert!(!text.contains("not in the database"), "{text}");
     }
 }
 

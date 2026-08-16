@@ -24,7 +24,7 @@ use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::HashSet;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -473,6 +473,31 @@ fn frequency_notice(library: &Path, db: &Path) -> String {
         library.display(),
         db.display()
     )
+}
+
+/// Say the library disagrees.
+fn notice_drift(w: &SettingsWindow, dir: &Path, db: &Path) {
+    match drifted(dir, db) {
+        Err(e) => eprintln!("chibipop: checking for drift failed: {e:#}"),
+        Ok(None) => {}
+        Ok(Some(text)) => w.set_status(&text),
+    }
+}
+
+/// The notice, if it drifted.
+fn drifted(dir: &Path, db: &Path) -> Result<Option<String>> {
+    let sources = read_source_hashes(db)?;
+    let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    Ok(settings::drift_notice(sources.as_deref(), &lib, dir, db))
+}
+
+/// What built it, if recorded.
+fn read_source_hashes(db: &Path) -> Result<Option<String>> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} to read its source list", db.display()))?;
+    conn.query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
+        .optional()
+        .with_context(|| format!("reading source_hashes from {}", db.display()))
 }
 
 /// Say nothing was changed.
@@ -1074,7 +1099,10 @@ pub fn run(
             eprintln!("chibipop: opening settings at startup failed: {e:#}");
             None
         }
-        Ok(w) => Some(w),
+        Ok(w) => {
+            notice_drift(&w, &library, &db_path);
+            Some(w)
+        }
     };
     // Consecutive armed ticks.
     let mut armed_ticks: u32 = 0;
@@ -1754,7 +1782,10 @@ pub fn run(
                         match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
                             // Never fatal.
                             Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
-                            Ok(w) => settings = Some(w),
+                            Ok(w) => {
+                                notice_drift(&w, &library, &db_path);
+                                settings = Some(w);
+                            }
                         }
                     }
                 }
@@ -3478,5 +3509,31 @@ mod tests {
         assert!(format!("{err:#}").contains("no dictionary"), "{err:#}");
         assert_eq!(1, dict_rows(&db).len(), "the database must be untouched");
         assert!(library.join("terms.zip").exists(), "the archive must stay");
+    }
+
+    /// Real bytes, not a constant.
+    #[test]
+    fn the_library_that_built_the_database_has_not_drifted() {
+        let (dir, _guard) = edit_scratch("no_drift");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+
+        let raw = read_source_hashes(&db).unwrap().expect("build-dict records what it read");
+        assert!(raw.contains(r#""name": "terms.zip""#), "json.dumps spacing: {raw}");
+        assert_eq!(None, drifted(&library, &db).unwrap(), "the two agree");
+    }
+
+    /// The dropped-in archive.
+    #[test]
+    fn an_archive_the_build_never_saw_is_reported_as_drift() {
+        let (dir, _guard) = edit_scratch("drifted");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        std::fs::copy(fixture("freq.zip"), library.join("freq.zip")).unwrap();
+
+        let text = drifted(&library, &db).unwrap().expect("a dropped-in archive is drift");
+
+        assert!(text.contains("freq.zip"), "{text}");
+        assert!(text.contains("chibipop build-dict --library"), "{text}");
     }
 }
