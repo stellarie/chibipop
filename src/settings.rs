@@ -441,6 +441,115 @@ pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
         .collect()
 }
 
+/// Drop a removed dictionary.
+///
+/// An emptied list is removed.
+pub fn dictionary_removed(cfg: &mut Config, name: &str) {
+    let claims = |entry: &String| dict_order_rank(name, std::slice::from_ref(entry)).is_some();
+    cfg.dictionaries.display_order.retain(|entry| !claims(entry));
+    cfg.dictionaries.per_language.retain(|_, list| {
+        list.retain(|entry| !claims(entry));
+        !list.is_empty()
+    });
+}
+
+/// List an added dictionary.
+///
+/// Never makes a language list.
+pub fn dictionary_added(cfg: &mut Config, name: &str) {
+    if name.trim().is_empty() {
+        return;
+    }
+    append_key(name, &mut cfg.dictionaries.display_order);
+    let listed = cfg.dictionaries.per_language.get_mut(&cfg.ocr.language);
+    if let Some(list) = listed.filter(|l| !l.is_empty()) {
+        append_key(name, list);
+    }
+}
+
+/// Only if nothing claims it.
+fn append_key(name: &str, entries: &mut Vec<String>) {
+    if dict_order_rank(name, entries).is_none() {
+        let key = order_key(name, entries);
+        entries.push(key);
+    }
+}
+
+/// Where the two sides differ.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Drift {
+    /// In the library, never built.
+    unbuilt: Vec<String>,
+    /// Built from, now gone.
+    orphaned: Vec<String>,
+}
+
+/// Library vs source_hashes.
+///
+/// Parsed: the bytes vary.
+fn drift(sources: Option<&str>, lib: &Library) -> Drift {
+    let Some(raw) = sources else { return Drift::default() };
+    let Ok(listed) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return Drift::default();
+    };
+    let recorded: Vec<String> =
+        listed.iter().filter_map(|rec| rec["name"].as_str()).map(str::to_string).collect();
+    // write_meta skips unreadables.
+    let built: Vec<String> = lib
+        .entries
+        .iter()
+        .filter(|e| e.kind != Kind::Unreadable)
+        .map(|e| e.file.clone())
+        .collect();
+    Drift { unbuilt: only_in(&built, &recorded), orphaned: only_in(&recorded, &built) }
+}
+
+/// Names in one list only.
+fn only_in(these: &[String], those: &[String]) -> Vec<String> {
+    these.iter().filter(|name| !those.contains(name)).cloned().collect()
+}
+
+/// Offer a rebuild, or not.
+///
+/// CRLF: the box is an EDIT.
+pub fn drift_notice(
+    sources: Option<&str>,
+    lib: &Library,
+    dir: &Path,
+    db: &Path,
+) -> Option<String> {
+    // build-dict needs a term zip.
+    if !lib.entries.iter().any(|e| e.kind == Kind::Term) {
+        return None;
+    }
+    let found = drift(sources, lib);
+    let mut parts = Vec::new();
+    if !found.unbuilt.is_empty() {
+        parts.push(format!(
+            "In your library but not in the database: {}.",
+            found.unbuilt.join(", ")
+        ));
+    }
+    if !found.orphaned.is_empty() {
+        parts.push(format!(
+            "In the database but no longer in your library: {}.",
+            found.orphaned.join(", ")
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Your library and your dictionary database no longer match. {} Nothing is broken \
+         and lookups still work, but a dictionary the database does not have cannot answer. \
+         To make them match, quit chibipop, then run this in a terminal, and start chibipop \
+         again when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
+        parts.join(" "),
+        dir.display(),
+        db.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,6 +1546,342 @@ mod tests {
         };
         let form = with_library(from_config(&Config::default(), &[]), &lib);
         assert!(form.dict_names.contains(&"DroppedIn".to_string()), "{form:?}");
+    }
+
+    // ---- incremental ----
+
+    fn strs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn with_list(mut cfg: Config, lang: &str, list: &[&str]) -> Config {
+        cfg.dictionaries.per_language.insert(lang.to_string(), strs(list));
+        cfg
+    }
+
+    #[test]
+    fn a_removed_dictionary_loses_its_order_entry() {
+        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
+    }
+
+    #[test]
+    fn a_removal_drops_the_name_from_every_language_list() {
+        let mut cfg = with_list(
+            with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林", "Jitendex"]),
+            "zh-Hans-CN",
+            &["大辞林", "中日大辞典"],
+        );
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+        assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
+    }
+
+    /// `[]` searches everything.
+    #[test]
+    fn a_language_list_left_empty_loses_its_key() {
+        let mut cfg = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(
+            !cfg.dictionaries.per_language.contains_key("ja"),
+            "an emptied entry must be removed, not written as []: {:?}",
+            cfg.dictionaries.per_language
+        );
+    }
+
+    /// Why `[]` is not written.
+    #[test]
+    fn an_empty_list_left_behind_would_scope_the_language() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(!is_scoped(&from_config(&cfg, &[])), "the language must be unscoped again");
+
+        let blanked = with_list(cfg_with(&["Jitendex"]), "ja", &[]);
+        assert!(
+            is_scoped(&from_config(&blanked, &[])),
+            "[] keeps the language scoped and pins it at the next Apply",
+        );
+    }
+
+    /// A blank claims nothing.
+    #[test]
+    fn a_removal_leaves_a_blank_entry_alone() {
+        let mut cfg = cfg_with(&["", "大辞林"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert_eq!(strs(&[""]), cfg.dictionaries.display_order);
+    }
+
+    /// A frequency name too.
+    #[test]
+    fn a_removal_naming_no_entry_changes_nothing() {
+        let before = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        let mut cfg = before.clone();
+        dictionary_removed(&mut cfg, "jiten_freq_global");
+        assert_eq!(before, cfg);
+    }
+
+    /// Recorded, not desired.
+    #[test]
+    fn a_substring_two_dictionaries_share_is_dropped_by_either_removal() {
+        let mut cfg = cfg_with(&["大辞"]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(cfg.dictionaries.display_order.is_empty(), "大辞泉 loses its place too");
+    }
+
+    #[test]
+    fn a_list_that_was_already_empty_is_removed_too() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "zh-Hans-CN", &[]);
+        dictionary_removed(&mut cfg, "大辞林　第四版");
+        assert!(cfg.dictionaries.per_language.is_empty());
+    }
+
+    #[test]
+    fn an_added_dictionary_is_appended_with_a_derived_key() {
+        let mut cfg = cfg_with(&["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.display_order);
+    }
+
+    #[test]
+    fn an_added_dictionary_joins_a_language_that_has_a_list() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// No entry: search all.
+    #[test]
+    fn an_added_dictionary_never_creates_a_language_list() {
+        let mut cfg = cfg_with(&["大辞林"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert!(
+            cfg.dictionaries.per_language.is_empty(),
+            "creating an entry would pin the language: {:?}",
+            cfg.dictionaries.per_language
+        );
+    }
+
+    /// `[]` is not a list.
+    #[test]
+    fn an_added_dictionary_never_fills_an_empty_language_list() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &[]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert!(
+            cfg.dictionaries.per_language["ja"].is_empty(),
+            "filling [] would scope ja to the new dictionary alone",
+        );
+    }
+
+    #[test]
+    fn an_added_dictionary_leaves_the_other_languages_alone() {
+        let mut cfg = with_list(
+            with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]),
+            "zh-Hans-CN",
+            &["中日大辞典"],
+        );
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
+    }
+
+    /// It is already ordered.
+    #[test]
+    fn an_entry_that_already_claims_the_name_is_not_duplicated() {
+        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["Jitendex"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// A blank pins everything.
+    #[test]
+    fn a_dictionary_with_no_title_adds_no_entry() {
+        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
+        dictionary_added(&mut cfg, "");
+        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// Two writers, one result.
+    #[test]
+    fn an_incremental_removal_agrees_with_a_full_apply() {
+        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let kept = vec![DictInfo { dict_id: 1, name: "Jitendex.org [2026-07-09]".into() }];
+        let full = apply_to(&from_config(&cfg, &kept), &cfg);
+        let mut incremental = cfg.clone();
+        dictionary_removed(&mut incremental, "大辞林　第四版");
+        assert_eq!(full.dictionaries, incremental.dictionaries);
+    }
+
+    /// Two writers, one result.
+    #[test]
+    fn an_incremental_addition_agrees_with_a_full_apply() {
+        let cfg = cfg_with(&["大辞林"]);
+        let full = apply_to(&from_config(&cfg, &dicts()), &cfg);
+        let mut incremental = cfg.clone();
+        dictionary_added(&mut incremental, "Jitendex.org [2026-07-09]");
+        assert_eq!(full.dictionaries, incremental.dictionaries);
+    }
+
+    // ---- drift ----
+
+    const LIB_DIR: &str = r"C:\chibipop\library";
+    const DB_FILE: &str = r"C:\chibipop\data\chibipop.sqlite";
+
+    /// build.rs, json.dumps spacing.
+    const BUILT_JSON: &str = concat!(
+        r#"[{"name": "jitendex.zip", "bytes": 462, "sha256": "b1a8"}, "#,
+        r#"{"name": "daijirin.zip", "bytes": 385, "sha256": "d49c"}, "#,
+        r#"{"name": "freq.zip", "bytes": 12, "sha256": "0f0f"}]"#
+    );
+
+    /// edit.rs, keys sorted.
+    const EDITED_JSON: &str = concat!(
+        r#"[{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"},"#,
+        r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"},"#,
+        r#"{"bytes":12,"name":"freq.zip","sha256":"0f0f"}]"#
+    );
+
+    fn notice(sources: &str, lib: &Library) -> Option<String> {
+        drift_notice(Some(sources), lib, Path::new(LIB_DIR), Path::new(DB_FILE))
+    }
+
+    fn entry(file: &str, kind: Kind) -> crate::library::Entry {
+        crate::library::Entry { file: file.into(), name: file.into(), kind }
+    }
+
+    #[test]
+    fn a_library_that_matches_the_source_list_reports_no_drift() {
+        assert_eq!(None, notice(EDITED_JSON, &library()));
+    }
+
+    /// THE trap: different bytes.
+    #[test]
+    fn the_builders_own_json_reports_no_drift() {
+        assert_ne!(BUILT_JSON, EDITED_JSON, "same bytes proves nothing");
+        assert_eq!(None, notice(BUILT_JSON, &library()));
+    }
+
+    #[test]
+    fn a_source_list_in_another_order_reports_no_drift() {
+        let shuffled = concat!(
+            r#"[{"bytes":12,"name":"freq.zip","sha256":"0f0f"},"#,
+            r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"},"#,
+            r#"{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"}]"#
+        );
+        assert_eq!(None, notice(shuffled, &library()));
+    }
+
+    /// A hand-dropped archive.
+    #[test]
+    fn an_archive_the_database_never_built_from_is_drift() {
+        let mut lib = library();
+        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        let text = notice(EDITED_JSON, &lib).expect("a dropped-in archive is drift");
+        assert!(text.contains("dropped-in.zip"), "{text}");
+    }
+
+    /// A hand-deleted archive.
+    #[test]
+    fn an_archive_the_library_no_longer_has_is_drift() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "daijirin.zip");
+        let text = notice(EDITED_JSON, &lib).expect("a deleted archive is drift");
+        assert!(text.contains("daijirin.zip"), "{text}");
+    }
+
+    #[test]
+    fn drift_names_each_side_in_its_own_list() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "daijirin.zip");
+        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        let found = drift(Some(EDITED_JSON), &lib);
+        assert_eq!(strs(&["dropped-in.zip"]), found.unbuilt);
+        assert_eq!(strs(&["daijirin.zip"]), found.orphaned);
+    }
+
+    /// The builder skips these.
+    #[test]
+    fn an_unreadable_archive_is_not_drift() {
+        let mut lib = library();
+        lib.entries.push(entry("broken.zip", Kind::Unreadable));
+        assert_eq!(None, notice(EDITED_JSON, &lib));
+    }
+
+    /// write_meta hashes freqs.
+    #[test]
+    fn a_frequency_archive_is_compared_like_any_other() {
+        let partial = concat!(
+            r#"[{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"},"#,
+            r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"}]"#
+        );
+        let text = notice(partial, &library()).expect("freq.zip is in neither list");
+        assert!(text.contains("freq.zip"), "{text}");
+    }
+
+    /// Absence is not disagreement.
+    #[test]
+    fn a_database_with_no_source_list_reports_no_drift() {
+        let none = drift_notice(None, &library(), Path::new(LIB_DIR), Path::new(DB_FILE));
+        assert_eq!(None, none);
+    }
+
+    /// Legacy files must not fail.
+    #[test]
+    fn a_source_list_that_will_not_parse_reports_no_drift() {
+        assert_eq!(None, notice("not json at all", &library()));
+    }
+
+    /// An unfamiliar record shape.
+    #[test]
+    fn a_source_record_with_no_name_is_ignored() {
+        let odd = concat!(
+            r#"[{"bytes":1},{"name":"jitendex.zip"},"#,
+            r#"{"name":"daijirin.zip"},{"name":"freq.zip"}]"#
+        );
+        assert_eq!(None, notice(odd, &library()));
+    }
+
+    /// Task 7's precedent.
+    #[test]
+    fn the_notice_names_the_rebuild_command_with_real_paths() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "freq.zip");
+        let text = notice(EDITED_JSON, &lib).unwrap();
+        let command = "\r\nchibipop build-dict \
+             --library \"C:\\chibipop\\library\" \
+             --out \"C:\\chibipop\\data\\chibipop.sqlite\"";
+        assert!(text.ends_with(command), "{text}");
+    }
+
+    /// build-dict would refuse.
+    #[test]
+    fn a_library_with_no_archives_offers_no_rebuild() {
+        assert_eq!(None, notice(EDITED_JSON, &Library::default()));
+    }
+
+    /// Frequency builds nothing.
+    #[test]
+    fn a_library_with_no_term_archive_offers_no_rebuild() {
+        let lib = Library { entries: vec![entry("freq.zip", Kind::Frequency)] };
+        assert_eq!(None, notice(EDITED_JSON, &lib));
+    }
+
+    /// The offer, not the fact.
+    #[test]
+    fn drift_is_still_seen_when_no_rebuild_is_offered() {
+        let found = drift(Some(EDITED_JSON), &Library::default());
+        assert_eq!(strs(&["jitendex.zip", "daijirin.zip", "freq.zip"]), found.orphaned);
+    }
+
+    /// One side, one sentence.
+    #[test]
+    fn the_notice_omits_the_side_that_agrees() {
+        let mut lib = library();
+        lib.entries.retain(|e| e.file != "freq.zip");
+        let text = notice(EDITED_JSON, &lib).unwrap();
+        assert!(text.contains("no longer in your library: freq.zip"), "{text}");
+        assert!(!text.contains("not in the database"), "{text}");
     }
 }
 

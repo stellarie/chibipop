@@ -24,6 +24,7 @@ use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
 use anyhow::{anyhow, Context, Result};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::HashSet;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -61,9 +62,6 @@ const WM_APP_SETTINGS: u32 = WM_APP + 6;
 
 /// Anki deck/model detect done.
 const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
-
-/// Apply staging finished.
-const WM_APP_APPLY: u32 = WM_APP + 8;
 
 /// Background save finished.
 const WM_APP_SAVED: u32 = WM_APP + 9;
@@ -113,6 +111,8 @@ pub struct WorkerSettings {
     pub language: String,
     pub present_cfg: PresentConfig,
     pub scan_display: ScanDisplay,
+    /// Refreshed by every edit.
+    pub dicts: Vec<DictInfo>,
 }
 
 /// One gated cursor movement.
@@ -216,9 +216,6 @@ pub fn settings_only(
     let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
         .context("opening the settings window")?;
 
-    // A run may hold it open.
-    let staged_db = rebuild::staging_path(dict_path);
-    report_staged_leftover(&staged_db);
     let mut rebuild: Option<InFlight> = None;
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
@@ -290,32 +287,24 @@ pub fn settings_only(
             }
             window.set_busy(false);
             match built {
-                // Built beside the live one.
-                Ok(()) => match rebuild::promote(&staged_db, dict_path) {
-                    Err(e) => {
-                        undo_apply(&flight, &e);
-                        let _ = std::fs::remove_file(&staged_db);
-                        window.set_status(STATUS_ANOTHER_RUNNING);
-                    }
-                    Ok(()) => {
-                        keep_apply(&flight, &window);
-                        let updated = pending.take().unwrap_or_else(|| cfg.clone());
-                        updated.save(config_path).with_context(|| {
-                            format!("saving settings to {}", config_path.display())
-                        })?;
-                        println!("chibipop: rebuilt {}.", dict_path.display());
-                        println!("chibipop: settings saved to {}.", config_path.display());
-                        // A new dictionary: start it.
-                        match start_run(config_path, dict_path) {
-                            Ok(()) => println!("chibipop: starting."),
-                            Err(e) => {
-                                eprintln!("chibipop: could not start chibipop: {e:#}");
-                                eprintln!("chibipop: the dictionary is ready - start it yourself.");
-                            }
+                Ok(()) => {
+                    keep_apply(&flight, &window);
+                    let updated = pending.take().unwrap_or_else(|| cfg.clone());
+                    updated.save(config_path).with_context(|| {
+                        format!("saving settings to {}", config_path.display())
+                    })?;
+                    println!("chibipop: rebuilt {}.", dict_path.display());
+                    println!("chibipop: settings saved to {}.", config_path.display());
+                    // New dictionary: start it.
+                    match start_run(config_path, dict_path) {
+                        Ok(()) => println!("chibipop: starting."),
+                        Err(e) => {
+                            eprintln!("chibipop: could not start chibipop: {e:#}");
+                            eprintln!("chibipop: the dictionary is ready - start it yourself.");
                         }
-                        return Ok(());
                     }
-                },
+                    return Ok(());
+                }
                 Err(e) => {
                     undo_apply(&flight, &e);
                     report_failed_rebuild(&window, &e);
@@ -339,7 +328,7 @@ pub fn settings_only(
                     println!("chibipop: restart chibipop for them to take effect.");
                     return Ok(());
                 }
-                match start_rebuild(&edited, &library, &staged_db) {
+                match start_rebuild(&edited, &library, dict_path) {
                     Err(e) => refuse_apply(&window, &e),
                     Ok(flight) => {
                         begin_rebuild(&window);
@@ -374,18 +363,7 @@ fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsFo
     }
 }
 
-const STATUS_REBUILT: &str = "Dictionaries rebuilt.";
-
-const STATUS_ANOTHER_RUNNING: &str =
-    "Another chibipop is running. Close it, then Apply again.";
-
 const STATUS_REBUILD_FAILED: &str = "The rebuild failed. Your dictionary is unchanged.";
-
-const STATUS_NO_LOOKUPS: &str = "The dictionary could not be reopened. Restart chibipop.";
-
-const STATUS_SAVE_FAILED: &str = "Dictionaries rebuilt, but the settings could not be saved.";
-
-const STATUS_NO_HOOKS: &str = "Hover detection could not be restored. Restart chibipop.";
 
 /// A change and its rebuild.
 struct InFlight {
@@ -483,6 +461,45 @@ fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: not applied: {e:#}");
 }
 
+/// Freq needs a rebuild.
+///
+/// CRLF: the box is an EDIT.
+fn frequency_notice(library: &Path, db: &Path) -> String {
+    format!(
+        "Frequency lists rank the words in every dictionary, so changing one needs the \
+         whole database rebuilt - chibipop cannot do that while it is running. Nothing was \
+         changed. Quit chibipop, then run this in a terminal, and start chibipop again \
+         when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
+        library.display(),
+        db.display()
+    )
+}
+
+/// Say the library disagrees.
+fn notice_drift(w: &SettingsWindow, dir: &Path, db: &Path) {
+    match drifted(dir, db) {
+        Err(e) => eprintln!("chibipop: checking for drift failed: {e:#}"),
+        Ok(None) => {}
+        Ok(Some(text)) => w.set_status(&text),
+    }
+}
+
+/// The notice, if it drifted.
+fn drifted(dir: &Path, db: &Path) -> Result<Option<String>> {
+    let sources = read_source_hashes(db)?;
+    let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    Ok(settings::drift_notice(sources.as_deref(), &lib, dir, db))
+}
+
+/// What built it, if recorded.
+fn read_source_hashes(db: &Path) -> Result<Option<String>> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} to read its source list", db.display()))?;
+    conn.query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
+        .optional()
+        .with_context(|| format!("reading source_hashes from {}", db.display()))
+}
+
 /// Say nothing was changed.
 fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     w.set_status(STATUS_REBUILD_FAILED);
@@ -490,63 +507,234 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
-/// A staged build left behind.
-fn staged_notice(staged: &Path) -> Option<String> {
-    staged.exists().then(|| {
-        format!(
-            "chibipop: a leftover staged rebuild is at {}; it is not in use and will not \
-             be adopted - the next rebuild overwrites it.",
-            staged.display()
-        )
-    })
+/// A dictionary Apply deletes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Removal {
+    name: String,
+    dict_id: Option<i64>,
+    file: Option<String>,
 }
 
-/// Report it, never adopt it.
-fn report_staged_leftover(staged: &Path) {
-    if let Some(line) = staged_notice(staged) {
-        eprintln!("{line}");
+/// What one Apply must edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditPlan {
+    removals: Vec<Removal>,
+    additions: Vec<crate::settings::StagedAdd>,
+}
+
+/// What one Apply changed.
+#[derive(Debug, Default)]
+struct EditReport {
+    added: Vec<String>,
+    removed: Vec<String>,
+    failed: Vec<String>,
+    dicts: Vec<DictInfo>,
+}
+
+/// One edit's progress channel.
+enum EditMsg {
+    Status(String),
+    Done(Result<Box<EditReport>>),
+}
+
+/// An in-place edit running.
+struct EditFlight {
+    rx: mpsc::Receiver<EditMsg>,
+    _lock: LibraryLock,
+}
+
+/// Read-write, WAL asserted.
+fn open_writer(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .with_context(|| format!("opening {} for writing", path.display()))?;
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .with_context(|| format!("reading the journal mode of {}", path.display()))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        anyhow::bail!(
+            "{} is in {mode} journal mode, not WAL - changing dictionaries in place needs \
+             WAL. Rebuild the dictionary to convert it.",
+            path.display()
+        );
+    }
+    Ok(conn)
+}
+
+/// Does Apply touch a freq zip?
+///
+/// Those still need a rebuild.
+fn stages_frequency(form: &SettingsForm, dicts: &[DictInfo]) -> bool {
+    let added = form.staged_adds.iter().any(|a| form.freq_names.contains(&a.name));
+    let removed = form.staged_removes.iter().any(|name| {
+        !dicts.iter().any(|d| &d.name == name) && !form.unreadable.contains(name)
+    });
+    added || removed
+}
+
+/// Which rows and files change.
+fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPlan {
+    let removals = form
+        .staged_removes
+        .iter()
+        .map(|name| Removal {
+            name: name.clone(),
+            dict_id: dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id),
+            file: lib
+                .entries
+                .iter()
+                .find(|e| &e.name == name || &e.file == name)
+                .map(|e| e.file.clone()),
+        })
+        .collect();
+    EditPlan { removals, additions: form.staged_adds.clone() }
+}
+
+/// Count from this dictionary.
+///
+/// Builder ids are absolute.
+fn rebased(line: &str, base: i64) -> String {
+    let Some(rest) = line.strip_prefix("progress") else {
+        return line.to_string();
+    };
+    let Some((n, total)) = rest.trim().split_once('/') else {
+        return line.to_string();
+    };
+    let Ok(n) = n.trim().parse::<i64>() else {
+        return line.to_string();
+    };
+    format!("progress  {} / {}", (n - base + 1).max(1), total.trim())
+}
+
+/// What the edit achieved.
+fn edit_status(report: &EditReport) -> String {
+    let mut parts = Vec::new();
+    if !report.added.is_empty() {
+        parts.push(format!("Added {}.", report.added.join(", ")));
+    }
+    if !report.removed.is_empty() {
+        parts.push(format!("Removed {}.", report.removed.join(", ")));
+    }
+    if !report.failed.is_empty() {
+        parts.push(format!("Not applied: {}.", report.failed.join("; ")));
+    }
+    if parts.is_empty() {
+        return "No dictionary changed.".to_string();
+    }
+    parts.join(" ")
+}
+
+/// Edit the live database.
+///
+/// Refuses before it moves.
+fn apply_edits(
+    db: &Path,
+    dir: &Path,
+    form: &SettingsForm,
+    tx: &mpsc::Sender<EditMsg>,
+) -> Result<Box<EditReport>> {
+    let mut conn = open_writer(db)?;
+    let reader = SqliteDictionary::open(db)?;
+    let mut lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    if settings::terms_after_apply(form, &lib) == 0 {
+        anyhow::bail!("that would leave chibipop with no dictionary");
+    }
+    // From the file, not a cache.
+    let live = reader.dicts().context("reading dictionary identities")?;
+    let plan = plan_edits(form, &live, &lib);
+
+    let say = |text: String| {
+        let _ = tx.send(EditMsg::Status(text));
+    };
+    let mut pending = Pending::new(dir, &lib);
+    let mut report = EditReport::default();
+
+    for removal in &plan.removals {
+        say(format!("Removing {}\u{2026}", removal.name));
+        match remove_one(&mut conn, &mut lib, dir, &mut pending, removal) {
+            Ok(()) => report.removed.push(removal.name.clone()),
+            Err(e) => report.failed.push(format!("{}: {e:#}", removal.name)),
+        }
+    }
+
+    let freqs = lib.freq_paths(dir);
+    for add in &plan.additions {
+        say(format!("Reading {}\u{2026}", add.name));
+        match add_one(&mut conn, &mut lib, dir, &freqs, add, tx) {
+            Ok(name) => report.added.push(name),
+            Err(e) => report.failed.push(format!("{}: {e:#}", add.name)),
+        }
+    }
+
+    lib.save(dir).with_context(|| format!("saving {}", dir.display()))?;
+    pending.commit()?;
+    report.dicts = reader.dicts().context("re-reading dictionary identities")?;
+    Ok(Box::new(report))
+}
+
+/// One dict: rows, then file.
+fn remove_one(
+    conn: &mut Connection,
+    lib: &mut Library,
+    dir: &Path,
+    pending: &mut Pending,
+    removal: &Removal,
+) -> Result<()> {
+    if let Some(dict_id) = removal.dict_id {
+        let archive = removal.file.as_ref().map(|f| dir.join(f)).unwrap_or_default();
+        let done = crate::dict::edit::remove_dictionary(conn, dict_id, &archive)?;
+        if done.dicts == 0 {
+            anyhow::bail!("dictionary {dict_id} was no longer in the database");
+        }
+    }
+    if let Some(file) = &removal.file {
+        lib.quarantine(dir, file).with_context(|| format!("removing {file}"))?;
+        pending.held(file.clone());
+    }
+    Ok(())
+}
+
+/// One archive: file, then rows.
+fn add_one(
+    conn: &mut Connection,
+    lib: &mut Library,
+    dir: &Path,
+    freqs: &[PathBuf],
+    add: &crate::settings::StagedAdd,
+    tx: &mpsc::Sender<EditMsg>,
+) -> Result<String> {
+    let entry = lib
+        .import(dir, &add.source)
+        .with_context(|| format!("importing {}", add.source.display()))?;
+    let path = dir.join(&entry.file);
+    let base = crate::dict::edit::next_entry_id(conn)?;
+    let on_progress = |line: &str| {
+        if let Some(text) = rebuild::friendly(&rebased(line, base)) {
+            let _ = tx.send(EditMsg::Status(text));
+        }
+    };
+    match crate::dict::edit::add_dictionary(conn, &path, freqs, &on_progress) {
+        Ok(done) => Ok(done.name),
+        Err(e) => {
+            lib.entries.retain(|x| x.file != entry.file);
+            let _ = std::fs::remove_file(&path);
+            Err(e)
+        }
     }
 }
 
-/// Which one gets opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Database {
-    New,
-    Old,
-}
-
-/// What an outcome requires.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromoteDecision {
-    /// false means roll back.
-    commit_quarantine: bool,
-    database: Database,
-    delete_staged: bool,
-    status: &'static str,
-}
-
-/// The outcome, decided.
-fn promote_outcome(rebuild_ok: bool, promote_ok: bool) -> PromoteDecision {
-    match (rebuild_ok, promote_ok) {
-        // Promote never ran.
-        (false, _) => PromoteDecision {
-            commit_quarantine: false,
-            database: Database::Old,
-            delete_staged: false,
-            status: STATUS_REBUILD_FAILED,
-        },
-        (true, false) => PromoteDecision {
-            commit_quarantine: false,
-            database: Database::Old,
-            delete_staged: true,
-            status: STATUS_ANOTHER_RUNNING,
-        },
-        (true, true) => PromoteDecision {
-            commit_quarantine: true,
-            database: Database::New,
-            delete_staged: false,
-            status: STATUS_REBUILT,
-        },
+/// Progress, never blocking.
+///
+/// Never writes to stdout.
+fn pump_edit(rx: &mpsc::Receiver<EditMsg>, w: &SettingsWindow) -> Option<Result<Box<EditReport>>> {
+    loop {
+        match rx.try_recv() {
+            Ok(EditMsg::Status(text)) => w.set_status(&text),
+            Ok(EditMsg::Done(done)) => return Some(done),
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Some(Err(anyhow!("the dictionary change ended without reporting")));
+            }
+        }
     }
 }
 
@@ -716,13 +904,6 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
     Ok((worker, dicts))
 }
 
-/// Stop it; the DB closes.
-fn stop_worker(trigger_tx: mpsc::Sender<Trigger>, worker: thread::JoinHandle<()>) -> Result<()> {
-    // Drop first, or join hangs.
-    drop(trigger_tx);
-    worker.join().map_err(|_| anyhow!("the worker thread panicked"))
-}
-
 /// Run until the user quits.
 pub fn run(
     mut cfg: Config,
@@ -736,13 +917,10 @@ pub fn run(
     }
 
     let library = library_dir();
-    // The worker holds it open.
-    let staged_db = rebuild::staging_path(dict_path);
-    report_staged_leftover(&staged_db);
     let db_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
-    let (mut trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
+    let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     // Unknown until Popup::create.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
@@ -754,17 +932,18 @@ pub fn run(
     let mut live = derive(&cfg);
 
     // Contract 3: DPI before GDI.
-    let (spawned, mut dicts) = spawn_worker(WorkerSpawn {
+    // Never joined - join hangs.
+    let (_worker, mut dicts) = spawn_worker(WorkerSpawn {
         dict_path: db_path.clone(),
         rules_path: rules_path.clone(),
-        settings: worker_settings(&live),
+        // Spawn reads the file itself.
+        settings: worker_settings(&live, &[]),
         main_tid,
         trigger_rx,
         result_tx: result_tx.clone(),
         worker_capture_guard_active: Arc::clone(&capture_guard_active),
         capture_guard_tx: capture_guard_tx.clone(),
     })?;
-    let mut worker = Some(spawned);
 
     let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
@@ -887,7 +1066,7 @@ pub fn run(
     next_id += 1;
     let mut latest_dispatched = RequestId(next_id);
     let _ = trigger_tx.send(Trigger {
-        kind: TriggerKind::Reload(Box::new(worker_settings(&live))),
+        kind: TriggerKind::Reload(Box::new(worker_settings(&live, &dicts))),
         id: latest_dispatched,
     });
     // Visible just before the Hide.
@@ -905,8 +1084,6 @@ pub fn run(
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
     let (detect_tx, detect_rx) =
         mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
-    let (apply_tx, apply_rx) =
-        mpsc::channel::<Result<(Pending, mpsc::Receiver<Progress>)>>();
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
     // One writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
@@ -922,15 +1099,16 @@ pub fn run(
             eprintln!("chibipop: opening settings at startup failed: {e:#}");
             None
         }
-        Ok(w) => Some(w),
+        Ok(w) => {
+            notice_drift(&w, &library, &db_path);
+            Some(w)
+        }
     };
     // Consecutive armed ticks.
     let mut armed_ticks: u32 = 0;
-    // A rebuild in flight.
-    let mut rebuild: Option<InFlight> = None;
-    // Held while staging runs.
-    let mut staging_lock: Option<LibraryLock> = None;
-    let mut pending_cfg: Option<Config> = None;
+    // An in-place edit in flight.
+    let mut edit: Option<EditFlight> = None;
+    let mut edit_cfg: Option<Config> = None;
 
     // I4: kept in one place.
     let drain_capture_guard = || {
@@ -1187,91 +1365,36 @@ pub fn run(
             }
 
             if let Some(w) = &settings {
-                if staging_lock.is_some() {
-                    // Not while it copies files.
+                if edit.is_some() {
+                    // Not while the db changes.
                     let _ = w.take_outcome();
-                } else if rebuild.is_some() {
-                    // Not while the child writes.
-                    let _ = w.take_outcome();
-                    // Taken only when finished.
-                    let done = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, w));
-                    if let Some(built) = done {
-                        let flight = rebuild.take();
-                        match (built, flight) {
-                            (_, None) => w.set_busy(false),
-                            (Ok(()), Some(flight)) => {
-                                let updated =
-                                    pending_cfg.take().unwrap_or_else(|| cfg.clone());
-                                // No ack while we block.
-                                capture_guard_active.store(false, Ordering::SeqCst);
-                                // No hooks while we block.
-                                drop(hooks.take());
-                                let (fresh_tx, fresh_rx) = mpsc::channel::<Trigger>();
-                                let old_tx = std::mem::replace(&mut trigger_tx, fresh_tx);
-                                match worker.take() {
-                                    Some(h) => {
-                                        if let Err(e) = stop_worker(old_tx, h) {
-                                            eprintln!("chibipop: {e:#}");
-                                        }
-                                    }
-                                    None => drop(old_tx),
+                    let done = edit.as_ref().and_then(|f| pump_edit(&f.rx, w));
+                    if let Some(done) = done {
+                        edit = None;
+                        w.set_busy(false);
+                        match done {
+                            Err(e) => {
+                                edit_cfg = None;
+                                refuse_apply(w, &e);
+                            }
+                            Ok(report) => {
+                                let report = *report;
+                                let status = edit_status(&report);
+                                let mut updated =
+                                    edit_cfg.take().unwrap_or_else(|| cfg.clone());
+                                // Removals first: keys collide.
+                                for name in &report.removed {
+                                    settings::dictionary_removed(&mut updated, name);
                                 }
-
-                                let promoted = rebuild::promote(&staged_db, &db_path);
-                                let d = promote_outcome(true, promoted.is_ok());
-                                if d.delete_staged {
-                                    let _ = std::fs::remove_file(&staged_db);
+                                for name in &report.added {
+                                    settings::dictionary_added(&mut updated, name);
                                 }
-                                if d.commit_quarantine {
-                                    keep_apply(&flight, w);
-                                } else if let Err(e) = &promoted {
-                                    undo_apply(&flight, e);
-                                }
-                                if d.database == Database::New {
-                                    cfg = updated;
-                                    live = derive(&cfg);
-                                    w.reseed_per_language(&cfg.dictionaries.per_language);
-                                }
-
-                                let respawned = spawn_worker(WorkerSpawn {
-                                    dict_path: db_path.clone(),
-                                    rules_path: rules_path.clone(),
-                                    settings: worker_settings(&live),
-                                    main_tid,
-                                    trigger_rx: fresh_rx,
-                                    result_tx: result_tx.clone(),
-                                    worker_capture_guard_active:
-                                        Arc::clone(&capture_guard_active),
-                                    capture_guard_tx: capture_guard_tx.clone(),
-                                });
-                                let reopened = match respawned {
-                                    Ok((h, fresh)) => {
-                                        worker = Some(h);
-                                        dicts = fresh;
-                                        true
-                                    }
-                                    Err(e) => {
-                                        eprintln!("chibipop: reopening {} failed: {e:#}",
-                                                  db_path.display());
-                                        eprintln!("chibipop: lookups are off until you \
-                                                   restart chibipop.");
-                                        false
-                                    }
-                                };
-                                let rehooked = match Hooks::install() {
-                                    Ok(h) => {
-                                        hooks = Some(h);
-                                        true
-                                    }
-                                    Err(e) => {
-                                        eprintln!("chibipop: reinstalling the input \
-                                                   hooks failed: {e:#}");
-                                        eprintln!("chibipop: hover, scroll and the \
-                                                   hotkeys are off until you restart \
-                                                   chibipop.");
-                                        false
-                                    }
-                                };
+                                // Spec §4: the cache was stale.
+                                dicts = report.dicts;
+                                w.clear_staged();
+                                w.reseed_per_language(&updated.dictionaries.per_language);
+                                cfg = updated.clone();
+                                live = derive(&cfg);
                                 let (order, restrict) = resolve_dict_filter(
                                     &cfg, &dicts, || configured_recogniser_runs(&cfg));
                                 live.present_cfg.dict_order = order;
@@ -1284,34 +1407,13 @@ pub fn run(
                                 latest_dispatched = RequestId(next_id);
                                 let _ = trigger_tx.send(Trigger {
                                     kind: TriggerKind::Reload(
-                                        Box::new(worker_settings(&live))),
+                                        Box::new(worker_settings(&live, &dicts))),
                                     id: latest_dispatched,
                                 });
-
-                                let mut saved = true;
-                                if d.database == Database::New {
-                                    join_save(&mut save_job);
-                                    if let Err(e) = cfg.save(config_path) {
-                                        eprintln!(
-                                            "chibipop: could not save settings to {}: {e:#}",
-                                            config_path.display());
-                                        saved = false;
-                                    } else {
-                                        println!("chibipop: rebuilt {}.", db_path.display());
-                                    }
-                                }
-                                w.set_busy(false);
-                                w.set_status(match (reopened, rehooked, saved) {
-                                    (false, _, _) => STATUS_NO_LOOKUPS,
-                                    (_, false, _) => STATUS_NO_HOOKS,
-                                    (_, _, false) => STATUS_SAVE_FAILED,
-                                    _ => d.status,
-                                });
-                            }
-                            (Err(e), Some(flight)) => {
-                                w.set_busy(false);
-                                undo_apply(&flight, &e);
-                                report_failed_rebuild(w, &e);
+                                save_in_background(&mut save_job, updated,
+                                                   config_path.to_path_buf(),
+                                                   save_tx.clone(), main_tid);
+                                w.set_status(&status);
                             }
                         }
                     }
@@ -1326,27 +1428,30 @@ pub fn run(
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
                             // Never half-apply.
-                            if edited.has_staged() {
+                            if edited.has_staged() && stages_frequency(&edited, &dicts) {
+                                w.set_status(&frequency_notice(&library, &db_path));
+                            } else if edited.has_staged() {
                                 match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
                                     Ok(lock) => {
                                         begin_apply(w);
-                                        pending_cfg = Some(updated);
-                                        staging_lock = Some(lock);
+                                        edit_cfg = Some(updated);
+                                        let (etx, erx) = mpsc::channel::<EditMsg>();
+                                        edit = Some(EditFlight { rx: erx, _lock: lock });
+                                        let db = db_path.clone();
                                         let dir = library.clone();
-                                        let out = staged_db.clone();
-                                        let tx = apply_tx.clone();
                                         thread::spawn(move || {
-                                            let result = stage_and_spawn(&edited, &dir, &out);
-                                            let _ = tx.send(result);
-                                            // SAFETY: wakes the pump thread.
-                                            unsafe {
-                                                let _ = PostThreadMessageW(
-                                                    main_tid, WM_APP_APPLY,
-                                                    WPARAM(0), LPARAM(0),
-                                                );
-                                            }
+                                            let done =
+                                                apply_edits(&db, &dir, &edited, &etx);
+                                            let _ = etx.send(EditMsg::Done(done));
                                         });
+                                        let ms = t0.elapsed().as_millis();
+                                        if ms > APPLY_BUDGET_MS {
+                                            eprintln!(
+                                                "chibipop: Apply took {ms} ms \
+                                                 (budget {APPLY_BUDGET_MS})"
+                                            );
+                                        }
                                     }
                                 }
                             } else {
@@ -1362,7 +1467,8 @@ pub fn run(
                                 next_id += 1;
                                 latest_dispatched = RequestId(next_id);
                                 let _ = trigger_tx.send(Trigger {
-                                    kind: TriggerKind::Reload(Box::new(worker_settings(&live))),
+                                    kind: TriggerKind::Reload(
+                                        Box::new(worker_settings(&live, &dicts))),
                                     id: latest_dispatched,
                                 });
                                 let clamped = settings::clamp_notice(&edited, &updated);
@@ -1644,22 +1750,6 @@ pub fn run(
                     w.populate_combos(&decks, &models, &fields);
                 }
             }
-        } else if msg.message == WM_APP_APPLY {
-            while let Ok(result) = apply_rx.try_recv() {
-                let Some(lock) = staging_lock.take() else { continue };
-                let Some(w) = &settings else { continue };
-                w.set_busy(false);
-                match result {
-                    Ok((pending, rx)) => {
-                        begin_rebuild(w);
-                        rebuild = Some(InFlight { pending, rx, _lock: lock });
-                    }
-                    Err(e) => {
-                        pending_cfg = None;
-                        refuse_apply(w, &e);
-                    }
-                }
-            }
         } else if msg.message == WM_APP_SAVED {
             while let Ok(result) = save_rx.try_recv() {
                 if let Err(e) = result {
@@ -1692,7 +1782,10 @@ pub fn run(
                         match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
                             // Never fatal.
                             Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
-                            Ok(w) => settings = Some(w),
+                            Ok(w) => {
+                                notice_drift(&w, &library, &db_path);
+                                settings = Some(w);
+                            }
                         }
                     }
                 }
@@ -1717,14 +1810,23 @@ pub fn run(
     drop(hooks.take());
     // No ack while we block.
     capture_guard_active.store(false, Ordering::SeqCst);
-    if let Some(h) = worker.take() {
-        if let Err(e) = stop_worker(trigger_tx, h) {
-            eprintln!("chibipop: {e:#}");
-        }
-    }
     // exit(0) kills it mid-write.
     join_save(&mut save_job);
     std::process::exit(0)
+}
+
+/// One reload into the cache.
+///
+/// dicts goes stale otherwise.
+fn take_reload(
+    s: WorkerSettings,
+    present_cfg: &mut PresentConfig,
+    scan_display: &mut ScanDisplay,
+    dicts: &mut Vec<DictInfo>,
+) {
+    *present_cfg = s.present_cfg;
+    *scan_display = s.scan_display;
+    *dicts = s.dicts;
 }
 
 /// Newest hover; all reloads.
@@ -1800,8 +1902,8 @@ fn worker_main(
     };
     let engine = LookupEngine::new(Deconjugator::new(rules));
 
-    // Decision 2: read once.
-    let dicts: Vec<DictInfo> = match dict.dicts().context("reading dictionary identities") {
+    // Refreshed by every Reload.
+    let mut dicts: Vec<DictInfo> = match dict.dicts().context("reading dictionary identities") {
         Ok(d) => d,
         Err(e) => {
             let _ = startup_tx.send(Err(e));
@@ -1827,8 +1929,7 @@ fn worker_main(
                 s.scan_alphanumeric,
                 &s.language,
             );
-            present_cfg = s.present_cfg;
-            scan_display = s.scan_display;
+            take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
         }
         let Some(trigger) = hover else {
             continue;
@@ -2438,7 +2539,7 @@ fn derive(cfg: &Config) -> LiveSettings {
 }
 
 /// What the worker reloads.
-fn worker_settings(live: &LiveSettings) -> WorkerSettings {
+fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
     WorkerSettings {
         max_passes: live.max_ocr_passes,
         prefer_vertical: live.prefer_vertical,
@@ -2447,6 +2548,7 @@ fn worker_settings(live: &LiveSettings) -> WorkerSettings {
         language: live.language.clone(),
         present_cfg: live.present_cfg.clone(),
         scan_display: live.scan_display,
+        dicts: dicts.to_vec(),
     }
 }
 
@@ -2751,6 +2853,7 @@ mod tests {
             language: "ja".to_string(),
             present_cfg: Config::default().present_config(),
             scan_display: ScanDisplay { captures: false, highlight: false },
+            dicts: Vec::new(),
         }
     }
 
@@ -2823,7 +2926,7 @@ mod tests {
         cfg.ocr.capture_height = 480;
         cfg.ocr.scan_alphanumeric = false;
         cfg.ocr.max_ocr_passes = 3;
-        let out = worker_settings(&derive(&cfg));
+        let out = worker_settings(&derive(&cfg), &[]);
         assert_eq!(CaptureSize { w: 640, h: 480 }, out.capture);
         assert!(!out.scan_alphanumeric);
         assert_eq!(3, out.max_passes);
@@ -2835,7 +2938,7 @@ mod tests {
         cfg.ocr.language = "zh-Hant".to_string();
         let live = derive(&cfg);
         assert_eq!("zh-Hant", live.language);
-        assert_eq!("zh-Hant", worker_settings(&live).language);
+        assert_eq!("zh-Hant", worker_settings(&live, &[]).language);
     }
 
     /// Step 3b: the input trio.
@@ -3051,96 +3154,6 @@ mod tests {
         assert!(!restrict);
     }
 
-    struct DropFlag(Arc<AtomicBool>);
-
-    impl Drop for DropFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[test]
-    fn stop_worker_wakes_a_blocked_loop_and_joins_after_its_state_is_gone() {
-        let (tx, rx) = mpsc::channel::<Trigger>();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let by_disconnect = Arc::new(AtomicBool::new(false));
-        let held = Arc::clone(&dropped);
-        let why = Arc::clone(&by_disconnect);
-        let worker = thread::spawn(move || {
-            let _state = DropFlag(held);
-            let reason = loop {
-                if let Err(e) = rx.recv_timeout(Duration::from_secs(5)) {
-                    break e;
-                }
-            };
-            why.store(matches!(reason, mpsc::RecvTimeoutError::Disconnected), Ordering::SeqCst);
-        });
-        stop_worker(tx, worker).expect("the loop should have exited cleanly");
-        assert!(
-            by_disconnect.load(Ordering::SeqCst),
-            "the loop timed out instead of being woken by the dropped sender"
-        );
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "join() returned while the loop still owned its state"
-        );
-    }
-
-    #[test]
-    fn a_failed_promote_keeps_the_quarantine_and_the_old_database() {
-        let d = promote_outcome(true, false);
-        assert!(!d.commit_quarantine);
-        assert!(d.delete_staged);
-        assert_eq!(Database::Old, d.database);
-    }
-
-    #[test]
-    fn a_promoted_rebuild_commits_the_quarantine_and_keeps_the_new_file() {
-        let d = promote_outcome(true, true);
-        assert!(d.commit_quarantine);
-        assert!(!d.delete_staged);
-        assert_eq!(Database::New, d.database);
-        assert_eq!("Dictionaries rebuilt.", d.status);
-    }
-
-    #[test]
-    fn a_failed_rebuild_touches_neither_the_quarantine_nor_the_staged_file() {
-        let d = promote_outcome(false, false);
-        assert!(!d.commit_quarantine);
-        assert!(!d.delete_staged);
-        assert_eq!(Database::Old, d.database);
-        assert_eq!("The rebuild failed. Your dictionary is unchanged.", d.status);
-    }
-
-    /// Promote never runs then.
-    #[test]
-    fn a_failed_rebuild_ignores_whether_the_promote_would_have_worked() {
-        assert_eq!(promote_outcome(false, false), promote_outcome(false, true));
-    }
-
-    #[test]
-    fn the_quarantine_is_committed_exactly_when_the_new_database_is_live() {
-        for rebuilt in [true, false] {
-            for promoted in [true, false] {
-                let d = promote_outcome(rebuilt, promoted);
-                assert_eq!(
-                    d.commit_quarantine,
-                    d.database == Database::New,
-                    "({rebuilt}, {promoted})"
-                );
-            }
-        }
-    }
-
-    /// settings_only's wording.
-    #[test]
-    fn a_failed_promote_reports_what_the_settings_only_path_reports() {
-        assert_eq!(
-            "Another chibipop is running. Close it, then Apply again.",
-            promote_outcome(true, false).status,
-        );
-    }
-
     struct ScratchDir(PathBuf);
 
     impl Drop for ScratchDir {
@@ -3149,48 +3162,378 @@ mod tests {
         }
     }
 
-    /// Never beside the real data.
-    fn scratch(test_name: &str) -> (PathBuf, ScratchDir) {
+    fn edit_scratch(test_name: &str) -> (PathBuf, ScratchDir) {
         let dir = std::env::temp_dir()
-            .join("chibipop_staged_notice")
+            .join("chibipop_apply_edit")
             .join(format!("t_{}_{test_name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         (dir.clone(), ScratchDir(dir))
     }
 
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan").join(name)
+    }
+
+    /// WAL, as build-dict writes it.
+    fn built_db(dir: &Path, library: &Path) -> PathBuf {
+        std::fs::create_dir_all(library).unwrap();
+        std::fs::copy(fixture("terms.zip"), library.join("terms.zip")).unwrap();
+        let out = dir.join("chibipop.sqlite");
+        crate::dict::build::build(&[library.join("terms.zip")], &[], &out, &|_| {}).unwrap();
+        out
+    }
+
+    fn dict_rows(db: &Path) -> Vec<(i64, String)> {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let mut stmt = conn.prepare("SELECT dict_id, name FROM dict ORDER BY dict_id").unwrap();
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        rows.map(std::result::Result::unwrap).collect()
+    }
+
+    fn entry_count(db: &Path) -> i64 {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn staged_form(adds: &[(&Path, &str)], removes: &[&str]) -> SettingsForm {
+        let mut form = settings::from_config(&Config::default(), &[]);
+        for (source, name) in adds {
+            form.staged_adds.push(crate::settings::StagedAdd {
+                source: source.to_path_buf(),
+                name: (*name).to_string(),
+            });
+        }
+        form.staged_removes = removes.iter().map(|n| (*n).to_string()).collect();
+        form
+    }
+
+    fn lib_of(entries: &[(&str, &str)]) -> Library {
+        Library {
+            entries: entries
+                .iter()
+                .map(|(file, name)| crate::library::Entry {
+                    file: (*file).to_string(),
+                    name: (*name).to_string(),
+                    kind: crate::library::Kind::Term,
+                })
+                .collect(),
+        }
+    }
+
+    fn report_of(added: &[&str], removed: &[&str], failed: &[&str]) -> EditReport {
+        EditReport {
+            added: added.iter().map(|s| (*s).to_string()).collect(),
+            removed: removed.iter().map(|s| (*s).to_string()).collect(),
+            failed: failed.iter().map(|s| (*s).to_string()).collect(),
+            dicts: Vec::new(),
+        }
+    }
+
+    /// Spec 2: never write to it.
     #[test]
-    fn a_leftover_staged_database_is_announced_by_name() {
-        let (dir, _guard) = scratch("announced");
-        let staged = rebuild::staging_path(&dir.join("chibipop.sqlite"));
-        std::fs::write(&staged, b"a complete build nobody noticed").unwrap();
-        let notice = staged_notice(&staged).expect("a staged file must be announced");
-        assert!(
-            notice.contains(&staged.display().to_string()),
-            "the notice must name the file, got: {notice}"
-        );
+    fn the_writer_refuses_a_database_that_is_not_in_wal_mode() {
+        let (dir, _guard) = edit_scratch("legacy_mode");
+        let legacy = dir.join("legacy.sqlite");
+        let conn = rusqlite::Connection::open(&legacy).unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE t(x);").unwrap();
+        drop(conn);
+
+        let err = open_writer(&legacy).expect_err("a delete-mode file must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("delete"), "the message must name the mode found: {msg}");
+        assert!(msg.contains("WAL"), "the message must name WAL: {msg}");
     }
 
     #[test]
-    fn no_staged_database_means_no_notice() {
-        let (dir, _guard) = scratch("silent");
-        let staged = rebuild::staging_path(&dir.join("chibipop.sqlite"));
-        assert_eq!(None, staged_notice(&staged));
+    fn the_writer_opens_a_wal_database_for_writing() {
+        let (dir, _guard) = edit_scratch("wal_ok");
+        let db = built_db(&dir, &dir.join("library"));
+        let conn = open_writer(&db).expect("a WAL database must open for writing");
+        conn.execute_batch("INSERT INTO meta (k, v) VALUES ('t6', '1')")
+            .expect("the writer must be able to write");
     }
 
-    /// Reported, never adopted.
+    /// Never create a blank one.
     #[test]
-    fn announcing_a_staged_database_leaves_it_untouched() {
-        let (dir, _guard) = scratch("untouched");
-        let live = dir.join("chibipop.sqlite");
-        std::fs::write(&live, b"the database in use").unwrap();
-        let staged = rebuild::staging_path(&live);
-        std::fs::write(&staged, b"a complete build nobody noticed").unwrap();
-        let _ = staged_notice(&staged);
+    fn the_writer_never_creates_a_missing_database() {
+        let (dir, _guard) = edit_scratch("no_create");
+        let missing = dir.join("absent.sqlite");
+        assert!(open_writer(&missing).is_err(), "a missing database must not open");
+        assert!(!missing.exists(), "opening must not create the file");
+    }
+
+    /// Absolute ids read wrong.
+    #[test]
+    fn progress_counts_from_the_dictionary_being_added() {
+        assert_eq!("progress  4997 / ?", rebased("progress  365000 / ?", 360004));
         assert_eq!(
-            b"a complete build nobody noticed".to_vec(),
-            std::fs::read(&staged).expect("the staged file must survive being announced")
+            Some("4,997 entries\u{2026}".to_string()),
+            rebuild::friendly(&rebased("progress  365000 / ?", 360004))
         );
-        assert_eq!(b"the database in use".to_vec(), std::fs::read(&live).unwrap());
+    }
+
+    #[test]
+    fn progress_into_an_empty_database_is_unchanged() {
+        assert_eq!("progress  5000 / ?", rebased("progress  5000 / ?", 1));
+    }
+
+    #[test]
+    fn a_line_that_is_not_progress_survives_rebasing() {
+        assert_eq!("building  creating index", rebased("building  creating index", 360004));
+        assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
+    }
+
+    /// A freq zip has no dict row.
+    #[test]
+    fn adding_a_frequency_archive_is_refused() {
+        let mut form = staged_form(&[(Path::new("freq.zip"), "JA Freq")], &[]);
+        form.freq_names = vec!["JA Freq".to_string()];
+        assert!(stages_frequency(&form, &[]));
+    }
+
+    #[test]
+    fn adding_a_term_dictionary_stays_incremental() {
+        let form = staged_form(&[(Path::new("terms.zip"), "FixtureTerms")], &[]);
+        assert!(!stages_frequency(&form, &[]));
+    }
+
+    #[test]
+    fn removing_a_row_the_database_never_had_is_refused() {
+        let form = staged_form(&[], &["JA Freq"]);
+        assert!(stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+    }
+
+    #[test]
+    fn a_refused_frequency_change_names_the_builder_and_both_paths() {
+        let notice = frequency_notice(
+            Path::new(r"C:\a\library"),
+            Path::new(r"C:\a\data\chibipop.sqlite"),
+        );
+        assert!(notice.contains("Nothing was changed."), "{notice}");
+        assert!(notice.contains("\r\nchibipop build-dict"), "the command needs its own line");
+        assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
+        assert!(notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""), "{notice}");
+    }
+
+    #[test]
+    fn removing_an_installed_dictionary_stays_incremental() {
+        let form = staged_form(&[], &["\u{5927}\u{8f9e}\u{6797}"]);
+        assert!(!stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+    }
+
+    /// A broken zip has no dict row.
+    #[test]
+    fn removing_an_unreadable_file_stays_incremental() {
+        let mut form = staged_form(&[], &["broken.zip"]);
+        form.unreadable = vec!["broken.zip".to_string()];
+        assert!(!stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+    }
+
+    #[test]
+    fn a_removal_resolves_its_row_and_its_archive() {
+        let form = staged_form(&[], &["\u{5927}\u{8f9e}\u{6797}"]);
+        let lib = lib_of(&[("daijirin.zip", "\u{5927}\u{8f9e}\u{6797}")]);
+        let plan = plan_edits(&form, &[di(7, "\u{5927}\u{8f9e}\u{6797}")], &lib);
+        assert_eq!(1, plan.removals.len());
+        assert_eq!(Some(7), plan.removals[0].dict_id);
+        assert_eq!(Some("daijirin.zip".to_string()), plan.removals[0].file);
+    }
+
+    /// Unreadables list by file.
+    #[test]
+    fn a_removal_may_name_the_archive_file() {
+        let form = staged_form(&[], &["broken.zip"]);
+        let plan = plan_edits(&form, &[], &lib_of(&[("broken.zip", "broken")]));
+        assert_eq!(None, plan.removals[0].dict_id);
+        assert_eq!(Some("broken.zip".to_string()), plan.removals[0].file);
+    }
+
+    /// A row the library forgot.
+    #[test]
+    fn a_removal_with_no_archive_still_names_its_row() {
+        let form = staged_form(&[], &["Orphan"]);
+        let plan = plan_edits(&form, &[di(3, "Orphan")], &lib_of(&[]));
+        assert_eq!(Some(3), plan.removals[0].dict_id);
+        assert_eq!(None, plan.removals[0].file);
+    }
+
+    #[test]
+    fn the_status_names_both_lists() {
+        let s = edit_status(&report_of(&["New"], &["Old"], &[]));
+        assert!(s.contains("New"), "{s}");
+        assert!(s.contains("Old"), "{s}");
+    }
+
+    /// Spec 9: name the failure.
+    #[test]
+    fn the_status_names_what_failed_beside_what_worked() {
+        let s = edit_status(&report_of(&["New"], &[], &["Bad: the zip is corrupt"]));
+        assert!(s.contains("New"), "the applied change must still be named: {s}");
+        assert!(s.contains("Bad"), "the failure must be named: {s}");
+        assert!(s.contains("the zip is corrupt"), "the reason must be named: {s}");
+    }
+
+    #[test]
+    fn a_change_that_did_nothing_says_so() {
+        assert_eq!("No dictionary changed.", edit_status(&report_of(&[], &[], &[])));
+    }
+
+    /// The release's whole point.
+    #[test]
+    fn an_apply_adds_a_dictionary_to_the_live_database() {
+        let (dir, _guard) = edit_scratch("add");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        let before = entry_count(&db);
+        let form = staged_form(&[(&fixture("terms.zip"), "FixtureTerms")], &[]);
+
+        let (tx, rx) = mpsc::channel::<EditMsg>();
+        let report = apply_edits(&db, &library, &form, &tx).expect("the add must apply");
+        drop(tx);
+
+        assert_eq!(vec!["FixtureTerms".to_string()], report.added);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(2, report.dicts.len(), "{:?}", report.dicts);
+        assert_eq!(2, dict_rows(&db).len());
+        assert_eq!(before * 2, entry_count(&db), "every entry must be kept and doubled");
+        assert!(
+            rx.try_iter().any(|m| matches!(m, EditMsg::Status(_))),
+            "the edit must report progress"
+        );
+    }
+
+    /// REGRESSION 1.18's symptom.
+    #[test]
+    fn an_apply_removes_a_dictionary_and_its_archive() {
+        let (dir, _guard) = edit_scratch("remove");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        std::fs::copy(fixture("terms.zip"), library.join("extra.zip")).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "INSERT INTO dict (dict_id, name, priority) VALUES (9, 'extra.zip', 8);
+                 INSERT INTO entry (entry_id, dict_id, senses) VALUES (900, 9, '[]');
+                 INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id)
+                     VALUES ('x', 'x', 'x', '', NULL, 900, 9);",
+            )
+            .unwrap();
+        }
+        let kept = entry_count(&db) - 1;
+        let form = staged_form(&[], &["extra.zip"]);
+
+        let (tx, _rx) = mpsc::channel::<EditMsg>();
+        let report = apply_edits(&db, &library, &form, &tx).expect("the removal must apply");
+
+        assert_eq!(vec!["extra.zip".to_string()], report.removed);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(1, dict_rows(&db).len());
+        assert_eq!(kept, entry_count(&db), "the other dictionary must be untouched");
+        assert!(!library.join("extra.zip").exists(), "the archive must be gone");
+        assert!(!library.join(".removed").exists(), "nothing may stay quarantined");
+        assert_eq!(1, report.dicts.len());
+    }
+
+    /// Task 4's guard, from here.
+    #[test]
+    fn a_refused_addition_leaves_no_trace_in_the_library() {
+        let (dir, _guard) = edit_scratch("refused_add");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        let before = entry_count(&db);
+        let form = staged_form(&[(&fixture("freq.zip"), "FixtureFreq")], &[]);
+
+        let (tx, _rx) = mpsc::channel::<EditMsg>();
+        let report = apply_edits(&db, &library, &form, &tx).expect("the apply must report");
+
+        assert!(report.added.is_empty(), "{:?}", report.added);
+        assert_eq!(1, report.failed.len(), "{:?}", report.failed);
+        assert!(!library.join("freq.zip").exists(), "the imported copy must be removed");
+        assert_eq!(before, entry_count(&db));
+        assert_eq!(1, dict_rows(&db).len());
+    }
+
+    /// Refuse before it moves.
+    #[test]
+    fn a_legacy_database_is_refused_before_the_library_is_touched() {
+        let (dir, _guard) = edit_scratch("legacy_apply");
+        let library = dir.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::copy(fixture("terms.zip"), library.join("terms.zip")).unwrap();
+        let db = dir.join("legacy.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE dict(dict_id INTEGER);")
+            .unwrap();
+        drop(conn);
+        let form = staged_form(&[(&fixture("terms.zip"), "FixtureTerms")], &[]);
+
+        let (tx, _rx) = mpsc::channel::<EditMsg>();
+        let err = apply_edits(&db, &library, &form, &tx).expect_err("a legacy file is refused");
+
+        assert!(format!("{err:#}").contains("WAL"), "{err:#}");
+        assert_eq!(
+            1,
+            std::fs::read_dir(&library).unwrap().count(),
+            "nothing may be imported before the refusal"
+        );
+    }
+
+    /// Same id, new dictionary.
+    #[test]
+    fn a_reload_replaces_the_cached_dictionary_identities() {
+        let mut present_cfg = Config::default().present_config();
+        let mut scan_display = ScanDisplay { captures: false, highlight: false };
+        let mut dicts = vec![di(7, "Removed")];
+        let mut s = ws(2);
+        s.dicts = vec![di(7, "Added")];
+
+        take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
+
+        assert_eq!(vec![di(7, "Added")], dicts, "the removed name must not answer");
+    }
+
+    /// Never the last dictionary.
+    #[test]
+    fn an_apply_that_would_empty_the_library_is_refused() {
+        let (dir, _guard) = edit_scratch("last_one");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        let form = staged_form(&[], &["FixtureTerms"]);
+
+        let (tx, _rx) = mpsc::channel::<EditMsg>();
+        let err = apply_edits(&db, &library, &form, &tx).expect_err("the last one is refused");
+
+        assert!(format!("{err:#}").contains("no dictionary"), "{err:#}");
+        assert_eq!(1, dict_rows(&db).len(), "the database must be untouched");
+        assert!(library.join("terms.zip").exists(), "the archive must stay");
+    }
+
+    /// Real bytes, not a constant.
+    #[test]
+    fn the_library_that_built_the_database_has_not_drifted() {
+        let (dir, _guard) = edit_scratch("no_drift");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+
+        let raw = read_source_hashes(&db).unwrap().expect("build-dict records what it read");
+        assert!(raw.contains(r#""name": "terms.zip""#), "json.dumps spacing: {raw}");
+        assert_eq!(None, drifted(&library, &db).unwrap(), "the two agree");
+    }
+
+    /// The dropped-in archive.
+    #[test]
+    fn an_archive_the_build_never_saw_is_reported_as_drift() {
+        let (dir, _guard) = edit_scratch("drifted");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        std::fs::copy(fixture("freq.zip"), library.join("freq.zip")).unwrap();
+
+        let text = drifted(&library, &db).unwrap().expect("a dropped-in archive is drift");
+
+        assert!(text.contains("freq.zip"), "{text}");
+        assert!(text.contains("chibipop build-dict --library"), "{text}");
     }
 }

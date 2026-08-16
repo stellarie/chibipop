@@ -135,7 +135,7 @@ struct TcItemW {
     l_param: isize,
 }
 
-/// What a rebuild disables.
+/// What an Apply disables.
 const WHILE_BUSY: [i32; 14] = [
     ID_APPLY,
     ID_QUIT,
@@ -959,7 +959,8 @@ fn apply_caption(mode: ApplyMode) -> &'static str {
 fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
     match (mode, staged) {
         (ApplyMode::Live, false) => "Applying saves your settings and uses them right away.",
-        (ApplyMode::Live, true) => "Applying saves your settings and rebuilds your dictionary.",
+        (ApplyMode::Live, true) => "Applying saves your settings and updates your \
+                                    dictionaries in place.",
         (ApplyMode::Standalone, _) => "Applying saves your settings and restarts chibipop.",
     }
 }
@@ -1288,7 +1289,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Lock it while it rebuilds.
+    /// Lock it while Apply runs.
     pub fn set_busy(&self, busy: bool) {
         // SAFETY: every id in `WHILE_BUSY` is a live child of `self.hwnd`,
         // created in `build`, and each `GetDlgItem` result is checked. Focus
@@ -1987,7 +1988,7 @@ impl SettingsWindow {
             }
             y += ROW_GAP;
             dict.push(child(h, w!("STATIC"),
-                "Order is matched by dictionary name. Check both lists after a rebuild.",
+                "Order is matched by dictionary name. Check both lists after a change.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, DICT_HINT_H, 0, f)?);
             y += DICT_HINT_H + 8;
 
@@ -2968,12 +2969,13 @@ mod tests {
         assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
     }
 
-    /// It rebuilds in place now.
+    /// No rebuild, no restart.
     #[test]
-    fn a_staged_dictionary_promises_a_rebuild_not_a_restart() {
+    fn a_staged_dictionary_promises_an_in_place_update() {
         assert_eq!("Apply", apply_caption(ApplyMode::Live));
         let hint = apply_hint(ApplyMode::Live, true);
-        assert!(hint.contains("rebuilds your dictionary"), "{hint}");
+        assert!(hint.contains("in place"), "{hint}");
+        assert!(!hint.contains("rebuild"), "{hint}");
         assert!(!hint.contains("restart"), "{hint}");
     }
 
