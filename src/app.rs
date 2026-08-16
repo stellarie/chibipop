@@ -73,7 +73,7 @@ const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 const DISPATCH_TICK_MS: u32 = 20;
 
 /// Anchor-to-popup gap.
-const POPUP_GAP: i32 = 12;
+const POPUP_GAP: i32 = 40;
 
 /// Not slop: UPSCALE 2 rounds.
 const ANCHOR_JITTER_PX: i32 = 4;
