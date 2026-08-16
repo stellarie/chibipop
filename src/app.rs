@@ -63,9 +63,6 @@ const WM_APP_SETTINGS: u32 = WM_APP + 6;
 /// Anki deck/model detect done.
 const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 
-/// Apply staging finished.
-const WM_APP_APPLY: u32 = WM_APP + 8;
-
 /// Background save finished.
 const WM_APP_SAVED: u32 = WM_APP + 9;
 
@@ -219,9 +216,6 @@ pub fn settings_only(
     let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
         .context("opening the settings window")?;
 
-    // A run may hold it open.
-    let staged_db = rebuild::staging_path(dict_path);
-    report_staged_leftover(&staged_db);
     let mut rebuild: Option<InFlight> = None;
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
@@ -293,32 +287,24 @@ pub fn settings_only(
             }
             window.set_busy(false);
             match built {
-                // Built beside the live one.
-                Ok(()) => match rebuild::promote(&staged_db, dict_path) {
-                    Err(e) => {
-                        undo_apply(&flight, &e);
-                        let _ = std::fs::remove_file(&staged_db);
-                        window.set_status(STATUS_ANOTHER_RUNNING);
-                    }
-                    Ok(()) => {
-                        keep_apply(&flight, &window);
-                        let updated = pending.take().unwrap_or_else(|| cfg.clone());
-                        updated.save(config_path).with_context(|| {
-                            format!("saving settings to {}", config_path.display())
-                        })?;
-                        println!("chibipop: rebuilt {}.", dict_path.display());
-                        println!("chibipop: settings saved to {}.", config_path.display());
-                        // A new dictionary: start it.
-                        match start_run(config_path, dict_path) {
-                            Ok(()) => println!("chibipop: starting."),
-                            Err(e) => {
-                                eprintln!("chibipop: could not start chibipop: {e:#}");
-                                eprintln!("chibipop: the dictionary is ready - start it yourself.");
-                            }
+                Ok(()) => {
+                    keep_apply(&flight, &window);
+                    let updated = pending.take().unwrap_or_else(|| cfg.clone());
+                    updated.save(config_path).with_context(|| {
+                        format!("saving settings to {}", config_path.display())
+                    })?;
+                    println!("chibipop: rebuilt {}.", dict_path.display());
+                    println!("chibipop: settings saved to {}.", config_path.display());
+                    // New dictionary: start it.
+                    match start_run(config_path, dict_path) {
+                        Ok(()) => println!("chibipop: starting."),
+                        Err(e) => {
+                            eprintln!("chibipop: could not start chibipop: {e:#}");
+                            eprintln!("chibipop: the dictionary is ready - start it yourself.");
                         }
-                        return Ok(());
                     }
-                },
+                    return Ok(());
+                }
                 Err(e) => {
                     undo_apply(&flight, &e);
                     report_failed_rebuild(&window, &e);
@@ -342,7 +328,7 @@ pub fn settings_only(
                     println!("chibipop: restart chibipop for them to take effect.");
                     return Ok(());
                 }
-                match start_rebuild(&edited, &library, &staged_db) {
+                match start_rebuild(&edited, &library, dict_path) {
                     Err(e) => refuse_apply(&window, &e),
                     Ok(flight) => {
                         begin_rebuild(&window);
@@ -377,18 +363,7 @@ fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsFo
     }
 }
 
-const STATUS_REBUILT: &str = "Dictionaries rebuilt.";
-
-const STATUS_ANOTHER_RUNNING: &str =
-    "Another chibipop is running. Close it, then Apply again.";
-
 const STATUS_REBUILD_FAILED: &str = "The rebuild failed. Your dictionary is unchanged.";
-
-const STATUS_NO_LOOKUPS: &str = "The dictionary could not be reopened. Restart chibipop.";
-
-const STATUS_SAVE_FAILED: &str = "Dictionaries rebuilt, but the settings could not be saved.";
-
-const STATUS_NO_HOOKS: &str = "Hover detection could not be restored. Restart chibipop.";
 
 /// A change and its rebuild.
 struct InFlight {
@@ -486,71 +461,25 @@ fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: not applied: {e:#}");
 }
 
+/// Freq needs a rebuild.
+///
+/// CRLF: the box is an EDIT.
+fn frequency_notice(library: &Path, db: &Path) -> String {
+    format!(
+        "Frequency lists rank the words in every dictionary, so changing one needs the \
+         whole database rebuilt - chibipop cannot do that while it is running. Nothing was \
+         changed. Quit chibipop, then run this in a terminal, and start chibipop again \
+         when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
+        library.display(),
+        db.display()
+    )
+}
+
 /// Say nothing was changed.
 fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     w.set_status(STATUS_REBUILD_FAILED);
     eprintln!("chibipop: the rebuild failed: {e:#}");
     eprintln!("chibipop: the dictionary in use was not touched.");
-}
-
-/// A staged build left behind.
-fn staged_notice(staged: &Path) -> Option<String> {
-    staged.exists().then(|| {
-        format!(
-            "chibipop: a leftover staged rebuild is at {}; it is not in use and will not \
-             be adopted - the next rebuild overwrites it.",
-            staged.display()
-        )
-    })
-}
-
-/// Report it, never adopt it.
-fn report_staged_leftover(staged: &Path) {
-    if let Some(line) = staged_notice(staged) {
-        eprintln!("{line}");
-    }
-}
-
-/// Which one gets opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Database {
-    New,
-    Old,
-}
-
-/// What an outcome requires.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromoteDecision {
-    /// false means roll back.
-    commit_quarantine: bool,
-    database: Database,
-    delete_staged: bool,
-    status: &'static str,
-}
-
-/// The outcome, decided.
-fn promote_outcome(rebuild_ok: bool, promote_ok: bool) -> PromoteDecision {
-    match (rebuild_ok, promote_ok) {
-        // Promote never ran.
-        (false, _) => PromoteDecision {
-            commit_quarantine: false,
-            database: Database::Old,
-            delete_staged: false,
-            status: STATUS_REBUILD_FAILED,
-        },
-        (true, false) => PromoteDecision {
-            commit_quarantine: false,
-            database: Database::Old,
-            delete_staged: true,
-            status: STATUS_ANOTHER_RUNNING,
-        },
-        (true, true) => PromoteDecision {
-            commit_quarantine: true,
-            database: Database::New,
-            delete_staged: false,
-            status: STATUS_REBUILT,
-        },
-    }
 }
 
 /// A dictionary Apply deletes.
@@ -950,13 +879,6 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
     Ok((worker, dicts))
 }
 
-/// Stop it; the DB closes.
-fn stop_worker(trigger_tx: mpsc::Sender<Trigger>, worker: thread::JoinHandle<()>) -> Result<()> {
-    // Drop first, or join hangs.
-    drop(trigger_tx);
-    worker.join().map_err(|_| anyhow!("the worker thread panicked"))
-}
-
 /// Run until the user quits.
 pub fn run(
     mut cfg: Config,
@@ -970,13 +892,10 @@ pub fn run(
     }
 
     let library = library_dir();
-    // The worker holds it open.
-    let staged_db = rebuild::staging_path(dict_path);
-    report_staged_leftover(&staged_db);
     let db_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
-    let (mut trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
+    let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     // Unknown until Popup::create.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
@@ -988,7 +907,8 @@ pub fn run(
     let mut live = derive(&cfg);
 
     // Contract 3: DPI before GDI.
-    let (spawned, mut dicts) = spawn_worker(WorkerSpawn {
+    // Never joined - join hangs.
+    let (_worker, mut dicts) = spawn_worker(WorkerSpawn {
         dict_path: db_path.clone(),
         rules_path: rules_path.clone(),
         // Spawn reads the file itself.
@@ -999,7 +919,6 @@ pub fn run(
         worker_capture_guard_active: Arc::clone(&capture_guard_active),
         capture_guard_tx: capture_guard_tx.clone(),
     })?;
-    let mut worker = Some(spawned);
 
     let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
@@ -1140,8 +1059,6 @@ pub fn run(
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
     let (detect_tx, detect_rx) =
         mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
-    let (apply_tx, apply_rx) =
-        mpsc::channel::<Result<(Pending, mpsc::Receiver<Progress>)>>();
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
     // One writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
@@ -1161,11 +1078,6 @@ pub fn run(
     };
     // Consecutive armed ticks.
     let mut armed_ticks: u32 = 0;
-    // A rebuild in flight.
-    let mut rebuild: Option<InFlight> = None;
-    // Held while staging runs.
-    let mut staging_lock: Option<LibraryLock> = None;
-    let mut pending_cfg: Option<Config> = None;
     // An in-place edit in flight.
     let mut edit: Option<EditFlight> = None;
     let mut edit_cfg: Option<Config> = None;
@@ -1477,134 +1389,6 @@ pub fn run(
                             }
                         }
                     }
-                } else if staging_lock.is_some() {
-                    // Not while it copies files.
-                    let _ = w.take_outcome();
-                } else if rebuild.is_some() {
-                    // Not while the child writes.
-                    let _ = w.take_outcome();
-                    // Taken only when finished.
-                    let done = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, w));
-                    if let Some(built) = done {
-                        let flight = rebuild.take();
-                        match (built, flight) {
-                            (_, None) => w.set_busy(false),
-                            (Ok(()), Some(flight)) => {
-                                let updated =
-                                    pending_cfg.take().unwrap_or_else(|| cfg.clone());
-                                // No ack while we block.
-                                capture_guard_active.store(false, Ordering::SeqCst);
-                                // No hooks while we block.
-                                drop(hooks.take());
-                                let (fresh_tx, fresh_rx) = mpsc::channel::<Trigger>();
-                                let old_tx = std::mem::replace(&mut trigger_tx, fresh_tx);
-                                match worker.take() {
-                                    Some(h) => {
-                                        if let Err(e) = stop_worker(old_tx, h) {
-                                            eprintln!("chibipop: {e:#}");
-                                        }
-                                    }
-                                    None => drop(old_tx),
-                                }
-
-                                let promoted = rebuild::promote(&staged_db, &db_path);
-                                let d = promote_outcome(true, promoted.is_ok());
-                                if d.delete_staged {
-                                    let _ = std::fs::remove_file(&staged_db);
-                                }
-                                if d.commit_quarantine {
-                                    keep_apply(&flight, w);
-                                } else if let Err(e) = &promoted {
-                                    undo_apply(&flight, e);
-                                }
-                                if d.database == Database::New {
-                                    cfg = updated;
-                                    live = derive(&cfg);
-                                    w.reseed_per_language(&cfg.dictionaries.per_language);
-                                }
-
-                                let respawned = spawn_worker(WorkerSpawn {
-                                    dict_path: db_path.clone(),
-                                    rules_path: rules_path.clone(),
-                                    settings: worker_settings(&live, &dicts),
-                                    main_tid,
-                                    trigger_rx: fresh_rx,
-                                    result_tx: result_tx.clone(),
-                                    worker_capture_guard_active:
-                                        Arc::clone(&capture_guard_active),
-                                    capture_guard_tx: capture_guard_tx.clone(),
-                                });
-                                let reopened = match respawned {
-                                    Ok((h, fresh)) => {
-                                        worker = Some(h);
-                                        dicts = fresh;
-                                        true
-                                    }
-                                    Err(e) => {
-                                        eprintln!("chibipop: reopening {} failed: {e:#}",
-                                                  db_path.display());
-                                        eprintln!("chibipop: lookups are off until you \
-                                                   restart chibipop.");
-                                        false
-                                    }
-                                };
-                                let rehooked = match Hooks::install() {
-                                    Ok(h) => {
-                                        hooks = Some(h);
-                                        true
-                                    }
-                                    Err(e) => {
-                                        eprintln!("chibipop: reinstalling the input \
-                                                   hooks failed: {e:#}");
-                                        eprintln!("chibipop: hover, scroll and the \
-                                                   hotkeys are off until you restart \
-                                                   chibipop.");
-                                        false
-                                    }
-                                };
-                                let (order, restrict) = resolve_dict_filter(
-                                    &cfg, &dicts, || configured_recogniser_runs(&cfg));
-                                live.present_cfg.dict_order = order;
-                                live.present_cfg.restrict_to_order = restrict;
-                                apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(), &mut theme,
-                                           &capture_guard_active);
-                                // Kills stale results.
-                                next_id += 1;
-                                latest_dispatched = RequestId(next_id);
-                                let _ = trigger_tx.send(Trigger {
-                                    kind: TriggerKind::Reload(
-                                        Box::new(worker_settings(&live, &dicts))),
-                                    id: latest_dispatched,
-                                });
-
-                                let mut saved = true;
-                                if d.database == Database::New {
-                                    join_save(&mut save_job);
-                                    if let Err(e) = cfg.save(config_path) {
-                                        eprintln!(
-                                            "chibipop: could not save settings to {}: {e:#}",
-                                            config_path.display());
-                                        saved = false;
-                                    } else {
-                                        println!("chibipop: rebuilt {}.", db_path.display());
-                                    }
-                                }
-                                w.set_busy(false);
-                                w.set_status(match (reopened, rehooked, saved) {
-                                    (false, _, _) => STATUS_NO_LOOKUPS,
-                                    (_, false, _) => STATUS_NO_HOOKS,
-                                    (_, _, false) => STATUS_SAVE_FAILED,
-                                    _ => d.status,
-                                });
-                            }
-                            (Err(e), Some(flight)) => {
-                                w.set_busy(false);
-                                undo_apply(&flight, &e);
-                                report_failed_rebuild(w, &e);
-                            }
-                        }
-                    }
                 } else {
                     match w.take_outcome() {
                         // Tray remains; just hide.
@@ -1617,28 +1401,7 @@ pub fn run(
                             let updated = settings::apply_to(&edited, &cfg);
                             // Never half-apply.
                             if edited.has_staged() && stages_frequency(&edited, &dicts) {
-                                match LibraryLock::acquire(&library) {
-                                    Err(e) => refuse_apply(w, &e),
-                                    Ok(lock) => {
-                                        begin_apply(w);
-                                        pending_cfg = Some(updated);
-                                        staging_lock = Some(lock);
-                                        let dir = library.clone();
-                                        let out = staged_db.clone();
-                                        let tx = apply_tx.clone();
-                                        thread::spawn(move || {
-                                            let result = stage_and_spawn(&edited, &dir, &out);
-                                            let _ = tx.send(result);
-                                            // SAFETY: wakes the pump thread.
-                                            unsafe {
-                                                let _ = PostThreadMessageW(
-                                                    main_tid, WM_APP_APPLY,
-                                                    WPARAM(0), LPARAM(0),
-                                                );
-                                            }
-                                        });
-                                    }
-                                }
+                                w.set_status(&frequency_notice(&library, &db_path));
                             } else if edited.has_staged() {
                                 match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
@@ -1959,22 +1722,6 @@ pub fn run(
                     w.populate_combos(&decks, &models, &fields);
                 }
             }
-        } else if msg.message == WM_APP_APPLY {
-            while let Ok(result) = apply_rx.try_recv() {
-                let Some(lock) = staging_lock.take() else { continue };
-                let Some(w) = &settings else { continue };
-                w.set_busy(false);
-                match result {
-                    Ok((pending, rx)) => {
-                        begin_rebuild(w);
-                        rebuild = Some(InFlight { pending, rx, _lock: lock });
-                    }
-                    Err(e) => {
-                        pending_cfg = None;
-                        refuse_apply(w, &e);
-                    }
-                }
-            }
         } else if msg.message == WM_APP_SAVED {
             while let Ok(result) = save_rx.try_recv() {
                 if let Err(e) = result {
@@ -2032,11 +1779,6 @@ pub fn run(
     drop(hooks.take());
     // No ack while we block.
     capture_guard_active.store(false, Ordering::SeqCst);
-    if let Some(h) = worker.take() {
-        if let Err(e) = stop_worker(trigger_tx, h) {
-            eprintln!("chibipop: {e:#}");
-        }
-    }
     // exit(0) kills it mid-write.
     join_save(&mut save_job);
     std::process::exit(0)
@@ -3381,147 +3123,12 @@ mod tests {
         assert!(!restrict);
     }
 
-    struct DropFlag(Arc<AtomicBool>);
-
-    impl Drop for DropFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[test]
-    fn stop_worker_wakes_a_blocked_loop_and_joins_after_its_state_is_gone() {
-        let (tx, rx) = mpsc::channel::<Trigger>();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let by_disconnect = Arc::new(AtomicBool::new(false));
-        let held = Arc::clone(&dropped);
-        let why = Arc::clone(&by_disconnect);
-        let worker = thread::spawn(move || {
-            let _state = DropFlag(held);
-            let reason = loop {
-                if let Err(e) = rx.recv_timeout(Duration::from_secs(5)) {
-                    break e;
-                }
-            };
-            why.store(matches!(reason, mpsc::RecvTimeoutError::Disconnected), Ordering::SeqCst);
-        });
-        stop_worker(tx, worker).expect("the loop should have exited cleanly");
-        assert!(
-            by_disconnect.load(Ordering::SeqCst),
-            "the loop timed out instead of being woken by the dropped sender"
-        );
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "join() returned while the loop still owned its state"
-        );
-    }
-
-    #[test]
-    fn a_failed_promote_keeps_the_quarantine_and_the_old_database() {
-        let d = promote_outcome(true, false);
-        assert!(!d.commit_quarantine);
-        assert!(d.delete_staged);
-        assert_eq!(Database::Old, d.database);
-    }
-
-    #[test]
-    fn a_promoted_rebuild_commits_the_quarantine_and_keeps_the_new_file() {
-        let d = promote_outcome(true, true);
-        assert!(d.commit_quarantine);
-        assert!(!d.delete_staged);
-        assert_eq!(Database::New, d.database);
-        assert_eq!("Dictionaries rebuilt.", d.status);
-    }
-
-    #[test]
-    fn a_failed_rebuild_touches_neither_the_quarantine_nor_the_staged_file() {
-        let d = promote_outcome(false, false);
-        assert!(!d.commit_quarantine);
-        assert!(!d.delete_staged);
-        assert_eq!(Database::Old, d.database);
-        assert_eq!("The rebuild failed. Your dictionary is unchanged.", d.status);
-    }
-
-    /// Promote never runs then.
-    #[test]
-    fn a_failed_rebuild_ignores_whether_the_promote_would_have_worked() {
-        assert_eq!(promote_outcome(false, false), promote_outcome(false, true));
-    }
-
-    #[test]
-    fn the_quarantine_is_committed_exactly_when_the_new_database_is_live() {
-        for rebuilt in [true, false] {
-            for promoted in [true, false] {
-                let d = promote_outcome(rebuilt, promoted);
-                assert_eq!(
-                    d.commit_quarantine,
-                    d.database == Database::New,
-                    "({rebuilt}, {promoted})"
-                );
-            }
-        }
-    }
-
-    /// settings_only's wording.
-    #[test]
-    fn a_failed_promote_reports_what_the_settings_only_path_reports() {
-        assert_eq!(
-            "Another chibipop is running. Close it, then Apply again.",
-            promote_outcome(true, false).status,
-        );
-    }
-
     struct ScratchDir(PathBuf);
 
     impl Drop for ScratchDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    /// Never beside the real data.
-    fn scratch(test_name: &str) -> (PathBuf, ScratchDir) {
-        let dir = std::env::temp_dir()
-            .join("chibipop_staged_notice")
-            .join(format!("t_{}_{test_name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        (dir.clone(), ScratchDir(dir))
-    }
-
-    #[test]
-    fn a_leftover_staged_database_is_announced_by_name() {
-        let (dir, _guard) = scratch("announced");
-        let staged = rebuild::staging_path(&dir.join("chibipop.sqlite"));
-        std::fs::write(&staged, b"a complete build nobody noticed").unwrap();
-        let notice = staged_notice(&staged).expect("a staged file must be announced");
-        assert!(
-            notice.contains(&staged.display().to_string()),
-            "the notice must name the file, got: {notice}"
-        );
-    }
-
-    #[test]
-    fn no_staged_database_means_no_notice() {
-        let (dir, _guard) = scratch("silent");
-        let staged = rebuild::staging_path(&dir.join("chibipop.sqlite"));
-        assert_eq!(None, staged_notice(&staged));
-    }
-
-    /// Reported, never adopted.
-    #[test]
-    fn announcing_a_staged_database_leaves_it_untouched() {
-        let (dir, _guard) = scratch("untouched");
-        let live = dir.join("chibipop.sqlite");
-        std::fs::write(&live, b"the database in use").unwrap();
-        let staged = rebuild::staging_path(&live);
-        std::fs::write(&staged, b"a complete build nobody noticed").unwrap();
-        let _ = staged_notice(&staged);
-        assert_eq!(
-            b"a complete build nobody noticed".to_vec(),
-            std::fs::read(&staged).expect("the staged file must survive being announced")
-        );
-        assert_eq!(b"the database in use".to_vec(), std::fs::read(&live).unwrap());
     }
 
     fn edit_scratch(test_name: &str) -> (PathBuf, ScratchDir) {
@@ -3650,7 +3257,7 @@ mod tests {
 
     /// A freq zip has no dict row.
     #[test]
-    fn adding_a_frequency_archive_routes_to_the_full_rebuild() {
+    fn adding_a_frequency_archive_is_refused() {
         let mut form = staged_form(&[(Path::new("freq.zip"), "JA Freq")], &[]);
         form.freq_names = vec!["JA Freq".to_string()];
         assert!(stages_frequency(&form, &[]));
@@ -3663,9 +3270,21 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_row_the_database_never_had_routes_to_the_full_rebuild() {
+    fn removing_a_row_the_database_never_had_is_refused() {
         let form = staged_form(&[], &["JA Freq"]);
         assert!(stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+    }
+
+    #[test]
+    fn a_refused_frequency_change_names_the_builder_and_both_paths() {
+        let notice = frequency_notice(
+            Path::new(r"C:\a\library"),
+            Path::new(r"C:\a\data\chibipop.sqlite"),
+        );
+        assert!(notice.contains("Nothing was changed."), "{notice}");
+        assert!(notice.contains("\r\nchibipop build-dict"), "the command needs its own line");
+        assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
+        assert!(notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""), "{notice}");
     }
 
     #[test]
