@@ -302,61 +302,6 @@ pub fn region_around(cursor: PhysPoint, prefer_vertical: bool, size: CaptureSize
     }
 }
 
-/// Union of two rects.
-fn union_rect(a: PhysRect, b: PhysRect) -> PhysRect {
-    let x = a.x.min(b.x);
-    let y = a.y.min(b.y);
-    let r = (a.x + a.w).max(b.x + b.w);
-    let bot = (a.y + a.h).max(b.y + b.h);
-    PhysRect { x, y, w: r - x, h: bot - y }
-}
-
-/// Spaced chars on same line?
-fn spaced_on_line(prev: PhysRect, next: PhysRect, ori: Orientation) -> bool {
-    let (gap, sz, cross, lim) = match ori {
-        Orientation::Horizontal => (
-            next.x - (prev.x + prev.w),
-            (prev.w + next.w) / 2,
-            (prev.center().y - next.center().y).abs(),
-            (prev.h + next.h) / 4,
-        ),
-        Orientation::Vertical => (
-            next.y - (prev.y + prev.h),
-            (prev.h + next.h) / 2,
-            (prev.center().x - next.center().x).abs(),
-            (prev.w + next.w) / 4,
-        ),
-    };
-    gap > 0 && gap < 2 * sz && cross <= lim
-}
-
-/// Merge spaced single-chars.
-pub fn merge_spaced_words(words: &[&OcrWord], ori: Orientation) -> Vec<OcrWord> {
-    if words.is_empty() {
-        return Vec::new();
-    }
-    let mut out: Vec<OcrWord> = Vec::new();
-    let mut text = words[0].text.clone();
-    let mut rect = words[0].rect;
-    let mut ok = words[0].text.chars().count() == 1;
-    let mut prev = words[0].rect;
-    for w in words.iter().skip(1) {
-        let single = w.text.chars().count() == 1;
-        if ok && single && spaced_on_line(prev, w.rect, ori) {
-            text.push_str(&w.text);
-            rect = union_rect(rect, w.rect);
-        } else {
-            out.push(OcrWord { text, rect });
-            text = w.text.clone();
-            rect = w.rect;
-            ok = single;
-        }
-        prev = w.rect;
-    }
-    out.push(OcrWord { text, rect });
-    out
-}
-
 /// Gap if `next` continues `current`.
 fn continuation_gap(current: &OcrLine, next: &OcrLine, orientation: Orientation) -> Option<i32> {
     if current.words.is_empty() || next.words.is_empty() {
@@ -485,13 +430,12 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option
         ordered.extend(tail);
     }
 
-    // Geom from merged words.
-    let merged = merge_spaced_words(&ordered, orientation);
-    let geom: Vec<TextGeom> = merged
+    // Per word, never per run.
+    let geom: Vec<TextGeom> = ordered
         .iter()
-        .map(|mw| TextGeom {
-            char_count: mw.text.chars().count(),
-            rect: mw.rect,
+        .map(|w| TextGeom {
+            char_count: w.text.chars().count(),
+            rect: w.rect,
         })
         .collect();
 
@@ -1339,133 +1283,39 @@ mod tests {
         assert_eq!(None, union_chars(&[], 0, 3, 3));
     }
 
-    // -- merge_spaced_words --
-
+    /// The runtime shape: 26px pitch.
     #[test]
-    fn merge_empty_returns_empty() {
-        let r: Vec<&OcrWord> = Vec::new();
-        assert!(merge_spaced_words(&r, Orientation::Horizontal).is_empty());
+    fn a_spaced_run_boxes_only_the_matched_chars() {
+        let line = OcrLine {
+            words: vec![w("学", 100, 100, 23, 24), w("生", 126, 100, 23, 24),
+                        w("は", 152, 100, 23, 24), w("宿", 178, 100, 23, 24),
+                        w("舎", 204, 100, 23, 24)],
+        };
+        let r = resolve(&[line], p(185, 112), true).unwrap();
+        assert_eq!(5, r.span.geom.len(), "gaps must not fold the run into one entry");
+
+        let from = r.span.text[..r.span.cursor_byte_offset].chars().count();
+        let boxed = union_chars(&r.span.geom, from, 2, 3).unwrap();
+        assert_eq!(PhysRect { x: 175, y: 97, w: 55, h: 30 }, boxed);
     }
 
+    /// Gaps inside a match are covered.
     #[test]
-    fn merge_single_word_unchanged() {
-        let words = [w("食", 100, 100, 20, 20)];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(1, m.len());
-        assert_eq!("食", m[0].text);
-    }
-
-    /// gap = 0: no merge needed.
-    #[test]
-    fn merge_touching_chars_stay_separate() {
-        let words = [
-            w("可", 100, 100, 30, 40),
-            w("哀", 130, 100, 30, 40),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(2, m.len());
-    }
-
-    /// gap = 1.5x: merge.
-    #[test]
-    fn merge_spaced_chars_are_joined() {
-        let words = [
-            w("食", 100, 100, 20, 20),
-            w("べ", 150, 100, 20, 20),
-            w("物", 200, 100, 20, 20),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(1, m.len());
-        assert_eq!("食べ物", m[0].text);
-    }
-
-    /// gap = 4x: no merge.
-    #[test]
-    fn merge_far_apart_chars_stay_separate() {
-        let words = [
-            w("左", 100, 100, 20, 20),
-            w("右", 200, 100, 20, 20),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(2, m.len());
-    }
-
-    /// Multi-char blocks merging.
-    #[test]
-    fn merge_skips_multi_char_words() {
-        let words = [
-            w("食", 100, 100, 20, 20),
-            w("ab", 150, 100, 40, 20),
-            w("物", 220, 100, 20, 20),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(3, m.len());
-    }
-
-    /// Cross-axis offset blocks it.
-    #[test]
-    fn merge_different_y_stays_separate() {
-        let words = [
-            w("上", 100, 100, 20, 20),
-            w("下", 150, 200, 20, 20),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(2, m.len());
-    }
-
-    /// Vertical spaced chars merge.
-    #[test]
-    fn merge_vertical_spaced_chars() {
-        let words = [
-            w("食", 100, 100, 20, 20),
-            w("べ", 100, 150, 20, 20),
-            w("物", 100, 200, 20, 20),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Vertical);
-        assert_eq!(1, m.len());
-        assert_eq!("食べ物", m[0].text);
-    }
-
-    /// Union rect spans the gap.
-    #[test]
-    fn merge_rect_covers_the_gap() {
-        let words = [
-            w("食", 100, 100, 20, 20),
-            w("物", 150, 100, 20, 20),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(1, m.len());
-        assert_eq!(PhysRect { x: 100, y: 100, w: 70, h: 20 }, m[0].rect);
-    }
-
-    /// Large gap breaks the chain.
-    #[test]
-    fn merge_chain_broken_by_large_gap() {
-        let words = [
-            w("食", 100, 100, 20, 20),
-            w("べ", 150, 100, 20, 20),
-            w("物", 300, 100, 20, 20),
-        ];
-        let r: Vec<&OcrWord> = words.iter().collect();
-        let m = merge_spaced_words(&r, Orientation::Horizontal);
-        assert_eq!(2, m.len());
-        assert_eq!("食べ", m[0].text);
-        assert_eq!("物", m[1].text);
+    fn a_spaced_match_is_continuous_across_its_gaps() {
+        let line = OcrLine {
+            words: vec![w("学", 100, 100, 23, 24), w("生", 126, 100, 23, 24),
+                        w("は", 152, 100, 23, 24)],
+        };
+        let r = resolve(&[line], p(110, 112), true).unwrap();
+        let boxed = union_chars(&r.span.geom, 0, 3, 0).unwrap();
+        assert_eq!(PhysRect { x: 100, y: 100, w: 75, h: 24 }, boxed);
     }
 
     // -- resolve with spaced text --
 
-    /// Spaced geom is merged.
+    /// Spaced geom stays per char.
     #[test]
-    fn resolve_merges_spaced_geom() {
+    fn resolve_keeps_spaced_geom_per_char() {
         let line = OcrLine {
             words: vec![
                 w("食", 100, 100, 20, 20),
@@ -1475,8 +1325,19 @@ mod tests {
         };
         let got = resolve(&[line], p(155, 105), true).unwrap();
         assert_eq!("食べ物", got.span.text);
-        assert_eq!(1, got.span.geom.len());
-        assert_eq!(3, got.span.geom[0].char_count);
+        assert_eq!(3, got.span.geom.len());
+        assert!(got.span.geom.iter().all(|g| g.char_count == 1));
+
+        // Whole match: gaps covered.
+        assert_eq!(
+            PhysRect { x: 100, y: 100, w: 120, h: 20 },
+            union_chars(&got.span.geom, 0, 3, 0).unwrap()
+        );
+        // One char: only that char.
+        assert_eq!(
+            PhysRect { x: 150, y: 100, w: 20, h: 20 },
+            union_chars(&got.span.geom, 1, 1, 0).unwrap()
+        );
     }
 
     /// Cursor offset survives merge.
@@ -1494,9 +1355,9 @@ mod tests {
         assert!(got.span.text[6..].starts_with('物'));
     }
 
-    /// Vertical spaced chars merge.
+    /// Vertical spaced stays per char.
     #[test]
-    fn resolve_spaced_vertical_merges() {
+    fn resolve_keeps_spaced_vertical_geom_per_char() {
         let line = OcrLine {
             words: vec![
                 w("食", 100, 100, 20, 20),
@@ -1506,7 +1367,11 @@ mod tests {
         };
         let got = resolve(&[line], p(105, 155), true).unwrap();
         assert_eq!(Orientation::Vertical, got.orientation);
-        assert_eq!(1, got.span.geom.len());
+        assert_eq!(3, got.span.geom.len());
+        assert_eq!(
+            PhysRect { x: 100, y: 150, w: 20, h: 20 },
+            union_chars(&got.span.geom, 1, 1, 0).unwrap()
+        );
     }
 
     /// Touching keeps per-char geom.

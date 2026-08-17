@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>chibipop OCR corpus</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 2560px; height: 1080px; overflow: hidden;
+               background: #ffffff; color: #101010; }
+  .blk { position: absolute; font-size: 26px; line-height: 34px; letter-spacing: 0;
+         font-family: "Noto Sans JP", "Yu Gothic UI", "Microsoft YaHei", sans-serif;
+         white-space: pre; }
+  .lbl { position: absolute; font: 12px Consolas, monospace; color: #b00020; }
+  #ruler { position: absolute; top: 0; left: 0; width: 2560px; height: 18px; }
+  #ruler div { position: absolute; top: 0; font: 10px Consolas, monospace; color: #888;
+               border-left: 1px solid #ccc; padding-left: 2px; height: 18px; }
+  #outlined { background: #101010; padding: 6px 10px;
+              color: #ffffff; -webkit-text-stroke: 1px #101010; }
+  #vert { writing-mode: vertical-rl; text-orientation: upright; height: 700px; }
+</style>
+<body>
+<div id="ruler"></div>
+
+<div class="lbl" style="left:100px; top:104px;">J1 horizontal 26px solid</div>
+<div class="blk" id="j1" style="left:100px; top:120px;">学生は宿舎に住んでいます。風邪をひいて休んだ。</div>
+
+<div class="lbl" style="left:100px; top:204px;">O outlined 26px</div>
+<div class="blk" id="outlined" style="left:100px; top:220px;">学生は宿舎に住んでいます。風邪をひいて休んだ。</div>
+
+<div class="lbl" style="left:100px; top:314px;">A alphanumeric mixed</div>
+<div class="blk" id="alnum" style="left:100px; top:330px;">Aランクの生徒が100円のABCテストを受けた。</div>
+
+<div class="lbl" style="left:100px; top:414px;">ZS simplified chinese</div>
+<div class="blk" id="zhs" style="left:100px; top:430px;">我在学习中文，这是简体字的例句。</div>
+
+<div class="lbl" style="left:100px; top:514px;">ZT traditional chinese</div>
+<div class="blk" id="zht" style="left:100px; top:530px;">我在學習中文，這是繁體字的例句。</div>
+
+<div class="lbl" style="left:100px; top:614px;">J2 horizontal, second sentence</div>
+<div class="blk" id="j2" style="left:100px; top:630px;">図書館で新しい辞書を借りました。</div>
+
+<div class="lbl" style="left:100px; top:714px;">W wide-spaced (merge must not fire)</div>
+<div class="blk" id="wide" style="left:100px; top:730px; letter-spacing:80px;">学生は宿舎に住む</div>
+
+<div class="lbl" style="left:2150px; top:104px;">V vertical</div>
+<div class="blk" id="vert" style="left:2150px; top:120px;">吾輩は猫である。名前はまだ無い。</div>
+
+<script>
+  const r = document.getElementById('ruler');
+  for (let x = 0; x <= 2560; x += 100) {
+    const d = document.createElement('div');
+    d.style.left = x + 'px';
+    d.textContent = x;
+    r.appendChild(d);
+  }
+  // Report the real box of every glyph-bearing block.
+  const out = {};
+  for (const id of ['j1', 'outlined', 'alnum', 'zhs', 'zht', 'j2', 'vert']) {
+    const b = document.getElementById(id).getBoundingClientRect();
+    out[id] = { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) };
+  }
+  // Per-character boxes for the first line, so the highlight math is predictable.
+  const range = document.createRange();
+  const node = document.getElementById('j1').firstChild;
+  out.j1_chars = [];
+  for (let i = 0; i < node.length; i++) {
+    range.setStart(node, i); range.setEnd(node, i + 1);
+    const b = range.getBoundingClientRect();
+    out.j1_chars.push({ c: node.data[i], x: Math.round(b.x), y: Math.round(b.y),
+                        w: Math.round(b.width), h: Math.round(b.height) });
+  }
+  document.title = 'READY ' + JSON.stringify(out);
+</script>
+</body>
