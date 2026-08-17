@@ -1089,3 +1089,44 @@ names `chibipop build-dict --library "<lib>" --out "<db>"` with real paths and a
 first", matching the two that already do, or a `rebuild_instruction(library, db)` helper is written
 once and called from all six sites. The second is the better shape and is why this is an item rather
 than a one-line fix.
+
+## 29. The match highlight is the whole merged run, not the matched word — **FIXED 2026-08-17**
+
+> **Fixed in `d1508dc`, the day it was filed.** `resolve` builds `span.geom` from the **unmerged**
+> words, so one entry is one OCR word and `union_chars` boxes exactly the matched characters.
+> `merge_spaced_words`, `spaced_on_line` and `union_rect` had no other caller and are deleted
+> (−55 lines, −10 tests, +2 guards). `f3668bb` wanted the highlight to span gaps; `union_chars`
+> returns a bounding box, so gaps inside a match were always covered. The merge solved a problem
+> the union had already solved.
+>
+> Live on the fixture: 宿舎 `w=314 → 56` (**predicted before running, matched exactly**),
+> 図書館 `267 → 106`, 風邪をひいて `273 → 158`, a 1-char vertical match `h=185 → 27`.
+>
+> The account below is kept because the mechanism recurs.
+
+**Regressed 2026-08-04 in `f3668bb`, found 2026-08-17 by `docs/REGRESSION.md` §1.2.** User-visible
+only with `popup.highlight_match = true`, which is why it survived thirteen days and a release.
+
+`merge_spaced_words` (`src/text/layout.rs:334`) folds consecutive **single-character** OCR words
+into one `OcrWord` carrying the union rect, and `resolve` builds `span.geom` from that merged list.
+Windows OCR returns one word per CJK character, so an ordinary Japanese line collapses to a
+**single** `TextGeom` with `char_count = line length`. `union_chars` unions whole entries, so any
+match inside that entry gets the entire run's rect.
+
+Measured on `docs/fixtures/ocr-corpus.html`: 宿舎 (2 chars) → `w=314`; 図書館 (4) → `w=267`;
+風邪をひいて (6) → `w=273`; a 1-char match on the *vertical* column → `h=185`. Expected for the
+first is `x=176 y=123 w=56 h=30`. The heights are right, which is what makes it look plausible.
+Falsifier, same binary: the fixture's `letter-spacing:80px` line puts the gap over
+`spaced_on_line`'s `2 × size` ceiling, the merge does not fire, and the box is exact —
+`x=416 y=733 w=29 h=30` for a `w=23` glyph.
+
+**Why the suite is green.** Every `union_chars` test hand-builds geom at `char_count: 1` per entry,
+and `resolve_carries_one_geom_entry_per_word_aligned_to_the_text` asserts three entries for three
+words that do not merge. Nothing feeds `resolve` a run of evenly spaced single CJK characters.
+
+**If picked up:** the merge exists for line assembly and for OCR that splits a word across spaced
+glyphs — deleting it is not the fix. The geometry wants to stay per-character while the *text* is
+merged: keep the component rects on the merged entry (`Vec<PhysRect>` beside `char_count`, or a
+parallel per-character geom vector that `union_chars` indexes), so `union_chars` can slice inside an
+entry instead of only between entries. Whatever the shape, the guard is the missing test above:
+resolve a real evenly-spaced CJK run and assert a 2-char match yields ink + 2×3px, not the line.

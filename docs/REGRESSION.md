@@ -7,6 +7,11 @@ Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed 
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
+**§1.2, the match highlight, regressed on 2026-08-04 and was fixed on 2026-08-17** — found by this
+page, filed as BACKLOG 29, fixed and re-verified the same day. The whole cycle is kept under that
+heading rather than tidied away, because the useful artefact is not "it passes" but *how* a
+green suite and a shipped release both missed it.
+
 **Five exceptions to "verified", all marked in place.** Tier 1 items **1.9–1.13** were added
 2026-08-09 with the resizable-capture / hot-reload branch and **have not been run**. Items
 **1.14–1.16** were added 2026-08-11 with the per-character-retrigger / OCR-language branch:
@@ -30,6 +35,24 @@ existed in any version of the program.
 results are in `docs/superpowers/LIVE-PASS-2026-08-14.md` in the main checkout. Nothing in it
 exercises the v0.8.0 incremental path, which did not exist that day.
 
+> [!important] The machine has ONE monitor — corrected 2026-08-17
+> The portrait secondary is gone. Windows reports one `\\.\DISPLAY1`, **2560×1080 at 96 DPI**.
+> Ignore every "portrait secondary (x ≥ 2560)" instruction below, and the tier-2 callout's
+> "3640×1920" virtual desktop. **Tier 1 now takes over the only screen there is** — say so before
+> you start, and put the text up yourself.
+
+> [!tip] The named corpus — `docs/fixtures/ocr-corpus.html`
+> One kiosk page, every input class this page tests, at **known coordinates**: horizontal JA 26px,
+> the same sentence outlined, alphanumeric-mixed, Simplified Chinese, Traditional Chinese, a second
+> JA line, a wide-spaced line (suppresses the geometry merge — see 1.2), and a vertical column. It
+> writes each block's rect and the per-character boxes of line J1 into `document.title`, so you can
+> **predict a rect before you run**. Coordinates below assume it full-screen at 2560×1080.
+> `docs/fixtures/scroll-test.html` is the companion for 1.7; it prints `window.scrollY` to its title.
+>
+> ```bash
+> chrome --user-data-dir=/tmp/kiosk --no-first-run --kiosk file:///C:/Users/Stella/chibipop/docs/fixtures/ocr-corpus.html
+> ```
+
 ---
 
 ## Tier 0 — the automated gate (~2 min, no screen)
@@ -50,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **873** total across **6** targets, 1 ignored (was 794; re-measured 2026-08-16) |
+| Rust tests | **all green**, **885** total across **6** targets, 1 ignored (873 → 893 → 885 on 2026-08-17; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -247,6 +270,20 @@ suppression — the count went **down** because the code did.
 > regression. **A count that changes is only ever a finding or a re-baseline. Say which, in
 > writing, in the same commit that moves it.**
 
+**873 → 893 → 885, both moves on 2026-08-17, neither a finding.**
+
+- **+20** at `8388ef2`, the merge of PR #1: the HTML-glossary branch added tests and removed none.
+  `src/dict/glossary.rs` is new, and `glosses_html` is pinned in `dict/build.rs`,
+  `lookup/model.rs`, `present.rs` and `anki.rs`.
+- **−10 +2** for the BACKLOG 29 fix: `merge_spaced_words` and its two helpers went, and their 10
+  tests with them; 2 guards replaced them. 893 − 10 + 2 = **885**. The two `resolve_*_merges_*`
+  tests were **rewritten, not deleted** — they now assert per-character geom *and* the gap-spanning
+  property the deleted code claimed, so the behaviour keeps coverage from both sides.
+
+Three runs at each number, identical each time; six targets splitting 874 + 0 + 1 + 2 + 8 + 0,
+**0 failed**, the same **1 ignored**. Clippy did not move: **3** raw, **0** on the bin target.
+`golden_corpus` ran rather than skipping, because this checkout has a built `data/chibipop.sqlite`.
+
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
 that clippy passed. A 4th is a real regression — most often a field added by one commit and read by
@@ -264,17 +301,25 @@ cargo clippy --all-targets --all-features -- -D warnings \
 catches this — it regressed to **19× the oracle's** and every test stayed green, because a
 32 GB machine simply absorbs it. Needs the real archives, so it is not a CI check.
 
+> [!warning] Redirect stdout to a FILE, never to a pipe — corrected 2026-08-17
+> The version of this snippet that set `RedirectStandardOutput = $true` and called `ReadToEnd()`
+> **after** the wait loop **deadlocks**: nothing drains the pipe while the child runs, the 4 KB
+> buffer fills, and `build-dict` blocks forever on its own progress lines. The tell is a process at
+> ~3% CPU with a WAL that stopped growing. It is corpus-dependent, which is what makes it nasty —
+> a 768 k-entry build prints ~165 lines and squeaks through; a 1.13 M-entry build prints ~230 and
+> hangs. Seen once, for 17 minutes, before anyone suspected the harness rather than the program.
+
 ```powershell
 $out = Join-Path $env:TEMP "mem_check.sqlite"
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = "C:\Users\Stella\chibipop\target\release\chibipop.exe"
-$psi.Arguments = 'build-dict --library "C:\Users\Stella\Documents\dicts" --out "' + $out + '"'
-$psi.RedirectStandardOutput = $true; $psi.UseShellExecute = $false
-$p = [System.Diagnostics.Process]::Start($psi)
+$log = Join-Path $env:TEMP "mem_check.log"
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$p = Start-Process -FilePath "C:\Users\Stella\chibipop\target\release\chibipop.exe" -PassThru -NoNewWindow `
+     -ArgumentList @('build-dict', '--library', 'C:\Users\Stella\Documents\dicts', '--out', $out) `
+     -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 $peak = 0
 while (-not $p.HasExited) { try { $p.Refresh(); $w = $p.WorkingSet64; if ($w -gt $peak) { $peak = $w } } catch {}; Start-Sleep -Milliseconds 100 }
-$p.WaitForExit(); $p.StandardOutput.ReadToEnd() | Out-Null
-Write-Output ("peak {0:N0} MB" -f ($peak/1MB))
+$p.WaitForExit(); $sw.Stop()
+Write-Output ("peak {0:N0} MB in {1:N1} s" -f ($peak/1MB), $sw.Elapsed.TotalSeconds)
 ```
 
 | Measured 2026-07-29 | peak | elapsed |
@@ -282,6 +327,20 @@ Write-Output ("peak {0:N0} MB" -f ($peak/1MB))
 | Rust, streaming (current) | **148 MB** | 33.7 s |
 | Rust, materialised (the regression) | 9,641 MB | 83.3 s |
 | Python oracle *(deleted 2026-07-31; kept for comparison)* | 498 MB | 83.9 s |
+
+**Re-measured 2026-08-17 at `8388ef2`, from scratch on a wiped output path.** Streaming still
+holds — both peaks are far under the ~300 MB line, on a corpus half again as large as the original.
+
+| Corpus | entries | term rows | peak | elapsed | db size |
+|---|---|---|---|---|---|
+| `Documents\dicts` — jitendex + JA freq + 大辞林 (the 2026-07-29 corpus) | 768,636 | 1,261,454 | **173 MB** | 35.2 s | **556 MB** |
+| 6 archives — the above + 3 ZH-JA dictionaries | 1,129,265 | 1,982,693 | **198 MB** | 51.3 s | **851 MB** |
+
+**The database roughly doubled, and `glosses_html` is why.** The pre-HTML build of 2026-08-01 is
+**242 MB** at 774,087 entries; the post-HTML build above is **556 MB** at 768,636 — fewer entries,
+2.3× the bytes. Measured, not inferred: over a 10,000-row sample of `entry.senses`, `glosses_html`
+is **61.1%** of the payload, and all 10,000 carry a non-empty one. That is the price of the feature.
+A `.sqlite` that no longer fits where it used to is now expected, not a mystery.
 
 Anything over ~300 MB means the streaming was undone. **`PeakWorkingSet64` reads 0 once the
 process has exited** — the peak must be sampled while it runs, which is why the loop above
@@ -296,8 +355,15 @@ happened once, with the wheel accumulator.
 
 ## Tier 1 — agent-verifiable, on real pixels (~5 min)
 
-Needs Japanese text on the **portrait secondary** (x ≥ 2560). `probe` reads a coordinate without
-moving the pointer, so it disturbs nothing.
+Needs text on screen. There is **one display** (2560×1080, 96 DPI) — put the corpus fixture up
+full-screen and work against its published coordinates. `probe` reads a coordinate without moving
+the pointer, so it disturbs nothing; the rows that *do* move the pointer are marked.
+
+> [!note] Which language each command can actually test — added 2026-08-17
+> **`probe` and `watch` hardcode `"ja"`** (`src/main.rs:140` and `:311`), so **no `probe` row on
+> this page can test Chinese OCR at all**. Only `run` reads `ocr.language`. `watch` additionally
+> ignores the configured capture size and always uses `CaptureSize::default()`. Anything about
+> zh-Hans / zh-Hant therefore has to go through §1.21, which drives the real app.
 
 ### 1.1 The pipeline resolves and looks up
 
@@ -318,6 +384,27 @@ example, with real numbers:
 
 **Predict the rect from the word boxes before running it.** A highlight that merely looks plausible
 is the failure this catches.
+
+> [!success] 1.2 regressed 2026-08-04, fixed 2026-08-17 — read before you touch geom
+> **Passing, to the pixel.** 宿舎 gives `x=176 y=123 w=56 h=30`, which is what the word boxes
+> predict. 図書館 `w=106`. 風邪をひいて `w=158`. A 1-char vertical match `x=2154 y=277 w=26 h=27`.
+>
+> **It failed for 13 days first.** `merge_spaced_words` folded single-character OCR words into one
+> `TextGeom`, and Windows OCR emits one word per CJK character, so a whole line became one entry
+> with `char_count = line length`. `union_chars` unions whole entries, so 宿舎 boxed
+> `学生は宿舎に住んでいます。` entire — `w=314` where 56 was right. The height was correct
+> throughout, which is what made it look plausible. The fix builds `span.geom` from the **unmerged**
+> words; the merge and its two helpers are deleted. Full account in BACKLOG 29.
+>
+> Three lessons, in descending order of how much they will cost you again:
+>
+> 1. **Every geometry fixture used touching glyphs** — `x=100,130,160` at `w=30`, no gaps. Real OCR
+>    emits gaps, and the merge only fired on gaps, so ten tests and a release saw nothing.
+> 2. **`popup.highlight_match` is `false` in the live config.** A check whose output is off by
+>    default is a check nobody runs.
+> 3. **Suppress the suspect, do not argue with it.** The fixture's `letter-spacing:80px` line put
+>    the gap over the merge threshold and the box came back exact. That took one probe and settled
+>    what three plausible theories could not.
 
 ### 1.3 The deconjugation case
 
@@ -1002,6 +1089,87 @@ the staged archive is back in `library/`, `library/.removed/` is empty or gone, 
 
 ---
 
+### 1.21 All three OCR languages resolve — **added 2026-08-17, run**
+
+`probe` cannot do this (it hardcodes `"ja"`). Drive the real app: set `ocr.language`, start `run`,
+put the pointer on the matching line of the fixture, screenshot the popup. One restart per
+language — a config **file** edit is not the live-Apply path, §1.9 is.
+
+| `ocr.language` | fixture line | hover at | expect |
+|---|---|---|---|
+| `ja` | J1 `y=120` | `191,136` | 宿舎 / しゅくしゃ / freq 21663, Jitendex + 大辞林 sections |
+| `zh-Hans-CN` | ZS `y=430` | `165,447` | 学习 / **xué·xí**, 中日大辞典　第二版 only |
+| `zh-Hant-TW` | ZT `y=530` | `165,547` | 學習 / **xuéxí**, 小学館中日辞典 第3版 only |
+
+All three passed on 2026-08-17. The Chinese rows also **prove §1.17, the per-language dictionary
+lists**, from the other side: with `zh-*` selected the JA dictionaries are absent from the popup.
+That is the visible half of the feature, and it was unrun until now.
+
+Check the installed recognisers first — a missing one is not a chibipop failure:
+
+```bash
+powershell -NoProfile -Command "\$env:PSModulePath='C:\Windows\system32\WindowsPowerShell\v1.0\Modules'; [void][Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]; [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { \$_.LanguageTag }"
+```
+
+This box has `en-US`, `ja`, `zh-Hans-CN`, `zh-Hant-TW`. **PowerShell 7 cannot load the WinRT type**
+— it must be Windows PowerShell 5.1, with `PSModulePath` reset or the PS7 paths leak in.
+
+### 1.22 The Anki card carries HTML, if the field map asks for it — **added 2026-08-17, run**
+
+The `[[anki.field_map]]` `source` values are `expression`, `reading`, `glossary`, `glossary_html`,
+`frequency` (`src/anki.rs:228-234`). **`glossary` is plain text; `glossary_html` is the formatted
+one.** They are different fields, and picking the wrong one fails silently.
+
+Mined 2026-08-17 into a sample deck, 12 notes over three languages, `glossary_html` mapped:
+
+| Language | Words | Result |
+|---|---|---|
+| `ja` | 宿舎 · **風邪をひく** · 図書館 · 辞書 · ランク · **猫** | 148–3349 chars of HTML, freq present |
+| `zh-Hans-CN` | 学习 · 中文 · 简体字 | 111–565 chars, no freq (the freq dict is JA-only) |
+| `zh-Hant-TW` | 學習 · 繁體字 · 例句 | 456–1530 chars of HTML, no freq |
+
+Two of those rows carry their own proof. **風邪をひく was mined by hovering 風邪をひいて**, so the
+card holds the dictionary form and deconjugation reaches Anki. **猫 came off the vertical column**
+with `prefer_vertical = true`, which flips the capture to 100×500.
+
+The HTML is real structure: `<ul><li>` glosses, a `forms` `<table>` of 図書館 / としょかん /
+ずしょかん, bold and superscript spans, and `<a href="?query=図書">` cross-references.
+
+> [!warning] Two things to expect, neither a defect
+> **The live config maps the plain source.** `target/release/chibipop.toml` has
+> `source = "glossary"`, so real cards get plain text from a build that can produce HTML.
+>
+> **Some dictionaries have no markup to render.** 中日大辞典　第二版 stores plain strings, so
+> `glosses_html` falls back to plain — correctly. It falls back with **literal newlines**, and an
+> Anki field is HTML, so those cards render as one run-on paragraph. 学习 shows this; 繁體字, from
+> 小学館中日辞典, does not. Converting the newlines to `<br>` on the fallback would fix it.
+
+**Adding the same expression twice fails, and says so** — the popup shows `✗ Failed to add`. That is
+the duplicate guard, not a broken hotkey. Hover a different word to re-test.
+
+**Clean up after this row:** `deleteNotes`, then `deleteDecks` with `cardsToo`, then confirm
+`deckNames` is back to what it was. Use a scratch deck, never a real one.
+
+> [!note] Two passes on 2026-08-17 — one 2560×1080 display, the corpus fixture
+> **Pass 1**, at `8388ef2`. Passed: 1.1, 1.3, 1.5, 1.6, 1.7, 1.21, 1.22. **Failed: 1.2.**
+> **Pass 2**, after the BACKLOG 29 fix, to prove it rather than assume it. **1.2 passes**, predicted
+> before running and matched exactly. Everything from pass 1 re-run and unchanged, with the boxes
+> corrected: 1.3 `w=273 → 158`, 1.5 identical anchor *and* box across four points, 1.6b vertical
+> 1-char `h=185 → 27`, the alnum run `w=203 → 78`. **1.6a still resolves nothing at 500×100** — the
+> known-broken case must stay broken, and does. Tier 0 re-gated at **885 ×3**, clippy 3 / 0.
+>
+> **1.7a is not comparable, and that is the finding.** Outlined **60.9%** vs solid **91.3%** here,
+> against the recorded 53.8% / 100.0%. The gap reproduces and the misreads are confident
+> (ひ → `乙、`), but this is a different font at a different size, so the percentages are not the
+> same measurement. `--upscale 1` also costs the solid line its two dakuten (で→て, だ→た); the same
+> line reads exact at the default region. **Score a font against itself, in one run, or not at all.**
+>
+> **Still unrun:** 1.9–1.20 as marked, and 1.8's sustained-hover memory figure.
+>
+> **Artefact worth knowing:** `probe` reads whatever is on screen, chibipop's own popup included.
+> One probe came back reading `xué・Xi` off the popup covering the line. Dismiss it before you probe
+> underneath.
+
 ## Tier 2 — mostly automatable (~5 min)
 
 > [!important] Corrected 2026-07-31 — this tier is **not** human-only
@@ -1015,8 +1183,16 @@ the staged archive is back in `library/`, `library/.removed/` is empty or gone, 
 >
 > **And read the cursor back before believing anything.** `MOUSEEVENTF_ABSOLUTE` targets the
 > **primary monitor** unless you also pass `MOUSEEVENTF_VIRTUALDESK` (`0x4000`) and normalise over
-> the whole virtual desktop (`x * 65535 / (vw - 1)`; this box is 3640x1920). Asking for `2696,491`
-> without it put the cursor at `1355,246` and looked exactly like a dead hook.
+> the whole virtual desktop (`x * 65535 / (vw - 1)`). ~~this box is 3640x1920~~ — **stale as of
+> 2026-08-17: the box is 2560×1080, one display.** Asking for `2696,491` without the flag once put
+> the cursor at `1355,246` and looked exactly like a dead hook; with one monitor that coordinate no
+> longer exists at all.
+>
+> **Simpler, and it worked on 2026-08-17:** plain `SetCursorPos` from a PowerShell tool call drives
+> the hover end to end — pointer onto the word, popup up, `SendKeys 'a'` fires the Anki hotkey and
+> the card lands. No `SendInput` normalisation, no virtual-desktop arithmetic. Nudge the cursor
+> twice (`191,136` then `192,137`); a single `SetCursorPos` onto a stationary point may not raise
+> the popup on its own.
 >
 > Detecting the popup needs no screenshot: `EnumWindows` filtered by pid, then `GetClassName` —
 > `ChibipopPopupClass` and `ChibipopOverlayClass` appear and disappear with it.
@@ -1207,6 +1383,12 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **Python's `json.dumps` is not compact; `serde_json` is** | Python defaults to `", "` and `": "` separators. Every row differs from a Rust port that emits compact JSON — spuriously on a whole-database diff, and for real in `entry.senses`. Hit twice. Match the separators, or the oracle diff drowns in noise. |
 | **git-bash `/tmp` is not the `/tmp` a native tool sees** | `/tmp` maps to `AppData\Local\Temp` for bash but resolves to `C:\tmp` for python.exe or chibipop.exe — and `sqlite3.connect` *creates* the missing file, so the symptom is `no such table`, not `file not found`. Produced a false verification failure. Convert with `cygpath -w` before handing a path to a Windows program. |
 | **`cargo test` prints five `test result:` lines** | Quoting the first reports roughly a third of the suite as the total. Sum them: `awk '/^test result: ok\./ {s+=$4} END {print s+0}'`. An agent got this wrong once and reported 245 for 248. |
+| **Merging OCR words merges their geometry too** | *(The code that did this is gone — the trap is not.)* A match highlight that is the right height and the wrong width, the whole line, at every match length. Any per-character claim about geometry dies the moment words are merged upstream of it, and `union_chars` can only union whole entries. Before adding a merge for text, ask what it does to geom. Suppress it (wide letter-spacing) to tell this apart from a broken union. |
+| **Every geometry fixture used touching glyphs** | A whole class of bug that ten tests and a release walk straight past. Real OCR emits *gaps*; a fixture at `x=100,130,160` with `w=30` has none, and gap-conditional code is invisible to it. When a code path branches on spacing, at least one fixture must be spaced. |
+| **`glossary` and `glossary_html` are different Anki sources** | Cards that look plain next to a popup that looks rich. Nothing errors — the field map just asked for the other one. Check `target/release/chibipop.toml` before believing the feature is missing. |
+| **A child that prints progress will fill a 4 KB pipe and stop** | A build at ~3% CPU with a WAL that stopped growing, forever. `RedirectStandardOutput = $true` + `ReadToEnd()` after the wait loop is the trap; redirect to a **file** instead. Corpus-dependent, so it passes on the small corpus and hangs on the big one. |
+| **`probe` and `watch` are Japanese-only** | A Chinese OCR check that "fails" while the app works. Both hardcode `"ja"` (`src/main.rs:140`, `:311`); only `run` reads `ocr.language`. `watch` also ignores the configured capture size. |
+| **DXGI declines a region that crosses a screen edge** | `DXGI capture unavailable (no DXGI output for region); using BitBlt` on any probe within half a capture-width of x=0. Not a failure — the fallback is the design — but it means edge-of-screen probes are not measuring the DXGI path. |
 | **A stripped dependency reads as a free one** | Task 3 measured 3.44 MB after adding `zip`, because nothing called it yet and the linker dropped it. Size a new dependency only once something actually reaches it. Also: 3,928,064 bytes is 3.75 MB, not 3.93 — divide by 2²⁰, not 10⁶. |
 
 ## When something fails

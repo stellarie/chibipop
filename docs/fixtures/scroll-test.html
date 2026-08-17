@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SCROLL 0</title>
+<style>
+  body { margin: 0; font: 48px Consolas, monospace; background: #fff; color: #222; }
+  .row { height: 120px; border-bottom: 1px solid #ddd; padding-left: 40px; }
+</style>
+<body>
+<script>
+  for (let i = 0; i < 60; i++) {
+    const d = document.createElement('div');
+    d.className = 'row';
+    d.textContent = 'row ' + i;
+    document.body.appendChild(d);
+  }
+  const tick = () => { document.title = 'SCROLL ' + Math.round(window.scrollY); };
+  addEventListener('scroll', tick);
+  tick();
+</script>
+</body>
