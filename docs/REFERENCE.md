@@ -138,40 +138,38 @@ the binary in `target/release/` and the data at the repository root.
 only. It is created when absent, so a fallback would write a first run's
 settings to whichever directory happened to launch it.
 
-### The blank copy
+### The latest-build copy
 
-`C:\Users\Stella\Documents\chibipop-latest` holds a **blank copy of the latest
-build**. Blank means what a downloaded zip contains:
-
-```
-chibipop-latest/
-  chibipop.exe
-  data/deconjugator.json
-  README.md
-  LICENSE
-```
-
-No `chibipop.toml` and no database, so the next launch takes the **first-run
-path** — the settings window, and a config written with defaults.
-
-Refresh it after every release build:
+`C:\Users\Stella\Documents\chibipop-latest` holds the latest build. Refresh it
+after every release build:
 
 ```powershell
 pwsh -File scripts/blank-copy.ps1
 ```
 
-The script wipes the destination and copies from `target/release/`. It
-**refuses to run if a `.sqlite` file is there**, because a database is 200-900
-MB of the user's own build; pass `-Force` to override. Use `-Destination` for
-another path.
+**The script deletes nothing.** It picks one of two modes from what it finds:
 
-> [!note] Launching it makes it non-blank
-> First run writes `chibipop.toml` beside the executable. That is the path
-> under test, not a fault. Re-run the script to get a blank copy back.
+| Destination | Mode | Effect |
+|---|---|---|
+| no `chibipop.exe` | seed | writes the exe, `data/deconjugator.json`, `README.md`, `LICENSE` |
+| an existing install | refresh | replaces `chibipop.exe` only |
+
+A seeded folder carries no `chibipop.toml` and no database. Its first launch
+therefore takes the **first-run path**: the settings window, and a config
+written with defaults. Once someone configures that folder, a refresh keeps
+their `chibipop.toml`, `library/` and `data/`, and prints what it kept.
+
+`-Destination` seeds another path. Use it to test the first-run experience
+without disturbing an install.
+
+> [!warning] Quit chibipop first
+> Windows will not overwrite a running executable. The script checks whether
+> a chibipop is running **from that folder** and stops with its pid rather
+> than failing halfway.
 
 The copy is a **local build**, not the released artifact. Its bytes differ
-from the zip's — different toolchain and different line endings on `LICENSE`.
-Verify a *release* against the zip from the draft, per
+from the zip's — different toolchain, and different line endings on
+`LICENSE`. Verify a *release* against the zip from the draft, per
 [`RELEASING.md`](RELEASING.md) step 6.
 
 ---
