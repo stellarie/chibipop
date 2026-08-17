@@ -118,8 +118,14 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
   built exe and locating `RT_MANIFEST` id 1 inside it. No `Cargo.toml` change was needed — Cargo
   runs a root `build.rs` by convention. `rc.exe` must still be run from PowerShell; MSYS2 mangles
   its `/flag` arguments under git-bash.
-- **`TextSource::at` / `resolve_at` are unreachable *and* single-pass.** An M4 hazard: the UIA
-  tier will come in through that trait and silently get the old behaviour.
+- ~~**`TextSource::at` / `resolve_at` are unreachable *and* single-pass.**~~ **DONE** — `TextSource`
+  is deleted. `OcrTextSource` now implements `TextProvider` (`src/text/provider.rs`) through the
+  multi-pass `resolve_at_tiled`; `docs/REGRESSION.md` §1.24 is the human check that the swap
+  changed nothing on screen. **Residual, not closed by this alone:** `OcrTextSource` still carries
+  an *inherent* `resolve_at` (single-pass) of the same name. Inherent methods win over trait
+  methods in call resolution, so `ocr.resolve_at(x)` on a concrete `&OcrTextSource` silently keeps
+  taking the old path — only a `&dyn TextProvider` or `T: TextProvider` caller reaches the new one.
+  A future UIA provider is unaffected; a future caller that types the OCR source concretely is not.
 - **Ruby hover on pass 1.** `nearest_line` keeps the tiled path from splicing furigana, but
   `hit_scan` on pass 1 will happily resolve a ruby character if the cursor is nearer to it than
   to the base text. Reproduced live at (3550,1450) → `ん` from `かんたん`.
