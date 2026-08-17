@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **906** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 on 2026-08-18; see below) |
+| Rust tests | **all green**, **907** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -96,9 +96,9 @@ that is the difference between the two rows and it is deliberate.
 > [!warning] `cargo test --lib` reports 891 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
 > runs the library target only and omits the five integration-test targets:
-> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (4 passed), `rebuild`
+> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (5 passed), `rebuild`
 > (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **891 passed, 1
-> ignored**, and that figure is close enough to the true **906 passed, 2 ignored** to read as a
+> ignored**, and that figure is close enough to the true **907 passed, 2 ignored** to read as a
 > whole-suite result — which is why the trap works. A partial run does not announce itself as
 > partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
 >
@@ -350,18 +350,46 @@ both **906**: eight targets splitting 891 + 0 + 1 + 2 + 4 + 0 + 8 + 0, **0 faile
 **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh,
 not assumed.
 
-> [!warning] `a_hang_times_out_without_killing_the_test` must **fail**, never hang
-> That test wedges a plugin on purpose and asserts the caller gets an error saying `deadline`.
-> It is green because the host reads the child on a separate thread and waits with
-> `recv_timeout`; a direct `read_line` on the child cannot be interrupted, so the caller would
-> block forever instead. **If this target ever stops rather than fails, the reader thread is the
-> suspect — do not wrap the test in a timeout to make the symptom go away.** In the running app
+**906 → 907 is a fix round on that same task, and the single new test is the whole point of it.**
+Review found that the host wrote to the child's stdin **on the calling thread**, with no timeout:
+a bare `write_all` inside `call`. A plugin that stops draining its stdin blocks that thread
+uninterruptibly, and `text/recognise` carries a base64 PNG — orders of magnitude past what a pipe
+buffers. **The four existing tests could not catch it, and the reason is worth keeping:** the
+`hang` fixture reads its line *before* it parks, and every payload those tests send is `{}`. The
+suite proved the read path was interruptible while never once exercising the write path. Four
+changes closed it — stdin moved onto its own writer thread fed by a channel; the deadline became a
+total budget for the call rather than a per-message gap, which also bounds a plugin that chatters
+faster than the deadline and could otherwise loop `call` forever; `call` drains stale lines before
+it sends; and `shutdown` inspects `kill()` instead of discarding it, so a failed kill is never
+followed by a blocking `wait()`. Two runs, both **907**: eight targets splitting 891 + 0 + 1 + 2 +
+5 + 0 + 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the
+bin target — both counted fresh, not assumed.
+
+> [!warning] Two `plugin_host` tests must **fail**, never hang — and they guard different pipes
+> `a_hang_times_out_without_killing_the_test` wedges a plugin that has already read its request.
+> `a_deaf_plugin_times_out_instead_of_blocking_the_writer` wedges one that never reads at all,
+> and sends it 256 KiB. Both assert the caller gets an error saying `deadline`.
+>
+> They are green because **each pipe is owned by its own thread** and `call` touches neither. A
+> `read_line` on the child cannot be interrupted; neither can a `write_all` into a full pipe, and
+> a Windows anonymous pipe buffers only a few kilobytes. `call` waits on a channel with
+> `recv_timeout` against a **single budget for the whole call**, so it returns on time whichever
+> pipe is stuck.
+>
+> **The read test alone did not cover this, and that is the lesson.** It reads its line before it
+> parks, and every other test sends `{}` — small enough for the pipe buffer to swallow whole. The
+> write path was never exercised until the deaf test existed, and when it finally was, the
+> `write_all` that used to live in `call` blocked **forever**: 90 s with no result line, the test
+> binary and its child both alive. The payload is 256 KiB so the exact buffer size cannot matter.
+>
+> **If this target ever stops rather than fails, a reader or writer thread is the suspect — do
+> not wrap the test in a timeout to make the symptom go away.** In the running app
 > this call sits on the worker thread. That alone does not freeze anything: the **main** thread
 > owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`. The danger is second-hand, and item 24 of
 > `docs/BACKLOG.md` is the precedent — a worker whose closure had already finished, a `join()` on
 > the main thread that never returned, zero messages pumped, and the user's machine frozen twice.
 > A plugin call that can block forever is one `join()` away from being that bug again.
-> The whole target runs in about **1.5 s**. A `plugin_host` run measured in minutes is the tell.
+> The whole target runs in about **1.6 s**. A `plugin_host` run measured in minutes is the tell.
 
 **Every `plugin_host` test starts a real `chibipop.exe`.** `Host` kills the child from `Drop` as
 well as `shutdown`, so a panicking or early-returning test still reaps its process. After a run,
