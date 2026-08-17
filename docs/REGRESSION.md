@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **885** total across **7** targets, 2 ignored (873 → 893 → 885 on 2026-08-17; see below) |
+| Rust tests | **all green**, **886** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 on 2026-08-17; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -283,6 +283,14 @@ suppression — the count went **down** because the code did.
 Three runs at each number, identical each time; six targets splitting 874 + 0 + 1 + 2 + 8 + 0,
 **0 failed**, the same **1 ignored**. Clippy did not move: **3** raw, **0** on the bin target.
 `golden_corpus` ran rather than skipping, because this checkout has a built `data/chibipop.sqlite`.
+
+**885 → 886 is a re-baseline, not a finding.** Task 2 of the plugin-system round deleted the
+unreachable, single-pass `TextSource` trait and replaced it with `TextProvider`
+(`src/text/provider.rs`), which `OcrTextSource` now implements through the multi-pass
+`resolve_at_tiled`. It added one test, `text::provider::tests::a_provider_is_usable_as_a_trait_object`,
+and removed none. Two runs, both **886**: seven targets splitting 875 + 0 + 1 + 2 + 0 + 8 + 0,
+**0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
+counted fresh, not assumed.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
@@ -1200,6 +1208,13 @@ The work proceeded on the ruling that the encode is paid only by plugin users, w
 
 **Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen spec
 section 6 and consider the length-prefixed binary frame named in spec section 12.
+
+### 1.24 Provider trait, no behaviour change — **added 2026-08-17, not run**
+
+**Provider trait, no behaviour change.** Hover a word on `docs/fixtures/ocr-corpus.html` line J1.
+The popup text, the resolved word and the highlight rect must match what the same hover produced
+before this branch. Record the rect. `union_chars` on 宿舎 measured `x=176 y=123 w=56 h=30` on
+2026-08-17.
 
 ## Tier 2 — mostly automatable (~5 min)
 

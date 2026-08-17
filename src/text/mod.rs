@@ -3,10 +3,10 @@
 pub mod layout;
 pub mod capture;
 pub mod ocr;
+pub mod provider;
 
-use crate::geom::{PhysPoint, PhysRect};
+use crate::geom::PhysRect;
 use crate::text::layout::TextGeom;
-use anyhow::Result;
 
 /// Text plus a cursor position.
 #[derive(Debug)]
@@ -18,9 +18,4 @@ pub struct TextSpan {
     pub anchor: PhysRect,
     /// Word boxes; may be empty.
     pub geom: Vec<TextGeom>,
-}
-
-/// Text at a screen position.
-pub trait TextSource {
-    fn at(&self, p: PhysPoint) -> Result<Option<TextSpan>>;
 }
