@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **885** total across **6** targets, 1 ignored (873 → 893 → 885 on 2026-08-17; see below) |
+| Rust tests | **all green**, **885** total across **7** targets, 2 ignored (873 → 893 → 885 on 2026-08-17; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -88,8 +88,8 @@ that is the difference between the two rows and it is deliberate.
 > `golden_corpus` (`tests/golden.rs:31-34`) early-returns when `data/chibipop.sqlite` is absent,
 > printing `SKIP golden_corpus: … not built` and asserting **nothing**. It is reported as `ok`, not
 > as ignored, so **every total on this page includes one test that did not run** on any tree without
-> a built database — which is every fresh clone and every worktree. The `1 ignored` beside the total
-> is a *different* test. This is pre-existing and is recorded here rather than fixed: making the
+> a built database — which is every fresh clone and every worktree. The ignored tests beside the
+> total are *different* tests. This is pre-existing and is recorded here rather than fixed: making the
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
 
@@ -1169,6 +1169,37 @@ the duplicate guard, not a broken hotkey. Hover a different word to re-test.
 > **Artefact worth knowing:** `probe` reads whatever is on screen, chibipop's own popup included.
 > One probe came back reading `xué・Xi` off the popup covering the line. Dismiss it before you probe
 > underneath.
+
+### 1.23 Real text inside the PNG-encode bracket — **added 2026-08-17, not run**
+
+**Why this exists.** The plugin system sends captures to a plugin as base64 PNG. `tests/png_cost.rs`
+measured the encode against three synthetic buffers and produced a **bracket**, not an answer:
+
+| Buffer | Bytes | p95 |
+|---|---|---|
+| `uniform`, best case | 1,163 | **4.98 ms** |
+| `text_like`, two-tone | 2,423 | 4.93 ms |
+| `noisy`, worst case | 600,516 | **21.09 ms** |
+
+About **4.7 ms is fixed WinRT overhead**, independent of content. Real screen text sits somewhere
+between 4.98 and 21.09 ms, and no synthetic buffer can say where. **Only a real capture can.**
+
+The work proceeded on the ruling that the encode is paid only by plugin users, whose engines run
+100–300 ms anyway. This step is what confirms or withdraws that.
+
+**Run it while you are here for any other tier 1 item.** It needs no separate session.
+
+**Steps**
+
+1. Put `docs/fixtures/ocr-corpus.html` full-screen at 2560×1080.
+2. Capture the JA line J1 region with `probe --at <x>,<y> --region 500,100 --dump`.
+3. Encode that real buffer through `encode_png` and record the byte count and p95.
+
+**Pass** when the real byte count and p95 land inside the bracket above, and the p95 is **under
+10 ms**. Record the number here either way.
+
+**Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen spec
+section 6 and consider the length-prefixed binary frame named in spec section 12.
 
 ## Tier 2 — mostly automatable (~5 min)
 
