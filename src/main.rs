@@ -93,6 +93,12 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Test fixture plugin.
+    #[command(hide = true)]
+    PluginEcho {
+        #[arg(default_value = "ok")]
+        mode: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -431,6 +437,7 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::PluginEcho { mode } => chibipop::plugin::echo::run(&mode),
     }
 }
 
