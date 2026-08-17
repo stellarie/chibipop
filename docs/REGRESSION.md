@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **893** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 → 893 on 2026-08-17; see below) |
+| Rust tests | **all green**, **897** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -305,10 +305,14 @@ referenced from nowhere else yet — no other file changed. Repeated runs, all *
 seven targets splitting 882 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the same **2 ignored**.
 Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not assumed.
 
-Task 4 (measured 2026-08-18): `src/plugin/version.rs` adds pure protocol negotiation,
-`agree(offered, picked, declared)`, validating picked is in offered and matches manifest
-protocol, refusing with messages naming the numbers involved. Four tests, all passing.
-Measured: **886 passed, 1 ignored** after this task. Clippy: **3** raw, **0** on bin target.
+**893 → 897 is a re-baseline, not a finding.** Task 4 of the plugin-system round adds
+`src/plugin/version.rs`: pure protocol negotiation, `agree(offered, picked, declared)`,
+validating picked is in offered and matches manifest protocol, refusing with messages
+naming the numbers involved. It added four tests and removed none; the module is new,
+self-contained, and referenced from nowhere else yet — no other file changed. Repeated
+runs all **897**: seven targets splitting 886 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the
+same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted
+fresh, not assumed.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
