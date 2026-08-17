@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **897** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 on 2026-08-18; see below) |
+| Rust tests | **all green**, **902** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -93,12 +93,12 @@ that is the difference between the two rows and it is deliberate.
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
 
-> [!warning] `cargo test --lib` reports 886 / 1, which looks like the full figure
+> [!warning] `cargo test --lib` reports 891 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
 > runs the library target only and omits the four integration-test targets:
 > `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `rebuild` (8 passed), `png_cost`
-> (0 passed, 1 ignored). The partial run reports **886 passed, 1 ignored**, and that figure is
-> close enough to the true **897 passed, 2 ignored** to read as a whole-suite result — which is
+> (0 passed, 1 ignored). The partial run reports **891 passed, 1 ignored**, and that figure is
+> close enough to the true **902 passed, 2 ignored** to read as a whole-suite result — which is
 > why the trap works. A partial run does not announce itself as partial. **Both figures confirmed
 > by independent re-runs on 2026-08-18.**
 
@@ -322,6 +322,18 @@ self-contained, and referenced from nowhere else yet — no other file changed. 
 runs all **897**: seven targets splitting 886 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the
 same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted
 fresh, not assumed.
+
+**897 → 902 is a re-baseline, not a finding.** Task 5 of the plugin-system round adds
+`src/plugin/proto.rs`: the wire-protocol serde types (`Hello`, `Ready`, `Caps`,
+`RecogniseParams`, `Rect`, `RecogniseResult`, `Line`, `Word`) and a `request()` helper that
+frames one JSON-RPC-shaped line, newline-terminated. `Cargo.toml` gains `base64 = "0.22"`;
+it was already in `Cargo.lock` at `0.22.1`, pulled in transitively via `ureq`/`ureq-proto`,
+so the lock file's only change is that one line marking it a direct dependency of `chibipop`,
+confirmed by diff. It added five tests and removed none; the module is new, self-contained,
+and referenced from nowhere else yet beyond its registration in `src/plugin/mod.rs` — no
+other file changed. Repeated runs, all **902**: seven targets splitting 891 + 0 + 1 + 2 + 0
++ 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the
+bin target — both counted fresh, not assumed.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
