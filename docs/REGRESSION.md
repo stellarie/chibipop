@@ -93,6 +93,15 @@ that is the difference between the two rows and it is deliberate.
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
 
+> [!warning] `cargo test --lib` reports 886 / 1, which looks like the full figure
+> Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
+> runs the library target only and omits the four integration-test targets:
+> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `rebuild` (8 passed), `png_cost`
+> (0 passed, 1 ignored). The partial run reports **886 passed, 1 ignored**, and that figure is
+> close enough to the true **897 passed, 2 ignored** to read as a whole-suite result — which is
+> why the trap works. A partial run does not announce itself as partial. **Both figures confirmed
+> by independent re-runs on 2026-08-18.**
+
 **A lower number is not automatically a finding either — it is a debt to explain.** The
 772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
 account of it is arithmetic, not reassurance: name what was removed, name what still covers the
