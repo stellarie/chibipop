@@ -9,6 +9,7 @@ use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
     tile_forward, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
 };
+use crate::text::provider::TextRead;
 use crate::text::TextSpan;
 use anyhow::{Context, Result};
 use std::mem::size_of;
@@ -503,8 +504,9 @@ impl OcrTextSource {
 }
 
 impl crate::text::provider::TextProvider for OcrTextSource {
-    fn resolve_at(&self, cursor: PhysPoint) -> Result<Option<TextSpan>> {
-        Ok(self.resolve_at_tiled(cursor)?.map(|r| r.span))
+    fn read_at(&self, cursor: PhysPoint, collect_scan: bool) -> Result<TextRead> {
+        let (resolved, scan) = self.resolve_at_tiled_scanned(cursor, collect_scan)?;
+        Ok(TextRead { resolved, scan })
     }
     fn name(&self) -> &str { "windows-ocr" }
     fn provides_geometry(&self) -> bool { true }

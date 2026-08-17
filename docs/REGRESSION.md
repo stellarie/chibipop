@@ -286,11 +286,15 @@ Three runs at each number, identical each time; six targets splitting 874 + 0 + 
 
 **885 → 886 is a re-baseline, not a finding.** Task 2 of the plugin-system round deleted the
 unreachable, single-pass `TextSource` trait and replaced it with `TextProvider`
-(`src/text/provider.rs`), which `OcrTextSource` now implements through the multi-pass
-`resolve_at_tiled`. It added one test, `text::provider::tests::a_provider_is_usable_as_a_trait_object`,
-and removed none. Two runs, both **886**: seven targets splitting 875 + 0 + 1 + 2 + 0 + 8 + 0,
-**0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
-counted fresh, not assumed.
+(`src/text/provider.rs`), which `OcrTextSource` implements over the multi-pass
+`resolve_at_tiled_scanned` and which `src/app.rs`'s `resolve_trigger` now calls through the
+trait at both its call sites — the first design left the trait itself unreachable a second time,
+caught before landing, and widened to carry `TextRead { resolved, scan }` rather than a bare
+`TextSpan` so the one real call site could actually reach it. It added one test,
+`text::provider::tests::a_provider_is_usable_as_a_trait_object`, and removed none. Repeated runs,
+all **886**: seven targets splitting 875 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the same
+**2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh,
+not assumed.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than

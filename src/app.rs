@@ -16,6 +16,7 @@ use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::layout::{CaptureSize, Orientation};
 use crate::text::ocr::{recogniser_available, OcrTextSource};
+use crate::text::provider::{TextProvider, TextRead};
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
@@ -1993,15 +1994,15 @@ fn resolve_trigger(
     let raw = match capture_guard {
         Some(guard) => {
             guard.hide_for_capture();
-            let r = ocr.resolve_at_tiled_scanned(cursor, scan_display.captures);
+            let r = ocr.read_at(cursor, scan_display.captures);
             guard.restore_after_capture();
             r
         }
-        None => ocr.resolve_at_tiled_scanned(cursor, scan_display.captures),
+        None => ocr.read_at(cursor, scan_display.captures),
     };
     let (resolved, mut scan) = match raw {
-        Ok((Some(r), scan)) => (r, scan),
-        Ok((None, _)) => return WorkerOutcome::Hide,
+        Ok(TextRead { resolved: Some(r), scan }) => (r, scan),
+        Ok(TextRead { resolved: None, .. }) => return WorkerOutcome::Hide,
         Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
     };
 
