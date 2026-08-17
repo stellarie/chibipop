@@ -109,6 +109,7 @@ name = "chibipop"
 version = "0.8.2"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "rusqlite",
  "serde",
