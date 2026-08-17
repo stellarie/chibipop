@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **902** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 on 2026-08-18; see below) |
+| Rust tests | **all green**, **906** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -95,12 +95,15 @@ that is the difference between the two rows and it is deliberate.
 
 > [!warning] `cargo test --lib` reports 891 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
-> runs the library target only and omits the four integration-test targets:
-> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `rebuild` (8 passed), `png_cost`
-> (0 passed, 1 ignored). The partial run reports **891 passed, 1 ignored**, and that figure is
-> close enough to the true **902 passed, 2 ignored** to read as a whole-suite result — which is
-> why the trap works. A partial run does not announce itself as partial. **Both figures confirmed
-> by independent re-runs on 2026-08-18.**
+> runs the library target only and omits the five integration-test targets:
+> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (4 passed), `rebuild`
+> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **891 passed, 1
+> ignored**, and that figure is close enough to the true **906 passed, 2 ignored** to read as a
+> whole-suite result — which is why the trap works. A partial run does not announce itself as
+> partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
+>
+> The gap widens as this round goes on: every plugin task since Task 6 adds integration tests
+> the `--lib` figure cannot see, so **891 has not moved since Task 5** while the true total has.
 
 **A lower number is not automatically a finding either — it is a debt to explain.** The
 772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
@@ -334,6 +337,35 @@ and referenced from nowhere else yet beyond its registration in `src/plugin/mod.
 other file changed. Repeated runs, all **902**: seven targets splitting 891 + 0 + 1 + 2 + 0
 + 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the
 bin target — both counted fresh, not assumed.
+
+**902 → 906 is a re-baseline, not a finding.** Task 6 of the plugin-system round adds
+`src\plugin\host.rs` and `src\plugin\echo.rs`. The host spawns one plugin process, runs the
+`hello` handshake, sends numbered requests, enforces a per-call deadline, and kills the child
+from both `shutdown` and `Drop`. `echo.rs` is a fixture plugin with four modes — `ok`, `crash`,
+`hang`, `garbage` — reached through a hidden `plugin-echo` subcommand on the main binary, which
+is why these tests need no Python and no second crate. They are this round's first
+**integration** tests, so they land in a **new eighth target**, `tests\plugin_host.rs`, and
+`cargo test --lib` cannot see a single one of them: the lib figure is still **891**. Two runs,
+both **906**: eight targets splitting 891 + 0 + 1 + 2 + 4 + 0 + 8 + 0, **0 failed**, the same
+**2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh,
+not assumed.
+
+> [!warning] `a_hang_times_out_without_killing_the_test` must **fail**, never hang
+> That test wedges a plugin on purpose and asserts the caller gets an error saying `deadline`.
+> It is green because the host reads the child on a separate thread and waits with
+> `recv_timeout`; a direct `read_line` on the child cannot be interrupted, so the caller would
+> block forever instead. **If this target ever stops rather than fails, the reader thread is the
+> suspect — do not wrap the test in a timeout to make the symptom go away.** In the running app
+> this call sits on the worker thread. That alone does not freeze anything: the **main** thread
+> owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`. The danger is second-hand, and item 24 of
+> `docs/BACKLOG.md` is the precedent — a worker whose closure had already finished, a `join()` on
+> the main thread that never returned, zero messages pumped, and the user's machine frozen twice.
+> A plugin call that can block forever is one `join()` away from being that bug again.
+> The whole target runs in about **1.5 s**. A `plugin_host` run measured in minutes is the tell.
+
+**Every `plugin_host` test starts a real `chibipop.exe`.** `Host` kills the child from `Drop` as
+well as `shutdown`, so a panicking or early-returning test still reaps its process. After a run,
+`Get-Process chibipop` should return **nothing**. Strays mean a path reached neither exit.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
