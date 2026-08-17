@@ -305,6 +305,11 @@ referenced from nowhere else yet — no other file changed. Repeated runs, all *
 seven targets splitting 882 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the same **2 ignored**.
 Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not assumed.
 
+Task 4 (measured 2026-08-18): `src/plugin/version.rs` adds pure protocol negotiation,
+`agree(offered, picked, declared)`, validating picked is in offered and matches manifest
+protocol, refusing with messages naming the numbers involved. Four tests, all passing.
+Measured: **886 passed, 1 ignored** after this task. Clippy: **3** raw, **0** on bin target.
+
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
 that clippy passed. A 4th is a real regression — most often a field added by one commit and read by
