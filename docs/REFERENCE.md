@@ -138,6 +138,42 @@ the binary in `target/release/` and the data at the repository root.
 only. It is created when absent, so a fallback would write a first run's
 settings to whichever directory happened to launch it.
 
+### The blank copy
+
+`C:\Users\Stella\Documents\chibipop-latest` holds a **blank copy of the latest
+build**. Blank means what a downloaded zip contains:
+
+```
+chibipop-latest/
+  chibipop.exe
+  data/deconjugator.json
+  README.md
+  LICENSE
+```
+
+No `chibipop.toml` and no database, so the next launch takes the **first-run
+path** — the settings window, and a config written with defaults.
+
+Refresh it after every release build:
+
+```powershell
+pwsh -File scripts/blank-copy.ps1
+```
+
+The script wipes the destination and copies from `target/release/`. It
+**refuses to run if a `.sqlite` file is there**, because a database is 200-900
+MB of the user's own build; pass `-Force` to override. Use `-Destination` for
+another path.
+
+> [!note] Launching it makes it non-blank
+> First run writes `chibipop.toml` beside the executable. That is the path
+> under test, not a fault. Re-run the script to get a blank copy back.
+
+The copy is a **local build**, not the released artifact. Its bytes differ
+from the zip's — different toolchain and different line endings on `LICENSE`.
+Verify a *release* against the zip from the draft, per
+[`RELEASING.md`](RELEASING.md) step 6.
+
 ---
 
 ## Configuration file
