@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **886** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 on 2026-08-17; see below) |
+| Rust tests | **all green**, **893** total across **7** targets, 2 ignored (873 → 893 → 885 → 886 → 893 on 2026-08-17; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -295,6 +295,15 @@ caught before landing, and widened to carry `TextRead { resolved, scan }` rather
 all **886**: seven targets splitting 875 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the same
 **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh,
 not assumed.
+
+**886 → 893 is a re-baseline, not a finding.** Task 3 of the plugin-system round adds
+`src/plugin/manifest.rs` and `src/plugin/mod.rs`: pure parsing of `plugin.toml` into a
+`Manifest`, rejecting an unsupported protocol, an unknown role, a claimed role with no
+matching section, an empty `provides` list, and ambient mode (protocol 1 runs no ambient
+plugin). It added seven tests and removed none; the module is new, self-contained, and
+referenced from nowhere else yet — no other file changed. Repeated runs, all **893**:
+seven targets splitting 882 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the same **2 ignored**.
+Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not assumed.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
