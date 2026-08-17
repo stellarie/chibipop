@@ -6,13 +6,13 @@ use crate::plugin::version::agree;
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
 
 pub struct Host {
     child: Child,
-    stdin: ChildStdin,
+    writes: Sender<Vec<u8>>,
     lines: Receiver<Result<String, std::io::Error>>,
     ready: Ready,
     next_id: u64,
@@ -28,8 +28,9 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
         .spawn()
         .with_context(|| format!("starting plugin \"{}\"", m.name))?;
 
-    let stdin = child.stdin.take().context("plugin stdin")?;
+    let mut stdin = child.stdin.take().context("plugin stdin")?;
     let stdout = child.stdout.take().context("plugin stdout")?;
+
     let (tx, lines) = mpsc::channel();
     // A read cannot be interrupted.
     std::thread::spawn(move || {
@@ -40,7 +41,17 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
         }
     });
 
-    let mut h = Host { child, stdin, lines, ready: blank_ready(), next_id: 1 };
+    let (writes, outbox) = mpsc::channel::<Vec<u8>>();
+    // Nor a write to a full pipe.
+    std::thread::spawn(move || {
+        for msg in outbox {
+            if stdin.write_all(&msg).is_err() || stdin.flush().is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut h = Host { child, writes, lines, ready: blank_ready(), next_id: 1 };
     let hello = Hello {
         chibipop: env!("CARGO_PKG_VERSION").to_string(),
         protocol_supported: crate::plugin::manifest::SUPPORTED.to_vec(),
@@ -76,14 +87,24 @@ impl Host {
         params: serde_json::Value,
         deadline: Duration,
     ) -> Result<serde_json::Value> {
+        // Stale lines are never ours.
+        while self.lines.try_recv().is_ok() {}
+
         let id = self.next_id;
         self.next_id += 1;
         let line = crate::plugin::proto::request(id, method, params);
-        self.stdin.write_all(line.as_bytes()).context("writing to the plugin")?;
-        self.stdin.flush().context("flushing to the plugin")?;
+        self.writes
+            .send(line.into_bytes())
+            .context("the plugin's input is closed")?;
 
+        let started = Instant::now();
         loop {
-            let got = match self.lines.recv_timeout(deadline) {
+            // One budget, not one per line.
+            let left = match deadline.checked_sub(started.elapsed()) {
+                Some(d) if !d.is_zero() => d,
+                _ => bail!("plugin missed its {} ms deadline", deadline.as_millis()),
+            };
+            let got = match self.lines.recv_timeout(left) {
                 Ok(l) => l.context("reading from the plugin")?,
                 Err(RecvTimeoutError::Timeout) => {
                     bail!("plugin missed its {} ms deadline", deadline.as_millis())
@@ -105,8 +126,10 @@ impl Host {
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // A failed kill never reaps.
+        if self.child.kill().is_ok() {
+            let _ = self.child.wait();
+        }
     }
 }
 

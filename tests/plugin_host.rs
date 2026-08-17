@@ -46,6 +46,23 @@ fn a_hang_times_out_without_killing_the_test() {
 }
 
 #[test]
+fn a_deaf_plugin_times_out_instead_of_blocking_the_writer() {
+    let m = fixture("deaf");
+    let mut h = host::spawn(&m, std::path::Path::new(".")).unwrap();
+    let big = "x".repeat(256 * 1024);
+    let e = h
+        .call(
+            "text/recognise",
+            serde_json::json!({ "image_png": big }),
+            Duration::from_millis(250),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("deadline"), "{e}");
+    h.shutdown();
+}
+
+#[test]
 fn a_crash_is_reported_as_an_error() {
     let m = fixture("crash");
     let mut h = host::spawn(&m, std::path::Path::new(".")).unwrap();

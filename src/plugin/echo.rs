@@ -35,6 +35,12 @@ pub fn run(mode: &str) -> ! {
         reply["id"] = serde_json::json!(id);
         let _ = writeln!(out, "{reply}");
         let _ = out.flush();
+        // Never drains stdin again.
+        if mode == "deaf" {
+            loop {
+                std::thread::park();
+            }
+        }
     }
     std::process::exit(0)
 }
