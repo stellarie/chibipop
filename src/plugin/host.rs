@@ -8,7 +8,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -21,10 +22,58 @@ use windows::Win32::System::JobObjects::{
 pub struct Host {
     child: Child,
     job: Option<Job>,
-    writes: Sender<Vec<u8>>,
+    outbox: Arc<Outbox>,
     lines: Receiver<Result<String, std::io::Error>>,
     ready: Ready,
     next_id: u64,
+}
+
+#[derive(Default)]
+struct Queued {
+    bytes: Option<Vec<u8>>,
+    closed: bool,
+}
+
+/// One request, never a backlog.
+#[derive(Default)]
+struct Outbox {
+    queued: Mutex<Queued>,
+    ready: Condvar,
+}
+
+impl Outbox {
+    fn put(&self, bytes: Vec<u8>) -> bool {
+        let mut q = self.queued.lock().unwrap();
+        if q.closed {
+            return false;
+        }
+        // A stale one had no reader.
+        q.bytes = Some(bytes);
+        self.ready.notify_one();
+        true
+    }
+
+    fn clear(&self) {
+        self.queued.lock().unwrap().bytes = None;
+    }
+
+    fn close(&self) {
+        self.queued.lock().unwrap().closed = true;
+        self.ready.notify_one();
+    }
+
+    fn take(&self) -> Option<Vec<u8>> {
+        let mut q = self.queued.lock().unwrap();
+        loop {
+            if let Some(bytes) = q.bytes.take() {
+                return Some(bytes);
+            }
+            if q.closed {
+                return None;
+            }
+            q = self.ready.wait(q).unwrap();
+        }
+    }
 }
 
 /// Kills its members on close.
@@ -124,17 +173,19 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
         }
     });
 
-    let (writes, outbox) = mpsc::channel::<Vec<u8>>();
+    let outbox: Arc<Outbox> = Arc::default();
+    let mine = Arc::clone(&outbox);
     // Nor a write to a full pipe.
     std::thread::spawn(move || {
-        for msg in outbox {
+        while let Some(msg) = mine.take() {
             if stdin.write_all(&msg).is_err() || stdin.flush().is_err() {
                 break;
             }
         }
+        mine.close();
     });
 
-    let mut h = Host { child, job: Some(job), writes, lines, ready: blank_ready(), next_id: 1 };
+    let mut h = Host { child, job: Some(job), outbox, lines, ready: blank_ready(), next_id: 1 };
     let hello = Hello {
         chibipop: env!("CARGO_PKG_VERSION").to_string(),
         protocol_supported: crate::plugin::manifest::SUPPORTED.to_vec(),
@@ -170,15 +221,29 @@ impl Host {
         params: serde_json::Value,
         deadline: Duration,
     ) -> Result<serde_json::Value> {
+        let got = self.attempt(method, params, deadline);
+        if got.is_err() {
+            // Only ours can be pending.
+            self.outbox.clear();
+        }
+        got
+    }
+
+    fn attempt(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        deadline: Duration,
+    ) -> Result<serde_json::Value> {
         // Stale lines are never ours.
         while self.lines.try_recv().is_ok() {}
 
         let id = self.next_id;
         self.next_id += 1;
         let line = crate::plugin::proto::request(id, method, params);
-        self.writes
-            .send(line.into_bytes())
-            .context("the plugin's input is closed")?;
+        if !self.outbox.put(line.into_bytes()) {
+            bail!("the plugin's input is closed");
+        }
 
         let started = Instant::now();
         loop {
@@ -209,6 +274,8 @@ impl Host {
     }
 
     pub fn shutdown(&mut self) {
+        // Frees an idle writer thread.
+        self.outbox.close();
         // A failed kill never reaps.
         if self.child.kill().is_ok() {
             let _ = self.child.wait();
@@ -221,5 +288,49 @@ impl Host {
 impl Drop for Host {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_request_replaces_the_first_rather_than_queueing_behind_it() {
+        let outbox = Outbox::default();
+        assert!(outbox.put(b"one".to_vec()));
+        assert!(outbox.put(b"two".to_vec()));
+        assert_eq!(outbox.take(), Some(b"two".to_vec()));
+        outbox.close();
+        assert_eq!(outbox.take(), None);
+    }
+
+    /// The deaf-plugin leak, in miniature.
+    #[test]
+    fn an_abandoned_request_is_dropped_rather_than_left_queued() {
+        let outbox = Outbox::default();
+        assert!(outbox.put(vec![0u8; 256 * 1024]));
+        outbox.clear();
+        outbox.close();
+        // Never assert_eq on the payload.
+        assert!(outbox.take().is_none());
+    }
+
+    #[test]
+    fn a_closed_outbox_refuses_a_request_instead_of_swallowing_it() {
+        let outbox = Outbox::default();
+        outbox.close();
+        assert!(!outbox.put(b"one".to_vec()));
+        assert_eq!(outbox.take(), None);
+    }
+
+    /// Or the writer thread leaks.
+    #[test]
+    fn a_waiting_writer_wakes_when_the_outbox_closes() {
+        let outbox = Arc::new(Outbox::default());
+        let mine = Arc::clone(&outbox);
+        let writer = std::thread::spawn(move || mine.take());
+        outbox.close();
+        assert_eq!(writer.join().unwrap(), None);
     }
 }
