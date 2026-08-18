@@ -98,6 +98,10 @@ const ID_PER_CHAR: i32 = 139;
 const ID_OCR_LANG: i32 = 140;
 /// 141 was Include / exclude.
 const ID_DICTS_OFF: i32 = 142;
+/// Clips the page content.
+const ID_VIEWPORT: i32 = 143;
+/// Holds the page content.
+const ID_CONTENT: i32 = 144;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -386,10 +390,10 @@ fn record_language_change(hwnd: HWND) {
 /// Starts capture mode.
 unsafe fn begin_capture(hwnd: HWND, id: i32) {
     // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
-    // children of `hwnd`, created in `build`; `window_text` and
+    // descendants of `hwnd`, created in `build`; `window_text` and
     // `SetWindowTextW` state their own contracts.
     unsafe {
-        let Ok(btn) = GetDlgItem(Some(hwnd), id) else { return };
+        let Ok(btn) = dlg_item(hwnd, id) else { return };
         let prev = window_text(btn);
         CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, prev)));
         CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, id))));
@@ -400,7 +404,7 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
 /// Ends capture, unchanged.
 unsafe fn cancel_capture(hwnd: HWND) {
     // SAFETY: `id` came from `CAPTURING`, only ever set by
-    // `begin_capture` to a live child of `hwnd`; the stashed text
+    // `begin_capture` to a live descendant of `hwnd`; the stashed text
     // was captured from that same control.
     unsafe {
         let mine = hwnd.0 as isize;
@@ -411,7 +415,7 @@ unsafe fn cancel_capture(hwnd: HWND) {
             .with(|c| c.borrow_mut().take())
             .and_then(|(h, s)| (h == mine).then_some(s));
         let Some(text) = prev else { return };
-        if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
+        if let Ok(btn) = dlg_item(hwnd, id) {
             let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
         }
     }
@@ -456,10 +460,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
                 ID_MODE_LIVE | ID_MODE_HOLD => unsafe {
-                    if let Ok(c) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
+                    if let Ok(c) = dlg_item(hwnd, ID_TRIGGER_KEY) {
                         let _ = EnableWindow(c, id == ID_MODE_HOLD);
                     }
-                    if let Ok(c) = GetDlgItem(Some(hwnd), ID_PER_CHAR) {
+                    if let Ok(c) = dlg_item(hwnd, ID_PER_CHAR) {
                         let _ = EnableWindow(c, id == ID_MODE_LIVE);
                     }
                 },
@@ -739,12 +743,32 @@ unsafe fn child(
     Ok(hwnd)
 }
 
+/// A control by id, pane or not.
+///
+/// `GetDlgItem` stops at direct
+/// children. Page controls are
+/// grandchildren of the window,
+/// inside the two panes.
+unsafe fn dlg_item(root: HWND, id: i32) -> WinResult<HWND> {
+    // SAFETY: `root` is the settings window's live handle; every `GetDlgItem`
+    // result is checked, so a missing pane or control yields `Err` here rather
+    // than a dangling handle. No id is used by both the window and a pane.
+    unsafe {
+        if let Ok(c) = GetDlgItem(Some(root), id) {
+            return Ok(c);
+        }
+        let viewport = GetDlgItem(Some(root), ID_VIEWPORT)?;
+        let content = GetDlgItem(Some(viewport), ID_CONTENT)?;
+        GetDlgItem(Some(content), id)
+    }
+}
+
 /// A box's own selected row.
 unsafe fn box_selection(hwnd: HWND, which: DictBox) -> isize {
-    // SAFETY: both ids name live children of `hwnd`, created in `build`;
+    // SAFETY: both ids name live descendants of `hwnd`, created in `build`;
     // a missing one yields `Err` here rather than a dangling handle.
     unsafe {
-        GetDlgItem(Some(hwnd), dict_box_id(which))
+        dlg_item(hwnd, dict_box_id(which))
             .map(|l| SendMessageW(l, LB_GETCURSEL, None, None).0)
             .unwrap_or(-1)
     }
@@ -773,14 +797,14 @@ unsafe fn select_dict_row(
     to: DictBox,
     at: usize,
 ) {
-    // SAFETY: both ids name live children of `hwnd`, created in `build`;
+    // SAFETY: both ids name live descendants of `hwnd`, created in `build`;
     // `fill_dict_list` states its own contract. LB_SETCURSEL with -1 is the
     // documented way to clear a single-selection listbox.
     unsafe {
         for (which, rows) in
             [(DictBox::Searched, searched), (DictBox::NotSearched, not_searched)]
         {
-            let Ok(list) = GetDlgItem(Some(hwnd), dict_box_id(which)) else { continue };
+            let Ok(list) = dlg_item(hwnd, dict_box_id(which)) else { continue };
             fill_dict_list(list, rows);
             let sel: isize = if which == to { at as isize } else { -1 };
             SendMessageW(list, LB_SETCURSEL, Some(WPARAM(sel as usize)), None);
@@ -819,10 +843,10 @@ unsafe fn move_selected(hwnd: HWND, up: bool) {
 
 /// Disable what cannot act.
 unsafe fn update_list_buttons(hwnd: HWND) {
-    // SAFETY: every id below is a live child of `hwnd`, created in `build`,
-    // and each `GetDlgItem` result is checked before it is used.
+    // SAFETY: every id below is a live descendant of `hwnd`, created
+    // in `build`, and each `dlg_item` result is checked before use.
     unsafe {
-        let freqs = GetDlgItem(Some(hwnd), ID_FREQS).unwrap_or_default();
+        let freqs = dlg_item(hwnd, ID_FREQS).unwrap_or_default();
         let (Some(searched), Some(not_searched)) =
             (list_rows(hwnd, ID_DICTS), list_rows(hwnd, ID_DICTS_OFF))
         else {
@@ -832,7 +856,7 @@ unsafe fn update_list_buttons(hwnd: HWND) {
             return;
         }
         let from = active_dict_box(hwnd);
-        let Ok(dicts) = GetDlgItem(Some(hwnd), dict_box_id(from)) else { return };
+        let Ok(dicts) = dlg_item(hwnd, dict_box_id(from)) else { return };
         let cur = box_selection(hwnd, from);
         let freq_cur = SendMessageW(freqs, LB_GETCURSEL, None, None).0;
         let unreadable = unreadable_rows(hwnd);
@@ -858,7 +882,7 @@ unsafe fn update_list_buttons(hwnd: HWND) {
             (ID_DICT_REMOVE, dicts, picked),
             (ID_FREQ_REMOVE, freqs, freq_cur >= 0),
         ] {
-            if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
+            if let Ok(btn) = dlg_item(hwnd, id) {
                 if !enable && focused == btn {
                     let _ = SetFocus(Some(list));
                 }
@@ -891,10 +915,11 @@ unsafe fn list_row(list: HWND, index: isize) -> Option<String> {
 
 /// Every row, or None if gone.
 unsafe fn list_rows(hwnd: HWND, id: i32) -> Option<Vec<String>> {
-    // SAFETY: `id` names a child of `hwnd`; a missing one yields `Err` here
-    // rather than a dangling handle, and `list_row` states its own contract.
+    // SAFETY: `id` names a descendant of `hwnd`; a missing one yields
+    // `Err` here rather than a dangling handle, and `list_row` states
+    // its own contract.
     unsafe {
-        let list = GetDlgItem(Some(hwnd), id).ok()?;
+        let list = dlg_item(hwnd, id).ok()?;
         let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
         Some((0..count.max(0)).filter_map(|i| list_row(list, i)).collect())
     }
@@ -918,7 +943,7 @@ unsafe fn fill_dict_list(list: HWND, rows: &[String]) {
 /// An edit or combo's own text.
 unsafe fn window_text(ctrl: HWND) -> String {
     // SAFETY: `ctrl` is a live control the caller
-    // obtained from `GetDlgItem`; the buffer is sized
+    // obtained from `dlg_item`; the buffer is sized
     // to the length `GetWindowTextLengthW` itself
     // reported, which is the contract `GetWindowTextW`
     // writes against.
@@ -1138,7 +1163,7 @@ pub struct SettingsWindow {
     field_map_extra: RefCell<Vec<HWND>>,
     /// True while collapsed.
     field_map_collapsed: Cell<bool>,
-    /// Where Anki's static rows end.
+    /// Anki static rows end, page y.
     anki_static_bottom: i32,
     /// hwnd, x, y (96-dpi) to shift.
     bottom_ctrls: Vec<(HWND, i32, i32)>,
@@ -1284,10 +1309,10 @@ impl SettingsWindow {
 
     /// The Anki URL field's text.
     pub fn anki_url(&self) -> String {
-        // SAFETY: `ID_ANKI_URL` is a live child of
+        // SAFETY: `ID_ANKI_URL` is a live descendant of
         // `self.hwnd`, created in `build`.
         unsafe {
-            GetDlgItem(Some(self.hwnd), ID_ANKI_URL)
+            dlg_item(self.hwnd, ID_ANKI_URL)
                 .map(|c| window_text(c))
                 .unwrap_or_default()
         }
@@ -1295,10 +1320,10 @@ impl SettingsWindow {
 
     /// The Anki model field's text.
     pub fn anki_model(&self) -> String {
-        // SAFETY: `ID_ANKI_MODEL` is a live child of
+        // SAFETY: `ID_ANKI_MODEL` is a live descendant of
         // `self.hwnd`, created in `build`.
         unsafe {
-            GetDlgItem(Some(self.hwnd), ID_ANKI_MODEL)
+            dlg_item(self.hwnd, ID_ANKI_MODEL)
                 .map(|c| window_text(c))
                 .unwrap_or_default()
         }
@@ -1321,7 +1346,7 @@ impl SettingsWindow {
         let Some(action) = action else {
             return;
         };
-        // SAFETY: both helpers act only on live children of `self.hwnd`,
+        // SAFETY: both helpers act only on live descendants of `self.hwnd`,
         // which outlives this call, and each states its own contract.
         unsafe {
             match action {
@@ -1350,7 +1375,7 @@ impl SettingsWindow {
         // SAFETY: `ID_STATUS` is a live child of `self.hwnd`, created in
         // `build`; `SetWindowTextW` copies the string during the call.
         unsafe {
-            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
+            if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
                 let _ = SetWindowTextW(c, PCWSTR(wide(text).as_ptr()));
             }
         }
@@ -1358,14 +1383,14 @@ impl SettingsWindow {
 
     /// Show what was really applied.
     pub fn set_capture_fields(&self, ocr: &crate::config::OcrConfig) {
-        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are live children of
-        // `self.hwnd`, created in `build`; each `GetDlgItem` result is
+        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are live descendants of
+        // `self.hwnd`, created in `build`; each `dlg_item` result is
         // checked, and `SetWindowTextW` copies the string during the call,
         // so each temporary outlives its only use.
         unsafe {
             for (id, px) in [(ID_CAPTURE_W, ocr.capture_width), (ID_CAPTURE_H, ocr.capture_height)]
             {
-                if let Ok(c) = GetDlgItem(Some(self.hwnd), id) {
+                if let Ok(c) = dlg_item(self.hwnd, id) {
                     let _ = SetWindowTextW(c, PCWSTR(wide(&px.to_string()).as_ptr()));
                 }
             }
@@ -1379,11 +1404,11 @@ impl SettingsWindow {
         // created in `build`; `SetWindowTextW` copies each string during the
         // call, so the temporaries below outlive every use.
         unsafe {
-            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_APPLY) {
+            if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
                 let caption = wide(apply_caption(self.apply_mode));
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
-            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
+            if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
                 let hint = wide(apply_hint(self.apply_mode, staged));
                 let _ = SetWindowTextW(c, PCWSTR(hint.as_ptr()));
             }
@@ -1392,16 +1417,16 @@ impl SettingsWindow {
 
     /// Lock it while Apply runs.
     pub fn set_busy(&self, busy: bool) {
-        // SAFETY: every id in `WHILE_BUSY` is a live child of `self.hwnd`,
-        // created in `build`, and each `GetDlgItem` result is checked. Focus
-        // is moved off the controls first, since a disabled window keeping
-        // focus leaves the keyboard talking to nothing.
+        // SAFETY: every id in `WHILE_BUSY` is a live descendant of
+        // `self.hwnd`, created in `build`; each `dlg_item` result is
+        // checked. Focus is moved off the controls first, since a disabled
+        // window keeping focus leaves the keyboard talking to nothing.
         unsafe {
             if busy {
                 let _ = SetFocus(Some(self.hwnd));
             }
             for id in WHILE_BUSY {
-                if let Ok(c) = GetDlgItem(Some(self.hwnd), id) {
+                if let Ok(c) = dlg_item(self.hwnd, id) {
                     let _ = EnableWindow(c, !busy);
                 }
             }
@@ -1435,10 +1460,10 @@ impl SettingsWindow {
 
     /// The language combo's own tag.
     fn selected_language(&self) -> Option<String> {
-        // SAFETY: `ID_OCR_LANG` is a live child of `self.hwnd`, created in
-        // `build`; a missing one yields `Err` here rather than a handle.
+        // SAFETY: `ID_OCR_LANG` is a live descendant of `self.hwnd`, made
+        // in `build`; a missing one yields `Err` here rather than a handle.
         let i = unsafe {
-            GetDlgItem(Some(self.hwnd), ID_OCR_LANG)
+            dlg_item(self.hwnd, ID_OCR_LANG)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
                 .unwrap_or(-1)
         };
@@ -1458,8 +1483,8 @@ impl SettingsWindow {
         if prev == next {
             return;
         }
-        // SAFETY: both list ids are live children of `self.hwnd`, created in
-        // `build`; `list_rows` and `select_dict_row` state their own contracts
+        // SAFETY: both list ids are live descendants of `self.hwnd`, made
+        // in `build`; `list_rows` and `select_dict_row` state their contracts
         // and every handle is checked before it is used.
         unsafe {
             let (Some(active), Some(excluded)) =
@@ -1523,7 +1548,7 @@ impl SettingsWindow {
         }
         self.current_tab.set(tab);
         // SAFETY: every HWND in every group was created in
-        // `build` as a child of `self.hwnd` and lives until
+        // `build` as a descendant of `self.hwnd` and lives until
         // the window is destroyed.
         unsafe {
             for (i, ctrls) in groups.iter().enumerate() {
@@ -1545,7 +1570,7 @@ impl SettingsWindow {
         // children, created in `build`/`build_field_map_rows`.
         unsafe {
             self.apply_field_map_visibility();
-            if let Ok(btn) = GetDlgItem(Some(self.hwnd), ID_FIELD_MAP_TOGGLE) {
+            if let Ok(btn) = dlg_item(self.hwnd, ID_FIELD_MAP_TOGGLE) {
                 let text = field_map_toggle_label(collapsed);
                 let _ = SetWindowTextW(btn, PCWSTR(wide(text).as_ptr()));
             }
@@ -1568,10 +1593,10 @@ impl SettingsWindow {
             return false;
         };
         // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
-        // children of `self.hwnd`, created in `build`; `SetWindowTextW`
+        // descendants of `self.hwnd`, created in `build`; `SetWindowTextW`
         // copies the string during the call.
         unsafe {
-            if let Ok(btn) = GetDlgItem(Some(self.hwnd), id) {
+            if let Ok(btn) = dlg_item(self.hwnd, id) {
                 let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
             }
         }
@@ -1580,11 +1605,11 @@ impl SettingsWindow {
 
     /// Fills deck/model + map rows.
     pub fn populate_combos(&self, decks: &[String], models: &[String], fields: &[String]) {
-        // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live children of
+        // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live descendants of
         // `self.hwnd`, created in `build`; each `SendMessageW` copies the
         // string during the call.
         unsafe {
-            if let Ok(deck) = GetDlgItem(Some(self.hwnd), ID_ANKI_DECK) {
+            if let Ok(deck) = dlg_item(self.hwnd, ID_ANKI_DECK) {
                 let cur = window_text(deck);
                 SendMessageW(deck, CB_RESETCONTENT, None, None);
                 for name in decks {
@@ -1594,7 +1619,7 @@ impl SettingsWindow {
                 SendMessageW(deck, WM_SETTEXT, None,
                     Some(LPARAM(wide(&cur).as_ptr() as isize)));
             }
-            if let Ok(model) = GetDlgItem(Some(self.hwnd), ID_ANKI_MODEL) {
+            if let Ok(model) = dlg_item(self.hwnd, ID_ANKI_MODEL) {
                 let cur = window_text(model);
                 SendMessageW(model, CB_RESETCONTENT, None, None);
                 for name in models {
@@ -1616,7 +1641,7 @@ impl SettingsWindow {
             return;
         }
         // SAFETY: every hwnd in `field_map_extra`/`field_map_rows` was
-        // created by this same function as a child of `self.hwnd`, and
+        // created by this same function as a descendant of `self.hwnd`, and
         // is destroyed here exactly once before its slot is reused.
         unsafe {
             for hwnd in self.field_map_extra.borrow_mut().drain(..) {
@@ -1630,7 +1655,7 @@ impl SettingsWindow {
         let (extra, rows) = self.build_field_map_rows(fields, &existing);
         *self.field_map_extra.borrow_mut() = extra;
         *self.field_map_rows.borrow_mut() = rows;
-        // SAFETY: every hwnd was just created as a child of `self.hwnd`.
+        // SAFETY: every hwnd was just created as a descendant of `self.hwnd`.
         unsafe { self.apply_field_map_visibility() };
         self.ensure_room_for(self.field_map_bottom());
     }
@@ -1639,7 +1664,7 @@ impl SettingsWindow {
     unsafe fn apply_field_map_visibility(&self) {
         let visible = self.current_tab.get() == 3 && !self.field_map_collapsed.get();
         let cmd = if visible { SW_SHOW } else { SW_HIDE };
-        // SAFETY: every hwnd here is a live child of `self.hwnd`,
+        // SAFETY: every hwnd here is a live descendant of `self.hwnd`,
         // created in `build_field_map_rows`.
         unsafe {
             for &c in self.field_map_extra.borrow().iter() {
@@ -1652,24 +1677,34 @@ impl SettingsWindow {
     }
 
     /// Field-map area's bottom.
+    ///
+    /// Window y, like `bottom_y0`.
     fn field_map_bottom(&self) -> i32 {
         let n = self.field_map_rows.borrow().len();
-        if n == 0 || self.field_map_collapsed.get() {
+        let page = if n == 0 || self.field_map_collapsed.get() {
             self.anki_static_bottom
         } else {
             self.anki_static_bottom + 20 + field_map_rows_needed(n) * ROW_H + 8
-        }
+        };
+        CONTENT_Y + page
     }
 
-    /// Under every content control.
+    /// Right below the tab strip.
+    ///
+    /// Tab order follows z-order, so
+    /// the pages must sit there, not
+    /// after the Apply row.
     ///
     /// Call after creating children.
-    unsafe fn sink_viewport(&self) {
+    unsafe fn place_viewport(&self) {
         // SAFETY: `self.viewport` is a live child of `self.hwnd` from `build`
         // on, destroyed only with it; before that it is null and the call
-        // fails harmlessly. `SWP_NOSIZE | SWP_NOMOVE` leave its rect alone.
+        // fails harmlessly. `GetDlgItem` yields the tab control, a sibling of
+        // the viewport, which is what `SetWindowPos` requires of an insert-
+        // after handle. `SWP_NOSIZE | SWP_NOMOVE` leave its rect alone.
         unsafe {
-            let _ = SetWindowPos(self.viewport, Some(HWND_BOTTOM), 0, 0, 0, 0,
+            let after = GetDlgItem(Some(self.hwnd), ID_TAB).unwrap_or(HWND_BOTTOM);
+            let _ = SetWindowPos(self.viewport, Some(after), 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
@@ -1682,15 +1717,18 @@ impl SettingsWindow {
     ) -> (Vec<HWND>, Vec<(String, HWND)>) {
         let f = self.font;
         let h = self.hwnd;
+        // Page y, like `build`.
+        let page = self.content;
         let y0 = self.anki_static_bottom;
         let rows_n = field_map_rows_needed(fields.len());
         let map_h = 20 + rows_n * ROW_H + 8;
         let mut extra = Vec::new();
         let mut rows = Vec::new();
-        // SAFETY: `h` is `self.hwnd`, live for the caller's duration;
-        // every control created is its child and outlives this call.
+        // SAFETY: `h` is `self.hwnd` and `page` its content pane, both live
+        // for the caller's duration; every control created is a child of
+        // `page` and outlives this call.
         unsafe {
-            if let Ok(g) = child(h, w!("BUTTON"), "",
+            if let Ok(g) = child(page, w!("BUTTON"), "",
                 WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
                 PAD - 6, y0, WIN_W - 2 * PAD, map_h, 0, f)
             {
@@ -1702,14 +1740,14 @@ impl SettingsWindow {
                 let row = idx % rows_n;
                 let x = PAD + col * (COL_W + COL_GAP);
                 let y = y0 + 20 + row * ROW_H;
-                if let Ok(l) = child(h, w!("STATIC"), column_label(name),
+                if let Ok(l) = child(page, w!("STATIC"), column_label(name),
                     WINDOW_STYLE(0), x, y + 4, COL_LABEL_W, ROW_H, 0, f)
                 {
                     extra.push(l);
                 }
                 let id = ID_FIELD_MAP_BASE + idx;
                 let combo_x = x + COL_LABEL_W + COL_LABEL_GAP;
-                if let Ok(combo) = child(h, w!("COMBOBOX"), "",
+                if let Ok(combo) = child(page, w!("COMBOBOX"), "",
                     WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                     combo_x, y, COL_COMBO_W, 140, id, f)
                 {
@@ -1729,7 +1767,7 @@ impl SettingsWindow {
                     rows.push((name.clone(), combo));
                 }
             }
-            self.sink_viewport();
+            self.place_viewport();
         }
         (extra, rows)
     }
@@ -1748,8 +1786,19 @@ impl SettingsWindow {
         let dy = new_y0 - self.bottom_y0;
         // SAFETY: every hwnd in `bottom_ctrls` is a live child of
         // `self.hwnd`, created once in `build` and never destroyed
-        // before `self.hwnd` itself.
+        // before `self.hwnd` itself. Both panes are equally live, and
+        // `SWP_NOZORDER` keeps the placement `place_viewport` chose.
         unsafe {
+            // Or the pages clip.
+            let band = dpi_scale(self.hwnd, new_y0 - CONTENT_Y);
+            for pane in [self.viewport, self.content] {
+                let _ = SetWindowPos(
+                    pane, None,
+                    0, 0,
+                    dpi_scale(self.hwnd, WIN_W), band,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
             for &(hwnd, x, y) in &self.bottom_ctrls {
                 let _ = SetWindowPos(
                     hwnd, None,
@@ -1765,15 +1814,15 @@ impl SettingsWindow {
 
     /// Drop the selected row.
     unsafe fn remove_selected(&self, target: Target) {
-        // SAFETY: the id below names a live child of `self.hwnd`; `list_row`,
-        // `active_dict_box` and `update_list_buttons` state their own
-        // contracts. Either box may hold the selection.
+        // SAFETY: the id below names a live descendant of `self.hwnd`;
+        // `list_row`, `active_dict_box` and `update_list_buttons` state
+        // their own contracts. Either box may hold the selection.
         unsafe {
             let id = match target {
                 Target::Dicts => dict_box_id(active_dict_box(self.hwnd)),
                 Target::Freqs => ID_FREQS,
             };
-            let Ok(list) = GetDlgItem(Some(self.hwnd), id) else {
+            let Ok(list) = dlg_item(self.hwnd, id) else {
                 return;
             };
             let cur = SendMessageW(list, LB_GETCURSEL, None, None).0;
@@ -1798,7 +1847,7 @@ impl SettingsWindow {
     /// Stage whatever was picked.
     unsafe fn add_picked(&self) {
         // SAFETY: `pick_archives` owns every buffer it hands the dialog;
-        // every id names a live child of `self.hwnd`, and the string each
+        // every id names a live descendant of `self.hwnd`, and the string each
         // `LB_ADDSTRING` copies outlives that call. `list_rows` and
         // `select_dict_row` each state their own contract.
         unsafe {
@@ -1818,7 +1867,7 @@ impl SettingsWindow {
                     continue;
                 };
                 if kind == Kind::Frequency {
-                    let Ok(list) = GetDlgItem(Some(self.hwnd), ID_FREQS) else {
+                    let Ok(list) = dlg_item(self.hwnd, ID_FREQS) else {
                         continue;
                     };
                     SendMessageW(list, LB_ADDSTRING, None,
@@ -1898,8 +1947,11 @@ impl SettingsWindow {
         let mut ocr: Vec<HWND> = Vec::new();
         let mut ank: Vec<HWND> = Vec::new();
 
-        // SAFETY: `h` is the window just created by `open`; every control is
-        // a child of it and lives until the window is destroyed.
+        // SAFETY: `h` is the window just created by `open`. Every control
+        // below is created as a child of `h`, of `h`'s viewport pane, or of
+        // that pane's content pane, and each parent is created before any of
+        // its children. Windows destroys a child with its parent, so every
+        // handle taken here lives until `h` is destroyed.
         unsafe {
             // Tabs need comctl init.
             let icex = INITCOMMONCONTROLSEX {
@@ -1937,38 +1989,43 @@ impl SettingsWindow {
             item.psz_text = t3.as_mut_ptr();
             SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(3)),
                 Some(LPARAM(&item as *const _ as isize)));
-            y = CONTENT_Y;
-            let content_y = y;
-
             // Sized when the band is known.
             self.viewport = child(h, pane_class_name(), "",
                 WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-                0, content_y, WIN_W, 0, 0, None)?;
+                0, CONTENT_Y, WIN_W, 0, ID_VIEWPORT, None)?;
             self.content = child(self.viewport, pane_class_name(), "", WS_CLIPSIBLINGS,
-                0, 0, WIN_W, 0, 0, None)?;
+                0, 0, WIN_W, 0, ID_CONTENT, None)?;
+            // Or Tab skips every page.
+            for pane in [self.viewport, self.content] {
+                let ex = GetWindowLongW(pane, GWL_EXSTYLE) as u32 | WS_EX_CONTROLPARENT.0;
+                SetWindowLongW(pane, GWL_EXSTYLE, ex as i32);
+            }
+            // Page y, not window y.
+            let page = self.content;
+            y = 0;
 
             let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(h, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
+                child(page, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
                       PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
             };
             // Same, but carrying WS_GROUP so it ends the preceding group.
             let group_start = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(h, w!("BUTTON"), text,
+                child(page, w!("BUTTON"), text,
                       WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
                       PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
             };
             let label = |text: &str, y: i32| -> WinResult<HWND> {
-                child(h, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H, 0, f)
+                child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H, 0, f)
             };
 
             // ---- Trigger ----
             gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
             y += 20;
-            let live = child(h, w!("BUTTON"), "Live",
+            let live = child(page, w!("BUTTON"), "Live",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
                 PAD, y, 120, ROW_H, ID_MODE_LIVE, f)?;
             gen.push(live);
-            let hold = child(h, w!("BUTTON"), "Hold key",
+            let hold = child(page, w!("BUTTON"), "Hold key",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
                 PAD + 130, y, 120, ROW_H, ID_MODE_HOLD, f)?;
             gen.push(hold);
@@ -1982,7 +2039,7 @@ impl SettingsWindow {
             let key_vk = crate::config::parse_trigger_key(&form.trigger_key).unwrap_or(0x10);
             CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, key_vk))));
             let key_name = crate::config::trigger_key_name(key_vk);
-            let key_btn = child(h, w!("BUTTON"), &key_name, WS_TABSTOP,
+            let key_btn = child(page, w!("BUTTON"), &key_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_TRIGGER_KEY, f)?;
             gen.push(key_btn);
             let _ = EnableWindow(key_btn, !is_live);
@@ -1996,7 +2053,7 @@ impl SettingsWindow {
             y += 20;
 
             gen.push(label("Theme", y)?);
-            let theme = child(h, w!("COMBOBOX"), "",
+            let theme = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_THEME, f)?;
             gen.push(theme);
@@ -2013,7 +2070,7 @@ impl SettingsWindow {
             y += ROW_H + ROW_GAP;
 
             gen.push(label("Font", y)?);
-            let fonts_hwnd = child(h, w!("COMBOBOX"), "",
+            let fonts_hwnd = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 260, ID_FONT, f)?;
             gen.push(fonts_hwnd);
@@ -2039,7 +2096,7 @@ impl SettingsWindow {
                 MAX_WIDTH_RANGE.0 as i64, MAX_WIDTH_RANGE.1 as i64, 5,
                 form.max_width_percent as i64);
             gen.push(label("Max width (% of screen)", y)?);
-            let mw = child(h, w!("COMBOBOX"), "",
+            let mw = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_MAX_WIDTH, f)?;
             gen.push(mw);
@@ -2050,7 +2107,7 @@ impl SettingsWindow {
                 MAX_HEIGHT_RANGE.0 as i64, MAX_HEIGHT_RANGE.1 as i64, 5,
                 form.max_height_percent as i64);
             gen.push(label("Max height (% of screen)", y)?);
-            let mh = child(h, w!("COMBOBOX"), "",
+            let mh = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_MAX_HEIGHT, f)?;
             gen.push(mh);
@@ -2061,7 +2118,7 @@ impl SettingsWindow {
                 SUMMARY_RANGE.0 as i64, SUMMARY_RANGE.1 as i64, 10,
                 form.summary_chars as i64);
             gen.push(label("Summary length (characters)", y)?);
-            let sm = child(h, w!("COMBOBOX"), "",
+            let sm = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_SUMMARY, f)?;
             gen.push(sm);
@@ -2069,7 +2126,7 @@ impl SettingsWindow {
             y += ROW_H + ROW_GAP + 4;
 
             let check = |text: &str, id: i32, on: bool, y: i32| -> WinResult<HWND> {
-                let c = child(h, w!("BUTTON"), text,
+                let c = child(page, w!("BUTTON"), text,
                     WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                     PAD, y, WIN_W - 2 * PAD - 20, ROW_H, id, f)?;
                 SendMessageW(c, BM_SETCHECK, Some(WPARAM(if on { 1 } else { 0 })), None);
@@ -2087,7 +2144,7 @@ impl SettingsWindow {
             let y_general = y;
 
             // ---- Dictionaries ----
-            y = content_y;
+            y = 0;
             let bx = WIN_W - PAD - BTN_W - 8;
             let list_w = bx - 2 * PAD + 4;
             dict.push(group("Dictionaries — topmost is shown first", y, dict_group_h())?);
@@ -2098,10 +2155,10 @@ impl SettingsWindow {
                 [("Searched — for the selected OCR language", ID_DICTS),
                  ("Not searched", ID_DICTS_OFF)]
             {
-                dict.push(child(h, w!("STATIC"), caption,
+                dict.push(child(page, w!("STATIC"), caption,
                     WINDOW_STYLE(0), PAD, y, list_w, DICT_CAP_H, 0, f)?);
                 y += DICT_CAP_H;
-                dict.push(child(h, w!("LISTBOX"), "",
+                dict.push(child(page, w!("LISTBOX"), "",
                     WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                     PAD, y, list_w, DICT_BOX_H, id, f)?);
                 y += DICT_BOX_H;
@@ -2116,18 +2173,18 @@ impl SettingsWindow {
             .iter()
             .enumerate()
             {
-                dict.push(child(h, w!("BUTTON"), text, WS_TABSTOP,
+                dict.push(child(page, w!("BUTTON"), text, WS_TABSTOP,
                       bx, btn_y + i as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?);
             }
             y += ROW_GAP;
-            dict.push(child(h, w!("STATIC"),
+            dict.push(child(page, w!("STATIC"),
                 "Order is matched by dictionary name. Check both lists after a change.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, DICT_HINT_H, 0, f)?);
             y += DICT_HINT_H + 8;
 
             // A rebuild is library-only.
             if form.library_empty && !form.dict_names.is_empty() {
-                dict.push(child(h, w!("STATIC"),
+                dict.push(child(page, w!("STATIC"),
                     "chibipop is using a dictionary built outside the app. Adding or \
                      removing here rebuilds from this list only — import your original \
                      .zip files first.",
@@ -2143,7 +2200,7 @@ impl SettingsWindow {
                      removed. Dictionaries it used to order are now sorted last.",
                     stale.join("\", \"")
                 );
-                dict.push(child(h, w!("STATIC"), &msg, WINDOW_STYLE(0),
+                dict.push(child(page, w!("STATIC"), &msg, WINDOW_STYLE(0),
                       PAD, y, WIN_W - 2 * PAD - 20, 32, 0, f)?);
                 y += 36;
             }
@@ -2155,7 +2212,7 @@ impl SettingsWindow {
             let freq_h = 20 + freq_span + 8;
             dict.push(group_start("Frequency data — how common each word is", y, freq_h)?);
             y += 20;
-            let freqs = child(h, w!("LISTBOX"), "",
+            let freqs = child(page, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                 PAD, y, list_w, freq_span, ID_FREQS, f)?;
             dict.push(freqs);
@@ -2164,19 +2221,19 @@ impl SettingsWindow {
                     Some(LPARAM(wide(name).as_ptr() as isize)));
             }
             SendMessageW(freqs, LB_SETCURSEL, Some(WPARAM(0)), None);
-            dict.push(child(h, w!("BUTTON"), "Add…", WS_TABSTOP,
+            dict.push(child(page, w!("BUTTON"), "Add…", WS_TABSTOP,
                   bx, y, BTN_W, ROW_H, ID_FREQ_ADD, f)?);
-            dict.push(child(h, w!("BUTTON"), "Remove", WS_TABSTOP,
+            dict.push(child(page, w!("BUTTON"), "Remove", WS_TABSTOP,
                   bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?);
             y += freq_span + 8 + GROUP_GAP;
             let y_dict = y;
 
             // ---- OCR / Debug ----
-            y = content_y;
+            y = 0;
             ocr.push(group("OCR / Debug", y, 12 * ROW_H + 38)?);
             y += 20;
             ocr.push(label("OCR language", y)?);
-            let lang = child(h, w!("COMBOBOX"), "",
+            let lang = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_OCR_LANG, f)?;
             ocr.push(lang);
@@ -2191,7 +2248,7 @@ impl SettingsWindow {
             }
             self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"),
+            ocr.push(child(page, w!("STATIC"),
                 "Installed recognizers, plus any marked (not installed).",
                 WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
             y += ROW_H;
@@ -2199,27 +2256,27 @@ impl SettingsWindow {
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
                 form.max_ocr_passes as i64);
             ocr.push(label("OCR passes per hover", y)?);
-            let ps = child(h, w!("COMBOBOX"), "",
+            let ps = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_PASSES, f)?;
             ocr.push(ps);
             fill_numeric(ps, &self.passes, form.max_ocr_passes as i64);
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"),
+            ocr.push(child(page, w!("STATIC"),
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
             ocr.push(label("Capture width (px)", y)?);
-            ocr.push(child(h, w!("EDIT"), &form.capture_width.to_string(),
+            ocr.push(child(page, w!("EDIT"), &form.capture_width.to_string(),
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_W, f)?);
             y += ROW_H;
             ocr.push(label("Capture height (px)", y)?);
-            ocr.push(child(h, w!("EDIT"), &form.capture_height.to_string(),
+            ocr.push(child(page, w!("EDIT"), &form.capture_height.to_string(),
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_H, f)?);
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"), "Vertical mode swaps these two values.",
+            ocr.push(child(page, w!("STATIC"), "Vertical mode swaps these two values.",
                 WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
             y += ROW_H;
             ocr.push(check("Prefer vertical text (manga, VN)",
@@ -2233,12 +2290,12 @@ impl SettingsWindow {
             ocr.push(per_char);
             let _ = EnableWindow(per_char, is_live);
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"),
+            ocr.push(child(page, w!("STATIC"),
                 "Live mode only. Off: the popup holds while the cursor stays on \
                  the matched word.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
-            let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
+            let scan = child(page, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
             ocr.push(scan);
@@ -2248,10 +2305,10 @@ impl SettingsWindow {
             let y_ocr = y;
 
             // ---- Anki (own tab) ----
-            y = content_y;
+            y = 0;
             ank.push(group("Anki", y, 6 * ROW_H + 34)?);
             y += 20;
-            let anki_chk = child(h, w!("BUTTON"), "Enable Anki integration",
+            let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_ANKI_ENABLED, f)?;
             ank.push(anki_chk);
@@ -2259,12 +2316,12 @@ impl SettingsWindow {
                 Some(WPARAM(if form.anki_enabled { 1 } else { 0 })), None);
             y += ROW_H;
             ank.push(label("AnkiConnect URL", y)?);
-            ank.push(child(h, w!("EDIT"), &form.anki_url,
+            ank.push(child(page, w!("EDIT"), &form.anki_url,
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_URL, f)?);
             y += ROW_H;
             ank.push(label("Deck", y)?);
-            let deck = child(h, w!("COMBOBOX"), &form.anki_deck,
+            let deck = child(page, w!("COMBOBOX"), &form.anki_deck,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_ANKI_DECK, f)?;
             ank.push(deck);
@@ -2272,7 +2329,7 @@ impl SettingsWindow {
                 Some(LPARAM(wide(&form.anki_deck).as_ptr() as isize)));
             y += ROW_H;
             ank.push(label("Note type", y)?);
-            let model = child(h, w!("COMBOBOX"), &form.anki_model,
+            let model = child(page, w!("COMBOBOX"), &form.anki_model,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_ANKI_MODEL, f)?;
             ank.push(model);
@@ -2283,29 +2340,33 @@ impl SettingsWindow {
             let add_vk = crate::config::parse_trigger_key(&form.anki_add_key).unwrap_or(0x41);
             ANKI_CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, add_vk))));
             let add_name = crate::config::trigger_key_name(add_vk);
-            ank.push(child(h, w!("BUTTON"), &add_name, WS_TABSTOP,
+            ank.push(child(page, w!("BUTTON"), &add_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_ADD_KEY, f)?);
             y += ROW_H;
-            ank.push(child(h, w!("BUTTON"), "Refresh", WS_TABSTOP,
+            ank.push(child(page, w!("BUTTON"), "Refresh", WS_TABSTOP,
                   PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
-            ank.push(child(h, w!("STATIC"),
+            ank.push(child(page, w!("STATIC"),
                 "Click to load decks and field mappings from Anki",
                 WINDOW_STYLE(0), PAD + 88, y + 2, WIN_W - 2 * PAD - 96, ROW_H, 0, f)?);
             y += ROW_H + 8 + GROUP_GAP;
 
             // ---- Field-map toggle ----
             let toggle_text = field_map_toggle_label(self.field_map_collapsed.get());
-            ank.push(child(h, w!("BUTTON"), toggle_text, WS_TABSTOP,
+            ank.push(child(page, w!("BUTTON"), toggle_text, WS_TABSTOP,
                   PAD, y, 160, ROW_H, ID_FIELD_MAP_TOGGLE, f)?);
             y += ROW_H + 8;
 
             let y_ank = y;
-            y = y_general.max(y_dict).max(y_ocr).max(y_ank);
+            // Window y from here on.
+            y = y_general.max(y_dict).max(y_ocr).max(y_ank) + CONTENT_Y;
             let bottom_y0 = y;
             let mut bottom: Vec<(HWND, i32, i32)> = Vec::new();
 
             // ---- Updates ----
-            let updates_group = group("Updates", y, ROW_H + 24)?;
+            // Stays on `h`, not the pane.
+            let updates_group = child(h, w!("BUTTON"), "Updates",
+                WINDOW_STYLE(BS_GROUPBOX as u32),
+                PAD - 6, y, WIN_W - 2 * PAD, ROW_H + 24, 0, f)?;
             bottom.push((updates_group, PAD - 6, y));
             y += 20;
             let update_btn = child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
@@ -2332,14 +2393,14 @@ impl SettingsWindow {
             bottom.push((quit_btn, PAD, y));
 
             // The band the tabs occupy.
-            let band_h = bottom_y0 - content_y;
+            let band_h = bottom_y0 - CONTENT_Y;
             let _ = SetWindowPos(self.viewport, None, 0, 0,
                 dpi_scale(h, WIN_W), dpi_scale(h, band_h),
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
             let _ = SetWindowPos(self.content, None, 0, 0,
                 dpi_scale(h, WIN_W), dpi_scale(h, band_h),
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            self.sink_viewport();
+            self.place_viewport();
 
             self.anki_static_bottom = y_ank;
             self.bottom_y0 = bottom_y0;
@@ -2362,17 +2423,17 @@ impl SettingsWindow {
 
     /// The controls' current values, as a form.
     pub fn read(&self, template: &SettingsForm) -> SettingsForm {
-        // SAFETY: every id below is a live child of `self.hwnd`, created in
-        // `build` and destroyed only with the window in `Drop`.
+        // SAFETY: every id below is a live descendant of `self.hwnd`, made
+        // in `build` and destroyed only with the window in `Drop`.
         unsafe {
             let h = self.hwnd;
             let checked = |id: i32| -> bool {
-                GetDlgItem(Some(h), id)
+                dlg_item(h, id)
                     .map(|c| SendMessageW(c, BM_GETCHECK, None, None).0 == 1)
                     .unwrap_or(false)
             };
             let combo_index = |id: i32| -> isize {
-                GetDlgItem(Some(h), id)
+                dlg_item(h, id)
                     .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
                     .unwrap_or(-1)
             };
@@ -2381,7 +2442,7 @@ impl SettingsWindow {
                 if i < 0 { fallback } else { *values.get(i as usize).unwrap_or(&fallback) }
             };
             let text_of = |id: i32| -> String {
-                GetDlgItem(Some(h), id).map(|c| window_text(c)).unwrap_or_default()
+                dlg_item(h, id).map(|c| window_text(c)).unwrap_or_default()
             };
             let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
