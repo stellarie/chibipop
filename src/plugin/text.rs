@@ -1,5 +1,73 @@
 //! Plugin text helpers.
 use crate::geom::PhysRect;
+use crate::plugin::host::Host;
+use crate::plugin::manifest::Manifest;
+use crate::plugin::proto::{RecogniseParams, RecogniseResult, Rect};
+use crate::plugin::strikes::Strikes;
+use crate::text::layout::{OcrLine, OcrWord};
+use crate::text::recogniser::Recogniser;
+use anyhow::{bail, Context, Result};
+use base64::Engine;
+use std::cell::RefCell;
+use std::time::Duration;
+use windows::Graphics::Imaging::{
+    BitmapAlphaMode, BitmapEncoder, BitmapPixelFormat, SoftwareBitmap,
+};
+use windows::Security::Cryptography::CryptographicBuffer;
+use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream};
+
+/// Wire rects are image-local.
+fn to_ocr_lines(r: &RecogniseResult) -> Vec<OcrLine> {
+    r.lines
+        .iter()
+        .map(|l| OcrLine {
+            words: l
+                .words
+                .iter()
+                .flatten()
+                .map(|word| OcrWord {
+                    text: word.text.clone(),
+                    rect: PhysRect {
+                        x: word.rect.x,
+                        y: word.rect.y,
+                        w: word.rect.w,
+                        h: word.rect.h,
+                    },
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn encode_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
+    let ibuffer =
+        CryptographicBuffer::CreateFromByteArray(bgra).context("wrapping the pixel buffer")?;
+    // 32bpp BGRA; alpha is junk.
+    let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
+        &ibuffer,
+        BitmapPixelFormat::Bgra8,
+        w,
+        h,
+        BitmapAlphaMode::Ignore,
+    )
+    .context("building a SoftwareBitmap from the capture")?;
+
+    let stream = InMemoryRandomAccessStream::new().context("opening a PNG stream")?;
+    let encoder = BitmapEncoder::CreateAsync(BitmapEncoder::PngEncoderId()?, &stream)
+        .and_then(|op| op.join())
+        .context("creating the PNG encoder")?;
+    encoder.SetSoftwareBitmap(&bitmap).context("handing the encoder its pixels")?;
+    encoder.FlushAsync().and_then(|op| op.join()).context("encoding the PNG")?;
+
+    let size = u32::try_from(stream.Size().context("sizing the PNG")?)
+        .context("the encoded PNG does not fit in a read")?;
+    let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0)?)
+        .context("reading the PNG back")?;
+    reader.LoadAsync(size).and_then(|op| op.join()).context("reading the PNG back")?;
+    let mut out = vec![0u8; size as usize];
+    reader.ReadBytes(&mut out).context("reading the PNG back")?;
+    Ok(out)
+}
 
 pub fn estimate_offset(line: &str, cursor_x: i32, region: PhysRect) -> usize {
     let chars = line.chars().count();
@@ -11,12 +79,6 @@ pub fn estimate_offset(line: &str, cursor_x: i32, region: PhysRect) -> usize {
     let idx = idx.min(chars - 1);
     line.char_indices().nth(idx).map_or(0, |(b, _)| b)
 }
-
-use crate::plugin::host::Host;
-use crate::plugin::manifest::Manifest;
-use crate::plugin::strikes::Strikes;
-use std::cell::RefCell;
-use std::time::Duration;
 
 pub struct PluginText {
     pub host: RefCell<Host>,
@@ -43,14 +105,137 @@ impl PluginText {
     pub fn disabled(&self) -> bool {
         self.strikes.borrow().disabled()
     }
+
+    fn attempt(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+        let png = encode_png(buf, w, h)?;
+        let params = RecogniseParams {
+            image_png: base64::engine::general_purpose::STANDARD.encode(&png),
+            // The image is its own frame.
+            region: Rect { x: 0, y: 0, w, h },
+            scale: 1,
+            language: self.language.clone(),
+            deadline_ms: u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX),
+        };
+        let params = serde_json::to_value(&params).context("encoding the request")?;
+        let v = self.host.borrow_mut().call("text/recognise", params, self.timeout)?;
+        let parsed: RecogniseResult =
+            serde_json::from_value(v).context("response did not match the contract")?;
+        Ok(to_ocr_lines(&parsed))
+    }
+}
+
+impl Recogniser for PluginText {
+    fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+        if self.disabled() {
+            let why = self.strikes.borrow().last_error().unwrap_or("no detail").to_string();
+            bail!("plugin \"{}\" is disabled: {why}", self.name);
+        }
+        match self.attempt(buf, w, h) {
+            Ok(lines) => {
+                self.strikes.borrow_mut().record(true);
+                Ok(lines)
+            }
+            Err(e) => {
+                let mut strikes = self.strikes.borrow_mut();
+                strikes.note(&format!("{e:#}"));
+                if let Some(notice) = strikes.record(false) {
+                    eprintln!("chibipop: {}: {notice}", self.name);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn provides_geometry(&self) -> bool {
+        self.geometry
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::proto::{Line, RecogniseResult, Rect, Word};
+    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
     fn region() -> PhysRect {
         PhysRect { x: 100, y: 200, w: 500, h: 100 }
+    }
+
+    #[test]
+    fn wire_lines_become_ocr_lines() {
+        let r = RecogniseResult {
+            lines: vec![Line {
+                text: "宿舎".into(),
+                words: Some(vec![
+                    Word { text: "宿".into(), rect: Rect { x: 0, y: 0, w: 28, h: 30 } },
+                    Word { text: "舎".into(), rect: Rect { x: 28, y: 0, w: 28, h: 30 } },
+                ]),
+            }],
+        };
+        let lines = to_ocr_lines(&r);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].words.len(), 2);
+        assert_eq!(lines[0].words[1].rect.x, 28);
+    }
+
+    #[test]
+    fn a_text_only_line_yields_no_words() {
+        let r = RecogniseResult {
+            lines: vec![Line { text: "宿舎".into(), words: None }],
+        };
+        assert!(to_ocr_lines(&r)[0].words.is_empty());
+    }
+
+    #[test]
+    fn every_rect_field_survives_the_mapping_unoffset() {
+        let r = RecogniseResult {
+            lines: vec![Line {
+                text: "宿".into(),
+                words: Some(vec![Word {
+                    text: "宿".into(),
+                    rect: Rect { x: 11, y: 22, w: 33, h: 44 },
+                }]),
+            }],
+        };
+        let word = &to_ocr_lines(&r)[0].words[0];
+        assert_eq!(word.text, "宿");
+        assert_eq!(word.rect, PhysRect { x: 11, y: 22, w: 33, h: 44 });
+    }
+
+    #[test]
+    fn line_order_is_kept_and_no_line_is_dropped() {
+        let line = |t: &str| Line { text: t.into(), words: None };
+        let r = RecogniseResult { lines: vec![line("one"), line("two"), line("three")] };
+        assert_eq!(to_ocr_lines(&r).len(), 3);
+    }
+
+    #[test]
+    fn a_reply_with_no_lines_maps_to_no_lines() {
+        assert!(to_ocr_lines(&RecogniseResult { lines: vec![] }).is_empty());
+    }
+
+    #[test]
+    fn a_plugin_can_stand_in_as_a_recogniser() {
+        fn boxed(p: PluginText) -> Box<dyn Recogniser> {
+            Box::new(p)
+        }
+        let _ = boxed;
+    }
+
+    #[test]
+    #[ignore = "needs a WinRT apartment, run by hand"]
+    fn the_encoder_produces_a_real_png() {
+        // SAFETY: this thread has not initialised an apartment, and
+        // BitmapEncoder needs one. This is the only test in the lib binary
+        // that reaches WinRT, and it is ignored, so nothing else has
+        // established a conflicting apartment on this thread.
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.unwrap();
+        let png = encode_png(&[0xFFu8; 8 * 8 * 4], 8, 8).expect("encode");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]
