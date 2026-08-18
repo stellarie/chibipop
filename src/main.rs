@@ -93,11 +93,28 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Discover or test plugins.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
     /// Test fixture plugin.
     #[command(hide = true)]
     PluginEcho {
         #[arg(default_value = "ok")]
         mode: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// List discovered plugins.
+    List,
+    /// Send one test request.
+    Test {
+        name: String,
+        #[arg(long)]
+        image: PathBuf,
     },
 }
 
@@ -436,6 +453,16 @@ fn main() -> Result<()> {
                 counts.terms
             );
             Ok(())
+        }
+        Command::Plugin { cmd } => {
+            let root = chibipop::paths::beside_exe("plugins");
+            let code = match cmd {
+                PluginCmd::List => chibipop::plugin::cli::list(&root),
+                PluginCmd::Test { name, image } => {
+                    chibipop::plugin::cli::test_one(&root, &name, &image)
+                }
+            };
+            std::process::exit(code);
         }
         Command::PluginEcho { mode } => chibipop::plugin::echo::run(&mode),
     }

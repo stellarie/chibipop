@@ -1,4 +1,6 @@
 //! The plugin subsystem.
+pub mod cli;
+pub mod discover;
 pub mod echo;
 pub mod host;
 pub mod manifest;
