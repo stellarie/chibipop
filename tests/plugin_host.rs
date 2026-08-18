@@ -5,7 +5,7 @@ use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-/// Watches one pid across a kill.
+/// Watches a pid across a kill.
 struct Probe(HANDLE);
 
 impl Probe {
@@ -120,7 +120,7 @@ fn dropping_the_host_kills_the_grandchild_too() {
     assert!(!probe.alive(), "the grandchild {pid} outlived its host");
 }
 
-/// The host runs on a worker thread.
+/// It runs on a worker thread.
 #[test]
 fn a_host_can_still_move_between_threads() {
     fn needs_send<T: Send>() {}

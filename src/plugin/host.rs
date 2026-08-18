@@ -305,14 +305,14 @@ mod tests {
         assert_eq!(outbox.take(), None);
     }
 
-    /// The deaf-plugin leak, in miniature.
+    /// The deaf-plugin leak.
     #[test]
     fn an_abandoned_request_is_dropped_rather_than_left_queued() {
         let outbox = Outbox::default();
         assert!(outbox.put(vec![0u8; 256 * 1024]));
         outbox.clear();
         outbox.close();
-        // Never assert_eq on the payload.
+        // A dump would be 256 KiB.
         assert!(outbox.take().is_none());
     }
 
