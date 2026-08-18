@@ -398,7 +398,57 @@ the overlay again on some cheaper grounds, this is the predicate it would want b
 
 ---
 
-## 11. The settings window is height-constrained and cannot scroll
+## 11. ~~The settings window is height-constrained and cannot scroll~~ — DONE
+
+> **DONE 2026-08-19**, built across the scrollable-settings-window plan (commits `17cc8ea` spike,
+> `75c8f0a` viewport, `2eedf8b`+`db95d84` reparenting, `9f59d03` scrollbar, `4b87873` pinned button
+> row). The window now carries a clipping viewport and a scrollable content pane under a fixed
+> bottom row — the first "If picked up" option below — **plus** the bottom row is pinned to the
+> window's real client bottom (`place_bottom`) rather than laid out at the cross-tab `max()`'s own
+> `y`, so `fit_to`'s clamp now costs only visibility, recovered by scrolling, never the ability to
+> reach Apply. The window's *target* height is still the cross-tab `max()` — that deliberately did
+> not change, since that is the number `fit_to` clamps in the first place. The
+> `y = y_general.max(y_dict).max(y_ocr).max(y_ank)` line this item cites has moved twice since:
+> **`settings_window.rs:2169`** here, corrected to **2170** while this plan was scoped, and now
+> **`settings_window.rs:2555`** (`+ CONTENT_Y` was folded in along the way) — the file keeps
+> growing under a change like this, so re-grep rather than trust either number.
+>
+> **Two more of this item's own figures were wrong, both corrected by measuring a running window,
+> not by arguing with the table below.** The table gives Dictionaries as 364 clean / 448 worst
+> case; a real run measured **412**, because only the `library_empty` branch was firing on that
+> machine — 364 + 48 (that branch's cost) = 412 exactly, and the further +36 the stale-entries
+> branch would add reaches the table's own 448. The three figures agree; 412 is just a real machine
+> caught between the table's two extremes. And the margin the clean-config figure implies against
+> the governing 426 (426 − 364 = **62**) is not what a real window shows: measured directly against
+> the real Dictionaries figure, it is **426 − 412 = 14px** — a materially thinner cushion than the
+> table alone would suggest.
+>
+> **"The two want deciding together", below — resolved, see item 12.** Both items closed in this
+> same round, and item 12's own closure found the coupling this sentence feared never held: its
+> fix spent none of this item's headroom.
+>
+> Tasks 4-6 verified each of their changes with `chibipop settings --audit` (Task 0's tool, added
+> mid-plan; see [`REFERENCE.md`](REFERENCE.md)) — a JSON dump of the window's control tree, diffed
+> before and after. Tasks 1-3, which predate that tool, each built and threw away their own
+> harness instead.
+
+### Why `ScrollWindowEx` was rejected
+
+The first attempt (`17cc8ea`, a throwaway spike, never shipped) tried the obvious Win32 primitive
+instead of a clipping parent, so nobody has to re-run the experiment to learn why it does not work
+here.
+
+- **`SW_SCROLLCHILDREN` moves hidden children too, not only the visible ones.** Every scroll
+  displaced every tab's controls, including tabs `SW_HIDE`n at the time. After three scrolls of
+  General, switching to Dictionaries showed it **120px out of place**, its list box painted
+  straight over the tab strip — and switching back left the strip itself overpainted and
+  unclickable.
+- **`prcClip` clips the blit, not the children.** A child scrolled above the clip band keeps
+  drawing at its new position regardless, over the tab strip, because the flag only limits what
+  `ScrollWindowEx` itself paints, not where a repositioned child is free to paint on its own.
+- **Neither is fixable without a clipping parent** — a real window whose client area *is* the
+  scrolling band, so its children are clipped for free and cannot paint outside it. That parent is
+  the viewport this item shipped with.
 
 **Raised 2026-08-11 by the per-character-retrigger / OCR-language branch, which nearly tripped it
 and was rerouted instead of fixing it.** Not a regression — this ceiling predates the branch and
@@ -488,9 +538,13 @@ the "one tab grows, every tab pays" coupling that makes this so easy to trip.
 **Note the interaction with item 12** — that fix makes the General tab ~38px taller, which spends
 headroom this item says is already thin at 150%. The two want deciding together.
 
+**Resolved 2026-08-19.** Both were closed in the same round. Item 12's own closure measured the
+coupling this paragraph predicts and found it did not hold — see the DONE note at the top of this
+item and item 12's own closure below.
+
 ---
 
-## 12. The General tab's "Popup" group box is 32px too short for its contents
+## 12. ~~The General tab's "Popup" group box is 32px too short for its contents~~ — DONE
 
 **Present in shipped v0.6.0. Spotted 2026-08-11 by the per-character-retrigger / OCR-language
 branch and correctly left alone — it was out of that branch's scope and is purely cosmetic.**
@@ -498,6 +552,34 @@ branch and correctly left alone — it was out of that branch's scope and is pur
 The `Popup` group box on the General tab is drawn 238px tall but encloses 270px of controls, so the
 fourth checkbox — **`Hide the popup from screen capture`** — draws entirely **below its own frame**,
 and the third (`Show related words beside the popup`) has its bottom 8px clipped by it too.
+
+> **DONE 2026-08-19**, commit `e0a5c09` (`fix(ui): make the Popup group box tall enough for its
+> four checkboxes`), `settings_window.rs:2245` (not the `:1600` cited below — the file has grown):
+>
+> ```rust
+> // before
+> gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?);
+> // after
+> gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30)?);
+> ```
+>
+> Height **238 → 276**, exactly this item's own "If picked up" arithmetic below. Proven by rects
+> from `chibipop settings --audit`, not just arithmetic: the fourth checkbox (id 110) sits at
+> `y=384, h=24`, bottom **408**, unmoved by the fix. The group box now bottoms at **414**
+> (`y=138, h=276`) — the checkbox sits **6px inside** the frame, where it used to sit **32px past**
+> it (old frame bottom 376 against the same 408 — this item's own title). The third checkbox moves
+> from 8px clipped to 30px inside, matching the "8px clipped" claim above exactly.
+>
+> **This item's central prediction, below, did not hold — say so plainly.** It claims this fix
+> "lands squarely on item 11", adding ~38px to the General tab and spending item 11's headroom.
+> The audit diff between the two builds is **ten lines total, all `"h": 238` → `"h": 276` on this
+> one group box**, once per dump, across all five dumps — nothing else in any hunk. `group_start`'s
+> height argument only sizes the drawn `BS_GROUPBOX` rectangle; every control's position comes from
+> the hand-threaded `y` counter, which never reads that height back. So the frame can grow to match
+> its own contents without moving `y_general`, any checkbox, or anything on another tab. **Items 11
+> and 12 shared a piece of reasoning that turned out to be false**: they did not, in the end, need
+> deciding together, and this fix shipped spending none of item 11's headroom. See item 11's own
+> DONE note.
 
 ### The arithmetic, so nobody has to re-derive it
 
@@ -531,6 +613,11 @@ matching height is **276**, i.e. **+38px** on today's 238.
 **That +38px lands squarely on item 11.** It makes the General tab, already the tallest, taller
 still, and General is what sets the bottom row's position on every tab. Fix the scrolling or the
 per-tab layout first, or fix both in one round; do not spend the headroom without looking at it.
+
+**Resolved 2026-08-19 — this did not hold.** See the DONE note above: the audit diff proved growing
+this frame moves nothing else, on this tab or any other. Item 11 was fixed in the same round anyway
+(the real fix, a scrollable viewport), so the question this paragraph raises never had to be
+answered on its own terms.
 
 ---
 

@@ -96,7 +96,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **928** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 on 2026-08-18; see below) |
+| Rust tests | **all green**, **928** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 on 2026-08-18, reconfirmed 928 on 2026-08-19; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -124,6 +124,12 @@ that is the difference between the two rows and it is deliberate.
 > ignored**, and that figure is close enough to the true **928 passed, 2 ignored** to read as a
 > whole-suite result — which is why the trap works. A partial run does not announce itself as
 > partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
+>
+> **Reconfirmed 2026-08-19, from a single bare `cargo test`.** Neither figure needed a separate
+> `--lib` run: bare `cargo test`'s own per-target output prints the lib target's result
+> (`910 passed; 0 failed; 1 ignored`) as one of its eight lines, on the way to the same run's
+> whole-suite **928**. No sixth move — the scrollable-settings-window plan added no test to any
+> target, lib included.
 >
 > **The lib figure has now moved five times: 891 to 895, 895 to 899, 899 to 906, 906 to 907, and
 > 907 to 910 this one.** Task 7 added four unit tests for `Strikes` in `src/plugin/strikes.rs`;
@@ -509,6 +515,18 @@ the existing `manifest::parse` before running. Three runs, all **928**: eight ta
 raw, **0** on the bin target — both counted fresh, not assumed, all three accepted errors still at
 their original sites (`deconj.rs:78`, `model.rs:78`, `render.rs:699`), none in the three files this
 task touched.
+
+**928 → 928 across the whole scrollable-settings-window plan (`9425cdf`..`e0a5c09`, Tasks 0-6,
+2026-08-18/19) — not a finding, and worth recording precisely because it stayed flat.** Seven tasks
+touched `src/ui/settings_window.rs`, and Task 0 added a new `audit.rs`; none added or removed a
+test, by explicit instruction in every brief, since the count is treated as an exact baseline on
+this branch rather than a floor. Each task's own report measured **928 passed, 0 failed, 2 ignored,
+8 targets** after its own commit, and the doc round that closes the plan (`docs/BACKLOG.md` §11-12)
+re-ran a bare `cargo test` once more against the plan's tip (`e0a5c09`) rather than trust seven
+separate reports: still **928**, the same eight-way split, **910 + 0 + 1 + 2 + 7 + 0 + 8 + 0** —
+identical to the row directly above, control included, since neither round touched a test. Clippy
+was not re-run in the doc round; no `src/` file changed there, and no task in the plan reported the
+raw-3/bin-0 counts moving either.
 
 > [!warning] A red `dropping_the_host_kills_the_grandchild_too` **wedges the whole run**, and the
 > test binary is not the thing that hangs
@@ -1612,6 +1630,85 @@ mismatch (BACKLOG item 35) alike. The code alone never says which one regressed.
 
 **Cleanup.** Delete the `plugins` folder created for setup. It ships with no release package,
 `target/` is gitignored regardless, and nothing else in the tree depends on it.
+
+### 1.26 The scrollable settings window — added 2026-08-19, not run
+
+**Why this exists.** Tasks 3-6 of the scrollable-settings-window plan (`BACKLOG.md` §11-12) each
+verified their own piece during the build, against a standalone binary and a synthetically shrunk
+viewport — real measurements, but never run together as one pass, and never against a live window
+at real display scaling. This collects them into one checklist so a future change to this window
+has one page to run rather than four task reports to re-read.
+
+> [!warning] Not run as written. Read the per-step notes for what already has build-time evidence
+> and what is genuinely unexercised. Step 6 cannot be automated at all; step 7 was deliberately
+> deferred and is owed — see `progress.md`'s log for why.
+
+**Setup.** `./target/release/chibipop.exe settings`. The window is not user-resizable — its size is
+always computed from content and clamped to the work area by `fit_to` — so step 1's shrunk-window
+half, and steps 2-4 and 6 in full, need the viewport shorter than its tallest tab's content before
+there is anything to test. Two ways to
+get there: run step 7 first (150% scaling makes `fit_to`'s own clamp bite for real), or resize the
+window from a second process with `SetWindowPos`, which is what Tasks 4 and 5 did throughout the
+build — see their reports for the exact call shape. Either way, **resize the window, not the scroll
+info**: a scroll range written in from outside is read back by the writer, never by chibipop, so
+every scroll clamps to 0 for a reason that has nothing to do with the window under test (Task 4's
+trap, hit once during the build).
+
+1. **Every tab shows Apply at the same y.** Switch through all four tabs at the window's natural
+   size and read the `y` of the control with id **100** (`Apply & Restart`) on each —
+   `chibipop settings --audit` reports this directly, as `rect.y`, without opening a visible window
+   at all. Expect the **same y on all four**. Measured during the build, natural size: **548, 548,
+   548, 548**. Repeat after using Setup to shrink the window by 200px: expect again the same y on
+   all four, lower than before. Measured during the build: **348, 348, 348, 348**.
+2. **A tab taller than the viewport gets a scrollbar; a shorter one does not.** At natural size no
+   tab can ever exceed the viewport — the viewport is built from the same cross-tab `max()` that
+   governs the window, so this is a structural guarantee, not a per-machine measurement — and no
+   scrollbar should appear on any tab. Shrink the window below the tallest tab's content height
+   (Setup) and switch to that tab: a vertical scrollbar appears and the client area narrows by
+   `SM_CXVSCROLL`. Measured during the build: client width **470 → 453** (17px) the moment the bar
+   appeared. Switch to a tab shorter than the shrunk viewport: the bar disappears again.
+3. **The wheel scrolls the content, and clamps at both ends without drift.** With the window shrunk
+   (Setup) and a tall tab selected, hover the content pane and turn the wheel. One notch should move
+   the content **three lines** — measured during the build, one line is 20px logical, so one notch
+   is 60px. Keep scrolling past the end: the content must stop at the true maximum and go no
+   further. Measured during the build, 40 consecutive line-downs drove it to exactly the clamped
+   maximum and no further, and 80 line-ups symmetrically returned to exactly the top — over-scrolling
+   past either end does not drift past it, and repeating the same sequence reproduced the same
+   numbers every time.
+4. **Switching tabs resets the scroll position to the top.** Scroll a tab down, click a different
+   tab, then click back. The first tab must be back at its top position, not where it was left.
+   Measured during the build: a tab scrolled to its maximum returned to position 0 on re-selection.
+5. **Every control on every tab is where it was, and still responds — the reparenting check.** This
+   is Task 3's own verification and is worth re-running after any further change to this file: on
+   each tab, operate a control with a visible effect (the Hold key radio enabling the trigger-key
+   button on General; selecting a row in the Dictionaries lists to enable Move up/down; expanding
+   the Anki field map) and confirm it responds, not silently swallowed by the viewport or content
+   pane. Measured during the build with `ChildWindowFromPointEx`, resolved against the window tree
+   rather than the desktop: **0 of 26/21/23/21/68** controls swallowed across General, Dictionaries,
+   OCR/Debug, Anki and Anki expanded. `chibipop settings --audit`'s `tab_ring` / `tab_ring_reverse`,
+   diffed against a known-good dump, is the fast version of this same check, though it proves the
+   Tab-key ring rather than the mouse-hit path.
+6. **Drag the scrollbar thumb by hand.** With the window shrunk (Setup) and the bar visible, grab
+   the thumb and drag it up and down. The content must track the drag smoothly and stay wherever it
+   is released. **This step cannot be automated or verified synthetically, and that is a property of
+   the mechanism, not of this harness.** `WM_VSCROLL` with `SB_THUMBTRACK` reads `nTrackPos`, a
+   field only the scroll bar's own thumb-drag code ever sets — Task 4 confirmed a synthetic
+   `WM_VSCROLL` correctly does nothing, because it cannot populate that field. A human at the
+   keyboard is the only instrument that can exercise this arm.
+7. **At 150% display scaling, the Apply row is reachable on every tab.** Change Windows display
+   scaling to 150%, restart chibipop, and repeat steps 1-4. Apply must be visible or reachable by
+   scrolling on every tab, never clipped off the bottom of the screen with no way down to it.
+   **This step is owed, not run.** It was deliberately not attempted anywhere in this plan — display
+   scaling is a system-wide setting, not something to flip while oniichan was away from the
+   keyboard. `BACKLOG.md` §11 records that headroom at 150% was already thin before this plan; this
+   is the step that confirms whether the fix actually holds there.
+
+**What was measured during the build, for context — not a substitute for running this.** Steps 1-2
+came from Task 5, step 5 from Task 3, steps 3-4 from Task 4, each against a standalone, throwaway
+binary and config — never oniichan's install — with the window pinned off-screen or driven by
+`PostMessage`/`SetWindowPos` rather than a real mouse. None of it was run as this checklist, end to
+end, on a live window with a human watching. That is what actually running this item still buys,
+and step 6 cannot be bought any other way.
 
 ## Tier 2 — mostly automatable (~5 min)
 
