@@ -1406,3 +1406,31 @@ direction ("manifest claims no geometry, the response carries words"). The two b
 symmetric, so the code change is small; the reason only one shipped is that only one direction
 had a fixture to expose it — `plugin-echo`'s `text/recognise` reply always carries `words`, so
 nothing in this branch's tests could have failed on the missing half.
+
+---
+
+## 36. A blank region is not a protocol violation — **FIXED 2026-08-19**
+
+> **Fixed in `31c7ca7`, the day it was raised.** `test_one` decided whether a plugin had
+> honoured its `provides_geometry` claim with `parsed.lines.iter().any(|l|
+> l.words.is_some())`. `.any()` over an empty `Vec` returns `false`, so a blank region —
+> correctly reported as zero lines — was indistinguishable from a plugin that claimed
+> geometry and silently withheld it. Both exited **1**, the code this command's contract
+> reserves for the plugin author's fault.
+>
+> The check is now `violates_geometry(claimed, r)`, gated on `r.lines.is_empty()` before
+> the `.any()` call, with three unit tests over the predicate. Proven against the real
+> meikiocr plugin, both cases in one session: `blank-500x100.png` now exits 0 with 0
+> lines and no accusation; `ref-line.png` still exits 0 with its 23-word line.
+
+**Found 2026-08-19 by the controller, running the real meikiocr plugin against a blank
+region — not by anything in the suite.** It survived Task 9's review, that task's fix
+round, and its scoped re-review, because every test written against this check pointed
+at an image that had text in it. The general shape is worth naming: a `.any()` predicate
+over a collection that can legitimately be empty makes "no matches" and "nothing to
+match against" the same `false`, unless the empty case is excluded first, explicitly.
+
+Item **35**, raised the day before against this same function, is the check's other gap
+— the missing reverse direction, `!claimed && got`. That item's code quote and line
+citation were not re-verified against this fix and may now be stale; item 35 itself
+stays open, per this plan.
