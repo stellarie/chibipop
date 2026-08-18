@@ -1,8 +1,5 @@
-//! Plugin text becomes a span.
-use crate::geom::{PhysPoint, PhysRect};
-use crate::plugin::proto::{RecogniseResult, Rect};
-use crate::text::layout::TextGeom;
-use crate::text::TextSpan;
+//! Plugin text helpers.
+use crate::geom::PhysRect;
 
 pub fn estimate_offset(line: &str, cursor_x: i32, region: PhysRect) -> usize {
     let chars = line.chars().count();
@@ -13,63 +10,6 @@ pub fn estimate_offset(line: &str, cursor_x: i32, region: PhysRect) -> usize {
     let idx = (dx * chars as i64 / region.w as i64) as usize;
     let idx = idx.min(chars - 1);
     line.char_indices().nth(idx).map_or(0, |(b, _)| b)
-}
-
-fn to_screen(r: Rect, region: PhysRect, scale: i32) -> PhysRect {
-    let s = scale.max(1);
-    PhysRect {
-        x: region.x + r.x / s,
-        y: region.y + r.y / s,
-        w: (r.w / s).max(1),
-        h: (r.h / s).max(1),
-    }
-}
-
-pub fn span_from_lines(
-    r: &RecogniseResult,
-    cursor: PhysPoint,
-    region: PhysRect,
-    scale: i32,
-) -> Option<TextSpan> {
-    let line = r.lines.first()?;
-    if line.text.is_empty() {
-        return None;
-    }
-    let Some(words) = line.words.as_ref() else {
-        let off = estimate_offset(&line.text, cursor.x, region);
-        return Some(TextSpan {
-            text: line.text.clone(),
-            cursor_byte_offset: off,
-            anchor: region,
-            geom: vec![],
-        });
-    };
-    let geom: Vec<TextGeom> = words
-        .iter()
-        .map(|w| TextGeom {
-            char_count: w.text.chars().count(),
-            rect: to_screen(w.rect, region, scale),
-        })
-        .collect();
-    let mut off = 0usize;
-    let mut anchor = region;
-    for (w, g) in words.iter().zip(&geom) {
-        if cursor.x >= g.rect.x && cursor.x < g.rect.x + g.rect.w {
-            anchor = g.rect;
-            break;
-        }
-        off += w.text.len();
-    }
-    let mut off = off.min(line.text.len());
-    while off > 0 && !line.text.is_char_boundary(off) {
-        off -= 1;
-    }
-    Some(TextSpan {
-        text: line.text.clone(),
-        cursor_byte_offset: off,
-        anchor,
-        geom,
-    })
 }
 
 use crate::plugin::host::Host;
@@ -108,7 +48,6 @@ impl PluginText {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::proto::{Line, Word};
 
     fn region() -> PhysRect {
         PhysRect { x: 100, y: 200, w: 500, h: 100 }
@@ -143,52 +82,5 @@ mod tests {
     #[test]
     fn an_empty_line_estimates_zero() {
         assert_eq!(estimate_offset("", 300, region()), 0);
-    }
-
-    #[test]
-    fn geometry_maps_image_pixels_back_to_the_screen() {
-        let r = RecogniseResult {
-            lines: vec![Line {
-                text: "宿舎に".into(),
-                words: Some(vec![Word {
-                    text: "宿舎".into(),
-                    rect: Rect { x: 0, y: 0, w: 112, h: 60 },
-                }]),
-            }],
-        };
-        let span =
-            span_from_lines(&r, PhysPoint { x: 110, y: 210 }, region(), 2).unwrap();
-        assert_eq!(span.geom[0].rect, PhysRect { x: 100, y: 200, w: 56, h: 30 });
-        assert_eq!(span.geom[0].char_count, 2);
-        assert_eq!(span.anchor, span.geom[0].rect);
-    }
-
-    #[test]
-    fn the_geometry_offset_always_returns_a_char_boundary() {
-        let r = RecogniseResult {
-            lines: vec![Line {
-                text: "宿舎xに戻る".into(),
-                words: Some(vec![
-                    Word { text: "宿舎".into(), rect: Rect { x: 0, y: 0, w: 100, h: 60 } },
-                    Word { text: "に戻る".into(), rect: Rect { x: 100, y: 0, w: 150, h: 60 } },
-                ]),
-            }],
-        };
-        for x in 0..700 {
-            let span = span_from_lines(&r, PhysPoint { x, y: 210 }, region(), 1).unwrap();
-            let off = span.cursor_byte_offset;
-            assert!(span.text.is_char_boundary(off), "x={x} off={off}");
-        }
-    }
-
-    #[test]
-    fn a_text_only_line_yields_empty_geometry() {
-        let r = RecogniseResult {
-            lines: vec![Line { text: "宿舎に戻る".into(), words: None }],
-        };
-        let span =
-            span_from_lines(&r, PhysPoint { x: 350, y: 210 }, region(), 2).unwrap();
-        assert!(span.geom.is_empty());
-        assert_eq!(span.anchor, region());
     }
 }

@@ -9,7 +9,7 @@ use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
     tile_forward, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
 };
-use crate::text::provider::TextRead;
+use crate::text::recogniser::Recogniser;
 use crate::text::TextSpan;
 use anyhow::{Context, Result};
 use std::mem::size_of;
@@ -257,8 +257,27 @@ fn language_action(current: &str, requested: &str, available: impl FnOnce() -> b
     }
 }
 
-pub struct OcrTextSource {
+/// The built-in Windows engine.
+pub struct WindowsOcr {
     engine: OcrEngine,
+}
+
+impl WindowsOcr {
+    pub fn new(language: &str) -> Result<Self> {
+        Ok(WindowsOcr { engine: make_engine(language)? })
+    }
+}
+
+impl Recogniser for WindowsOcr {
+    fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+        recognise(&self.engine, buf, w, h)
+    }
+    fn name(&self) -> &str { "windows-ocr" }
+    fn provides_geometry(&self) -> bool { true }
+}
+
+pub struct OcrTextSource {
+    recogniser: Box<dyn Recogniser>,
     settings: SettingsSnapshot,
     language: String,
 }
@@ -270,10 +289,10 @@ impl OcrTextSource {
         init_dpi_awareness()?;
         // Else CO_E_NOTINITIALIZED.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
-        let engine = make_engine(language)?;
+        let recogniser = Box::new(WindowsOcr::new(language)?);
         let settings =
             SettingsSnapshot { max_passes, prefer_vertical, capture, scan_alphanumeric };
-        Ok(OcrTextSource { engine, settings, language: language.to_string() })
+        Ok(OcrTextSource { recogniser, settings, language: language.to_string() })
     }
 
     /// Swap in new OCR settings.
@@ -284,9 +303,9 @@ impl OcrTextSource {
             LangAction::NoPack => {
                 eprintln!("chibipop: no {language} recogniser; keeping {}", self.language);
             }
-            LangAction::Swap => match make_engine(language) {
-                Ok(engine) => {
-                    self.engine = engine;
+            LangAction::Swap => match WindowsOcr::new(language) {
+                Ok(built) => {
+                    self.recogniser = Box::new(built);
                     self.language = language.to_string();
                 }
                 Err(e) => eprintln!(
@@ -298,9 +317,9 @@ impl OcrTextSource {
         self.settings.apply(max_passes, prefer_vertical, capture, scan_alphanumeric);
     }
 
-    /// The engine from `new`.
-    pub fn engine(&self) -> &OcrEngine {
-        &self.engine
+    /// The engine now in use.
+    pub fn recogniser(&self) -> &dyn Recogniser {
+        self.recogniser.as_ref()
     }
 
     /// Lines plus the outcome.
@@ -347,7 +366,7 @@ impl OcrTextSource {
         factor: i32,
     ) -> Result<(Vec<OcrLine>, Capture)> {
         let cap = capture_upscaled_by(region, factor)?;
-        let raw = recognise(&self.engine, &cap.buf, cap.w, cap.h)?;
+        let raw = self.recogniser.recognise(&cap.buf, cap.w, cap.h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
         let lines = raw
             .into_iter()
@@ -363,11 +382,6 @@ impl OcrTextSource {
             })
             .collect();
         Ok((lines, cap))
-    }
-
-    /// Span plus orientation.
-    pub fn resolve_at(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
-        Ok(self.resolve_at_verbose(cursor)?.1)
     }
 
     /// Tiled, scan rects dropped.
@@ -479,7 +493,9 @@ impl OcrTextSource {
     ) -> Result<Vec<OcrWord>> {
         let cap = capture_upscaled_by(tile, UPSCALE)?;
         let origin = PhysPoint { x: tile.x, y: tile.y };
-        let lines: Vec<OcrLine> = recognise(&self.engine, &cap.buf, cap.w, cap.h)?
+        let lines: Vec<OcrLine> = self
+            .recogniser
+            .recognise(&cap.buf, cap.w, cap.h)?
             .into_iter()
             .map(|l| OcrLine {
                 words: l
@@ -501,15 +517,6 @@ impl OcrTextSource {
     pub fn cursor(&self) -> Result<PhysPoint> {
         cursor_position()
     }
-}
-
-impl crate::text::provider::TextProvider for OcrTextSource {
-    fn read_at(&self, cursor: PhysPoint, collect_scan: bool) -> Result<TextRead> {
-        let (resolved, scan) = self.resolve_at_tiled_scanned(cursor, collect_scan)?;
-        Ok(TextRead { resolved, scan })
-    }
-    fn name(&self) -> &str { "windows-ocr" }
-    fn provides_geometry(&self) -> bool { true }
 }
 
 #[cfg(test)]

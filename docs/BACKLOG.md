@@ -119,11 +119,17 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
   runs a root `build.rs` by convention. `rc.exe` must still be run from PowerShell; MSYS2 mangles
   its `/flag` arguments under git-bash.
 - ~~**`TextSource::at` / `resolve_at` are unreachable *and* single-pass.**~~ **DONE** — `TextSource`
-  is deleted. `TextProvider::read_at` (`src/text/provider.rs`) replaces it, `OcrTextSource`
-  implements it over the multi-pass `resolve_at_tiled_scanned`, and — the part that actually
-  proves reachable, not just the `impl` block existing — `src/app.rs`'s `resolve_trigger` calls
-  it through the trait at both its call sites. `docs/REGRESSION.md` §1.24 is the human check that
-  the swap changed nothing on screen.
+  is deleted, and so is the `TextProvider` that replaced it. **Reworded 2026-08-19**: the seam
+  moved one layer down, so the earlier proof of reachability — *"`src/app.rs`'s `resolve_trigger`
+  calls it through the trait"* — no longer describes the code. What is true now: the trait is
+  `text::recogniser::Recogniser` (`src/text/recogniser.rs`), `WindowsOcr` implements it, and the
+  live OCR path calls it at both of its capture sites, `recognise_at_capture` and `words_in`
+  inside `src/text/ocr.rs`. That is the part that actually proves reachable, not just the `impl`
+  block existing. `src/app.rs`'s `resolve_trigger` now calls the multi-pass
+  `resolve_at_tiled_scanned` concretely at both its call sites, which is what reaches that path.
+  The single-pass `resolve_at` is deleted too — see item 34. `docs/REGRESSION.md` §1.24 is the
+  human check that the swap changed nothing on screen, and it is **still owed**: it covers this
+  re-cut as well as the one it was written for.
 - **Ruby hover on pass 1.** `nearest_line` keeps the tiled path from splicing furigana, but
   `hit_scan` on pass 1 will happily resolve a ruby character if the cursor is nearer to it than
   to the base text. Reproduced live at (3550,1450) → `ん` from `かんたん`.
@@ -1257,7 +1263,24 @@ one hiding somewhere else.
 
 ---
 
-## 31. `TextProvider` is shaped as "do the whole lookup", not "supply text"
+## 31. ~~`TextProvider` is shaped as "do the whole lookup", not "supply text"~~ — **FIXED 2026-08-19**
+
+> **Fixed by the re-cut this item predicted.** `TextProvider`, `TextRead` and `read_at` are
+> deleted, and `src/text/provider.rs` with them. The trait is now
+> `text::recogniser::Recogniser` (`src/text/recogniser.rs`):
+> `recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>>`, plus `name` and
+> `provides_geometry`. That is the shape `text::ocr::recognise` already had, and it is exactly
+> what a plugin can promise — pixels in, lines out.
+>
+> **Everything the item said a plugin cannot supply now sits above the seam and never reaches
+> one.** Capture, tiling, orientation, `nearest_line`, hit scan and the `ScanRect` debug overlay
+> all stay inside `OcrTextSource`. `src/app.rs`'s `resolve_trigger` calls the concrete
+> `resolve_at_tiled_scanned` again, which is simpler than the trait call it replaced.
+>
+> `OcrTextSource` holds `Box<dyn Recogniser>` and the built-in engine is `WindowsOcr`, so the
+> two live call sites — `recognise_at_capture` and `words_in` — are the only places OCR happens.
+> Net effect on `src/` and `tests/`: **+101 lines, −193**. `tests/ocr_fixture.rs` proves the
+> delegation is faithful against the real Windows engine and the committed BGRA fixture.
 
 **Raised 2026-08-18 by the whole-branch review. This is the branch's known seam, expected to be
 re-cut on first contact — not a hidden defect.**
@@ -1320,7 +1343,16 @@ blocks and the channel never grows past a small constant.
 
 ---
 
-## 33. `span_from_lines` reads `lines.first()` only and ignores `cursor.y`
+## 33. ~~`span_from_lines` reads `lines.first()` only and ignores `cursor.y`~~ — **DISSOLVED 2026-08-19**
+
+> **Dissolved, not repaired.** `span_from_lines` is deleted, together with its private `to_screen`
+> helper and its three tests. The seam moved down to `Recogniser` (item 31), so a plugin now
+> returns `Vec<OcrLine>` and line choice belongs to the layer above — where
+> `text::layout::nearest_line` already does exactly this job, by geometry, with 7 tests.
+>
+> The item asked for `span_from_lines` to be given `nearest_line`'s behaviour. Deleting the caller
+> was cheaper than duplicating the callee. `estimate_offset` and `PluginText` are untouched and
+> still have no production caller; item 30 tracks that, and Task 4 of the current plan closes it.
 
 **Raised 2026-08-18 by the whole-branch review.**
 
@@ -1344,7 +1376,19 @@ one; nothing today covers that shape.
 
 ---
 
-## 34. The inherent single-pass `resolve_at` on `OcrTextSource` is dead
+## 34. ~~The inherent single-pass `resolve_at` on `OcrTextSource` is dead~~ — **FIXED 2026-08-19**
+
+> **Deleted, after the fresh grep this item asked for.** `.resolve_at(` returned nothing anywhere
+> in `src/` or `tests/` — only the definition — so `resolve_at` and its doc comment are gone. The
+> differently-named `resolve_at_tiled`, `resolve_at_tiled_scanned` and `resolve_at_verbose` are
+> untouched and still live.
+>
+> **One claim in the same round's design note was wrong, and is corrected here.** That note listed
+> `OcrTextSource::engine()` as a second zero-caller deletion. It had one caller:
+> `tests/ocr_fixture.rs`, which reached through it to run the real engine. `engine()` is gone all
+> the same — it leaked a raw WinRT `OcrEngine` out of a type that no longer holds one — and
+> `recogniser(&self) -> &dyn Recogniser` replaces it. The fixture test now exercises the built-in
+> path **through the trait**, which is a better regression check than the one it replaced.
 
 **Raised 2026-08-18 by the whole-branch review. Task 2's review flagged this as a deferred minor
 and named the whole-branch review as the place to triage it.**

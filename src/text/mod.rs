@@ -3,7 +3,7 @@
 pub mod layout;
 pub mod capture;
 pub mod ocr;
-pub mod provider;
+pub mod recogniser;
 
 use crate::geom::PhysRect;
 use crate::text::layout::TextGeom;
