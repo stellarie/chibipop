@@ -752,7 +752,10 @@ unsafe fn child(
 unsafe fn dlg_item(root: HWND, id: i32) -> WinResult<HWND> {
     // SAFETY: `root` is the settings window's live handle; every `GetDlgItem`
     // result is checked, so a missing pane or control yields `Err` here rather
-    // than a dangling handle. No id is used by both the window and a pane.
+    // than a dangling handle. Every caller passes a named `ID_*`, each unique
+    // and non-zero. The id 0 that group boxes and labels share does sit on
+    // both the window and a pane, but nothing ever looks 0 up, so searching
+    // the window first cannot return the wrong control.
     unsafe {
         if let Ok(c) = GetDlgItem(Some(root), id) {
             return Ok(c);
@@ -1695,15 +1698,21 @@ impl SettingsWindow {
     /// the pages must sit there, not
     /// after the Apply row.
     ///
-    /// Call after creating children.
+    /// Only the window's own
+    /// children can displace it.
     unsafe fn place_viewport(&self) {
         // SAFETY: `self.viewport` is a live child of `self.hwnd` from `build`
         // on, destroyed only with it; before that it is null and the call
         // fails harmlessly. `GetDlgItem` yields the tab control, a sibling of
         // the viewport, which is what `SetWindowPos` requires of an insert-
-        // after handle. `SWP_NOSIZE | SWP_NOMOVE` leave its rect alone.
+        // after handle. Without it the seat is left alone: creation order
+        // already puts the viewport there, so moving it anywhere else - to
+        // `HWND_BOTTOM` above all - would only be worse.
+        // `SWP_NOSIZE | SWP_NOMOVE` leave its rect alone.
         unsafe {
-            let after = GetDlgItem(Some(self.hwnd), ID_TAB).unwrap_or(HWND_BOTTOM);
+            let Ok(after) = GetDlgItem(Some(self.hwnd), ID_TAB) else {
+                return;
+            };
             let _ = SetWindowPos(self.viewport, Some(after), 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
@@ -1767,7 +1776,6 @@ impl SettingsWindow {
                     rows.push((name.clone(), combo));
                 }
             }
-            self.place_viewport();
         }
         (extra, rows)
     }
