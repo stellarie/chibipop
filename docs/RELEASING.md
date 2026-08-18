@@ -48,6 +48,13 @@ executable on first run.
 5. The **Release** workflow builds, packages and creates a **draft** release.
 6. **Open the draft**, download the zip, unzip it somewhere clean, and check
    `chibipop.exe run` starts. Then publish.
+7. **Refresh the latest-build copy** so `Documents\chibipop-latest` runs the
+   version you just shipped:
+   ```powershell
+   pwsh -File scripts/blank-copy.ps1
+   ```
+   It swaps the executable and keeps any config, library and database that
+   folder holds. See [`REFERENCE.md`](REFERENCE.md#the-latest-build-copy).
 
 Step 6 is not ceremony. Nothing in CI can hover over Japanese text, so the
 first real exercise of a release build is a human doing it.

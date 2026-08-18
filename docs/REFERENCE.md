@@ -138,6 +138,40 @@ the binary in `target/release/` and the data at the repository root.
 only. It is created when absent, so a fallback would write a first run's
 settings to whichever directory happened to launch it.
 
+### The latest-build copy
+
+`C:\Users\Stella\Documents\chibipop-latest` holds the latest build. Refresh it
+after every release build:
+
+```powershell
+pwsh -File scripts/blank-copy.ps1
+```
+
+**The script deletes nothing.** It picks one of two modes from what it finds:
+
+| Destination | Mode | Effect |
+|---|---|---|
+| no `chibipop.exe` | seed | writes the exe, `data/deconjugator.json`, `README.md`, `LICENSE` |
+| an existing install | refresh | replaces `chibipop.exe` only |
+
+A seeded folder carries no `chibipop.toml` and no database. Its first launch
+therefore takes the **first-run path**: the settings window, and a config
+written with defaults. Once someone configures that folder, a refresh keeps
+their `chibipop.toml`, `library/` and `data/`, and prints what it kept.
+
+`-Destination` seeds another path. Use it to test the first-run experience
+without disturbing an install.
+
+> [!warning] Quit chibipop first
+> Windows will not overwrite a running executable. The script checks whether
+> a chibipop is running **from that folder** and stops with its pid rather
+> than failing halfway.
+
+The copy is a **local build**, not the released artifact. Its bytes differ
+from the zip's — different toolchain, and different line endings on
+`LICENSE`. Verify a *release* against the zip from the draft, per
+[`RELEASING.md`](RELEASING.md) step 6.
+
 ---
 
 ## Configuration file
