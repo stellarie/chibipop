@@ -73,7 +73,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **907** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 on 2026-08-18; see below) |
+| Rust tests | **all green**, **909** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -96,9 +96,9 @@ that is the difference between the two rows and it is deliberate.
 > [!warning] `cargo test --lib` reports 891 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
 > runs the library target only and omits the five integration-test targets:
-> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (5 passed), `rebuild`
+> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (7 passed), `rebuild`
 > (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **891 passed, 1
-> ignored**, and that figure is close enough to the true **907 passed, 2 ignored** to read as a
+> ignored**, and that figure is close enough to the true **909 passed, 2 ignored** to read as a
 > whole-suite result — which is why the trap works. A partial run does not announce itself as
 > partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
 >
@@ -365,6 +365,39 @@ followed by a blocking `wait()`. Two runs, both **907**: eight targets splitting
 5 + 0 + 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the
 bin target — both counted fresh, not assumed.
 
+**907 → 909 is the second fix round on Task 6, and both new tests belong to one change.**
+`Child::kill()` is `TerminateProcess`: it kills one process, not a tree. A plugin reached through
+a `.cmd` shim, or a Python plugin that spawns a worker, left an orphan behind — and that orphan
+**inherits the plugin's stdout write handle**, so the host's reader thread never sees EOF. A
+leaked process *and* a leaked thread, from one `shutdown`. The host now creates a Windows **job
+object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assigns the child to it immediately after
+`spawn`, and closes the job handle in `shutdown` — after `kill()` and `wait()`, so the one
+process it can reap deterministically is reaped through its own handle before the job sweeps
+whatever that process started. `Cargo.toml` gains the `Win32_System_JobObjects` feature;
+`Win32_Security`, which `CreateJobObjectW` also needs, was already there for `CreateMutexW`.
+The new `tree` fixture mode spawns a grandchild and reports its pid, and
+`dropping_the_host_kills_the_grandchild_too` holds an `OpenProcess` handle across the drop — which
+also stops Windows recycling the pid — then polls `GetExitCodeProcess`. Three runs, all **909**:
+eight targets splitting 891 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the same **2 ignored**.
+Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not assumed.
+
+> [!warning] A red `dropping_the_host_kills_the_grandchild_too` **wedges the whole run**, and the
+> test binary is not the thing that hangs
+> Observed twice while falsifying this test, at 600 s and 300 s. The suite finishes and prints
+> `FAILED` on time; what stops is everything downstream of it. The surviving grandchild —
+> `chibipop.exe plugin-echo sleeper` — inherited the fixture's stderr, which is the test binary's,
+> which is `cargo`'s, which is whatever pipe the run was piped into. `cargo` and the test binary
+> both exit; the pipe's reader never sees EOF because the orphan still holds a write handle.
+>
+> **The cure is to kill that one pid, not to kill the pipeline.** Both times, `Stop-Process -Id
+> <the pid in the failure message>` released the hung command instantly. The failure message
+> carries the pid for exactly this reason. Kill by pid, not `-Name chibipop`, which would also
+> take out any chibipop the user has open.
+>
+> This is the leak the job object exists to stop, one process further out than the reader thread,
+> and it is the reason to prefer redirecting a falsification run to a **file** rather than piping
+> it.
+
 > [!warning] Two `plugin_host` tests must **fail**, never hang — and they guard different pipes
 > `a_hang_times_out_without_killing_the_test` wedges a plugin that has already read its request.
 > `a_deaf_plugin_times_out_instead_of_blocking_the_writer` wedges one that never reads at all,
@@ -391,8 +424,9 @@ bin target — both counted fresh, not assumed.
 > A plugin call that can block forever is one `join()` away from being that bug again.
 > The whole target runs in about **1.6 s**. A `plugin_host` run measured in minutes is the tell.
 
-**Every `plugin_host` test starts a real `chibipop.exe`.** `Host` kills the child from `Drop` as
-well as `shutdown`, so a panicking or early-returning test still reaps its process. After a run,
+**Every `plugin_host` test starts a real `chibipop.exe`, and one starts two.** `Host` kills the
+child from `Drop` as well as `shutdown`, so a panicking or early-returning test still reaps its
+process, and closing the job handle sweeps anything that process started. After a run,
 `Get-Process chibipop` should return **nothing**. Strays mean a path reached neither exit.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
