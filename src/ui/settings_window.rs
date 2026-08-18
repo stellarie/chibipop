@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET, TEXTMETRICW,
 };
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_TAB_CLASSES,
+    InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, ICC_TAB_CLASSES,
 };
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
@@ -173,6 +173,10 @@ const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 const STATUS_H: i32 = 58;
 /// First y below the tab strip.
 const CONTENT_Y: i32 = PAD + TAB_H + 4;
+/// One scroll line, 96-DPI px.
+const SCROLL_LINE: i32 = 20;
+/// Lines per wheel notch.
+const WHEEL_LINES: i32 = 3;
 
 // ---- Dictionaries tab ----
 
@@ -255,26 +259,89 @@ fn work_area_height(hwnd: HWND) -> Option<i32> {
     }
 }
 
-/// Scrolls the content band.
+/// A window's client height.
 ///
-/// Physical px, not 96-DPI.
-fn scroll_content(hwnd: HWND, dy: i32, top: i32, bottom: i32) {
-    // SAFETY: `hwnd` is the settings window, live for the whole call.
-    // `client` and `rc` are stack locals; the pointers handed over are
-    // read during the call and never retained. `None` for the update
-    // region and update rect asks the OS to track the exposed area
-    // itself, which is what SW_INVALIDATE needs.
+/// Physical px; 0 if unknown.
+fn client_h(hwnd: HWND) -> i32 {
+    // SAFETY: `rc` is a stack local the call only writes through; a failure
+    // leaves it zeroed, which reads as an unknown height rather than a wrong
+    // one. `hwnd` need not be valid - the call reports `Err` for a stale one.
     unsafe {
-        let mut client = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client);
-        let rc = RECT { left: 0, top, right: client.right, bottom };
-        let _ = ScrollWindowEx(
-            hwnd, 0, dy,
-            Some(&rc), Some(&rc),
-            None, None,
-            SW_SCROLLCHILDREN | SW_INVALIDATE,
-        );
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        rc.bottom - rc.top
     }
+}
+
+/// Slides the content pane.
+///
+/// `y` is physical px, <= 0.
+fn move_content(hwnd: HWND, y: i32) {
+    // SAFETY: `panes` states its own contract and yields `Err` rather than a
+    // dangling handle; the pane it returns is a live descendant of `hwnd`,
+    // destroyed only with it. `SWP_NOSIZE` leaves the band height alone and
+    // `SWP_NOZORDER` keeps the seat `place_viewport` chose.
+    unsafe {
+        let Ok((_, content)) = panes(hwnd) else {
+            return;
+        };
+        let _ = SetWindowPos(content, None, 0, y, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Re-ranges the scrollbar.
+///
+/// Physical px. `content_h` is the
+/// SELECTED tab's, so a short tab
+/// needs no scrollbar. `view_h` is
+/// the viewport's own, read not
+/// assumed. Position resets to 0:
+/// the pane it described changed.
+fn set_scroll_range(hwnd: HWND, content_h: i32, view_h: i32) {
+    let si = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+        nMin: 0,
+        nMax: content_h.max(1) - 1,
+        nPage: view_h.max(1) as u32,
+        nPos: 0,
+        ..Default::default()
+    };
+    // SAFETY: `hwnd` is the settings window and `si` is a fully initialised
+    // local passed by const pointer; `SetScrollInfo` only reads it, and only
+    // for the duration of the call.
+    unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
+    move_content(hwnd, 0);
+}
+
+/// Moves to a new position.
+///
+/// `pick` reads the live info and
+/// names the position it wants.
+fn scroll_to(hwnd: HWND, pick: impl FnOnce(&SCROLLINFO) -> i32) {
+    let mut si = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_ALL,
+        ..Default::default()
+    };
+    // SAFETY: `si` is initialised with its own size and passed by mutable
+    // pointer for the call's duration only. Reading the position back is what
+    // keeps the scrollbar the single source of truth.
+    if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_err() {
+        return;
+    }
+    let old = si.nPos;
+    // Negative when content fits.
+    let max = (si.nMax - si.nPage as i32 + 1).max(0);
+    si.nPos = pick(&si).clamp(0, max);
+    if si.nPos == old {
+        return;
+    }
+    si.fMask = SIF_POS;
+    // SAFETY: same contract as `set_scroll_range`.
+    unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
+    move_content(hwnd, -si.nPos);
 }
 
 thread_local! {
@@ -484,6 +551,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 };
                 TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
             }
+            LRESULT(0)
+        }
+        WM_VSCROLL => {
+            let code = SCROLLBAR_COMMAND((wparam.0 & 0xffff) as i32);
+            let line = dpi_scale(hwnd, SCROLL_LINE);
+            scroll_to(hwnd, |si| match code {
+                SB_LINEUP => si.nPos - line,
+                SB_LINEDOWN => si.nPos + line,
+                SB_PAGEUP => si.nPos - si.nPage as i32,
+                SB_PAGEDOWN => si.nPos + si.nPage as i32,
+                SB_THUMBTRACK | SB_THUMBPOSITION => si.nTrackPos,
+                _ => si.nPos,
+            });
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            // Signed high word; low is keys.
+            let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32;
+            let step = delta / WHEEL_DELTA as i32
+                * WHEEL_LINES
+                * dpi_scale(hwnd, SCROLL_LINE);
+            // Forward scrolls towards the top.
+            scroll_to(hwnd, |si| si.nPos - step);
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -760,9 +850,20 @@ unsafe fn dlg_item(root: HWND, id: i32) -> WinResult<HWND> {
         if let Ok(c) = GetDlgItem(Some(root), id) {
             return Ok(c);
         }
+        let (_, content) = panes(root)?;
+        GetDlgItem(Some(content), id)
+    }
+}
+
+/// The viewport and its content.
+unsafe fn panes(root: HWND) -> WinResult<(HWND, HWND)> {
+    // SAFETY: `root` is the settings window's live handle; both results are
+    // checked, so a window without panes - anything before `build` finishes -
+    // yields `Err` here rather than a dangling handle.
+    unsafe {
         let viewport = GetDlgItem(Some(root), ID_VIEWPORT)?;
         let content = GetDlgItem(Some(viewport), ID_CONTENT)?;
-        GetDlgItem(Some(content), id)
+        Ok((viewport, content))
     }
 }
 
@@ -1168,6 +1269,8 @@ pub struct SettingsWindow {
     field_map_collapsed: Cell<bool>,
     /// Anki static rows end, page y.
     anki_static_bottom: i32,
+    /// Each tab's page height, 96-DPI.
+    tab_heights: [i32; 4],
     /// hwnd, x, y (96-dpi) to shift.
     bottom_ctrls: Vec<(HWND, i32, i32)>,
     /// Bottom bar's original y.
@@ -1206,7 +1309,7 @@ impl SettingsWindow {
                 WINDOW_EX_STYLE(0),
                 class_name(),
                 w!("chibipop settings"),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VSCROLL,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 // Placeholder: fit_to sizes it after build.
@@ -1241,6 +1344,7 @@ impl SettingsWindow {
                 field_map_extra: RefCell::new(Vec::new()),
                 field_map_collapsed: Cell::new(true),
                 anki_static_bottom: 0,
+                tab_heights: [0; 4],
                 bottom_ctrls: Vec::new(),
                 bottom_y0: 0,
                 bottom_tail: 0,
@@ -1264,6 +1368,8 @@ impl SettingsWindow {
             // Sizes AND shows - see `fit_to` for why showing cannot go
             // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
+            // General tab, from the top.
+            win.reset_scroll();
             let _ = SetForegroundWindow(hwnd);
             Ok(win)
         }
@@ -1536,6 +1642,25 @@ impl SettingsWindow {
         })
     }
 
+    /// A tab's height, page y.
+    ///
+    /// Anki grows with its field
+    /// map: measured, not stored.
+    fn tab_page_h(&self, tab: u32) -> i32 {
+        if tab == 3 {
+            return self.field_map_bottom() - CONTENT_Y;
+        }
+        self.tab_heights.get(tab as usize).copied().unwrap_or(0)
+    }
+
+    /// Re-range for the shown tab.
+    ///
+    /// Back to the top with it.
+    fn reset_scroll(&self) {
+        let content_h = dpi_scale(self.hwnd, self.tab_page_h(self.current_tab.get()));
+        set_scroll_range(self.hwnd, content_h, client_h(self.viewport));
+    }
+
     /// Show one tab, hide the rest.
     pub fn switch_tab(&self, tab: u32) {
         // SAFETY: `self.hwnd` is live until `Drop`.
@@ -1562,6 +1687,7 @@ impl SettingsWindow {
             }
             self.apply_field_map_visibility();
         }
+        self.reset_scroll();
     }
 
     /// Flips the fold and resizes.
@@ -1584,15 +1710,6 @@ impl SettingsWindow {
     /// Captures `vk`; true if used.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
         let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
-            // Spike: F8 scrolls content.
-            if vk == 0x77 {
-                scroll_content(
-                    self.hwnd,
-                    dpi_scale(self.hwnd, -40),
-                    dpi_scale(self.hwnd, CONTENT_Y),
-                    dpi_scale(self.hwnd, self.bottom_y0),
-                );
-            }
             return false;
         };
         // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
@@ -1818,6 +1935,8 @@ impl SettingsWindow {
         }
         // Unconditional: shrink too.
         self.fit_to(WIN_W, new_y0 + self.bottom_tail + PAD);
+        // The band just changed size.
+        self.reset_scroll();
     }
 
     /// Drop the selected row.
@@ -2411,6 +2530,7 @@ impl SettingsWindow {
             self.place_viewport();
 
             self.anki_static_bottom = y_ank;
+            self.tab_heights = [y_general, y_dict, y_ocr, y_ank];
             self.bottom_y0 = bottom_y0;
             self.bottom_tail = y + ROW_H + 8 - bottom_y0;
             self.bottom_ctrls = bottom;
