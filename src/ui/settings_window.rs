@@ -167,6 +167,8 @@ const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 /// ~3 lines of status text.
 const STATUS_H: i32 = 58;
+/// First y below the tab strip.
+const CONTENT_Y: i32 = PAD + TAB_H + 4;
 
 // ---- Dictionaries tab ----
 
@@ -241,6 +243,28 @@ fn work_area_height(hwnd: HWND) -> Option<i32> {
             ..Default::default()
         };
         GetMonitorInfoW(hmon, &mut mi).as_bool().then(|| mi.rcWork.bottom - mi.rcWork.top)
+    }
+}
+
+/// Scrolls the content band.
+///
+/// Physical px, not 96-DPI.
+fn scroll_content(hwnd: HWND, dy: i32, top: i32, bottom: i32) {
+    // SAFETY: `hwnd` is the settings window, live for the whole call.
+    // `client` and `rc` are stack locals; the pointers handed over are
+    // read during the call and never retained. `None` for the update
+    // region and update rect asks the OS to track the exposed area
+    // itself, which is what SW_INVALIDATE needs.
+    unsafe {
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let rc = RECT { left: 0, top, right: client.right, bottom };
+        let _ = ScrollWindowEx(
+            hwnd, 0, dy,
+            Some(&rc), Some(&rc),
+            None, None,
+            SW_SCROLLCHILDREN | SW_INVALIDATE,
+        );
     }
 }
 
@@ -1454,7 +1478,18 @@ impl SettingsWindow {
 
     /// Captures `vk`; true if used.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
-        let Some((id, text)) = take_captured_key(self.hwnd, vk) else { return false };
+        let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
+            // Spike: F8 scrolls content.
+            if vk == 0x77 {
+                scroll_content(
+                    self.hwnd,
+                    dpi_scale(self.hwnd, -40),
+                    dpi_scale(self.hwnd, CONTENT_Y),
+                    dpi_scale(self.hwnd, self.bottom_y0),
+                );
+            }
+            return false;
+        };
         // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
         // children of `self.hwnd`, created in `build`; `SetWindowTextW`
         // copies the string during the call.
@@ -1811,7 +1846,7 @@ impl SettingsWindow {
             item.psz_text = t3.as_mut_ptr();
             SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(3)),
                 Some(LPARAM(&item as *const _ as isize)));
-            y += TAB_H + 4;
+            y = CONTENT_Y;
             let content_y = y;
 
             let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
