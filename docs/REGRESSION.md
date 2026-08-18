@@ -96,7 +96,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **925** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 on 2026-08-18; see below) |
+| Rust tests | **all green**, **928** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -116,21 +116,24 @@ that is the difference between the two rows and it is deliberate.
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
 
-> [!warning] `cargo test --lib` reports 907 / 1, which looks like the full figure
+> [!warning] `cargo test --lib` reports 910 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
 > runs the library target only and omits the five integration-test targets:
 > `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (7 passed), `rebuild`
-> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **907 passed, 1
-> ignored**, and that figure is close enough to the true **925 passed, 2 ignored** to read as a
+> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **910 passed, 1
+> ignored**, and that figure is close enough to the true **928 passed, 2 ignored** to read as a
 > whole-suite result — which is why the trap works. A partial run does not announce itself as
 > partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
 >
-> **The lib figure has now moved four times: 891 to 895, 895 to 899, 899 to 906, and 906 to 907
-> this one.** Task 7 added four unit tests for `Strikes` in `src/plugin/strikes.rs`; Task 8 added
-> seven for `estimate_offset` and `span_from_lines` in `src/plugin/text.rs`, then one more in its
-> own fix round — no I/O in any of it, so nothing keeps these tests out of the lib target. The
-> lesson is unchanged and is the reason this callout exists: a stale lib figure looks exactly like
-> a current whole-suite figure, whether it moved recently or not.
+> **The lib figure has now moved five times: 891 to 895, 895 to 899, 899 to 906, 906 to 907, and
+> 907 to 910 this one.** Task 7 added four unit tests for `Strikes` in `src/plugin/strikes.rs`;
+> Task 8 added seven for `estimate_offset` and `span_from_lines` in `src/plugin/text.rs`, then one
+> more in its own fix round; Task 9 added three for `discover` in `src/plugin/discover.rs`. The
+> first two touch no I/O at all; Task 9's do — real temp-directory files, written and read back —
+> and they land in the lib target exactly the same, because what decides that is `#[cfg(test)]`
+> inside `src/` versus a file under `tests/`, never whether the test does I/O. The lesson is
+> unchanged and is the reason this callout exists: a stale lib figure looks exactly like a current
+> whole-suite figure, whether it moved recently or not.
 
 **A lower number is not automatically a finding either — it is a debt to explain.** The
 772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
@@ -490,6 +493,22 @@ converge, so a future change to either exit cannot reintroduce the bug on just o
 runs, all **925**: eight targets splitting 907 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the same
 **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not
 assumed.
+
+**925 → 928 is a re-baseline for Task 9, not a finding.** `src/plugin/discover.rs` is new:
+`discover(root) -> Vec<(PathBuf, Result<Manifest>)>` walks the plugin folders under `root`,
+parses each `plugin.toml` it finds, and lists a broken manifest beside its error instead of
+dropping it — a filter here would make `plugin list`'s per-failure reason impossible. `src/plugin/cli.rs`
+is also new (`list`, `test_one`), and `chibipop plugin list` / `chibipop plugin test` are wired into
+`src/main.rs`, but none of that carries its own unit test — it was proven for real in Step 6, not
+in the suite; see the task report. Three tests, all new, none rewritten: a missing root returns
+empty rather than erroring; a directory with one good and one broken manifest reports both, the
+second as `Err`; a directory holding a subfolder with no `plugin.toml` skips it without moving the
+count. All three passed unmodified from the brief, traced by hand against `std::fs::read_dir` and
+the existing `manifest::parse` before running. Three runs, all **928**: eight targets splitting
+910 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3**
+raw, **0** on the bin target — both counted fresh, not assumed, all three accepted errors still at
+their original sites (`deconj.rs:78`, `model.rs:78`, `render.rs:699`), none in the three files this
+task touched.
 
 > [!warning] A red `dropping_the_host_kills_the_grandchild_too` **wedges the whole run**, and the
 > test binary is not the thing that hangs
