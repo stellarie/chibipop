@@ -1502,6 +1502,117 @@ The popup text, the resolved word and the highlight rect must match what the sam
 before this branch. Record the rect. `union_chars` on 宿舎 measured `x=176 y=123 w=56 h=30` on
 2026-08-17.
 
+### 1.25 `chibipop plugin` CLI exit codes — **added 2026-08-18, run**
+
+**Why this exists.** The design spec's section 11 asks for a tier 1 item that runs
+`chibipop plugin test` against the reference plugin and confirms a non-zero exit for a
+deliberately broken response. It never landed while the nine build tasks ran — the CLI is the
+branch's only user-facing surface, and it had no tier 1 coverage at all until now. (The spec is a
+working note under the gitignored `docs/superpowers/`, not published with the repo.)
+
+**Setup — two plugin directories beside the binary under test.** Plugins live in a `plugins`
+folder next to `chibipop.exe`. Create:
+
+```toml
+# plugins/echo/plugin.toml — a working fixture
+name = "echo"
+version = "0.1.0"
+protocol = 1
+command = "<absolute path to this same chibipop.exe>"
+args = ["plugin-echo", "ok"]
+roles = ["text-provider"]
+
+[text_provider]
+provides_geometry = true
+languages = ["ja"]
+timeout_ms = 2000
+```
+
+```toml
+# plugins/broken/plugin.toml — deliberately invalid: no `command` field
+name = "broken"
+version = "0.1.0"
+protocol = 1
+roles = ["text-provider"]
+
+[text_provider]
+provides_geometry = true
+```
+
+`plugin-echo` is chibipop's own hidden fixture command. Pointing a manifest's `command` at the
+binary under test, with `args = ["plugin-echo", "ok"]`, needs no second binary to build.
+`docs/fixtures/plugin-sample.png` is a real 8×8 PNG already in the repo — no image setup needed.
+
+**Steps.** Run each of these five in order and check the exit code, not just the message.
+
+1. `chibipop plugin list` names `broken` as `REFUSED` with the real reason and lists `echo` clean.
+2. `chibipop plugin test echo --image docs/fixtures/plugin-sample.png` — the working fixture.
+3. `chibipop plugin test broken --image docs/fixtures/plugin-sample.png` — the same broken
+   manifest, this time matched by its directory name rather than a parsed one.
+4. `chibipop plugin test nosuchplugin --image docs/fixtures/plugin-sample.png` — a name nothing
+   declares.
+5. `chibipop plugin test echo --image docs/fixtures/does-not-exist.png` — an image path that does
+   not resolve.
+
+| # | Expect |
+|---|---|
+| 1 | exit **1** |
+| 2 | exit **0** |
+| 3 | exit **1** |
+| 4 | exit **2** |
+| 5 | exit **2** |
+
+**Measured 2026-08-18** against a release build at this commit, from the repo root:
+
+```
+$ ./target/release/chibipop.exe plugin list
+broken               REFUSED  reading plugin.toml: TOML parse error at line 1, column 1
+  |
+1 | name = "broken"
+  | ^
+missing field `command`
+
+echo                 0.1.0    protocol 1  roles [TextProvider]
+$ echo $?
+1
+
+$ ./target/release/chibipop.exe plugin test echo --image docs/fixtures/plugin-sample.png
+handshake ok in 50.0411ms: echo
+recognise ok in 142.2µs, 1 line(s)
+  line 0: "宿舎"  words 1
+$ echo $?
+0
+
+$ ./target/release/chibipop.exe plugin test broken --image docs/fixtures/plugin-sample.png
+plugin "broken": reading plugin.toml: TOML parse error at line 1, column 1
+  |
+1 | name = "broken"
+  | ^
+missing field `command`
+
+$ echo $?
+1
+
+$ ./target/release/chibipop.exe plugin test nosuchplugin --image docs/fixtures/plugin-sample.png
+no plugin named "nosuchplugin" under C:\Users\Stella\chibipop\.claude\worktrees\plugin-system\target\release\plugins
+$ echo $?
+2
+
+$ ./target/release/chibipop.exe plugin test echo --image docs/fixtures/does-not-exist.png
+reading docs/fixtures/does-not-exist.png: The system cannot find the file specified. (os error 2)
+$ echo $?
+2
+```
+
+**Pass** when all five exit codes match the table above. **Fail** on any mismatch.
+
+**One exit code, several causes — read the message, not just the number.** Exit **1** covers a
+broken manifest (scenario 3), a spawn failure, a handshake or call failure, and a geometry-claim
+mismatch (BACKLOG item 35) alike. The code alone never says which one regressed.
+
+**Cleanup.** Delete the `plugins` folder created for setup. It ships with no release package,
+`target/` is gitignored regardless, and nothing else in the tree depends on it.
+
 ## Tier 2 — mostly automatable (~5 min)
 
 > [!important] Corrected 2026-07-31 — this tier is **not** human-only

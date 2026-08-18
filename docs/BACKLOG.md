@@ -1134,3 +1134,188 @@ merged: keep the component rects on the merged entry (`Vec<PhysRect>` beside `ch
 parallel per-character geom vector that `union_chars` indexes), so `union_chars` can slice inside an
 entry instead of only between entries. Whatever the shape, the guard is the missing test above:
 resolve a real evenly-spaced CJK run and assert a 2-char match yields ink + 2×3px, not the line.
+
+---
+
+## 30. `plugin::host`, `plugin::text`, `plugin::strikes` and `PluginText` have no production caller
+
+**Raised 2026-08-18 by the whole-branch review. Deliberate, not an oversight — recorded because
+nothing tracked will say so once this branch merges.**
+
+Nothing in the popup path calls a plugin. `chibipop plugin list` and `chibipop plugin test` are
+the only way any of `src/plugin/host.rs`, `src/plugin/text.rs` or `src/plugin/strikes.rs` runs.
+`PluginText::new` (`src/plugin/text.rs:91`) has **zero callers anywhere in the crate**, including
+its own test module — a full grep of `src/` and `tests/` for `PluginText` returns only its
+declaration, its `impl` block, and the constructor body itself. `Strikes`
+(`src/plugin/strikes.rs`) is built only inside that constructor, so it sits one layer further from
+anything that runs.
+
+This gap is by design. The `TextProvider` impl that would wire `PluginText` into the popup path
+was withheld on purpose: an impl whose only method always errors type-checks as a working provider
+and fails at run time, not build time, which hides the gap instead of naming it. Task 8 shipped
+the struct and its pure helpers. It did not connect them.
+
+**The cost this leaves behind.** `PluginText`'s five fields — `host`, `name`, `geometry`,
+`language`, `timeout` (`src/plugin/text.rs:81-88`) — are `pub`, wider than any of them needs to
+be, **only** to satisfy `dead_code`. BACKLOG item 10 already records the reason: a `pub` item in a
+crate that is both a library and a binary never trips that lint, caller or not, and Task 8's
+review used exactly that fact to widen these fields rather than reach for `#[allow]`. `strikes`
+alone stays `pub(crate)`, because `disabled()` reads it from inside the same module.
+
+**If picked up:** the moment a real `impl TextProvider for PluginText` reads these fields, shrink
+all five back to `pub(crate)`. Widening them was a workaround for an impl that did not exist yet,
+not a decision that plugin internals should be public API. Grep for `PluginText::new` before
+landing that impl, to confirm it still has exactly one caller — the new impl — and not a second
+one hiding somewhere else.
+
+---
+
+## 31. `TextProvider` is shaped as "do the whole lookup", not "supply text"
+
+**Raised 2026-08-18 by the whole-branch review. This is the branch's known seam, expected to be
+re-cut on first contact — not a hidden defect.**
+
+`TextProvider::read_at(&self, cursor: PhysPoint, collect_scan: bool) -> Result<TextRead>`
+(`src/text/provider.rs:10-11`) was widened during Task 2 to fit its one live caller, `app.rs`'s
+`resolve_trigger`. `TextRead` carries `{ resolved: Option<Resolved>, scan: Vec<ScanRect> }`
+(`:5-8`), and `Resolved` carries `{ span: TextSpan, orientation: Orientation }`
+(`src/text/layout.rs:51-54`).
+
+`PluginText` cannot implement this trait as it stands. A plugin supplies OCR text over a pipe. It
+does not capture the screen, tile a region, detect orientation, or scan a debug overlay —
+redoing any of those inside a plugin's impl would duplicate work the host already does for the
+built-in engine. `orientation` has no plugin-side source at all: the wire protocol
+(`src/plugin/proto.rs`'s `RecogniseResult`, `Line`, `Word`) carries no such field, so an impl
+would have to invent a value rather than report one.
+
+`ScanRect` reaches the trait for the same reason. It is a debug-overlay concept — the boxes
+`probe --show-region` draws — that means nothing to a plugin; it is only in `TextRead` because
+the one existing caller needed it.
+
+**If picked up:** narrow `TextProvider` to what a plugin can actually promise — text, and
+geometry only when geometry exists — and give the built-in engine's tiling, scanning and
+orientation detection their own interface above that, called only from the one site that still
+needs `ScanRect`. This is design work, not a mechanical split: it touches
+`impl TextProvider for OcrTextSource` (`src/text/ocr.rs:506-513`) and every call site in
+`src/app.rs` and `src/main.rs`.
+
+---
+
+## 32. The host's inbox is unbounded — the mirror of a bug already fixed on the outbox
+
+**Raised 2026-08-18 by the whole-branch review. Harmless today; stops being harmless the moment a
+host outlives one CLI command.**
+
+`host::spawn` (`src/plugin/host.rs:166-174`) reads a plugin's stdout on its own thread, one line
+at a time, and forwards every line onto an `mpsc::channel()` with no bound. `Host::attempt`
+(`:232-274`) drains that channel with `recv_timeout` against a deadline, but the deadline only
+bounds how long `attempt` **waits** for the next line. It does nothing to the reader thread, which
+keeps pushing every line the child prints, on schedule or not, for as long as the process lives.
+
+**This is the exact mirror of a bug Task 6 already fixed, one direction over.** Task 6's review
+found `call`'s write to the plugin's stdin unbounded — a plugin that stopped draining its input
+could block the caller forever. The fix bounded the *outbox* (`Outbox`, `:39-77`) to a single
+slot: a second request replaces the first instead of queueing behind it. Nobody applied the same
+fix to the *inbox*. A plugin that never emits a newline, or emits lines continuously while idle —
+a heartbeat, a stray log, a bug — grows this channel's backing `Vec` without limit.
+
+**Why it has not bitten anyone yet.** Every `Host` this branch creates lives for the length of one
+`chibipop plugin test` invocation, seconds at most, and the channel goes away with the process.
+The leak needs a long-lived host — the kind a future "keep the plugin warm across hovers" feature
+would create — before it becomes a real, unbounded process.
+
+**If picked up, `sync_channel` is the wrong fix.** A bounded `mpsc::sync_channel` sender
+**blocks** when full, and blocking the reader thread on a full channel reintroduces the exact
+caller-blocking defect Task 6 removed, only moved from the write side to the read side. The
+honest fix bounds the channel's logical backlog, not the call that fills it — drop or coalesce
+lines the way `Outbox::put` already replaces a stale outbound request, so the reader thread never
+blocks and the channel never grows past a small constant.
+
+---
+
+## 33. `span_from_lines` reads `lines.first()` only and ignores `cursor.y`
+
+**Raised 2026-08-18 by the whole-branch review.**
+
+`span_from_lines` (`src/plugin/text.rs:28-73`) opens with `let line = r.lines.first()?;` and
+never reads `cursor.y` or looks at any other entry in `r.lines`. Any plugin response carrying more
+than one line resolves against whichever line the plugin put first, regardless of where the
+cursor actually sits.
+
+The built-in engine does not have this gap. `text::layout::nearest_line`
+(`src/text/layout.rs:140`) picks a line by comparing the cursor's position against every
+candidate, and the OCR path calls it for exactly that reason. `span_from_lines` has no
+equivalent. Its own tests — `geometry_maps_image_pixels_back_to_the_screen`,
+`a_text_only_line_yields_empty_geometry` and the rest — all build a `RecogniseResult` with exactly
+one line, so nothing in the suite exercises the multi-line case at all.
+
+**If picked up:** give `span_from_lines` the same job `nearest_line` already does for the
+built-in path — pick the line closest to `cursor.y` (by geometry when words are present, by read
+order when they are not), then run the existing per-line offset logic against that line instead
+of `lines[0]`. The fix needs a new test with two or more lines and a cursor placed over the second
+one; nothing today covers that shape.
+
+---
+
+## 34. The inherent single-pass `resolve_at` on `OcrTextSource` is dead
+
+**Raised 2026-08-18 by the whole-branch review. Task 2's review flagged this as a deferred minor
+and named the whole-branch review as the place to triage it.**
+
+`OcrTextSource::resolve_at` (`src/text/ocr.rs:369-371`) has had zero callers repo-wide since
+Task 2 (`a98efc2`) moved `app.rs`'s two live call sites onto `TextProvider::read_at`, which
+reaches the multi-pass `resolve_at_tiled_scanned` instead. A direct grep confirms it: no
+`.resolve_at(` call survives anywhere in `src/` or `tests/` — only the definition itself, and the
+differently-named `resolve_at_tiled`, `resolve_at_tiled_scanned` and `resolve_at_verbose`, which
+are all still live and called.
+
+**Nothing will warn.** `resolve_at` is `pub`, and BACKLOG item 10 already records the blind spot
+this depends on: a `pub` item in a crate that is both a library and a binary counts as library API
+to `dead_code`, caller or not. The clippy gate that would normally catch an orphaned function
+structurally cannot see this one.
+
+A `pub` single-pass `resolve_at` sitting beside a `pub` multi-pass `resolve_at_tiled_scanned`,
+both callable by name, is the same trap BACKLOG item 4 was originally about — a faster,
+wrong-shaped path left reachable beside the real one, waiting for some future caller to reach for
+the shorter name and get single-pass accuracy by accident.
+
+**If picked up:** delete `resolve_at` (`:369-371`) and its doc comment. It is three lines with no
+test of its own; `resolve_at_verbose`, which it wraps, is what the existing tests already
+exercise. Confirm with a fresh grep for `.resolve_at(` (not `resolve_at_tiled`, not
+`resolve_at_verbose`) that nothing started calling it between this being written and it being
+removed.
+
+---
+
+## 35. Spec section 7.2's capability check is one-directional
+
+**Raised 2026-08-18 by the whole-branch review.**
+
+`test_one` (`src/plugin/cli.rs:112-117`) checks one half of the capability contract the design
+spec's section 7.2 defines:
+
+```rust
+let claimed = cfg.provides_geometry;
+let got = parsed.lines.iter().any(|l| l.words.is_some());
+if claimed && !got {
+    eprintln!("VIOLATION: manifest claims geometry, the response carries none");
+    return 1;
+}
+```
+
+This catches a plugin whose manifest sets `provides_geometry = true` while its response carries
+no `words` on any line. It does not catch the reverse: `provides_geometry = false` in the
+manifest, with a response that **does** carry `words`. The spec calls both directions a violation
+— any disagreement between the manifest and the response — but only one direction here ever sets
+the exit code. (The spec lives under the gitignored `docs/superpowers/`, not published with the
+repo — the same caveat as BACKLOG item 1's sources.)
+
+`cli.rs` is the only place in the crate that compares claimed geometry against actual geometry at
+all, since no `TextProvider` impl for a plugin exists yet (BACKLOG item 30) to make the same
+comparison at run time. So today the gap is silent everywhere it could matter.
+
+**If picked up:** add the second branch — `!claimed && got` — with its own message naming the
+direction ("manifest claims no geometry, the response carries words"). The two branches are
+symmetric, so the code change is small; the reason only one shipped is that only one direction
+had a fixture to expose it — `plugin-echo`'s `text/recognise` reply always carries `words`, so
+nothing in this branch's tests could have failed on the missing half.
