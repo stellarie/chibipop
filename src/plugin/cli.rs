@@ -109,11 +109,43 @@ pub fn test_one(root: &Path, name: &str, image: &Path) -> i32 {
         println!("  line {i}: {:?}  words {n}", line.text);
     }
 
-    let claimed = cfg.provides_geometry;
-    let got = parsed.lines.iter().any(|l| l.words.is_some());
-    if claimed && !got {
+    if violates_geometry(cfg.provides_geometry, &parsed) {
         eprintln!("VIOLATION: manifest claims geometry, the response carries none");
         return 1;
     }
     0
+}
+
+fn violates_geometry(claimed: bool, r: &proto::RecogniseResult) -> bool {
+    if !claimed || r.lines.is_empty() {
+        return false;
+    }
+    !r.lines.iter().any(|l| l.words.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_response_is_not_a_geometry_violation() {
+        let r = proto::RecogniseResult { lines: vec![] };
+        assert!(!violates_geometry(true, &r), "no lines means no text, not a broken plugin");
+    }
+
+    #[test]
+    fn a_geometry_claim_with_text_but_no_words_is_a_violation() {
+        let r = proto::RecogniseResult {
+            lines: vec![proto::Line { text: "宿舎".into(), words: None }],
+        };
+        assert!(violates_geometry(true, &r));
+    }
+
+    #[test]
+    fn a_text_only_plugin_never_violates() {
+        let r = proto::RecogniseResult {
+            lines: vec![proto::Line { text: "宿舎".into(), words: None }],
+        };
+        assert!(!violates_geometry(false, &r));
+    }
 }
