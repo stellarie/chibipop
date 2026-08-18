@@ -96,7 +96,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **917** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 on 2026-08-18; see below) |
+| Rust tests | **all green**, **924** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -116,19 +116,21 @@ that is the difference between the two rows and it is deliberate.
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
 
-> [!warning] `cargo test --lib` reports 899 / 1, which looks like the full figure
+> [!warning] `cargo test --lib` reports 906 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
 > runs the library target only and omits the five integration-test targets:
 > `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (7 passed), `rebuild`
-> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **899 passed, 1
-> ignored**, and that figure is close enough to the true **917 passed, 2 ignored** to read as a
+> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **906 passed, 1
+> ignored**, and that figure is close enough to the true **924 passed, 2 ignored** to read as a
 > whole-suite result — which is why the trap works. A partial run does not announce itself as
 > partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
 >
-> **The lib figure has now moved twice: 891 to 895 last round, 895 to 899 this one.** Task 7 adds
-> four more unit tests, for `Strikes` in `src/plugin/strikes.rs` — no I/O, so nothing keeps them
-> out of the lib target. The lesson is unchanged and is the reason this callout exists: a stale
-> lib figure looks exactly like a current whole-suite figure, whether it moved recently or not.
+> **The lib figure has now moved three times: 891 to 895, 895 to 899, and 899 to 906 this one.**
+> Task 7 added four unit tests for `Strikes` in `src/plugin/strikes.rs`; Task 8 adds seven more,
+> for `estimate_offset` and `span_from_lines` in `src/plugin/text.rs` — no I/O in either module,
+> so nothing keeps their tests out of the lib target. The lesson is unchanged and is the reason
+> this callout exists: a stale lib figure looks exactly like a current whole-suite figure, whether
+> it moved recently or not.
 
 **A lower number is not automatically a finding either — it is a debt to explain.** The
 772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
@@ -433,6 +435,43 @@ two failures not disabling, the third disabling and naming the error, and a succ
 count. Repeated runs, all **917**: eight targets splitting 899 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0
 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
 counted fresh, not assumed.
+
+**917 → 924 is Task 8, and all seven new tests are unit tests.** `src/plugin/text.rs` adds two pure
+functions plus the `PluginText` struct. `estimate_offset` is the text-only downgrade's proportional
+cursor-to-byte estimate (spec 7.2): it turns a cursor x into a char index by position across the
+line's screen region, then reads that char's byte offset back out of `char_indices()` — never a
+byte index computed by hand — so every return value is either `0` or something `char_indices()`
+already proved to be a boundary. `the_estimate_always_returns_a_char_boundary` sweeps every x from
+0 to 699 across and past both edges of a five-char CJK line and asserts `is_char_boundary` at each
+one; it holds by construction, and no input was found that breaks it. `span_from_lines` turns a
+plugin's `RecogniseResult` into chibipop's `TextSpan`: with a `words` array it maps each word's
+image-local rect back to screen space through `region` and `scale` and finds the hovered word by x;
+with `words: None` (the text-only tier) it falls back to `estimate_offset` and returns empty
+geometry. `PluginText::new` and `disabled()` also land, holding a live `Host` and a `Strikes`
+counter. **No `impl TextProvider for PluginText` in this task, by explicit ruling** — `resolve_at`
+needs a capture that lives on the worker thread, and a stub impl whose only method always errors
+would type-check as a working provider and fail at run time instead of build time; the follow-up
+task adds the impl together with the capture.
+
+**The struct as specified did not clear its own gate.** The task brief's Step 4 code makes every
+field `pub(crate)`, expecting — per `docs/BACKLOG.md` item 10 — that no `dead_code` warning could
+fire because the enclosing struct is `pub` in a lib-and-bin crate. Measured, not assumed:
+`cargo build --all-targets` on that literal code reports fields `host`, `name`, `geometry`,
+`language`, and `timeout` are never read, and `cargo clippy --all-targets --all-features -- -D
+warnings` promotes it to an `error` line that neither `-A` allow-list covers, so the raw count went
+**3 → 4** and the bin-target count went **0 → 4**. Item 10's exemption is about `pub` items
+reachable from the crate root — functions, and the struct itself — and does not extend to a
+`pub(crate)` field on that struct: such a field is invisible outside the crate regardless of the
+struct's own visibility, so the compiler can and does prove it unread. This is the collision the
+"why counts, not exit status" note further down this page already warns about — a field added by
+one commit and read by the next — except here the next commit is deliberately deferred to a
+follow-up task. The fix widened the five unread fields to `pub`, leaving `strikes` at `pub(crate)`
+since `disabled()` already reads it, and was verified to restore all three: no `dead_code` warning,
+clippy raw **3**, bin-target **0**. Not silenced with `#[allow]`.
+
+Three runs, all **924**: eight targets splitting 906 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the
+same **2 ignored**. Clippy, measured after the field-visibility fix: **3** raw, **0** on the bin
+target — both counted fresh, not assumed.
 
 > [!warning] A red `dropping_the_host_kills_the_grandchild_too` **wedges the whole run**, and the
 > test binary is not the thing that hangs
