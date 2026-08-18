@@ -60,7 +60,10 @@ pub fn span_from_lines(
         }
         off += w.text.len();
     }
-    let off = off.min(line.text.len());
+    let mut off = off.min(line.text.len());
+    while off > 0 && !line.text.is_char_boundary(off) {
+        off -= 1;
+    }
     Some(TextSpan {
         text: line.text.clone(),
         cursor_byte_offset: off,
@@ -158,6 +161,24 @@ mod tests {
         assert_eq!(span.geom[0].rect, PhysRect { x: 100, y: 200, w: 56, h: 30 });
         assert_eq!(span.geom[0].char_count, 2);
         assert_eq!(span.anchor, span.geom[0].rect);
+    }
+
+    #[test]
+    fn the_geometry_offset_always_returns_a_char_boundary() {
+        let r = RecogniseResult {
+            lines: vec![Line {
+                text: "宿舎xに戻る".into(),
+                words: Some(vec![
+                    Word { text: "宿舎".into(), rect: Rect { x: 0, y: 0, w: 100, h: 60 } },
+                    Word { text: "に戻る".into(), rect: Rect { x: 100, y: 0, w: 150, h: 60 } },
+                ]),
+            }],
+        };
+        for x in 0..700 {
+            let span = span_from_lines(&r, PhysPoint { x, y: 210 }, region(), 1).unwrap();
+            let off = span.cursor_byte_offset;
+            assert!(span.text.is_char_boundary(off), "x={x} off={off}");
+        }
     }
 
     #[test]
