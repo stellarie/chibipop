@@ -96,7 +96,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **913** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 on 2026-08-18; see below) |
+| Rust tests | **all green**, **917** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -116,21 +116,19 @@ that is the difference between the two rows and it is deliberate.
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
 
-> [!warning] `cargo test --lib` reports 895 / 1, which looks like the full figure
+> [!warning] `cargo test --lib` reports 899 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
 > runs the library target only and omits the five integration-test targets:
 > `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (7 passed), `rebuild`
-> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **895 passed, 1
-> ignored**, and that figure is close enough to the true **913 passed, 2 ignored** to read as a
+> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **899 passed, 1
+> ignored**, and that figure is close enough to the true **917 passed, 2 ignored** to read as a
 > whole-suite result — which is why the trap works. A partial run does not announce itself as
 > partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
 >
-> **The lib figure sat at 891 from Task 5 until 2026-08-18 and has now moved to 895**, so do not
-> use "891" as a landmark. Every plugin task from Task 6 onward added *integration* tests, which
-> `--lib` cannot see; the third fix round on Task 6 was the first to add **unit** tests — four,
-> covering `Outbox` in `src/plugin/host.rs` — and those it can. The lesson is unchanged and is
-> the reason this callout exists: a stale lib figure looks exactly like a current whole-suite
-> figure, whether it moved recently or not.
+> **The lib figure has now moved twice: 891 to 895 last round, 895 to 899 this one.** Task 7 adds
+> four more unit tests, for `Strikes` in `src/plugin/strikes.rs` — no I/O, so nothing keeps them
+> out of the lib target. The lesson is unchanged and is the reason this callout exists: a stale
+> lib figure looks exactly like a current whole-suite figure, whether it moved recently or not.
 
 **A lower number is not automatically a finding either — it is a debt to explain.** The
 772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
@@ -421,6 +419,18 @@ path, because a request whose caller has given up has no reader. The slot is gua
 a condvar, and `shutdown` closes it so an idle writer thread cannot be stranded holding the pipe.
 The four unit tests cover replacement, the drain, a closed outbox refusing work, and the wake on
 close. Three runs, all **913**: eight targets splitting 895 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0
+failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
+counted fresh, not assumed.
+
+**913 → 917 is Task 7, and all four new tests are unit tests.** `src/plugin/strikes.rs` adds
+`Strikes`, a small state machine with no I/O: `record(bool)` counts consecutive failures, any
+success resets the count to zero, and the count reaching the configured limit disables the plugin
+and returns a notice built from the last recorded error — once. A second call after disabling
+short-circuits on the `disabled` flag and returns `None`, and that guard is the fourth test's whole
+point: `the_notice_fires_exactly_once` was confirmed to fail, at its second assertion, when the
+guard is removed, so it is not a green assertion that merely happens to pass. The other three cover
+two failures not disabling, the third disabling and naming the error, and a success resetting the
+count. Repeated runs, all **917**: eight targets splitting 899 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0
 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
 counted fresh, not assumed.
 
