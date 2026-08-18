@@ -2242,7 +2242,7 @@ impl SettingsWindow {
             // WS_GROUP terminates the radio group above. Without it the group
             // runs to the end of the window and arrow keys walk straight out
             // of Live/Hold Shift into the combos.
-            gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?);
+            gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30)?);
             y += 20;
 
             gen.push(label("Theme", y)?);
