@@ -348,12 +348,16 @@ pub fn settings_only(
 }
 
 /// The archive folder.
-fn library_dir() -> PathBuf {
+pub(crate) fn library_dir() -> PathBuf {
     crate::paths::beside_exe("library")
 }
 
 /// The form and the library.
-fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
+pub(crate) fn form_with_library(
+    cfg: &Config,
+    dicts: &[DictInfo],
+    dir: &Path,
+) -> SettingsForm {
     let form = settings::from_config(cfg, dicts);
     match Library::load(dir) {
         Ok(lib) => settings::with_library(form, &lib),

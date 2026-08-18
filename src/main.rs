@@ -64,6 +64,9 @@ enum Command {
         dict: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Dump the tree as JSON.
+        #[arg(long)]
+        audit: bool,
     },
     /// Print lookups on hover.
     Watch {
@@ -380,7 +383,7 @@ fn main() -> Result<()> {
                 println!();
             }
         }
-        Command::Settings { dict, config } => {
+        Command::Settings { dict, config, audit } => {
             let dict = dict_path(dict);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
@@ -395,6 +398,9 @@ fn main() -> Result<()> {
                 })?;
                 dictionary.dicts().context("reading dictionary identities")?
             };
+            if audit {
+                return chibipop::ui::audit::run(&cfg, &dicts);
+            }
             chibipop::app::settings_only(cfg, &dicts, &config_path, &dict)
         }
         Command::Run { dict, rules, config } => {
