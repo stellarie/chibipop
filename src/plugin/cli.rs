@@ -21,7 +21,7 @@ pub fn list(root: &Path) -> i32 {
             ),
             Err(e) => {
                 bad += 1;
-                println!("{:<20} REFUSED  {e}", dir.file_name().unwrap_or_default().to_string_lossy());
+                println!("{:<20} REFUSED  {e:#}", dir.file_name().unwrap_or_default().to_string_lossy());
             }
         }
     }
@@ -30,12 +30,19 @@ pub fn list(root: &Path) -> i32 {
 
 pub fn test_one(root: &Path, name: &str, image: &Path) -> i32 {
     let found = discover::discover(root);
-    let Some((dir, Ok(m))) = found.iter().find(|(d, p)| {
+    let Some((dir, parsed)) = found.iter().find(|(d, p)| {
         p.as_ref().map(|m| m.name == name).unwrap_or(false)
             || d.file_name().map(|f| f == name).unwrap_or(false)
     }) else {
         eprintln!("no plugin named \"{name}\" under {}", root.display());
         return 2;
+    };
+    let m = match parsed {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("plugin \"{name}\": {e:#}");
+            return 1;
+        }
     };
     if !m.roles.contains(&Role::TextProvider) {
         eprintln!("plugin \"{name}\" is not a text-provider");
@@ -53,7 +60,7 @@ pub fn test_one(root: &Path, name: &str, image: &Path) -> i32 {
     let mut h = match host::spawn(m, dir) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("handshake failed: {e}");
+            eprintln!("handshake failed: {e:#}");
             return 1;
         }
     };
@@ -83,7 +90,7 @@ pub fn test_one(root: &Path, name: &str, image: &Path) -> i32 {
     ) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("text/recognise failed: {e}");
+            eprintln!("text/recognise failed: {e:#}");
             return 1;
         }
     };
