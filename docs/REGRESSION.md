@@ -57,23 +57,46 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 
 ## Tier 0 — the automated gate (~2 min, no screen)
 
-**This tier is the CI contract.** The commands below are unchanged since 2026-07-29 and are what
+**The three `cargo` lines are the CI contract.** They are unchanged since 2026-07-29 and are what
 `.github/workflows/ci.yml` runs; the numbers beside them were last re-measured on **2026-08-11**.
 Two of them are `grep -c` counts rather than exit codes, and that is deliberate — see the note
 under the table. CI additionally passes `--color never` and runs the suite three times; both of
 those are explained in the callouts below, and neither is optional there.
 
+**The first two lines are local setup and are not in `ci.yml`** — checked, not assumed. That
+distinction matters for the stray-killing line, because CI has no chibipop installed and this
+machine has two.
+
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
-powershell -NoProfile -Command "Stop-Process -Name chibipop -Force -ErrorAction SilentlyContinue"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.Name -eq 'chibipop.exe' -and \$_.ExecutablePath -like '*\target\*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
 cargo test 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
 cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
 cargo build --release 2>&1 | grep -E "^error|Finished"
 ```
 
+> [!caution] Never kill chibipop by name on this machine — three different things answer to it
+> The preflight above used to be `Stop-Process -Name chibipop -Force`. **`-Name` is not
+> selective**, and as of 2026-08-18 three separate binaries are all called `chibipop.exe`:
+>
+> | Path | What it is | Killing it costs |
+> |---|---|---|
+> | `C:\Users\Stella\Documents\chibipop-latest` | the real install — config, dictionary library, a 256 MB database | closes the program the user is actually using |
+> | `C:\Users\Stella\Documents\chibipop-nightly` | where branch builds land, seeded 2026-08-18 | closes a build under test |
+> | `<repo>\target\debug` and `target\release` | test children and leftover strays | nothing — this is the only class worth killing |
+>
+> The replacement filters on `ExecutablePath` so it reaches **only** the third row. Verified
+> rather than reasoned: the `*\target\*` pattern was evaluated against all three paths (false,
+> false, true), a real `plugin-echo sleeper` started from `target\debug` was listed by a dry run
+> and then killed by the live command, and the command exits **0** when there is nothing to kill,
+> which `Get-Process -Name … -ErrorAction SilentlyContinue` does **not** do.
+>
+> The same rule governs the wedge callout further down this page: **kill by pid, or by path —
+> never by name.** Those two places are saying one thing, not two.
+
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **909** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 on 2026-08-18; see below) |
+| Rust tests | **all green**, **913** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 on 2026-08-18; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -93,17 +116,21 @@ that is the difference between the two rows and it is deliberate.
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
 
-> [!warning] `cargo test --lib` reports 891 / 1, which looks like the full figure
+> [!warning] `cargo test --lib` reports 895 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
 > runs the library target only and omits the five integration-test targets:
 > `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (7 passed), `rebuild`
-> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **891 passed, 1
-> ignored**, and that figure is close enough to the true **909 passed, 2 ignored** to read as a
+> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **895 passed, 1
+> ignored**, and that figure is close enough to the true **913 passed, 2 ignored** to read as a
 > whole-suite result — which is why the trap works. A partial run does not announce itself as
 > partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
 >
-> The gap widens as this round goes on: every plugin task since Task 6 adds integration tests
-> the `--lib` figure cannot see, so **891 has not moved since Task 5** while the true total has.
+> **The lib figure sat at 891 from Task 5 until 2026-08-18 and has now moved to 895**, so do not
+> use "891" as a landmark. Every plugin task from Task 6 onward added *integration* tests, which
+> `--lib` cannot see; the third fix round on Task 6 was the first to add **unit** tests — four,
+> covering `Outbox` in `src/plugin/host.rs` — and those it can. The lesson is unchanged and is
+> the reason this callout exists: a stale lib figure looks exactly like a current whole-suite
+> figure, whether it moved recently or not.
 
 **A lower number is not automatically a finding either — it is a debt to explain.** The
 772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
@@ -381,6 +408,22 @@ also stops Windows recycling the pid — then polls `GetExitCodeProcess`. Three 
 eight targets splitting 891 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the same **2 ignored**.
 Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not assumed.
 
+**909 → 913 is the third fix round on Task 6, and the four new tests are unit tests.** Review found
+that closing the unbounded-queue defect in round 1 had only closed half of it. `call` drained the
+reader channel at its top, but the *writer* channel was never drained at all: against a plugin that
+stops reading its stdin, every timed-out call left its base64 PNG queued forever and nothing bounded
+the total. **The fix is not `sync_channel`** — a bounded sender blocks when it is full, and a
+blocking send on the calling thread is the original round-1 defect coming back through the other
+door. Instead the queue was replaced by a **single slot**, which is what the protocol actually
+needs: `call` takes `&mut self`, so at most one request is ever outstanding. A second request
+replaces a stale one rather than queueing behind it, and `call` clears the slot on every error
+path, because a request whose caller has given up has no reader. The slot is guarded by a mutex and
+a condvar, and `shutdown` closes it so an idle writer thread cannot be stranded holding the pipe.
+The four unit tests cover replacement, the drain, a closed outbox refusing work, and the wake on
+close. Three runs, all **913**: eight targets splitting 895 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0
+failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
+counted fresh, not assumed.
+
 > [!warning] A red `dropping_the_host_kills_the_grandchild_too` **wedges the whole run**, and the
 > test binary is not the thing that hangs
 > Observed twice while falsifying this test, at 600 s and 300 s. The suite finishes and prints
@@ -391,12 +434,24 @@ Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, 
 >
 > **The cure is to kill that one pid, not to kill the pipeline.** Both times, `Stop-Process -Id
 > <the pid in the failure message>` released the hung command instantly. The failure message
-> carries the pid for exactly this reason. Kill by pid, not `-Name chibipop`, which would also
-> take out any chibipop the user has open.
+> carries the pid for exactly this reason.
+>
+> **Kill by pid, never `-Name chibipop`.** Three binaries answer to that name on this machine —
+> the real install at `Documents\chibipop-latest`, the branch-build target at
+> `Documents\chibipop-nightly`, and the test children under `target\`. `-Name` takes all three.
+> If you need the broad sweep rather than one pid, use the path-filtered preflight at the top of
+> this tier, which reaches only the third. The caution callout up there has the table.
 >
 > This is the leak the job object exists to stop, one process further out than the reader thread,
 > and it is the reason to prefer redirecting a falsification run to a **file** rather than piping
 > it.
+>
+> **It is also what the spawn-to-assign race costs, and that is the point of recording the race.**
+> `Host` assigns the child to its job immediately after `Command::spawn`, but the two are not
+> atomic. A plugin that forks inside that window leaves a grandchild outside the job, and the job
+> close will not sweep it. The consequence is not an abstract leak: it is exactly the wedge
+> described above — a run that prints its result and then hangs for as long as anyone waits.
+> Closing the window needs `PROC_THREAD_ATTRIBUTE_JOB_LIST` and a raw `CreateProcess`.
 
 > [!warning] Two `plugin_host` tests must **fail**, never hang — and they guard different pipes
 > `a_hang_times_out_without_killing_the_test` wedges a plugin that has already read its request.
@@ -426,8 +481,16 @@ Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, 
 
 **Every `plugin_host` test starts a real `chibipop.exe`, and one starts two.** `Host` kills the
 child from `Drop` as well as `shutdown`, so a panicking or early-returning test still reaps its
-process, and closing the job handle sweeps anything that process started. After a run,
-`Get-Process chibipop` should return **nothing**. Strays mean a path reached neither exit.
+process, and closing the job handle sweeps anything that process started. After a run, **no
+`chibipop.exe` should remain whose path is under `target\`**. Check the path, not just the name —
+an install being open is normal and is not a stray:
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chibipop.exe' } |
+  Select-Object ProcessId, ExecutablePath
+```
+
+A survivor under `target\` means a path reached neither exit.
 
 **Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
 `-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
