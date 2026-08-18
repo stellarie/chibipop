@@ -218,6 +218,11 @@ fn class_name() -> PCWSTR {
     w!("ChibipopSettingsClass")
 }
 
+/// Viewport and content pane.
+fn pane_class_name() -> PCWSTR {
+    w!("ChibipopSettingsPaneClass")
+}
+
 /// Scale a 96-DPI value.
 ///
 /// We are PER_MONITOR_AWARE_V2.
@@ -514,6 +519,70 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
         };
         if RegisterClassExW(&wc) == 0 {
             return Err(Error::from_thread()).context("RegisterClassExW");
+        }
+    }
+
+    REGISTERED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Both panes use this.
+///
+/// Only what `wndproc` claims.
+unsafe extern "system" fn pane_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_COMMAND | WM_NOTIFY => {
+            // SAFETY: `hwnd` is a live pane created by this module, and its
+            // parent outlives it - the parent creates it and the OS destroys
+            // it with the parent. `GetParent` reports `Err` rather than
+            // handing back a stale handle, and that case forwards nothing.
+            let parent = unsafe { GetParent(hwnd) };
+            match parent {
+                // SAFETY: `p` is the live parent just returned above;
+                // `wparam` and `lparam` are passed on unchanged, so their
+                // meaning is the one the original sender gave them.
+                Ok(p) => unsafe { SendMessageW(p, msg, Some(wparam), Some(lparam)) },
+                Err(_) => LRESULT(0),
+            }
+        }
+        // SAFETY: default handling of a message this proc does not claim.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Once per process.
+///
+/// Latch only after success.
+unsafe fn register_pane_class(hinstance: HINSTANCE) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // SAFETY: `wc` is a fully-initialised `WNDCLASSEXW` (the `..Default`
+    // spread zeroes every field not set here); `lpfnWndProc` points at a
+    // `'static extern "system" fn` valid for the process lifetime, which is
+    // what the OS requires.
+    unsafe {
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(pane_wndproc),
+            hInstance: hinstance,
+            lpszClassName: pane_class_name(),
+            hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW(IDC_ARROW)")?,
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (COLOR_BTNFACE.0 + 1) as *mut core::ffi::c_void,
+            ),
+            ..Default::default()
+        };
+        if RegisterClassExW(&wc) == 0 {
+            return Err(Error::from_thread()).context("RegisterClassExW for the pane class");
         }
     }
 
@@ -1039,6 +1108,10 @@ fn stored_trigger_key(vk: u16) -> String {
 
 pub struct SettingsWindow {
     hwnd: HWND,
+    /// Clips the content pane.
+    viewport: HWND,
+    /// Slides inside the viewport.
+    content: HWND,
     font: Option<HFONT>,
     /// The numeric values each combo offers, in the order they were added, so
     /// `read` can map a selection index back to a value.
@@ -1099,6 +1172,7 @@ impl SettingsWindow {
             let hinstance: HINSTANCE =
                 GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
             register_class(hinstance)?;
+            register_pane_class(hinstance)?;
 
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -1120,6 +1194,9 @@ impl SettingsWindow {
             let font = ui_font();
             let mut win = SettingsWindow {
                 hwnd,
+                // `build` creates both.
+                viewport: HWND::default(),
+                content: HWND::default(),
                 font,
                 widths: Vec::new(),
                 heights: Vec::new(),
@@ -1584,6 +1661,19 @@ impl SettingsWindow {
         }
     }
 
+    /// Under every content control.
+    ///
+    /// Call after creating children.
+    unsafe fn sink_viewport(&self) {
+        // SAFETY: `self.viewport` is a live child of `self.hwnd` from `build`
+        // on, destroyed only with it; before that it is null and the call
+        // fails harmlessly. `SWP_NOSIZE | SWP_NOMOVE` leave its rect alone.
+        unsafe {
+            let _ = SetWindowPos(self.viewport, Some(HWND_BOTTOM), 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
     /// Builds the box + field rows.
     fn build_field_map_rows(
         &self,
@@ -1639,6 +1729,7 @@ impl SettingsWindow {
                     rows.push((name.clone(), combo));
                 }
             }
+            self.sink_viewport();
         }
         (extra, rows)
     }
@@ -1848,6 +1939,13 @@ impl SettingsWindow {
                 Some(LPARAM(&item as *const _ as isize)));
             y = CONTENT_Y;
             let content_y = y;
+
+            // Sized when the band is known.
+            self.viewport = child(h, pane_class_name(), "",
+                WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                0, content_y, WIN_W, 0, 0, None)?;
+            self.content = child(self.viewport, pane_class_name(), "", WS_CLIPSIBLINGS,
+                0, 0, WIN_W, 0, 0, None)?;
 
             let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
                 child(h, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
@@ -2232,6 +2330,16 @@ impl SettingsWindow {
             let quit_btn = child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
                   PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
             bottom.push((quit_btn, PAD, y));
+
+            // The band the tabs occupy.
+            let band_h = bottom_y0 - content_y;
+            let _ = SetWindowPos(self.viewport, None, 0, 0,
+                dpi_scale(h, WIN_W), dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(self.content, None, 0, 0,
+                dpi_scale(h, WIN_W), dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            self.sink_viewport();
 
             self.anki_static_bottom = y_ank;
             self.bottom_y0 = bottom_y0;
