@@ -102,6 +102,8 @@ const ID_DICTS_OFF: i32 = 142;
 const ID_VIEWPORT: i32 = 143;
 /// Holds the page content.
 const ID_CONTENT: i32 = 144;
+/// The Updates group box.
+const ID_UPDATES: i32 = 145;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -173,6 +175,22 @@ const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 const STATUS_H: i32 = 58;
 /// First y below the tab strip.
 const CONTENT_Y: i32 = PAD + TAB_H + 4;
+/// Below the bottom row's top.
+const BOTTOM_UPDATE_DY: i32 = 20;
+const BOTTOM_STATUS_DY: i32 = BOTTOM_UPDATE_DY + ROW_H + 8 + GROUP_GAP;
+const BOTTOM_BTN_DY: i32 = BOTTOM_STATUS_DY + STATUS_H + 2;
+/// The bottom row's own height.
+const BOTTOM_H: i32 = BOTTOM_BTN_DY + ROW_H + 8;
+/// Apply's x, right-aligned.
+const BOTTOM_APPLY_X: i32 = WIN_W - PAD - 144;
+/// Bottom row: id, x, y offset.
+const BOTTOM_ROW: [(i32, i32, i32); 5] = [
+    (ID_UPDATES, PAD - 6, 0),
+    (ID_CHECK_UPDATE, PAD, BOTTOM_UPDATE_DY),
+    (ID_STATUS, PAD, BOTTOM_STATUS_DY),
+    (ID_APPLY, BOTTOM_APPLY_X, BOTTOM_BTN_DY),
+    (ID_QUIT, PAD, BOTTOM_BTN_DY),
+];
 /// One scroll line, 96-DPI px.
 const SCROLL_LINE: i32 = 20;
 /// Lines per wheel notch.
@@ -271,6 +289,64 @@ fn client_h(hwnd: HWND) -> i32 {
         let _ = GetClientRect(hwnd, &mut rc);
         rc.bottom - rc.top
     }
+}
+
+/// Pins the bottom row.
+///
+/// The row sits a fixed distance
+/// above the client bottom, so
+/// no tab's height can move it.
+/// The band above takes what is
+/// left, so a tall tab scrolls.
+fn place_bottom(hwnd: HWND) {
+    let ch = client_h(hwnd);
+    if ch <= 0 {
+        return;
+    }
+    let top = ch - dpi_scale(hwnd, BOTTOM_H + PAD);
+    // SAFETY: every id in `BOTTOM_ROW` names a direct child of `hwnd`, made
+    // in `build`; before that `GetDlgItem` yields `Err` rather than a
+    // dangling handle, and `panes` states the same contract for the band.
+    // `SWP_NOSIZE` leaves each control's size alone, `SWP_NOMOVE` leaves the
+    // band's origin alone, and `SWP_NOZORDER` keeps the seat `place_viewport`
+    // chose.
+    unsafe {
+        for (id, x, dy) in BOTTOM_ROW {
+            let Ok(c) = GetDlgItem(Some(hwnd), id) else {
+                continue;
+            };
+            let _ = SetWindowPos(c, None, dpi_scale(hwnd, x), top + dpi_scale(hwnd, dy),
+                0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        let Ok((viewport, _)) = panes(hwnd) else {
+            return;
+        };
+        let band = (top - dpi_scale(hwnd, CONTENT_Y)).max(0);
+        let _ = SetWindowPos(viewport, None, 0, 0, dpi_scale(hwnd, WIN_W), band,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // The page it ranged by moved.
+        repage(hwnd, viewport);
+    }
+}
+
+/// Re-pages after a resize.
+///
+/// Keeps the range, takes the new
+/// band as the page, so the
+/// scrollbar stays the only copy.
+fn repage(hwnd: HWND, viewport: HWND) {
+    let mut si = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE,
+        ..Default::default()
+    };
+    // SAFETY: `si` is initialised with its own size and passed by mutable
+    // pointer for the call's duration only. `set_scroll_range` takes a height
+    // and stores it as `nMax + 1`, so reading it back this way is exact.
+    if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_err() {
+        return;
+    }
+    set_scroll_range(hwnd, si.nMax + 1, client_h(viewport));
 }
 
 /// Slides the content pane.
@@ -551,6 +627,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 };
                 TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
             }
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            // The clamp lands here too.
+            place_bottom(hwnd);
             LRESULT(0)
         }
         WM_VSCROLL => {
@@ -843,9 +924,10 @@ unsafe fn dlg_item(root: HWND, id: i32) -> WinResult<HWND> {
     // SAFETY: `root` is the settings window's live handle; every `GetDlgItem`
     // result is checked, so a missing pane or control yields `Err` here rather
     // than a dangling handle. Every caller passes a named `ID_*`, each unique
-    // and non-zero. The id 0 that group boxes and labels share does sit on
-    // both the window and a pane, but nothing ever looks 0 up, so searching
-    // the window first cannot return the wrong control.
+    // and non-zero. The id 0 that group boxes and labels share now sits only
+    // on the content pane - the Updates box took `ID_UPDATES` so
+    // `place_bottom` can reach it - and nothing ever looks 0 up anyway, so
+    // searching the window first cannot return the wrong control.
     unsafe {
         if let Ok(c) = GetDlgItem(Some(root), id) {
             return Ok(c);
@@ -1271,12 +1353,8 @@ pub struct SettingsWindow {
     anki_static_bottom: i32,
     /// Each tab's page height, 96-DPI.
     tab_heights: [i32; 4],
-    /// hwnd, x, y (96-dpi) to shift.
-    bottom_ctrls: Vec<(HWND, i32, i32)>,
-    /// Bottom bar's original y.
+    /// Tallest tab's bottom y.
     bottom_y0: i32,
-    /// Bottom bar's own height.
-    bottom_tail: i32,
     /// Which tab is showing.
     current_tab: Cell<u32>,
     /// What Apply will do.
@@ -1345,9 +1423,7 @@ impl SettingsWindow {
                 field_map_collapsed: Cell::new(true),
                 anki_static_bottom: 0,
                 tab_heights: [0; 4],
-                bottom_ctrls: Vec::new(),
                 bottom_y0: 0,
-                bottom_tail: 0,
                 current_tab: Cell::new(0),
                 apply_mode: mode,
             };
@@ -1908,33 +1984,23 @@ impl SettingsWindow {
     /// Never below build's own size.
     fn ensure_room_for(&self, needed_bottom: i32) {
         let new_y0 = needed_bottom.max(self.bottom_y0);
-        let dy = new_y0 - self.bottom_y0;
-        // SAFETY: every hwnd in `bottom_ctrls` is a live child of
-        // `self.hwnd`, created once in `build` and never destroyed
-        // before `self.hwnd` itself. Both panes are equally live, and
-        // `SWP_NOZORDER` keeps the placement `place_viewport` chose.
+        // SAFETY: `self.content` is a live descendant of `self.hwnd`, created
+        // once in `build` and never destroyed before `self.hwnd` itself.
+        // `SWP_NOMOVE` leaves its origin alone and `SWP_NOZORDER` keeps the
+        // placement `place_viewport` chose. The viewport is not touched here:
+        // `place_bottom` sizes it from the client, off `fit_to`'s `WM_SIZE`.
         unsafe {
             // Or the pages clip.
-            let band = dpi_scale(self.hwnd, new_y0 - CONTENT_Y);
-            for pane in [self.viewport, self.content] {
-                let _ = SetWindowPos(
-                    pane, None,
-                    0, 0,
-                    dpi_scale(self.hwnd, WIN_W), band,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-            for &(hwnd, x, y) in &self.bottom_ctrls {
-                let _ = SetWindowPos(
-                    hwnd, None,
-                    dpi_scale(self.hwnd, x), dpi_scale(self.hwnd, y + dy),
-                    0, 0,
-                    SWP_NOSIZE | SWP_NOZORDER,
-                );
-            }
+            let _ = SetWindowPos(
+                self.content, None,
+                0, 0,
+                dpi_scale(self.hwnd, WIN_W),
+                dpi_scale(self.hwnd, new_y0 - CONTENT_Y),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
         // Unconditional: shrink too.
-        self.fit_to(WIN_W, new_y0 + self.bottom_tail + PAD);
+        self.fit_to(WIN_W, new_y0 + BOTTOM_H + PAD);
         // The band just changed size.
         self.reset_scroll();
     }
@@ -2485,39 +2551,31 @@ impl SettingsWindow {
 
             let y_ank = y;
             // Window y from here on.
-            y = y_general.max(y_dict).max(y_ocr).max(y_ank) + CONTENT_Y;
-            let bottom_y0 = y;
-            let mut bottom: Vec<(HWND, i32, i32)> = Vec::new();
+            // place_bottom re-pins these.
+            let bottom_y0 = y_general.max(y_dict).max(y_ocr).max(y_ank) + CONTENT_Y;
 
             // ---- Updates ----
             // Stays on `h`, not the pane.
-            let updates_group = child(h, w!("BUTTON"), "Updates",
+            child(h, w!("BUTTON"), "Updates",
                 WINDOW_STYLE(BS_GROUPBOX as u32),
-                PAD - 6, y, WIN_W - 2 * PAD, ROW_H + 24, 0, f)?;
-            bottom.push((updates_group, PAD - 6, y));
-            y += 20;
-            let update_btn = child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
-                  PAD, y, 136, ROW_H, ID_CHECK_UPDATE, f)?;
-            bottom.push((update_btn, PAD, y));
-            y += ROW_H + 8 + GROUP_GAP;
+                PAD - 6, bottom_y0, WIN_W - 2 * PAD, ROW_H + 24, ID_UPDATES, f)?;
+            child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
+                  PAD, bottom_y0 + BOTTOM_UPDATE_DY, 136, ROW_H, ID_CHECK_UPDATE, f)?;
 
             // ---- Apply / Cancel ----
             // Also the progress line.
             let staged = form.has_staged();
-            let status = child(h, w!("EDIT"),
+            child(h, w!("EDIT"),
                 apply_hint(self.apply_mode, staged),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
-                PAD, y, WIN_W - 2 * PAD - 16, STATUS_H, ID_STATUS, f)?;
-            bottom.push((status, PAD, y));
-            y += STATUS_H + 2;
-            let apply_btn = child(h, w!("BUTTON"), apply_caption(self.apply_mode),
+                PAD, bottom_y0 + BOTTOM_STATUS_DY, WIN_W - 2 * PAD - 16, STATUS_H,
+                ID_STATUS, f)?;
+            child(h, w!("BUTTON"), apply_caption(self.apply_mode),
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
-                  WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
-            bottom.push((apply_btn, WIN_W - PAD - 144, y));
+                  BOTTOM_APPLY_X, bottom_y0 + BOTTOM_BTN_DY, 136, ROW_H + 4, ID_APPLY, f)?;
             // Far left: not beside Apply.
-            let quit_btn = child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
-                  PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
-            bottom.push((quit_btn, PAD, y));
+            child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
+                  PAD, bottom_y0 + BOTTOM_BTN_DY, 116, ROW_H + 4, ID_QUIT, f)?;
 
             // The band the tabs occupy.
             let band_h = bottom_y0 - CONTENT_Y;
@@ -2532,8 +2590,6 @@ impl SettingsWindow {
             self.anki_static_bottom = y_ank;
             self.tab_heights = [y_general, y_dict, y_ocr, y_ank];
             self.bottom_y0 = bottom_y0;
-            self.bottom_tail = y + ROW_H + 8 - bottom_y0;
-            self.bottom_ctrls = bottom;
 
             // Start on General tab.
             for &c in dict.iter().chain(&ocr).chain(&ank) {
@@ -2546,7 +2602,7 @@ impl SettingsWindow {
         self.dict_ctrls = dict;
         self.ocr_ctrls = ocr;
         self.anki_ctrls = ank;
-        Ok(y + ROW_H + 8)
+        Ok(self.bottom_y0 + BOTTOM_H)
     }
 
     /// The controls' current values, as a form.
