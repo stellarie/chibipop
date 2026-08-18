@@ -4,4 +4,5 @@ pub mod host;
 pub mod manifest;
 pub mod proto;
 pub mod strikes;
+pub mod text;
 pub mod version;
