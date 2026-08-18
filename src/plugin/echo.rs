@@ -1,8 +1,15 @@
 //! A fixture plugin for tests.
 
 use std::io::{BufRead, Write};
+use std::process::{Command, Stdio};
 
 pub fn run(mode: &str) -> ! {
+    if mode == "sleeper" {
+        loop {
+            std::thread::park();
+        }
+    }
+    let grandchild = if mode == "tree" { sleeper() } else { None };
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -17,6 +24,7 @@ pub fn run(mode: &str) -> ! {
                 "protocol": 1, "name": "echo", "version": "0.1.0",
                 "roles": ["text-provider"], "features": [],
                 "capabilities": {"geometry": true, "languages": ["ja"]}}}),
+            ("echo/grandchild", _) => serde_json::json!({"result": {"pid": grandchild}}),
             (_, "crash") => std::process::exit(3),
             // park() may wake spuriously.
             (_, "hang") => loop {
@@ -43,4 +51,14 @@ pub fn run(mode: &str) -> ! {
         }
     }
     std::process::exit(0)
+}
+
+/// Outlives its parent.
+fn sleeper() -> Option<u32> {
+    Command::new(std::env::current_exe().ok()?)
+        .args(["plugin-echo", "sleeper"])
+        .stdin(Stdio::null())
+        .spawn()
+        .ok()
+        .map(|c| c.id())
 }
