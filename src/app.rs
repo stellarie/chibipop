@@ -483,6 +483,17 @@ fn frequency_notice(library: &Path, db: &Path) -> String {
     )
 }
 
+/// Names the active OCR engine.
+fn engine_status_line(cfg: &Config) -> String {
+    match resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled) {
+        EngineChoice::Builtin => "Engine: Built-in (Windows OCR)".to_string(),
+        EngineChoice::Plugin(name) => format!("Engine: {name}"),
+        EngineChoice::FellBack(name) => {
+            format!("Engine: {name} (not found — using Built-in)")
+        }
+    }
+}
+
 /// Say the library disagrees.
 fn notice_drift(w: &SettingsWindow, dir: &Path, db: &Path) {
     match drifted(dir, db) {
@@ -1445,6 +1456,7 @@ pub fn run(
                             let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
+                            let was_engine_log = cfg.debug.show_engine_log;
                             // Never half-apply.
                             if edited.has_staged() && stages_frequency(&edited, &dicts) {
                                 w.set_status(&frequency_notice(&library, &db_path));
@@ -1501,6 +1513,11 @@ pub fn run(
                                         w.set_status(notice);
                                     }
                                     None => w.set_status("Settings applied."),
+                                }
+                                if cfg.debug.show_engine_log {
+                                    w.set_status(&engine_status_line(&cfg));
+                                } else if was_engine_log {
+                                    w.set_status("");
                                 }
                                 let ms = t0.elapsed().as_millis();
                                 if ms > APPLY_BUDGET_MS {
@@ -3399,6 +3416,31 @@ mod tests {
         assert!(notice.contains("\r\nchibipop build-dict"), "the command needs its own line");
         assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
         assert!(notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""), "{notice}");
+    }
+
+    #[test]
+    fn engine_status_names_a_running_plugin() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".into();
+        cfg.plugins.enabled = vec!["meikiocr".into()];
+        assert_eq!("Engine: meikiocr", engine_status_line(&cfg));
+    }
+
+    #[test]
+    fn engine_status_names_the_builtin() {
+        assert_eq!(
+            "Engine: Built-in (Windows OCR)",
+            engine_status_line(&Config::default())
+        );
+    }
+
+    #[test]
+    fn engine_status_names_a_missing_plugin() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".into();
+        let s = engine_status_line(&cfg);
+        assert!(s.contains("meikiocr"), "{s}");
+        assert!(s.contains("not found"), "{s}");
     }
 
     #[test]

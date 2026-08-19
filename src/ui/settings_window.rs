@@ -109,6 +109,8 @@ const ID_UPDATES: i32 = 145;
 const ID_ENGINE: i32 = 146;
 /// Configure button, OCR tab.
 const ID_ENGINE_CONFIGURE: i32 = 147;
+/// Engine-log checkbox, OCR tab.
+const ID_ENGINE_LOG: i32 = 148;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -2746,7 +2748,7 @@ impl SettingsWindow {
 
             // ---- OCR / Debug ----
             y = 0;
-            ocr.push(group("OCR / Debug", y, 14 * ROW_H + 38)?);
+            ocr.push(group("OCR / Debug", y, 15 * ROW_H + 38)?);
             y += 20;
             let plugins_root = crate::paths::beside_exe("plugins");
             let found = crate::plugin::discover::discover(&plugins_root);
@@ -2857,6 +2859,9 @@ impl SettingsWindow {
             ocr.push(scan);
             SendMessageW(scan, BM_SETCHECK,
                 Some(WPARAM(if form.show_scan_region { 1 } else { 0 })), None);
+            y += ROW_H;
+            ocr.push(check("Show which OCR engine is active",
+                ID_ENGINE_LOG, form.show_engine_log, y)?);
             y += ROW_H + 18;
             let y_ocr = y;
 
@@ -3137,6 +3142,7 @@ impl SettingsWindow {
                 ocr_language,
                 engine,
                 show_scan_region: checked(ID_SHOW_SCAN),
+                show_engine_log: checked(ID_ENGINE_LOG),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),
                 staged_removes: staged.staged_removes.clone(),

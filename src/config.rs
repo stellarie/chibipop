@@ -293,6 +293,9 @@ pub struct DebugConfig {
     /// A console of each hover.
     #[serde(default)]
     pub show_lookup_log: bool,
+    /// Name the active engine.
+    #[serde(default)]
+    pub show_engine_log: bool,
 }
 
 /// Maps one field to Anki.

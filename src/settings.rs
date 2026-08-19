@@ -42,6 +42,7 @@ pub struct SettingsForm {
     /// "builtin" or a plugin's name.
     pub engine: String,
     pub show_scan_region: bool,
+    pub show_engine_log: bool,
     pub freq_names: Vec<String>,
     pub staged_adds: Vec<StagedAdd>,
     pub staged_removes: Vec<String>,
@@ -306,6 +307,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         ocr_language: cfg.ocr.language.clone(),
         engine: cfg.ocr.engine.clone(),
         show_scan_region: cfg.debug.show_scan_region,
+        show_engine_log: cfg.debug.show_engine_log,
         freq_names: Vec::new(),
         staged_adds: Vec::new(),
         staged_removes: Vec::new(),
@@ -364,6 +366,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.ocr.language = form.ocr_language.clone();
     out.ocr.engine = form.engine.clone();
     out.debug.show_scan_region = form.show_scan_region;
+    out.debug.show_engine_log = form.show_engine_log;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
     out.anki.deck = form.anki_deck.clone();
@@ -692,6 +695,7 @@ mod tests {
         cfg.ocr.capture_height = 180;
         cfg.ocr.scan_alphanumeric = false;
         cfg.debug.show_scan_region = true;
+        cfg.debug.show_engine_log = true;
         cfg.anki.enabled = true;
         cfg.anki.url = "http://localhost:9999".into();
         cfg.anki.deck = "Mining".into();
