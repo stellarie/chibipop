@@ -112,6 +112,11 @@ const ID_FIELD_MAP_BASE: i32 = 200;
 const FIELD_MAP_SOURCES: [&str; 6] =
     ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html"];
 
+/// First plugin-enable id.
+const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
+/// First plugin-configure id.
+const ID_PLUGIN_CONFIGURE_BASE: i32 = 1500;
+
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
 const TCM_GETCURSEL_MSG: u32 = TCM_FIRST + 11;
@@ -224,6 +229,13 @@ const COL_LABEL_GAP: i32 = 4;
 const COL_COMBO_W: i32 = COL_W - COL_LABEL_W - COL_LABEL_GAP;
 const COL_DROPPED_W: i32 = 150;
 const COL_LABEL_MAX_CHARS: usize = 18;
+
+// ---- Plugins tab ----
+
+/// Wraps a long refusal reason.
+const PLUGIN_STATUS_H: i32 = ROW_H + 16;
+/// One plugin row's own height.
+const PLUGIN_ROW_H: i32 = 2 * ROW_H + PLUGIN_STATUS_H;
 
 /// Which list a button acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1249,6 +1261,80 @@ fn column_label(name: &str) -> &str {
     name.char_indices().nth(COL_LABEL_MAX_CHARS).map_or(name, |(i, _)| &name[..i])
 }
 
+/// One discovered plugin's row.
+struct PluginRow {
+    label: String,
+    roles: String,
+    status: String,
+    checked: bool,
+    /// False for a refused plugin.
+    can_enable: bool,
+}
+
+/// Config's enabled plugin list.
+fn enabled_plugin_names() -> Vec<String> {
+    let path = crate::paths::beside_exe("chibipop.toml");
+    crate::config::load_or_create(&path).map(|c| c.plugins.enabled).unwrap_or_default()
+}
+
+/// Renders one plugin's row.
+fn plugin_row(
+    dir: &Path,
+    parsed: &Result<crate::plugin::manifest::Manifest>,
+    enabled: &[String],
+) -> PluginRow {
+    match parsed {
+        Ok(m) => {
+            let on = enabled.iter().any(|n| n == &m.name);
+            PluginRow {
+                label: format!("{} {}", m.name, m.version),
+                roles: roles_text(&m.roles),
+                status: if on { "Enabled" } else { "Disabled" }.to_string(),
+                checked: on,
+                can_enable: true,
+            }
+        }
+        Err(e) => PluginRow {
+            label: dir_label(dir),
+            roles: "—".to_string(),
+            status: format!("Refused: {e:#}"),
+            checked: false,
+            can_enable: false,
+        },
+    }
+}
+
+/// A refused plugin's folder.
+fn dir_label(dir: &Path) -> String {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Roles, joined for display.
+fn roles_text(roles: &[crate::plugin::manifest::Role]) -> String {
+    if roles.is_empty() {
+        return "—".to_string();
+    }
+    roles
+        .iter()
+        .map(|r| match r {
+            crate::plugin::manifest::Role::TextProvider => "text-provider",
+            crate::plugin::manifest::Role::FieldContributor => "field-contributor",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Group box height for n rows.
+fn plugins_group_h(n: usize) -> i32 {
+    let body = if n == 0 {
+        40
+    } else {
+        let n = n as i32;
+        n * PLUGIN_ROW_H + (n - 1) * ROW_GAP
+    };
+    20 + body + 8
+}
+
 /// Toggle glyph for fold state.
 fn field_map_toggle_label(collapsed: bool) -> &'static str {
     if collapsed { "Field mapping \u{25B6}" } else { "Field mapping \u{25BC}" }
@@ -1343,6 +1429,8 @@ pub struct SettingsWindow {
     ocr_ctrls: Vec<HWND>,
     /// Anki-tab-only controls.
     anki_ctrls: Vec<HWND>,
+    /// Plugins-tab-only controls.
+    plugin_ctrls: Vec<HWND>,
     /// Anki field name -> its combo.
     field_map_rows: RefCell<Vec<(String, HWND)>>,
     /// Field-map labels + group box.
@@ -1352,7 +1440,7 @@ pub struct SettingsWindow {
     /// Anki static rows end, page y.
     anki_static_bottom: i32,
     /// Each tab's page height, 96-DPI.
-    tab_heights: [i32; 4],
+    tab_heights: [i32; 5],
     /// Tallest tab's bottom y.
     bottom_y0: i32,
     /// Which tab is showing.
@@ -1418,11 +1506,12 @@ impl SettingsWindow {
                 dict_ctrls: Vec::new(),
                 ocr_ctrls: Vec::new(),
                 anki_ctrls: Vec::new(),
+                plugin_ctrls: Vec::new(),
                 field_map_rows: RefCell::new(Vec::new()),
                 field_map_extra: RefCell::new(Vec::new()),
                 field_map_collapsed: Cell::new(true),
                 anki_static_bottom: 0,
-                tab_heights: [0; 4],
+                tab_heights: [0; 5],
                 bottom_y0: 0,
                 current_tab: Cell::new(0),
                 apply_mode: mode,
@@ -1746,6 +1835,7 @@ impl SettingsWindow {
             &self.dict_ctrls,
             &self.ocr_ctrls,
             &self.anki_ctrls,
+            &self.plugin_ctrls,
         ];
         if tab as usize >= groups.len() {
             return;
@@ -2139,6 +2229,7 @@ impl SettingsWindow {
         let mut dict: Vec<HWND> = Vec::new();
         let mut ocr: Vec<HWND> = Vec::new();
         let mut ank: Vec<HWND> = Vec::new();
+        let mut plug: Vec<HWND> = Vec::new();
 
         // SAFETY: `h` is the window just created by `open`. Every control
         // below is created as a child of `h`, of `h`'s viewport pane, or of
@@ -2181,6 +2272,10 @@ impl SettingsWindow {
             let mut t3 = wide("Anki");
             item.psz_text = t3.as_mut_ptr();
             SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(3)),
+                Some(LPARAM(&item as *const _ as isize)));
+            let mut t4 = wide("Plugins");
+            item.psz_text = t4.as_mut_ptr();
+            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(4)),
                 Some(LPARAM(&item as *const _ as isize)));
             // Sized when the band is known.
             self.viewport = child(h, pane_class_name(), "",
@@ -2550,9 +2645,55 @@ impl SettingsWindow {
             y += ROW_H + 8;
 
             let y_ank = y;
+
+            // ---- Plugins ----
+            y = 0;
+            let plugins_root = crate::paths::beside_exe("plugins");
+            let found = crate::plugin::discover::discover(&plugins_root);
+            let enabled_plugins = enabled_plugin_names();
+            plug.push(group("Plugins", y, plugins_group_h(found.len()))?);
+            y += 20;
+            if found.is_empty() {
+                plug.push(child(page, w!("STATIC"),
+                    &format!("No plugins found in {}.", plugins_root.display()),
+                    WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 36, 0, f)?);
+                y += 40;
+            } else {
+                for (idx, (dir, parsed)) in found.iter().enumerate() {
+                    if idx > 0 {
+                        y += ROW_GAP;
+                    }
+                    let ry = y;
+                    let idx = idx as i32;
+                    let row = plugin_row(dir, parsed, &enabled_plugins);
+                    plug.push(child(page, w!("STATIC"), &row.label, WINDOW_STYLE(0),
+                        PAD, ry + 4, bx - PAD - 8, ROW_H, 0, f)?);
+                    let chk = child(page, w!("BUTTON"), "Enable",
+                        WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                        bx, ry, BTN_W, ROW_H,
+                        ID_PLUGIN_ENABLE_BASE + idx, f)?;
+                    SendMessageW(chk, BM_SETCHECK,
+                        Some(WPARAM(if row.checked { 1 } else { 0 })), None);
+                    let _ = EnableWindow(chk, row.can_enable);
+                    plug.push(chk);
+                    plug.push(child(page, w!("STATIC"), &row.roles, WINDOW_STYLE(0),
+                        PAD, ry + ROW_H + 4, bx - PAD - 8, ROW_H, 0, f)?);
+                    let status_y = ry + 2 * ROW_H;
+                    plug.push(child(page, w!("STATIC"), &row.status, WINDOW_STYLE(0),
+                        PAD, status_y, bx - PAD - 8, PLUGIN_STATUS_H, 0, f)?);
+                    plug.push(child(page, w!("BUTTON"), "Configure", WS_TABSTOP,
+                        bx, status_y, BTN_W, ROW_H,
+                        ID_PLUGIN_CONFIGURE_BASE + idx, f)?);
+                    y = ry + PLUGIN_ROW_H;
+                }
+            }
+            y += 8 + GROUP_GAP;
+            let y_plugins = y;
+
             // Window y from here on.
             // place_bottom re-pins these.
-            let bottom_y0 = y_general.max(y_dict).max(y_ocr).max(y_ank) + CONTENT_Y;
+            let bottom_y0 =
+                y_general.max(y_dict).max(y_ocr).max(y_ank).max(y_plugins) + CONTENT_Y;
 
             // ---- Updates ----
             // Stays on `h`, not the pane.
@@ -2588,11 +2729,11 @@ impl SettingsWindow {
             self.place_viewport();
 
             self.anki_static_bottom = y_ank;
-            self.tab_heights = [y_general, y_dict, y_ocr, y_ank];
+            self.tab_heights = [y_general, y_dict, y_ocr, y_ank, y_plugins];
             self.bottom_y0 = bottom_y0;
 
             // Start on General tab.
-            for &c in dict.iter().chain(&ocr).chain(&ank) {
+            for &c in dict.iter().chain(&ocr).chain(&ank).chain(&plug) {
                 let _ = ShowWindow(c, SW_HIDE);
             }
 
@@ -2602,6 +2743,7 @@ impl SettingsWindow {
         self.dict_ctrls = dict;
         self.ocr_ctrls = ocr;
         self.anki_ctrls = ank;
+        self.plugin_ctrls = plug;
         Ok(self.bottom_y0 + BOTTOM_H)
     }
 
@@ -3820,5 +3962,93 @@ mod tests {
     #[test]
     fn the_dictionaries_group_did_not_outgrow_the_one_box_layout() {
         assert_eq!(20 + 20 + (4 * BTN_PITCH + ROW_H) + ROW_GAP + 28 + 8, dict_group_h());
+    }
+
+    // ---- Plugins tab ----
+
+    fn manifest_stub(
+        name: &str,
+        roles: Vec<crate::plugin::manifest::Role>,
+    ) -> crate::plugin::manifest::Manifest {
+        crate::plugin::manifest::Manifest {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            protocol: 1,
+            command: "python".to_string(),
+            args: vec![],
+            roles,
+            text_provider: None,
+            field_contributor: None,
+        }
+    }
+
+    #[test]
+    fn an_enabled_plugin_is_labelled_enabled() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let row = plugin_row(Path::new("meikiocr"), &Ok(m), &["meikiocr".to_string()]);
+        assert_eq!("Enabled", row.status);
+        assert!(row.checked);
+        assert!(row.can_enable);
+        assert_eq!("meikiocr 0.1.0", row.label);
+    }
+
+    #[test]
+    fn an_unlisted_plugin_is_labelled_disabled() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let row = plugin_row(Path::new("meikiocr"), &Ok(m), &[]);
+        assert_eq!("Disabled", row.status);
+        assert!(!row.checked);
+        assert!(row.can_enable);
+    }
+
+    /// The core rule: never dropped.
+    #[test]
+    fn a_refused_plugin_shows_its_error_and_cannot_enable() {
+        let err = anyhow::anyhow!("plugin \"beta\" declares no roles");
+        let row = plugin_row(Path::new("some/dir/beta"), &Err(err), &["beta".to_string()]);
+        assert!(row.status.contains("declares no roles"), "{}", row.status);
+        assert!(row.status.starts_with("Refused"));
+        assert!(!row.checked);
+        assert!(!row.can_enable);
+        assert_eq!("beta", row.label);
+    }
+
+    #[test]
+    fn roles_text_joins_multiple_roles() {
+        let roles = vec![
+            crate::plugin::manifest::Role::TextProvider,
+            crate::plugin::manifest::Role::FieldContributor,
+        ];
+        assert_eq!("text-provider, field-contributor", roles_text(&roles));
+    }
+
+    #[test]
+    fn roles_text_handles_a_single_role() {
+        assert_eq!("text-provider", roles_text(&[crate::plugin::manifest::Role::TextProvider]));
+    }
+
+    #[test]
+    fn roles_text_is_a_dash_for_no_roles() {
+        assert_eq!("—", roles_text(&[]));
+    }
+
+    #[test]
+    fn dir_label_reads_the_folder_name() {
+        assert_eq!("meikiocr", dir_label(Path::new("C:/plugins/meikiocr")));
+    }
+
+    #[test]
+    fn plugins_group_h_for_no_plugins() {
+        assert_eq!(20 + 40 + 8, plugins_group_h(0));
+    }
+
+    #[test]
+    fn plugins_group_h_for_one_plugin() {
+        assert_eq!(20 + PLUGIN_ROW_H + 8, plugins_group_h(1));
+    }
+
+    #[test]
+    fn plugins_group_h_for_two_plugins() {
+        assert_eq!(20 + 2 * PLUGIN_ROW_H + ROW_GAP + 8, plugins_group_h(2));
     }
 }
