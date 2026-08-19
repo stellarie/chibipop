@@ -210,6 +210,7 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
                 // A dead plugin ends the loop.
                 let Ok(line) = line else { break };
                 eprintln!("{line}");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
                 push_log_line(&log_mine, line);
             }
         })
