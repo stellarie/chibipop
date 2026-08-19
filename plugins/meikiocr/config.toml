@@ -15,3 +15,7 @@ hf_home = ""
 
 # ONNX Runtime inference threads meikiocr is capped to.
 threads = 4
+
+# Enable meikiocr's internal debug log (box detection, NMS).
+# Produces heavy output — use for diagnosing one scan, not always-on.
+# debug = 1
