@@ -1792,6 +1792,119 @@ corpus page (Japanese text) ready to hover.
    must reset when a lookup succeeds. Do not re-enable the plugin during this step — that is a
    separate case.
 
+### 1.28 Fresh install without meikiocr (pre-plugin behavior) — added 2026-08-19, not run
+
+**Why this exists.** `scripts/blank-copy.ps1` now seeds the whole `plugins/` tree on every fresh
+install (this round's deploy fix, §1 of the same plan). `plugins/meikiocr` therefore ships even to
+installs that never asked for a plugin. This item is the proof that shipping it changes nothing for
+them: no extra output, no dropdown entry, no dictionary miss, unless a plugin is actually enabled.
+
+**Setup.** Seed a **scratch** folder — never `Documents\chibipop-latest` or `chibipop-nightly` —
+with `pwsh -File scripts/blank-copy.ps1 -Destination <empty folder>`. Do not create or hand-edit
+`chibipop.toml` first: the point is the true first-run path, before any config exists.
+`plugins/meikiocr` will be on disk (seeded) but not enabled.
+
+1. `<folder>\chibipop.exe run` starts with no errors and no plugin warnings. `resolve_engine
+   ("builtin", [])` (`src/config.rs:274-283`) returns `EngineChoice::Builtin` before any plugin code
+   runs, so neither fallback message (`src/app.rs:1943`, `:1950`) can fire. The stderr startup line
+   reads `chibipop: OCR engine: windows-ocr` (`src/app.rs:1999`; `WindowsOcr::name()` at
+   `src/text/ocr.rs:275`).
+2. `chibipop.exe settings` opens with **five tabs**: General, Dictionaries, OCR / Debug, Anki,
+   Plugins (`src/ui/settings_window.rs:2484-2508`).
+3. The **OCR engine** dropdown on OCR / Debug lists only **"Built-in (Windows OCR)"**. The list is
+   `["builtin"]` extended by `enabled_text_providers(found, enabled)`
+   (`src/ui/settings_window.rs:1428-1441`), which keeps only plugins whose name is in the enabled
+   list — empty here regardless of what is discovered on disk.
+4. The **Plugins** tab does **not** say "No plugins found" here — `plugins/meikiocr` is on disk, so
+   `discover()` finds it and the tab lists one row: **"meikiocr 0.1.0"**, status **"Disabled"**, the
+   **Enable** checkbox unchecked (`plugin_row`, `src/ui/settings_window.rs:1444-1468`). "No plugins
+   found in `<path>`." (`:2934-2936`) is the other valid outcome the task description allows for, but
+   it now means `plugins/` is empty or missing entirely — an install refreshed *before* this round's
+   `blank-copy.ps1` fix, or the folder deleted by hand. Confirm which state this install is actually
+   in and record it; don't assume.
+5. OCR works normally: hover Japanese text on screen and confirm it resolves through the popup, same
+   as any pre-plugin build.
+6. No `[meikiocr-adapter]` line appears anywhere in stderr. That prefix is printed only by the
+   adapter's own Python process (`plugins/meikiocr/adapter.py:90-92`), and nothing spawns it unless
+   `resolve_recogniser` takes the `EngineChoice::Plugin` arm (`src/app.rs:1936-1955`) — unreachable
+   with `engine = "builtin"` and nothing enabled.
+7. `[plugins]` absent from config defaults to an empty enabled list. On the very first launch, before
+   any `chibipop.toml` exists, this is `Config::default()`'s `plugins: PluginsConfig::default()`
+   (`src/config.rs:398`, struct at `:191-197`). `load_or_create` (`:496-516`) then **saves** that
+   default immediately — so after step 1 runs once, `chibipop.toml` exists and, being an unremarkable
+   empty `Vec`, is written back out as an explicit `[plugins]\nenabled = []`, not an absent section.
+   Both states resolve identically; the "default" is what matters, not whether the section is
+   literally missing. Already covered as a unit test: `plugins_enabled_defaults_to_empty`
+   (`src/config.rs:1328-1330`).
+
+**Pass** when all seven hold with `plugins/meikiocr` sitting unenabled on disk. The plugin system is
+invisible unless a plugin is actually turned on — that invisibility is the acceptance criterion.
+
+### 1.29 Per-engine live regression — added 2026-08-19, not run
+
+**Why this exists.** 1.28 proves the plugin system is invisible when off. This is the opposite
+proof: with meikiocr actually enabled, do the two OCR engines agree on the same fixture, and does
+naming a broken engine string fail safely instead of hanging or crashing. The engine is picked once,
+at worker-thread startup (`resolve_recogniser`, `src/app.rs:1936-1955`; "Resolved once, never saved"
+— hot-swap is not wired, see 1.27), so every engine change below needs a real restart of
+`chibipop.exe run`, never a Settings Apply.
+
+**Setup.** meikiocr installed and importable (`plugins/meikiocr/config.toml`'s `meikiocr_path`
+points at its venv — refreshing via `blank-copy.ps1` now keeps that file, which is the point of this
+round's §1 fix). `chibipop.toml` at the install root carries:
+
+```toml
+[plugins]
+enabled = ["meikiocr"]
+```
+
+Fixture: `docs/fixtures/live/01-japanese-modern.html` ("01 — modern" in `docs/LIVE-SUITE.md`),
+recognizer language `ja`. `m26` is the 26px baseline line — "学生は図書館で新しい辞書を借りました。",
+the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J1.
+
+1. **Built-in.** `[ocr]` has no `engine` key, or `engine = "builtin"`. Restart
+   (`chibipop.exe run`). Open page 01, hover `m26`, record the resolved word. Confirm the stderr
+   startup line reads `chibipop: OCR engine: windows-ocr`.
+2. **meikiocr.** Set `engine = "meikiocr"` under `[ocr]`. Restart. Open page 01, hover the same spot
+   on `m26`, record the resolved word. Confirm the stderr startup line reads
+   `chibipop: OCR engine: meikiocr` (`PluginText::name()` returns the manifest's own `name`,
+   `src/plugin/text.rs:98,149-151`). Confirm adapter lines appear on stderr: the adapter process
+   prints them itself (`adapter.py`'s `log()`, `:90-92`) and chibipop's stderr reader relays every
+   line unconditionally (`src/plugin/host.rs:206-217`) — the `show_adapter_log` debug checkbox only
+   echoes a status string inside the Settings window (`src/app.rs:1537-1539`); it does not gate this
+   passthrough. Expect, once at process start, `[meikiocr-adapter] loaded in <N>s provider=...
+   threads=4` and a `warm-up <N>ms` line (`adapter.py:132-139`), then on the hover itself
+   `[meikiocr-adapter] recognise <N>ms 1 line(s)` (`adapter.py:291-292`).
+
+   | | Built-in (windows-ocr) | meikiocr |
+   |---|---|---|
+   | Word resolved at `m26` | | |
+   | Startup line seen | | |
+   | `[meikiocr-adapter]` lines seen | n/a | |
+
+3. **Compare.** Both hovers land on the same screen coordinates on the same line, so both engines
+   should resolve the same word — 学生 or 図書館, depending on exactly where within the line the
+   cursor sits. A difference between the two is the finding to record, not a failure to explain away.
+4. **Fallback — unknown engine name.** Leave `enabled = ["meikiocr"]`. Set `engine = "nonexistent"`.
+   Restart. `resolve_engine("nonexistent", ["meikiocr"])` (`src/config.rs:274-283`) matches neither
+   `"builtin"` nor the enabled list, so it returns `EngineChoice::FellBack("nonexistent")` — a path
+   that never touches plugin discovery or spawning at all. Confirm:
+   - stderr prints the fallback warning, naming the missing engine, verbatim:
+     `chibipop: OCR engine "nonexistent" is not enabled, falling back to builtin`
+     (`src/app.rs:1949-1951`).
+   - chibipop starts anyway, on Windows OCR.
+   - the startup line reads `chibipop: OCR engine: windows-ocr`.
+   - hovering works normally.
+
+   **This is a different message from a plugin that fails to spawn.** A name that *is* in `enabled`
+   but can't start (bad path, crashed process, wrong role) instead prints `chibipop: OCR plugin
+   "<name>" failed, falling back to builtin: <reason>` (`src/app.rs:1942-1944`) — the same safe
+   landing, a different cause. Read the message; do not infer the cause from "it fell back" alone.
+
+**Pass** when both engines resolve a recorded word at `m26`, all three startup lines match verbatim,
+`[meikiocr-adapter]` lines appear only while meikiocr is the engine, and the fallback case starts
+clean on Windows OCR with the exact warning quoted above.
+
 ---
 
 ## Tier 2 — mostly automatable (~5 min)
