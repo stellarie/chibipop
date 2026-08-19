@@ -81,12 +81,12 @@ pub fn estimate_offset(line: &str, cursor_x: i32, region: PhysRect) -> usize {
 }
 
 pub struct PluginText {
-    pub host: RefCell<Host>,
+    pub(crate) host: RefCell<Host>,
     pub(crate) strikes: RefCell<Strikes>,
-    pub name: String,
-    pub geometry: bool,
-    pub language: String,
-    pub timeout: Duration,
+    pub(crate) name: String,
+    pub(crate) geometry: bool,
+    pub(crate) language: String,
+    pub(crate) timeout: Duration,
 }
 
 impl PluginText {

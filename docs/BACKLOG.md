@@ -1230,7 +1230,28 @@ resolve a real evenly-spaced CJK run and assert a 2-char match yields ink + 2×3
 
 ---
 
-## 30. `plugin::host`, `plugin::text`, `plugin::strikes` and `PluginText` have no production caller
+## 30. ~~`plugin::host`, `plugin::text`, `plugin::strikes` and `PluginText` have no production caller~~ — **FIXED 2026-08-19**
+
+> **Fixed by giving config a real engine choice.** `[ocr].engine` and `[plugins].enabled`
+> (`src/config.rs`) resolve through `resolve_engine` to an `EngineChoice`. `src/app.rs`'s
+> `worker_main` calls it once at startup: `EngineChoice::Plugin(name)` runs `find_text_plugin`
+> against `plugin::discover::discover`, then `plugin::host::spawn` and `PluginText::new`, and hands
+> the result to `text::ocr::OcrTextSource::with_recogniser` — a new, additive constructor next to
+> `new`, so the built-in path is untouched. `EngineChoice::Builtin`, `EngineChoice::FellBack` and
+> any discovery/spawn failure all take the same fallback: one `eprintln!` naming the plugin and the
+> reason, then the built-in engine, with `cfg.ocr.engine` never rewritten — a returning plugin
+> resumes on the next start, per spec section 6.
+>
+> **Verified live, not reasoned.** A throwaway test (written, run, deleted) drove exactly this
+> chain against the real meikiocr plugin under `target/release/plugins/`: `with_recogniser` built
+> an `OcrTextSource` around a spawned `PluginText`, and `recognise()` read `"昨日は"` off
+> `tests/fixtures/japanese_bgra.bin` — the same string Task 3 read directly off `PluginText`, now
+> reached through the config seam instead of by hand.
+>
+> `PluginText`'s five fields (`src/plugin/text.rs:84-89`) are `pub(crate)` again — `app.rs`'s
+> `spawn_plugin_recogniser` is the second crate-internal caller of `PluginText::new` the item asked
+> to check for, and `cargo check` stays clean at that visibility, confirming every field now has an
+> in-crate reader.
 
 **Raised 2026-08-18 by the whole-branch review. Deliberate, not an oversight — recorded because
 nothing tracked will say so once this branch merges.**

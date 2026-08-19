@@ -295,6 +295,18 @@ impl OcrTextSource {
         Ok(OcrTextSource { recogniser, settings, language: language.to_string() })
     }
 
+    /// Builds around one recogniser.
+    pub fn with_recogniser(recogniser: Box<dyn Recogniser>, max_passes: u8, prefer_vertical: bool,
+                            capture: CaptureSize, scan_alphanumeric: bool, language: &str)
+                            -> Result<Self> {
+        init_dpi_awareness()?;
+        // Else CO_E_NOTINITIALIZED.
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
+        let settings =
+            SettingsSnapshot { max_passes, prefer_vertical, capture, scan_alphanumeric };
+        Ok(OcrTextSource { recogniser, settings, language: language.to_string() })
+    }
+
     /// Swap in new OCR settings.
     pub fn apply_settings(&mut self, max_passes: u8, prefer_vertical: bool, capture: CaptureSize,
                           scan_alphanumeric: bool, language: &str) {

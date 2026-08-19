@@ -1,7 +1,7 @@
 //! Two threads: pump and worker.
 
 use crate::anki;
-use crate::config::Config;
+use crate::config::{resolve_engine, Config, EngineChoice};
 use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
 use crate::library::{Library, Pending};
@@ -11,11 +11,15 @@ use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
+use crate::plugin::manifest::{Manifest, Role};
+use crate::plugin::text::PluginText;
+use crate::plugin::{discover, host};
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::layout::{CaptureSize, Orientation};
 use crate::text::ocr::{recogniser_available, OcrTextSource};
+use crate::text::recogniser::Recogniser;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
@@ -23,7 +27,7 @@ use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::HashSet;
 use std::mem::size_of;
@@ -860,6 +864,10 @@ struct WorkerSpawn {
     dict_path: PathBuf,
     rules_path: PathBuf,
     settings: WorkerSettings,
+    /// "builtin" or a plugin's name.
+    ocr_engine: String,
+    /// Plugins allowed to run.
+    enabled_plugins: Vec<String>,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -873,6 +881,8 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
         dict_path,
         rules_path,
         settings,
+        ocr_engine,
+        enabled_plugins,
         main_tid,
         trigger_rx,
         result_tx,
@@ -891,6 +901,8 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
             settings.capture,
             settings.scan_alphanumeric,
             settings.language,
+            ocr_engine,
+            enabled_plugins,
             settings.scan_display,
             main_tid,
             trigger_rx,
@@ -942,6 +954,8 @@ pub fn run(
         rules_path: rules_path.clone(),
         // Spawn reads the file itself.
         settings: worker_settings(&live, &[]),
+        ocr_engine: cfg.ocr.engine.clone(),
+        enabled_plugins: cfg.plugins.enabled.clone(),
         main_tid,
         trigger_rx,
         result_tx: result_tx.clone(),
@@ -1848,6 +1862,58 @@ fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<
     (hover, reloads)
 }
 
+/// Finds a named text-provider.
+fn find_text_plugin<'a>(
+    found: &'a [(PathBuf, Result<Manifest>)],
+    name: &str,
+) -> Result<(&'a Path, &'a Manifest)> {
+    let hit = found.iter().find(|(dir, parsed)| {
+        parsed.as_ref().map(|m| m.name == name).unwrap_or(false)
+            || dir.file_name().map(|f| f == name).unwrap_or(false)
+    });
+    let Some((dir, parsed)) = hit else {
+        bail!("plugin \"{name}\" is not on disk");
+    };
+    let m = parsed.as_ref().map_err(|e| anyhow!("plugin \"{name}\": {e:#}"))?;
+    if !m.roles.contains(&Role::TextProvider) {
+        bail!("plugin \"{name}\" is not a text-provider");
+    }
+    Ok((dir.as_path(), m))
+}
+
+/// Spawns one plugin process.
+fn spawn_plugin_recogniser(name: &str) -> Result<Box<dyn Recogniser>> {
+    let root = crate::paths::beside_exe("plugins");
+    let found = discover::discover(&root);
+    let (dir, m) = find_text_plugin(&found, name)?;
+    let h = host::spawn(m, dir).with_context(|| format!("starting plugin \"{name}\""))?;
+    Ok(Box::new(PluginText::new(h, m)))
+}
+
+/// Picks and spawns the engine.
+///
+/// `None` picks the built-in.
+fn resolve_recogniser(ocr_engine: &str, enabled: &[String]) -> Option<Box<dyn Recogniser>> {
+    match resolve_engine(ocr_engine, enabled) {
+        EngineChoice::Builtin => None,
+        EngineChoice::Plugin(name) => match spawn_plugin_recogniser(&name) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!(
+                    "chibipop: OCR plugin \"{name}\" failed, falling back to builtin: {e:#}"
+                );
+                None
+            }
+        },
+        EngineChoice::FellBack(name) => {
+            eprintln!(
+                "chibipop: OCR engine \"{name}\" is not enabled, falling back to builtin"
+            );
+            None
+        }
+    }
+}
+
 /// Serves triggers, owns OCR.
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
@@ -1859,6 +1925,8 @@ fn worker_main(
     capture: CaptureSize,
     scan_alphanumeric: bool,
     language: String,
+    ocr_engine: String,
+    enabled_plugins: Vec<String>,
     mut scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
@@ -1867,17 +1935,25 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
-    let fallback = crate::config::default_ocr_language();
-    let substitute = startup_language(&language, &fallback, || recogniser_available(&language));
-    let language = match substitute {
-        Some(sub) => {
-            eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
-            sub
-        }
-        None => language,
+    // Resolved once, never saved.
+    let plugin_recogniser = resolve_recogniser(&ocr_engine, &enabled_plugins);
+    let built = if let Some(recogniser) = plugin_recogniser {
+        OcrTextSource::with_recogniser(
+            recogniser, max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language,
+        )
+    } else {
+        let fallback = crate::config::default_ocr_language();
+        let substitute =
+            startup_language(&language, &fallback, || recogniser_available(&language));
+        let language = match substitute {
+            Some(sub) => {
+                eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
+                sub
+            }
+            None => language,
+        };
+        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language)
     };
-    let built =
-        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language);
     let mut ocr = match built.context("creating the OCR text source") {
         Ok(o) => o,
         Err(e) => {
