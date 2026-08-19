@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, MAX_PATH, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, GetMonitorInfoW,
     MonitorFromWindow, ReleaseDC, COLOR_BTNFACE, ENUMLOGFONTEXW, HFONT, LOGFONTW, MONITORINFO,
@@ -26,7 +26,11 @@ use windows::Win32::UI::Controls::Dialogs::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{
+    ShellExecuteW, SHBrowseForFolderW, SHGetPathFromIDListW, BROWSEINFOW,
+    BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS,
+};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -259,6 +263,7 @@ enum Action {
     /// The file picks the list.
     Add,
     Remove(Target),
+    ConfigureEngine,
 }
 
 fn class_name() -> PCWSTR {
@@ -555,6 +560,61 @@ unsafe fn open_plugin_dir(hwnd: HWND, idx: usize) {
     }
 }
 
+/// Sets or appends the path.
+fn set_config_path(existing: &str, path: &str) -> String {
+    let new_line = format!("meikiocr_path = '{path}'");
+    let mut found = false;
+    let mut out: Vec<String> = existing
+        .lines()
+        .map(|line| {
+            if line.starts_with("meikiocr_path") {
+                found = true;
+                new_line.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(new_line);
+    }
+    let mut result = out.join("\n");
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+/// Pick an install folder.
+///
+/// `None` if cancelled.
+unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
+    let wtitle = wide(title);
+    let bi = BROWSEINFOW {
+        hwndOwner: owner,
+        lpszTitle: PCWSTR(wtitle.as_ptr()),
+        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        ..Default::default()
+    };
+    // SAFETY: `wtitle` and `bi` outlive every call below;
+    // `pidl` is freed exactly once, only when non-null, with
+    // the allocator its own docs require.
+    unsafe {
+        let pidl = SHBrowseForFolderW(&bi);
+        if pidl.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; MAX_PATH as usize];
+        let ok = SHGetPathFromIDListW(pidl, &mut buf);
+        CoTaskMemFree(Some(pidl as *const core::ffi::c_void));
+        if !ok.as_bool() {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+    }
+}
+
 fn record_dict_box(hwnd: HWND, which: DictBox) {
     DICT_BOX.with(|c| c.set(Some((hwnd.0 as isize, which))));
 }
@@ -669,6 +729,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
                 ID_FREQ_ADD => record_action(hwnd, Action::Add),
                 ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
+                ID_ENGINE_CONFIGURE => record_action(hwnd, Action::ConfigureEngine),
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
@@ -1741,8 +1802,9 @@ impl SettingsWindow {
         let Some(action) = action else {
             return;
         };
-        // SAFETY: both helpers act only on live descendants of `self.hwnd`,
-        // which outlives this call, and each states its own contract.
+        // SAFETY: each helper acts only on live descendants of
+        // `self.hwnd`, which outlives this call, and each states
+        // its own contract.
         unsafe {
             match action {
                 Action::Remove(target) => self.remove_selected(target),
@@ -1750,6 +1812,11 @@ impl SettingsWindow {
                     // D9: the picker pumps too.
                     before_blocking();
                     self.add_picked();
+                }
+                Action::ConfigureEngine => {
+                    // D9: the picker pumps too.
+                    before_blocking();
+                    self.configure_engine();
                 }
             }
         }
@@ -1879,6 +1946,17 @@ impl SettingsWindow {
         };
         let name = self.engine_names.get(idx)?;
         self.engine_dirs.get(name).map(|p| p.as_path())
+    }
+
+    /// Selected engine's own name.
+    fn selected_engine_name(&self) -> Option<&str> {
+        // SAFETY: `ID_ENGINE` is a live descendant of
+        // `self.hwnd`, created in `build`.
+        let idx = unsafe {
+            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else { return None };
+            SendMessageW(e, CB_GETCURSEL, None, None).0 as usize
+        };
+        self.engine_names.get(idx).map(|s| s.as_str())
     }
 
     /// Re-split for the combo.
@@ -2307,6 +2385,25 @@ impl SettingsWindow {
             update_list_buttons(self.hwnd);
             self.refresh_apply();
         }
+    }
+
+    /// Picks a folder, saves it.
+    unsafe fn configure_engine(&self) {
+        let Some(name) = self.selected_engine_name() else { return };
+        let Some(dir) = self.selected_engine_dir() else { return };
+        let title = format!("Select your {name} installation");
+        // SAFETY: `self.hwnd` is live; the picker frees its
+        // own PIDL before returning.
+        let picked = unsafe { pick_folder(self.hwnd, &title) };
+        let Some(path) = picked else { return };
+        let cfg_path = dir.join("config.toml");
+        let existing = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+        let updated = set_config_path(&existing, &path.to_string_lossy());
+        if std::fs::write(&cfg_path, updated).is_err() {
+            self.set_status(&format!("Could not save {name} path."));
+            return;
+        }
+        self.set_status(&format!("Saved {name} path."));
     }
 
     /// Resize so the client area holds `client_w` x `client_h` 96-DPI pixels,
@@ -4352,6 +4449,30 @@ mod tests {
         let mut dirs = HashMap::new();
         dirs.insert("meikiocr".to_string(), PathBuf::from("plugins/meikiocr"));
         assert_eq!(dirs.get("meikiocr").unwrap().as_os_str(), "plugins/meikiocr");
-        assert!(dirs.get("nonexistent").is_none());
+        assert!(!dirs.contains_key("nonexistent"));
+    }
+
+    #[test]
+    fn write_config_replaces_existing_path() {
+        let existing = "meikiocr_path = ''\nhf_home = ''\nthreads = 4\n";
+        let result = set_config_path(existing, r"C:\tools\meikiocr\.venv\Lib\site-packages");
+        assert!(result.contains(r"meikiocr_path = 'C:\tools\meikiocr\.venv\Lib\site-packages'"));
+        assert!(result.contains("hf_home = ''"));
+        assert!(result.contains("threads = 4"));
+    }
+
+    #[test]
+    fn write_config_appends_when_missing() {
+        let existing = "hf_home = ''\nthreads = 4\n";
+        let result = set_config_path(existing, r"C:\tools\meikiocr");
+        assert!(result.contains("hf_home = ''"));
+        assert!(result.contains("threads = 4"));
+        assert!(result.ends_with("meikiocr_path = 'C:\\tools\\meikiocr'\n"));
+    }
+
+    #[test]
+    fn write_config_creates_from_empty() {
+        let result = set_config_path("", r"C:\tools\meikiocr");
+        assert_eq!(result, "meikiocr_path = 'C:\\tools\\meikiocr'\n");
     }
 }
