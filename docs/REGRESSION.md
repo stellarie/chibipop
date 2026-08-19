@@ -1727,19 +1727,19 @@ hover observed with the resolved word recorded — **"it should work" is not evi
 > - Steps 1 and 2: Plugin enable and selection with a fresh lookup on each Apply.
 > - Step 3: Reverting to Built-in.
 > - The part of step 4 where the plugin disables itself *without* an Apply — the `Strikes` counter
->   fires on the worker thread and removes the live recogniser on-the-fly.
-> - The part of step 5 where the notice is seen.
+>   fires on the worker thread and makes `PluginText::recognise` return errors permanently, failing
+>   silently on all subsequent hovers with no auto-revert to Built-in.
 >
-> What *cannot* be verified without hot-swap (the second Apply in step 2, step 4's revert on Apply,
-> and any case where the engine changes with a popup already on-screen):
+> What *cannot* be verified today (steps 4 and 5's auto-revert and popup notice are not implemented;
+> hot-swap and the notice feature will ship together):
 >
 > - Step 2's "the next hover uses it" after an Apply that *merely* changes the engine selection,
 >   with no crash or new plugin-enable to trigger a forced reload. Apply would have to swap the
 >   recogniser while it runs; that is not implemented.
-> - Step 4's expect: applying a disable must not take effect until `Strikes` fires on the worker,
->   and then it *does* revert and say so. Without hot-swap, an Apply that changes the engine to
->   Built-in will persist the change; `Strikes` firing separately also persists it. There is
->   no "both together" case to verify.
+> - Step 4's revert: the auto-revert to Built-in, and the popup notice naming the disabled plugin,
+>   are future work. Currently when `Strikes` disables the plugin on the worker thread, all hovers
+>   fail silently with no notice.
+> - Step 5's notice: no popup notice exists for plugin failures. Errors go to stderr only.
 > - Neither step can show that an Apply-while-popup-visible case lands the change in the live
 >   instance instead of queuing it until a fresh lookup.
 
@@ -1762,15 +1762,16 @@ corpus page (Japanese text) ready to hover.
    Hover the same text. It must use Windows OCR and resolve the same word you got in step 1
    (if step 1 resolved anything). The revert is silent — no notice, no restart.
 
-4. **Disable an enabled plugin while it is the engine.** Leave the engine set to that plugin.
-   Press Apply to confirm the setting, then hover and exhaust it: three hovers must each raise
-   an error (any error, from the plugin). The third error fires the `Strikes` counter on the
-   worker thread. The plugin disables itself **without an Apply** — you will see no notice in the
-   window, but the internal disable fires. On the fourth hover, chibipop must revert to Built-in
-   **and raise a notice** on the popup saying the plugin failed and was disabled. Record the
-   plugin name in the notice. **The first three errors are the test; the notice is the observable
-   that proves the revert.** The revert happens on the worker thread, not on an Apply; this is
-   what `Strikes` exists for.
+4. **Disable an enabled plugin while it is the engine.** *(The auto-revert to Built-in and popup
+   notice described below are not yet implemented. Currently the plugin disables and all hovers fail
+   silently. These will ship with hot-swap.)* Leave the engine set to that plugin. Press Apply to
+   confirm the setting, then hover and exhaust it: three hovers must each raise an error (any error,
+   from the plugin). The third error fires the `Strikes` counter on the worker thread. The plugin
+   disables itself **without an Apply** — you will see no notice in the window, but the internal
+   disable fires. On the fourth hover, chibipop must revert to Built-in **and raise a notice** on
+   the popup saying the plugin failed and was disabled. Record the plugin name in the notice. **The
+   first three errors are the test; the notice is the observable that proves the revert.** The revert
+   happens on the worker thread, not on an Apply; this is what `Strikes` exists for.
 
    **Critical detail:** the disable happens on the worker thread with no coordination to the UI.
    A future hot-swap wiring must ensure that an Apply-while-disabled case does not resurrect the
@@ -1778,16 +1779,17 @@ corpus page (Japanese text) ready to hover.
    (`Strikes` fires and disables; a manual Apply to change the engine lands after it). The gap
    is owed and is recorded here rather than hidden.
 
-5. **Three failures in a row, auto-disable and notice.** Select a plugin that is not the current
-   engine (to avoid step 4's behavior). Leave the settings window alone — do not Apply. On the
-   main window or corpus page, use `chibipop.exe plugin test <name>` from the command line to
-   send three errors to the running instance *without* any Apply in between. The `Strikes` counter
-   must fire, the plugin must disable itself, and a fresh hover with any engine (plugin or Built-in)
-   must show the notice **once** on the popup — "Plugin <name> failed 3 times; disabled." The
-   notice must **not** reappear on the next hover. Repeat the command and confirm it still
-   disables once per three failures, not persistently. The disabled flag must survive an Apply
-   (the plugin stays off unless re-enabled by hand in the UI), and the `Strikes` counter must
-   reset when a lookup succeeds. Do not re-enable the plugin during this step — that is a
+5. **Three failures in a row, auto-disable and notice.** *(The popup notice is not yet implemented.
+   Currently the plugin disables and hovers fail silently. This will ship with hot-swap.)* Select a
+   plugin that is not the current engine (to avoid step 4's behavior). Leave the settings window
+   alone — do not Apply. On the main window or corpus page, use `chibipop.exe plugin test <name>`
+   from the command line to send three errors to the running instance *without* any Apply in between.
+   The `Strikes` counter must fire, the plugin must disable itself, and a fresh hover with any
+   engine (plugin or Built-in) must show the notice **once** on the popup — "Plugin <name> failed 3
+   times; disabled." The notice must **not** reappear on the next hover. Repeat the command and
+   confirm it still disables once per three failures, not persistently. The disabled flag must survive
+   an Apply (the plugin stays off unless re-enabled by hand in the UI), and the `Strikes` counter
+   must reset when a lookup succeeds. Do not re-enable the plugin during this step — that is a
    separate case.
 
 ---
