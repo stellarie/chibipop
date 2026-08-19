@@ -1710,6 +1710,88 @@ binary and config — never oniichan's install — with the window pinned off-sc
 end, on a live window with a human watching. That is what actually running this item still buys,
 and step 6 cannot be bought any other way.
 
+### 1.27 Live-Apply engine switching transitions — added 2026-08-19, not run
+
+**Why this exists.** Tasks 4–6 of the plugin-system round wired plugin discovery, loading, hosting,
+and state tracking. Task 7 added the `Strikes` counter, which disables a plugin after three
+consecutive failures and raises a notice naming it — a live notification on the worker thread that
+the running recogniser has changed. All five observable transitions below touch the engine field of
+a running worker, which `apply_settings` (`src/text/ocr.rs:311`) does not know about yet. This
+checklist captures the five transitions a future hot-swap wiring must preserve. Each one is a
+hover observed with the resolved word recorded — **"it should work" is not evidence**.
+
+> [!warning] Hot-swap is not wired — what is and is not verifiable today
+> `WorkerSettings` and `derive()` carry no engine field yet. Live hot-swap of the running recogniser
+> is **not implemented**. What *is* observable today:
+>
+> - Steps 1 and 2: Plugin enable and selection with a fresh lookup on each Apply.
+> - Step 3: Reverting to Built-in.
+> - The part of step 4 where the plugin disables itself *without* an Apply — the `Strikes` counter
+>   fires on the worker thread and removes the live recogniser on-the-fly.
+> - The part of step 5 where the notice is seen.
+>
+> What *cannot* be verified without hot-swap (the second Apply in step 2, step 4's revert on Apply,
+> and any case where the engine changes with a popup already on-screen):
+>
+> - Step 2's "the next hover uses it" after an Apply that *merely* changes the engine selection,
+>   with no crash or new plugin-enable to trigger a forced reload. Apply would have to swap the
+>   recogniser while it runs; that is not implemented.
+> - Step 4's expect: applying a disable must not take effect until `Strikes` fires on the worker,
+>   and then it *does* revert and say so. Without hot-swap, an Apply that changes the engine to
+>   Built-in will persist the change; `Strikes` firing separately also persists it. There is
+>   no "both together" case to verify.
+> - Neither step can show that an Apply-while-popup-visible case lands the change in the live
+>   instance instead of queuing it until a fresh lookup.
+
+**Setup.** `./target/release/chibipop.exe run`. Open Settings, go to **OCR / Debug** tab. Have a
+corpus page (Japanese text) ready to hover.
+
+1. **Enable a plugin.** In the **Plugin** listbox, select an available plugin (if any are listed
+   under "Available plugins") and click **Enable**. The status line must show the plugin starting,
+   then **Ready**. Record it started without crashing and reported its state.
+
+2. **Select it as the engine.** Switch to the **OCR language** dropdown and select the plugin as
+   the engine (it will be listed by name). Press Apply. Hover a word in your corpus **on the same
+   line and orientation the test used for step 1**. The next hover must use the plugin's
+   recogniser, not Windows OCR. Compare the word resolved, the hit-rank order, or the match box —
+   anything that differs between the two engines. **This step requires hot-swap: an Apply that
+   merely changes the engine selection must make the next hover use it. Without hot-swap, this
+   half is blocked.**
+
+3. **Select Built-in again.** In the **OCR language** dropdown, select Built-in and press Apply.
+   Hover the same text. It must use Windows OCR and resolve the same word you got in step 1
+   (if step 1 resolved anything). The revert is silent — no notice, no restart.
+
+4. **Disable an enabled plugin while it is the engine.** Leave the engine set to that plugin.
+   Press Apply to confirm the setting, then hover and exhaust it: three hovers must each raise
+   an error (any error, from the plugin). The third error fires the `Strikes` counter on the
+   worker thread. The plugin disables itself **without an Apply** — you will see no notice in the
+   window, but the internal disable fires. On the fourth hover, chibipop must revert to Built-in
+   **and raise a notice** on the popup saying the plugin failed and was disabled. Record the
+   plugin name in the notice. **The first three errors are the test; the notice is the observable
+   that proves the revert.** The revert happens on the worker thread, not on an Apply; this is
+   what `Strikes` exists for.
+
+   **Critical detail:** the disable happens on the worker thread with no coordination to the UI.
+   A future hot-swap wiring must ensure that an Apply-while-disabled case does not resurrect the
+   plugin or leave the UI and the worker out of sync. As written this step exercises neither
+   (`Strikes` fires and disables; a manual Apply to change the engine lands after it). The gap
+   is owed and is recorded here rather than hidden.
+
+5. **Three failures in a row, auto-disable and notice.** Select a plugin that is not the current
+   engine (to avoid step 4's behavior). Leave the settings window alone — do not Apply. On the
+   main window or corpus page, use `chibipop.exe plugin test <name>` from the command line to
+   send three errors to the running instance *without* any Apply in between. The `Strikes` counter
+   must fire, the plugin must disable itself, and a fresh hover with any engine (plugin or Built-in)
+   must show the notice **once** on the popup — "Plugin <name> failed 3 times; disabled." The
+   notice must **not** reappear on the next hover. Repeat the command and confirm it still
+   disables once per three failures, not persistently. The disabled flag must survive an Apply
+   (the plugin stays off unless re-enabled by hand in the UI), and the `Strikes` counter must
+   reset when a lookup succeeds. Do not re-enable the plugin during this step — that is a
+   separate case.
+
+---
+
 ## Tier 2 — mostly automatable (~5 min)
 
 > [!important] Corrected 2026-07-31 — this tier is **not** human-only
