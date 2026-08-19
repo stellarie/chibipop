@@ -118,9 +118,9 @@ def load():
     global _ocr, _cv2, _np
     t0 = time.perf_counter()
     import logging
-    if _CFG.get("debug"):
-        logging.basicConfig(level=logging.DEBUG, stream=sys.stderr,
-                            format="[meikiocr] %(message)s")
+    lvl = logging.DEBUG if _CFG.get("debug") else logging.INFO
+    logging.basicConfig(level=lvl, stream=sys.stderr,
+                        format="[meikiocr] %(message)s")
 
     import cv2
     import numpy as np
