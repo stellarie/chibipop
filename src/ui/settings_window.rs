@@ -8,7 +8,7 @@ use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RA
 use crate::text::ocr::tag_matches;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -1533,6 +1533,8 @@ pub struct SettingsWindow {
     ocr_langs: Vec<String>,
     /// Engine values, combo order.
     engine_names: Vec<String>,
+    /// Engine name to plugin directory.
+    engine_dirs: HashMap<String, PathBuf>,
     /// What Apply has yet to do.
     staged: RefCell<SettingsForm>,
     /// General-tab-only controls.
@@ -1618,6 +1620,7 @@ impl SettingsWindow {
                 fonts: Vec::new(),
                 ocr_langs: Vec::new(),
                 engine_names: Vec::new(),
+                engine_dirs: HashMap::new(),
                 staged: RefCell::new(form.clone()),
                 general_ctrls: Vec::new(),
                 dict_ctrls: Vec::new(),
@@ -1864,6 +1867,18 @@ impl SettingsWindow {
             return None;
         }
         self.ocr_langs.get(i as usize).cloned()
+    }
+
+    /// Selected engine's plugin directory.
+    fn selected_engine_dir(&self) -> Option<&Path> {
+        // SAFETY: `ID_ENGINE` is a live descendant of
+        // `self.hwnd`, created in `build`.
+        let idx = unsafe {
+            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else { return None };
+            SendMessageW(e, CB_GETCURSEL, None, None).0 as usize
+        };
+        let name = self.engine_names.get(idx)?;
+        self.engine_dirs.get(name).map(|p| p.as_path())
     }
 
     /// Re-split for the combo.
@@ -2666,6 +2681,17 @@ impl SettingsWindow {
             let engine_idx = engine_names.iter().position(|n| n == &form.engine).unwrap_or(0);
             SendMessageW(engine, CB_SETCURSEL, Some(WPARAM(engine_idx)), None);
             self.engine_names = engine_names;
+            let mut engine_dirs = HashMap::new();
+            for (dir, parsed) in &found {
+                if let Ok(m) = parsed {
+                    if enabled_plugins.contains(&m.name)
+                        && m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+                    {
+                        engine_dirs.insert(m.name.clone(), dir.clone());
+                    }
+                }
+            }
+            self.engine_dirs = engine_dirs;
             let cfg_btn = child(page, w!("BUTTON"), "Configure…", WS_TABSTOP,
                 bx, y, BTN_W, ROW_H, ID_ENGINE_CONFIGURE, f)?;
             ocr.push(cfg_btn);
@@ -4319,5 +4345,13 @@ mod tests {
         remember_plugin_dirs(hwnd, vec![PathBuf::from("plugins/meikiocr")]);
         assert_eq!(None, plugin_dir_at(hwnd, 1));
         assert_eq!(None, plugin_dir_at(dummy_hwnd(9103), 0));
+    }
+
+    #[test]
+    fn engine_dirs_maps_name_to_path() {
+        let mut dirs = HashMap::new();
+        dirs.insert("meikiocr".to_string(), PathBuf::from("plugins/meikiocr"));
+        assert_eq!(dirs.get("meikiocr").unwrap().as_os_str(), "plugins/meikiocr");
+        assert!(dirs.get("nonexistent").is_none());
     }
 }
