@@ -104,6 +104,8 @@ const ID_VIEWPORT: i32 = 143;
 const ID_CONTENT: i32 = 144;
 /// The Updates group box.
 const ID_UPDATES: i32 = 145;
+/// Engine combo, OCR tab.
+const ID_ENGINE: i32 = 146;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -147,10 +149,11 @@ struct TcItemW {
 }
 
 /// What an Apply disables.
-const WHILE_BUSY: [i32; 14] = [
+const WHILE_BUSY: [i32; 15] = [
     ID_APPLY,
     ID_QUIT,
     ID_OCR_LANG,
+    ID_ENGINE,
     ID_DICTS,
     ID_DICTS_OFF,
     ID_DICT_UP,
@@ -597,6 +600,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if id == ID_OCR_LANG && notify == CBN_SELCHANGE as u16 {
                 record_language_change(hwnd);
+                return LRESULT(0);
+            }
+            if id == ID_ENGINE && notify == CBN_SELCHANGE as u16 {
+                unsafe { update_engine_controls(hwnd) };
                 return LRESULT(0);
             }
             match id {
@@ -1090,6 +1097,19 @@ unsafe fn update_list_buttons(hwnd: HWND) {
     }
 }
 
+/// Disables the language combo.
+unsafe fn update_engine_controls(hwnd: HWND) {
+    // SAFETY: both ids are live descendants of `hwnd`, created in
+    // `build`; a missing one is skipped via `dlg_item`'s `Err`.
+    unsafe {
+        let Ok(engine) = dlg_item(hwnd, ID_ENGINE) else { return };
+        let idx = SendMessageW(engine, CB_GETCURSEL, None, None).0;
+        if let Ok(lang) = dlg_item(hwnd, ID_OCR_LANG) {
+            let _ = EnableWindow(lang, idx <= 0);
+        }
+    }
+}
+
 /// One row's text.
 unsafe fn list_row(list: HWND, index: isize) -> Option<String> {
     // SAFETY: `list` is a live listbox owned by the caller; the buffer is
@@ -1277,6 +1297,22 @@ fn enabled_plugin_names() -> Vec<String> {
     crate::config::load_or_create(&path).map(|c| c.plugins.enabled).unwrap_or_default()
 }
 
+/// Enabled text-provider names.
+fn enabled_text_providers(
+    found: &[(PathBuf, Result<crate::plugin::manifest::Manifest>)],
+    enabled: &[String],
+) -> Vec<String> {
+    found
+        .iter()
+        .filter_map(|(_, parsed)| parsed.as_ref().ok())
+        .filter(|m| {
+            enabled.iter().any(|e| e == &m.name)
+                && m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+        })
+        .map(|m| m.name.clone())
+        .collect()
+}
+
 /// Renders one plugin's row.
 fn plugin_row(
     dir: &Path,
@@ -1419,6 +1455,8 @@ pub struct SettingsWindow {
     fonts: Vec<String>,
     /// Language tags, combo order.
     ocr_langs: Vec<String>,
+    /// Engine values, combo order.
+    engine_names: Vec<String>,
     /// What Apply has yet to do.
     staged: RefCell<SettingsForm>,
     /// General-tab-only controls.
@@ -1501,6 +1539,7 @@ impl SettingsWindow {
                 passes: Vec::new(),
                 fonts: Vec::new(),
                 ocr_langs: Vec::new(),
+                engine_names: Vec::new(),
                 staged: RefCell::new(form.clone()),
                 general_ctrls: Vec::new(),
                 dict_ctrls: Vec::new(),
@@ -1706,6 +1745,7 @@ impl SettingsWindow {
             }
             if !busy {
                 update_list_buttons(self.hwnd);
+                update_engine_controls(self.hwnd);
             }
         }
     }
@@ -2518,8 +2558,31 @@ impl SettingsWindow {
 
             // ---- OCR / Debug ----
             y = 0;
-            ocr.push(group("OCR / Debug", y, 12 * ROW_H + 38)?);
+            ocr.push(group("OCR / Debug", y, 13 * ROW_H + 38)?);
             y += 20;
+            let plugins_root = crate::paths::beside_exe("plugins");
+            let found = crate::plugin::discover::discover(&plugins_root);
+            let enabled_plugins = enabled_plugin_names();
+            let mut engine_names = vec!["builtin".to_string()];
+            engine_names.extend(enabled_text_providers(&found, &enabled_plugins));
+            // Spec D4: keep it offered.
+            if form.engine != "builtin" && !engine_names.contains(&form.engine) {
+                engine_names.push(form.engine.clone());
+            }
+            ocr.push(label("OCR engine", y)?);
+            let engine = child(page, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_ENGINE, f)?;
+            ocr.push(engine);
+            for name in &engine_names {
+                let shown = if name == "builtin" { "Built-in (Windows OCR)" } else { name };
+                SendMessageW(engine, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(shown).as_ptr() as isize)));
+            }
+            let engine_idx = engine_names.iter().position(|n| n == &form.engine).unwrap_or(0);
+            SendMessageW(engine, CB_SETCURSEL, Some(WPARAM(engine_idx)), None);
+            self.engine_names = engine_names;
+            y += ROW_H;
             ocr.push(label("OCR language", y)?);
             let lang = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
@@ -2535,6 +2598,7 @@ impl SettingsWindow {
                 SendMessageW(lang, CB_SETCURSEL, Some(WPARAM(i)), None);
             }
             self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
+            let _ = EnableWindow(lang, engine_idx == 0);
             y += ROW_H;
             ocr.push(child(page, w!("STATIC"),
                 "Installed recognizers, plus any marked (not installed).",
@@ -2803,6 +2867,18 @@ impl SettingsWindow {
                 }
             };
 
+            let engine = {
+                let i = combo_index(ID_ENGINE);
+                if i < 0 {
+                    template.engine.clone()
+                } else {
+                    self.engine_names
+                        .get(i as usize)
+                        .cloned()
+                        .unwrap_or_else(|| template.engine.clone())
+                }
+            };
+
             let trigger_key = resolved_trigger_key(h, &template.trigger_key);
             let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
 
@@ -2851,6 +2927,7 @@ impl SettingsWindow {
                 scan_alphanumeric: checked(ID_SCAN_ALNUM),
                 per_character_lookup: checked(ID_PER_CHAR),
                 ocr_language,
+                engine,
                 show_scan_region: checked(ID_SHOW_SCAN),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),
@@ -4011,6 +4088,37 @@ mod tests {
         assert!(!row.checked);
         assert!(!row.can_enable);
         assert_eq!("beta", row.label);
+    }
+
+    #[test]
+    fn enabled_text_providers_includes_an_enabled_provider() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let found = vec![(PathBuf::from("meikiocr"), Ok(m))];
+        let names = enabled_text_providers(&found, &["meikiocr".to_string()]);
+        assert_eq!(vec!["meikiocr".to_string()], names);
+    }
+
+    #[test]
+    fn enabled_text_providers_excludes_a_disabled_provider() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let found = vec![(PathBuf::from("meikiocr"), Ok(m))];
+        assert!(enabled_text_providers(&found, &[]).is_empty());
+    }
+
+    #[test]
+    fn enabled_text_providers_excludes_a_non_provider_role() {
+        let m = manifest_stub("scorer", vec![crate::plugin::manifest::Role::FieldContributor]);
+        let found = vec![(PathBuf::from("scorer"), Ok(m))];
+        let names = enabled_text_providers(&found, &["scorer".to_string()]);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn enabled_text_providers_excludes_a_refused_manifest() {
+        let err = anyhow::anyhow!("plugin \"beta\" declares no roles");
+        let found = vec![(PathBuf::from("beta"), Err(err))];
+        let names = enabled_text_providers(&found, &["beta".to_string()]);
+        assert!(names.is_empty());
     }
 
     #[test]

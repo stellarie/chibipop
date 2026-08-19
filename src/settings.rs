@@ -39,6 +39,8 @@ pub struct SettingsForm {
     pub scan_alphanumeric: bool,
     pub per_character_lookup: bool,
     pub ocr_language: String,
+    /// "builtin" or a plugin's name.
+    pub engine: String,
     pub show_scan_region: bool,
     pub freq_names: Vec<String>,
     pub staged_adds: Vec<StagedAdd>,
@@ -300,6 +302,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
         per_character_lookup: cfg.trigger.per_character_lookup,
         ocr_language: cfg.ocr.language.clone(),
+        engine: cfg.ocr.engine.clone(),
         show_scan_region: cfg.debug.show_scan_region,
         freq_names: Vec::new(),
         staged_adds: Vec::new(),
@@ -356,6 +359,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.ocr.scan_alphanumeric = form.scan_alphanumeric;
     out.trigger.per_character_lookup = form.per_character_lookup;
     out.ocr.language = form.ocr_language.clone();
+    out.ocr.engine = form.engine.clone();
     out.debug.show_scan_region = form.show_scan_region;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
@@ -835,6 +839,23 @@ mod tests {
         cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
         assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+    }
+
+    #[test]
+    fn apply_to_carries_the_engine() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.engine = "meikiocr".to_string();
+        assert_eq!("meikiocr", apply_to(&form, &cfg).ocr.engine);
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_the_engine() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".to_string();
+        assert_eq!("meikiocr", from_config(&cfg, &dicts()).engine);
+        assert_eq!("builtin", from_config(&Config::default(), &dicts()).engine);
     }
 
     #[test]
