@@ -117,6 +117,10 @@ def load():
     """Build the engine. Called from hello, so the 1.3 s load is paid there."""
     global _ocr, _cv2, _np
     t0 = time.perf_counter()
+    import logging
+    logging.basicConfig(level=logging.DEBUG, stream=sys.stderr,
+                        format="[meikiocr] %(message)s")
+
     import cv2
     import numpy as np
     import meikiocr
