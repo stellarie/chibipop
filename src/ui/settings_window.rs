@@ -562,7 +562,8 @@ unsafe fn open_plugin_dir(hwnd: HWND, idx: usize) {
 
 /// Sets or appends the path.
 fn set_config_path(existing: &str, path: &str) -> String {
-    let new_line = format!("meikiocr_path = '{path}'");
+    let escaped = path.replace('\\', "\\\\");
+    let new_line = format!("meikiocr_path = \"{escaped}\"");
     let mut found = false;
     let mut out: Vec<String> = existing
         .lines()
@@ -585,7 +586,7 @@ fn set_config_path(existing: &str, path: &str) -> String {
     result
 }
 
-/// Pick a folder via a file dialog.
+/// Pick a folder via file dialog.
 ///
 /// `None` if cancelled.
 unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
@@ -1592,7 +1593,7 @@ pub struct SettingsWindow {
     ocr_langs: Vec<String>,
     /// Engine values, combo order.
     engine_names: Vec<String>,
-    /// Engine name to plugin directory.
+    /// Engine name → plugin dir.
     engine_dirs: HashMap<String, PathBuf>,
     /// What Apply has yet to do.
     staged: RefCell<SettingsForm>,
@@ -1934,7 +1935,7 @@ impl SettingsWindow {
         self.ocr_langs.get(i as usize).cloned()
     }
 
-    /// Selected engine's plugin directory.
+    /// Selected engine's plugin dir.
     fn selected_engine_dir(&self) -> Option<&Path> {
         // SAFETY: `ID_ENGINE` is a live descendant of
         // `self.hwnd`, created in `build`.
@@ -4458,9 +4459,9 @@ mod tests {
 
     #[test]
     fn write_config_replaces_existing_path() {
-        let existing = "meikiocr_path = ''\nhf_home = ''\nthreads = 4\n";
+        let existing = "meikiocr_path = \"\"\nhf_home = ''\nthreads = 4\n";
         let result = set_config_path(existing, r"C:\tools\meikiocr\.venv\Lib\site-packages");
-        assert!(result.contains(r"meikiocr_path = 'C:\tools\meikiocr\.venv\Lib\site-packages'"));
+        assert!(result.contains(r#"meikiocr_path = "C:\\tools\\meikiocr\\.venv\\Lib\\site-packages""#));
         assert!(result.contains("hf_home = ''"));
         assert!(result.contains("threads = 4"));
     }
@@ -4471,12 +4472,12 @@ mod tests {
         let result = set_config_path(existing, r"C:\tools\meikiocr");
         assert!(result.contains("hf_home = ''"));
         assert!(result.contains("threads = 4"));
-        assert!(result.ends_with("meikiocr_path = 'C:\\tools\\meikiocr'\n"));
+        assert!(result.ends_with("meikiocr_path = \"C:\\\\tools\\\\meikiocr\"\n"));
     }
 
     #[test]
     fn write_config_creates_from_empty() {
         let result = set_config_path("", r"C:\tools\meikiocr");
-        assert_eq!(result, "meikiocr_path = 'C:\\tools\\meikiocr'\n");
+        assert_eq!(result, "meikiocr_path = \"C:\\\\tools\\\\meikiocr\"\n");
     }
 }

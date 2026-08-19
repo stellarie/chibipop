@@ -1471,8 +1471,6 @@ pub fn run(
                             let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
-                            let was_engine_log = cfg.debug.show_engine_log;
-                            let was_adapter_log = cfg.debug.show_adapter_log;
                             // Never half-apply.
                             if edited.has_staged() && stages_frequency(&edited, &dicts) {
                                 w.set_status(&frequency_notice(&library, &db_path));
@@ -1523,25 +1521,21 @@ pub fn run(
                                 save_in_background(&mut save_job, updated,
                                                    config_path.to_path_buf(),
                                                    save_tx.clone(), main_tid);
+                                let mut status_parts = Vec::new();
                                 match &clamped {
                                     Some(notice) => {
                                         w.set_capture_fields(&cfg.ocr);
-                                        w.set_status(notice);
+                                        status_parts.push(notice.clone());
                                     }
-                                    None => w.set_status("Settings applied."),
+                                    None => status_parts.push("Settings applied.".to_string()),
                                 }
-                                let mut log_lines = Vec::new();
                                 if cfg.debug.show_engine_log {
-                                    log_lines.push(engine_status_line(&cfg));
+                                    status_parts.push(engine_status_line(&cfg));
                                 }
                                 if cfg.debug.show_adapter_log {
-                                    log_lines.push(adapter_status_line(&cfg));
+                                    status_parts.push(adapter_status_line(&cfg));
                                 }
-                                if !log_lines.is_empty() {
-                                    w.set_status(&log_lines.join("\r\n"));
-                                } else if was_engine_log || was_adapter_log {
-                                    w.set_status("");
-                                }
+                                w.set_status(&status_parts.join("\r\n"));
                                 let ms = t0.elapsed().as_millis();
                                 if ms > APPLY_BUDGET_MS {
                                     eprintln!(
