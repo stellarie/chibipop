@@ -3,10 +3,12 @@
 # Two modes, chosen by what is already there:
 #
 #   empty folder  seed it, the way a downloaded zip would: exe, deconjugator,
-#                 README, LICENSE. No config and no database, so the first
-#                 launch takes the first-run path.
-#   an install    replace chibipop.exe only. chibipop.toml, library/ and
-#                 data/ are the user's own and are never touched.
+#                 README, LICENSE, plugins/. No config and no database, so
+#                 the first launch takes the first-run path.
+#   an install    replace chibipop.exe, plus each plugin's plugin.toml and
+#                 adapter.py. chibipop.toml, library/, data/ and each
+#                 plugin's config.toml are the user's own and are never
+#                 touched if already present.
 #
 # This script deletes nothing. Run it after every release build.
 #
@@ -45,6 +47,47 @@ if ($seeding) {
 
 Copy-Item $exe $Destination -Force
 
+# plugins/: on seed, copy the whole tree, template configs and all. On
+# refresh, plugin.toml and adapter.py are code and always refresh; each
+# plugin's config.toml is the user's own and is kept if already present.
+$repoPlugins = Join-Path $repo 'plugins'
+$destPlugins = Join-Path $Destination 'plugins'
+$pluginNotes = @()
+
+if ($seeding) {
+    if (Test-Path $repoPlugins) {
+        New-Item -ItemType Directory -Path $destPlugins -Force | Out-Null
+        Copy-Item (Join-Path $repoPlugins '*') $destPlugins -Recurse -Force
+    }
+} elseif (Test-Path $repoPlugins) {
+    Get-ChildItem $repoPlugins -Directory |
+        Where-Object { Test-Path (Join-Path $_.FullName 'plugin.toml') } |
+        ForEach-Object {
+            $name = $_.Name
+            $srcDir = $_.FullName
+            $dstDir = Join-Path $destPlugins $name
+            New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
+
+            foreach ($file in 'plugin.toml', 'adapter.py') {
+                $srcFile = Join-Path $srcDir $file
+                if (Test-Path $srcFile) {
+                    Copy-Item $srcFile $dstDir -Force
+                }
+            }
+
+            $dstConfig = Join-Path $dstDir 'config.toml'
+            if (Test-Path $dstConfig) {
+                $pluginNotes += "plugins/$name (config.toml kept)"
+            } else {
+                $srcConfig = Join-Path $srcDir 'config.toml'
+                if (Test-Path $srcConfig) {
+                    Copy-Item $srcConfig $dstConfig
+                }
+                $pluginNotes += "plugins/$name (config.toml seeded)"
+            }
+        }
+}
+
 $version = (& $target --version) -replace '^chibipop\s+', ''
 Write-Output $(if ($seeding) { "seeded blank: $Destination" } else { "exe refreshed: $Destination" })
 Write-Output "version:      $version"
@@ -57,5 +100,6 @@ if (-not $seeding) {
     if ($lib) { $kept += "library/ ($($lib.Count) archives)" }
     $db = Get-ChildItem (Join-Path $Destination 'data') -Filter '*.sqlite' -ErrorAction SilentlyContinue
     foreach ($f in $db) { $kept += ("{0} ({1:N0} MB)" -f $f.Name, ($f.Length / 1MB)) }
+    $kept += $pluginNotes
     Write-Output $(if ($kept) { "kept:         " + ($kept -join ', ') } else { 'kept:         nothing else was there' })
 }
