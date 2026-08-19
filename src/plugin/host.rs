@@ -4,12 +4,13 @@ use crate::plugin::manifest::Manifest;
 use crate::plugin::proto::{Hello, Ready};
 use crate::plugin::version::agree;
 use anyhow::{bail, Context, Result};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -26,6 +27,30 @@ pub struct Host {
     lines: Receiver<Result<String, std::io::Error>>,
     ready: Ready,
     next_id: u64,
+    stderr_log: Arc<Mutex<VecDeque<String>>>,
+}
+
+/// Ring buffer capacity.
+const LOG_CAP: usize = 50;
+
+/// The active plugin's stderr.
+static ENGINE_LOG: OnceLock<Arc<Mutex<VecDeque<String>>>> = OnceLock::new();
+
+/// Reads the log from anywhere.
+pub fn engine_log_lines() -> Vec<String> {
+    match ENGINE_LOG.get() {
+        Some(log) => log.lock().unwrap().iter().cloned().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Evicts the oldest once full.
+fn push_log_line(buf: &Mutex<VecDeque<String>>, line: String) {
+    let mut b = buf.lock().unwrap();
+    if b.len() >= LOG_CAP {
+        b.pop_front();
+    }
+    b.push_back(line);
 }
 
 #[derive(Default)]
@@ -149,7 +174,7 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("starting plugin \"{}\"", m.name))?;
     if let Err(e) = job.adopt(&child) {
@@ -162,6 +187,7 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
 
     let mut stdin = child.stdin.take().context("plugin stdin")?;
     let stdout = child.stdout.take().context("plugin stdout")?;
+    let stderr = child.stderr.take().context("plugin stderr")?;
 
     let (tx, lines) = mpsc::channel();
     // A read cannot be interrupted.
@@ -172,6 +198,22 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
             }
         }
     });
+
+    let stderr_log = Arc::clone(
+        ENGINE_LOG.get_or_init(|| Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAP)))));
+    let log_mine = Arc::clone(&stderr_log);
+    // Named for panic messages.
+    std::thread::Builder::new()
+        .name(format!("{}-stderr", m.name))
+        .spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                // A dead plugin ends the loop.
+                let Ok(line) = line else { break };
+                eprintln!("{line}");
+                push_log_line(&log_mine, line);
+            }
+        })
+        .context("spawning the stderr reader")?;
 
     let outbox: Arc<Outbox> = Arc::default();
     let mine = Arc::clone(&outbox);
@@ -185,7 +227,9 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
         mine.close();
     });
 
-    let mut h = Host { child, job: Some(job), outbox, lines, ready: blank_ready(), next_id: 1 };
+    let mut h = Host {
+        child, job: Some(job), outbox, lines, ready: blank_ready(), next_id: 1, stderr_log,
+    };
     let hello = Hello {
         chibipop: env!("CARGO_PKG_VERSION").to_string(),
         protocol_supported: crate::plugin::manifest::SUPPORTED.to_vec(),
@@ -213,6 +257,11 @@ fn blank_ready() -> Ready {
 impl Host {
     pub fn ready(&self) -> &Ready {
         &self.ready
+    }
+
+    /// This plugin's recent stderr.
+    pub fn recent_log(&self) -> Vec<String> {
+        self.stderr_log.lock().unwrap().iter().cloned().collect()
     }
 
     pub fn call(
@@ -332,5 +381,17 @@ mod tests {
         let writer = std::thread::spawn(move || mine.take());
         outbox.close();
         assert_eq!(writer.join().unwrap(), None);
+    }
+
+    #[test]
+    fn the_log_ring_keeps_only_the_newest_lines_once_full() {
+        let buf = Mutex::new(VecDeque::new());
+        for i in 0..LOG_CAP + 5 {
+            push_log_line(&buf, i.to_string());
+        }
+        let got: Vec<String> = buf.lock().unwrap().iter().cloned().collect();
+        assert_eq!(got.len(), LOG_CAP);
+        assert_eq!(got.first(), Some(&"5".to_string()));
+        assert_eq!(got.last(), Some(&(LOG_CAP + 4).to_string()));
     }
 }
