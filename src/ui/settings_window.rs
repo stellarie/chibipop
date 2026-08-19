@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, MAX_PATH, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, GetMonitorInfoW,
     MonitorFromWindow, ReleaseDC, COLOR_BTNFACE, ENUMLOGFONTEXW, HFONT, LOGFONTW, MONITORINFO,
@@ -26,11 +26,7 @@ use windows::Win32::UI::Controls::Dialogs::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
-use windows::Win32::UI::Shell::{
-    ShellExecuteW, SHBrowseForFolderW, SHGetPathFromIDListW, BROWSEINFOW,
-    BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS,
-};
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -585,34 +581,32 @@ fn set_config_path(existing: &str, path: &str) -> String {
     result
 }
 
-/// Pick an install folder.
+/// Pick a folder via a file dialog.
 ///
 /// `None` if cancelled.
 unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
+    let mut buf = vec![0u16; 1024];
+    let filter: Vec<u16> = "Any file\0*.*\0\0".encode_utf16().collect();
     let wtitle = wide(title);
-    let bi = BROWSEINFOW {
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: owner,
-        lpszTitle: PCWSTR(wtitle.as_ptr()),
-        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        nFilterIndex: 1,
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(wtitle.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
         ..Default::default()
     };
-    // SAFETY: `wtitle` and `bi` outlive every call below;
-    // `pidl` is freed exactly once, only when non-null, with
-    // the allocator its own docs require.
-    unsafe {
-        let pidl = SHBrowseForFolderW(&bi);
-        if pidl.is_null() {
-            return None;
-        }
-        let mut buf = [0u16; MAX_PATH as usize];
-        let ok = SHGetPathFromIDListW(pidl, &mut buf);
-        CoTaskMemFree(Some(pidl as *const core::ffi::c_void));
-        if !ok.as_bool() {
-            return None;
-        }
-        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+    // SAFETY: same contract as `pick_archives`.
+    let picked = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool();
+    if !picked {
+        return None;
     }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let path = PathBuf::from(String::from_utf16_lossy(&buf[..len]));
+    path.parent().map(|p| p.to_path_buf())
 }
 
 fn record_dict_box(hwnd: HWND, which: DictBox) {

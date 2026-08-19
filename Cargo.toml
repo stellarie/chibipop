@@ -37,7 +37,6 @@ windows = { version = "0.62.2", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
-  "Win32_UI_Shell_Common",
   "Win32_UI_Controls",
   "Win32_UI_Controls_Dialogs",
   "Win32_Graphics_Direct3D",
@@ -48,8 +47,6 @@ windows = { version = "0.62.2", features = [
   "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_DirectWrite",
   "Win32_System_LibraryLoader",
-  # Frees the PIDL SHBrowseForFolderW returns.
-  "Win32_System_Com",
   # CreateMutexW takes SECURITY_ATTRIBUTES.
   "Win32_Security",
   "Win32_System_Threading",
