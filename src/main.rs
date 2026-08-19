@@ -213,6 +213,7 @@ fn main() -> Result<()> {
                     (read.lines, read.resolved, read.source, read.dxgi_error)
                 }
             };
+            println!("engine:  {}", source.recogniser().name());
             match &dxgi_error {
                 Some(why) => println!("capture: {}  (dxgi: {why})", source_used.as_str()),
                 None => println!("capture: {}", source_used.as_str()),

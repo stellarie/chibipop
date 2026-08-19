@@ -1955,7 +1955,10 @@ fn worker_main(
         OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language)
     };
     let mut ocr = match built.context("creating the OCR text source") {
-        Ok(o) => o,
+        Ok(o) => {
+            eprintln!("chibipop: OCR engine: {}", o.recogniser().name());
+            o
+        }
         Err(e) => {
             let _ = startup_tx.send(Err(e));
             return;
