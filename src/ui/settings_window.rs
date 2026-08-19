@@ -107,6 +107,8 @@ const ID_CONTENT: i32 = 144;
 const ID_UPDATES: i32 = 145;
 /// Engine combo, OCR tab.
 const ID_ENGINE: i32 = 146;
+/// Configure button, OCR tab.
+const ID_ENGINE_CONFIGURE: i32 = 147;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -152,11 +154,12 @@ struct TcItemW {
 }
 
 /// What an Apply disables.
-const WHILE_BUSY: [i32; 15] = [
+const WHILE_BUSY: [i32; 16] = [
     ID_APPLY,
     ID_QUIT,
     ID_OCR_LANG,
     ID_ENGINE,
+    ID_ENGINE_CONFIGURE,
     ID_DICTS,
     ID_DICTS_OFF,
     ID_DICT_UP,
@@ -1145,15 +1148,32 @@ unsafe fn update_list_buttons(hwnd: HWND) {
     }
 }
 
-/// Disables the language combo.
+/// True when idx > 0.
+fn should_show_configure(engine_combo_index: isize) -> bool {
+    engine_combo_index > 0
+}
+
+/// Lang enable, cfg show.
 unsafe fn update_engine_controls(hwnd: HWND) {
-    // SAFETY: both ids are live descendants of `hwnd`, created in
+    // SAFETY: each id is a live descendant of `hwnd`, created in
     // `build`; a missing one is skipped via `dlg_item`'s `Err`.
     unsafe {
         let Ok(engine) = dlg_item(hwnd, ID_ENGINE) else { return };
         let idx = SendMessageW(engine, CB_GETCURSEL, None, None).0;
         if let Ok(lang) = dlg_item(hwnd, ID_OCR_LANG) {
             let _ = EnableWindow(lang, idx <= 0);
+        }
+        if let Ok(cfg_btn) = dlg_item(hwnd, ID_ENGINE_CONFIGURE) {
+            let mut on_ocr_tab = false;
+            if let Ok(tab) = dlg_item(hwnd, ID_TAB) {
+                on_ocr_tab = SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0 == 2;
+            }
+            let cmd = if on_ocr_tab && should_show_configure(idx) {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            };
+            let _ = ShowWindow(cfg_btn, cmd);
         }
     }
 }
@@ -1951,6 +1971,7 @@ impl SettingsWindow {
                 }
             }
             self.apply_field_map_visibility();
+            update_engine_controls(self.hwnd);
         }
         self.reset_scroll();
     }
@@ -2631,9 +2652,11 @@ impl SettingsWindow {
                 engine_names.push(form.engine.clone());
             }
             ocr.push(label("OCR engine", y)?);
+            // Room for Configure at bx.
+            let engine_w = bx - FIELD_X - 8;
             let engine = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_ENGINE, f)?;
+                FIELD_X, y, engine_w, 220, ID_ENGINE, f)?;
             ocr.push(engine);
             for name in &engine_names {
                 let shown = if name == "builtin" { "Built-in (Windows OCR)" } else { name };
@@ -2643,6 +2666,10 @@ impl SettingsWindow {
             let engine_idx = engine_names.iter().position(|n| n == &form.engine).unwrap_or(0);
             SendMessageW(engine, CB_SETCURSEL, Some(WPARAM(engine_idx)), None);
             self.engine_names = engine_names;
+            let cfg_btn = child(page, w!("BUTTON"), "Configure…", WS_TABSTOP,
+                bx, y, BTN_W, ROW_H, ID_ENGINE_CONFIGURE, f)?;
+            ocr.push(cfg_btn);
+            let _ = ShowWindow(cfg_btn, SW_HIDE);
             y += ROW_H;
             ocr.push(label("OCR language", y)?);
             let lang = child(page, w!("COMBOBOX"), "",
@@ -3805,6 +3832,19 @@ mod tests {
         let rows = language_choices(installed_four(), "ZH-hans");
         assert_eq!(installed_four(), rows);
         assert_eq!(Some(2), language_index(&rows, "ZH-hans"));
+    }
+
+    // ---- engine configure ----
+
+    #[test]
+    fn configure_button_hidden_when_builtin_selected() {
+        assert!(!should_show_configure(0));
+    }
+
+    #[test]
+    fn configure_button_visible_when_plugin_selected() {
+        assert!(should_show_configure(1));
+        assert!(should_show_configure(3));
     }
 
     // ---- re-scoping ----
