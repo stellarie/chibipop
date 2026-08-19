@@ -56,6 +56,8 @@ pub struct SettingsForm {
     pub anki_model: String,
     pub anki_add_key: String,
     pub field_map: Vec<FieldMapping>,
+    /// Plugin names allowed to run.
+    pub enabled_plugins: Vec<String>,
 }
 
 /// An import waiting for Apply.
@@ -315,6 +317,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_model: cfg.anki.model.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
+        enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
 
@@ -369,6 +372,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
+    out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
         form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
     out.dictionaries.display_order =
@@ -856,6 +860,29 @@ mod tests {
         cfg.ocr.engine = "meikiocr".to_string();
         assert_eq!("meikiocr", from_config(&cfg, &dicts()).engine);
         assert_eq!("builtin", from_config(&Config::default(), &dicts()).engine);
+    }
+
+    #[test]
+    fn apply_to_carries_enabled_plugins() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.enabled_plugins = vec!["meikiocr".to_string()];
+        assert_eq!(
+            vec!["meikiocr".to_string()],
+            apply_to(&form, &cfg).plugins.enabled
+        );
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_enabled_plugins() {
+        let mut cfg = Config::default();
+        cfg.plugins.enabled = vec!["meikiocr".to_string()];
+        assert_eq!(
+            vec!["meikiocr".to_string()],
+            from_config(&cfg, &dicts()).enabled_plugins
+        );
+        assert!(from_config(&Config::default(), &dicts()).enabled_plugins.is_empty());
     }
 
     #[test]

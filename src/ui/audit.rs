@@ -31,7 +31,7 @@ pub fn run(cfg: &Config, dicts: &[DictInfo]) -> Result<()> {
     conceal(root);
 
     let mut dumps = Vec::new();
-    for tab in 0..4u32 {
+    for tab in 0..5u32 {
         window.switch_tab(tab);
         conceal(root);
         dumps.push(labelled(root, tab, false));

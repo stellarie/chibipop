@@ -26,6 +26,7 @@ use windows::Win32::UI::Controls::Dialogs::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -118,6 +119,8 @@ const FIELD_MAP_SOURCES: [&str; 6] =
 const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
 /// First plugin-configure id.
 const ID_PLUGIN_CONFIGURE_BASE: i32 = 1500;
+/// Plugin id block size.
+const PLUGIN_ID_SPAN: i32 = 100;
 
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
@@ -469,6 +472,9 @@ thread_local! {
     // Unreadable rows, by `HWND`.
     static UNREADABLE: RefCell<Option<(isize, Vec<String>)>> = const { RefCell::new(None) };
 
+    // Plugin dirs, by `HWND`.
+    static PLUGIN_DIRS: RefCell<Option<(isize, Vec<PathBuf>)>> = const { RefCell::new(None) };
+
     // Last box selected, by `HWND`.
     static DICT_BOX: Cell<Option<(isize, DictBox)>> = const { Cell::new(None) };
 }
@@ -506,6 +512,44 @@ fn unreadable_rows(hwnd: HWND) -> Vec<String> {
         Some((h, u)) if *h == hwnd.0 as isize => u.clone(),
         _ => Vec::new(),
     })
+}
+
+fn remember_plugin_dirs(hwnd: HWND, dirs: Vec<PathBuf>) {
+    PLUGIN_DIRS.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, dirs)));
+}
+
+/// The dir a Configure id names.
+fn plugin_dir_at(hwnd: HWND, idx: usize) -> Option<PathBuf> {
+    PLUGIN_DIRS.with(|c| match &*c.borrow() {
+        Some((h, dirs)) if *h == hwnd.0 as isize => dirs.get(idx).cloned(),
+        _ => None,
+    })
+}
+
+/// Configure button's index.
+fn plugin_configure_idx(id: i32) -> Option<usize> {
+    (ID_PLUGIN_CONFIGURE_BASE..ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN)
+        .contains(&id)
+        .then(|| (id - ID_PLUGIN_CONFIGURE_BASE) as usize)
+}
+
+/// Opens it in Explorer.
+unsafe fn open_plugin_dir(hwnd: HWND, idx: usize) {
+    let Some(dir) = plugin_dir_at(hwnd, idx) else { return };
+    let path = wide(&dir.to_string_lossy());
+    // SAFETY: `path` is NUL-terminated UTF-16 valid for the
+    // call; the OS only reads it, and a bad path just fails
+    // to open rather than causing UB.
+    unsafe {
+        let _ = ShellExecuteW(
+            Some(hwnd),
+            w!("open"),
+            PCWSTR(path.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
 }
 
 fn record_dict_box(hwnd: HWND, which: DictBox) {
@@ -604,6 +648,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if id == ID_ENGINE && notify == CBN_SELCHANGE as u16 {
                 unsafe { update_engine_controls(hwnd) };
+                return LRESULT(0);
+            }
+            if let Some(idx) = plugin_configure_idx(id) {
+                unsafe { open_plugin_dir(hwnd, idx) };
                 return LRESULT(0);
             }
             match id {
@@ -1345,6 +1393,14 @@ fn dir_label(dir: &Path) -> String {
     dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// This row's plugin name.
+fn plugin_key(dir: &Path, parsed: &Result<crate::plugin::manifest::Manifest>) -> String {
+    match parsed {
+        Ok(m) => m.name.clone(),
+        Err(_) => dir_label(dir),
+    }
+}
+
 /// Roles, joined for display.
 fn roles_text(roles: &[crate::plugin::manifest::Role]) -> String {
     if roles.is_empty() {
@@ -1469,6 +1525,8 @@ pub struct SettingsWindow {
     anki_ctrls: Vec<HWND>,
     /// Plugins-tab-only controls.
     plugin_ctrls: Vec<HWND>,
+    /// Plugin names, checkbox order.
+    plugin_names: Vec<String>,
     /// Anki field name -> its combo.
     field_map_rows: RefCell<Vec<(String, HWND)>>,
     /// Field-map labels + group box.
@@ -1546,6 +1604,7 @@ impl SettingsWindow {
                 ocr_ctrls: Vec::new(),
                 anki_ctrls: Vec::new(),
                 plugin_ctrls: Vec::new(),
+                plugin_names: Vec::new(),
                 field_map_rows: RefCell::new(Vec::new()),
                 field_map_extra: RefCell::new(Vec::new()),
                 field_map_collapsed: Cell::new(true),
@@ -2270,6 +2329,8 @@ impl SettingsWindow {
         let mut ocr: Vec<HWND> = Vec::new();
         let mut ank: Vec<HWND> = Vec::new();
         let mut plug: Vec<HWND> = Vec::new();
+        let mut plugin_names: Vec<String> = Vec::new();
+        let mut plugin_dirs: Vec<PathBuf> = Vec::new();
 
         // SAFETY: `h` is the window just created by `open`. Every control
         // below is created as a child of `h`, of `h`'s viewport pane, or of
@@ -2730,6 +2791,8 @@ impl SettingsWindow {
                     let ry = y;
                     let idx = idx as i32;
                     let row = plugin_row(dir, parsed, &enabled_plugins);
+                    plugin_names.push(plugin_key(dir, parsed));
+                    plugin_dirs.push(dir.clone());
                     plug.push(child(page, w!("STATIC"), &row.label, WINDOW_STYLE(0),
                         PAD, ry + 4, bx - PAD - 8, ROW_H, 0, f)?);
                     let chk = child(page, w!("BUTTON"), "Enable",
@@ -2808,6 +2871,8 @@ impl SettingsWindow {
         self.ocr_ctrls = ocr;
         self.anki_ctrls = ank;
         self.plugin_ctrls = plug;
+        self.plugin_names = plugin_names;
+        remember_plugin_dirs(h, plugin_dirs);
         Ok(self.bottom_y0 + BOTTOM_H)
     }
 
@@ -2940,6 +3005,13 @@ impl SettingsWindow {
                 anki_model: text_of(ID_ANKI_MODEL),
                 anki_add_key,
                 field_map,
+                enabled_plugins: self
+                    .plugin_names
+                    .iter()
+                    .enumerate()
+                    .filter(|&(idx, _)| checked(ID_PLUGIN_ENABLE_BASE + idx as i32))
+                    .map(|(_, name)| name.clone())
+                    .collect(),
             }
         }
     }
@@ -3021,6 +3093,12 @@ impl Drop for SettingsWindow {
             }
         });
         UNREADABLE.with(|c| {
+            let mut slot = c.borrow_mut();
+            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
+                *slot = None;
+            }
+        });
+        PLUGIN_DIRS.with(|c| {
             let mut slot = c.borrow_mut();
             if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
                 *slot = None;
@@ -4158,5 +4236,48 @@ mod tests {
     #[test]
     fn plugins_group_h_for_two_plugins() {
         assert_eq!(20 + 2 * PLUGIN_ROW_H + ROW_GAP + 8, plugins_group_h(2));
+    }
+
+    #[test]
+    fn plugin_key_uses_the_manifest_name() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        assert_eq!("meikiocr", plugin_key(Path::new("meikiocr"), &Ok(m)));
+    }
+
+    #[test]
+    fn plugin_key_falls_back_to_the_folder_when_refused() {
+        let err = anyhow::anyhow!("bad manifest");
+        assert_eq!("beta", plugin_key(Path::new("some/dir/beta"), &Err(err)));
+    }
+
+    #[test]
+    fn plugin_configure_idx_reads_the_first_and_last_row() {
+        assert_eq!(Some(0), plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE));
+        assert_eq!(
+            Some((PLUGIN_ID_SPAN - 1) as usize),
+            plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN - 1),
+        );
+    }
+
+    #[test]
+    fn plugin_configure_idx_is_none_outside_the_block() {
+        assert_eq!(None, plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE - 1));
+        assert_eq!(None, plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN));
+        assert_eq!(None, plugin_configure_idx(ID_PLUGIN_ENABLE_BASE));
+    }
+
+    #[test]
+    fn plugin_dir_at_reads_back_what_build_remembered() {
+        let hwnd = dummy_hwnd(9101);
+        remember_plugin_dirs(hwnd, vec![PathBuf::from("plugins/meikiocr")]);
+        assert_eq!(Some(PathBuf::from("plugins/meikiocr")), plugin_dir_at(hwnd, 0));
+    }
+
+    #[test]
+    fn plugin_dir_at_is_none_for_another_window_or_row() {
+        let hwnd = dummy_hwnd(9102);
+        remember_plugin_dirs(hwnd, vec![PathBuf::from("plugins/meikiocr")]);
+        assert_eq!(None, plugin_dir_at(hwnd, 1));
+        assert_eq!(None, plugin_dir_at(dummy_hwnd(9103), 0));
     }
 }

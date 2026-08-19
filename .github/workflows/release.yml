@@ -58,6 +58,7 @@ jobs:
           cp data/deconjugator.json     "dist/$name/data/"
           cp README.md                  "dist/$name/"
           cp LICENSE                    "dist/$name/"
+          cp -r plugins                 "dist/$name/"
           find "dist/$name" -type f | sort
 
       - name: Zip
