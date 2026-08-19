@@ -111,6 +111,8 @@ const ID_ENGINE: i32 = 146;
 const ID_ENGINE_CONFIGURE: i32 = 147;
 /// Engine-log checkbox, OCR tab.
 const ID_ENGINE_LOG: i32 = 148;
+/// Adapter-log checkbox.
+const ID_ADAPTER_LOG: i32 = 149;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -177,7 +179,7 @@ const WHILE_BUSY: [i32; 16] = [
 
 // ---- layout, 96-DPI px ----
 
-const WIN_W: i32 = 470;
+const WIN_W: i32 = 560;
 const PAD: i32 = 14;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
@@ -2762,7 +2764,7 @@ impl SettingsWindow {
             ocr.push(label("OCR engine", y)?);
             let engine = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_ENGINE, f)?;
+                FIELD_X, y, bx - FIELD_X - 8, 220, ID_ENGINE, f)?;
             ocr.push(engine);
             for name in &engine_names {
                 let shown = if name == "builtin" { "Built-in (Windows OCR)" } else { name };
@@ -2783,7 +2785,6 @@ impl SettingsWindow {
                 }
             }
             self.engine_dirs = engine_dirs;
-            y += ROW_H;
             let cfg_btn = child(page, w!("BUTTON"), "Configure…", WS_TABSTOP,
                 bx, y, BTN_W, ROW_H, ID_ENGINE_CONFIGURE, f)?;
             ocr.push(cfg_btn);
@@ -2862,6 +2863,9 @@ impl SettingsWindow {
             y += ROW_H;
             ocr.push(check("Show which OCR engine is active",
                 ID_ENGINE_LOG, form.show_engine_log, y)?);
+            y += ROW_H;
+            ocr.push(check("Show adapter log in status bar",
+                ID_ADAPTER_LOG, form.show_adapter_log, y)?);
             y += ROW_H + 18;
             let y_ocr = y;
 
@@ -3143,6 +3147,7 @@ impl SettingsWindow {
                 engine,
                 show_scan_region: checked(ID_SHOW_SCAN),
                 show_engine_log: checked(ID_ENGINE_LOG),
+                show_adapter_log: checked(ID_ADAPTER_LOG),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),
                 staged_removes: staged.staged_removes.clone(),

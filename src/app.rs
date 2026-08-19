@@ -494,6 +494,21 @@ fn engine_status_line(cfg: &Config) -> String {
     }
 }
 
+/// Recent plugin stderr lines.
+fn adapter_status_line(cfg: &Config) -> String {
+    if !matches!(resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled), EngineChoice::Plugin(_)) {
+        return "Adapter log: no plugin engine active".to_string();
+    }
+    let log = host::engine_log_lines();
+    let start = log.len().saturating_sub(5);
+    let tail = &log[start..];
+    if tail.is_empty() {
+        "Adapter log: (no output yet)".to_string()
+    } else {
+        format!("Adapter log:\r\n{}", tail.join("\r\n"))
+    }
+}
+
 /// Say the library disagrees.
 fn notice_drift(w: &SettingsWindow, dir: &Path, db: &Path) {
     match drifted(dir, db) {
@@ -1457,6 +1472,7 @@ pub fn run(
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
                             let was_engine_log = cfg.debug.show_engine_log;
+                            let was_adapter_log = cfg.debug.show_adapter_log;
                             // Never half-apply.
                             if edited.has_staged() && stages_frequency(&edited, &dicts) {
                                 w.set_status(&frequency_notice(&library, &db_path));
@@ -1514,9 +1530,16 @@ pub fn run(
                                     }
                                     None => w.set_status("Settings applied."),
                                 }
+                                let mut log_lines = Vec::new();
                                 if cfg.debug.show_engine_log {
-                                    w.set_status(&engine_status_line(&cfg));
-                                } else if was_engine_log {
+                                    log_lines.push(engine_status_line(&cfg));
+                                }
+                                if cfg.debug.show_adapter_log {
+                                    log_lines.push(adapter_status_line(&cfg));
+                                }
+                                if !log_lines.is_empty() {
+                                    w.set_status(&log_lines.join("\r\n"));
+                                } else if was_engine_log || was_adapter_log {
                                     w.set_status("");
                                 }
                                 let ms = t0.elapsed().as_millis();

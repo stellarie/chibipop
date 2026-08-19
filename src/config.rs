@@ -296,6 +296,9 @@ pub struct DebugConfig {
     /// Name the active engine.
     #[serde(default)]
     pub show_engine_log: bool,
+    /// Show the adapter's log.
+    #[serde(default)]
+    pub show_adapter_log: bool,
 }
 
 /// Maps one field to Anki.
