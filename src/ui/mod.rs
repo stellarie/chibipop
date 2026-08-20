@@ -1,5 +1,6 @@
 //! The popup and its content.
 
+pub mod audit;
 pub mod console;
 pub mod overlay;
 pub mod render;

@@ -64,6 +64,9 @@ enum Command {
         dict: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Dump the tree as JSON.
+        #[arg(long)]
+        audit: bool,
     },
     /// Print lookups on hover.
     Watch {
@@ -92,6 +95,29 @@ enum Command {
         library: PathBuf,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Discover or test plugins.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
+    /// Test fixture plugin.
+    #[command(hide = true)]
+    PluginEcho {
+        #[arg(default_value = "ok")]
+        mode: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// List discovered plugins.
+    List,
+    /// Send one test request.
+    Test {
+        name: String,
+        #[arg(long)]
+        image: PathBuf,
     },
 }
 
@@ -187,6 +213,7 @@ fn main() -> Result<()> {
                     (read.lines, read.resolved, read.source, read.dxgi_error)
                 }
             };
+            println!("engine:  {}", source.recogniser().name());
             match &dxgi_error {
                 Some(why) => println!("capture: {}  (dxgi: {why})", source_used.as_str()),
                 None => println!("capture: {}", source_used.as_str()),
@@ -357,7 +384,7 @@ fn main() -> Result<()> {
                 println!();
             }
         }
-        Command::Settings { dict, config } => {
+        Command::Settings { dict, config, audit } => {
             let dict = dict_path(dict);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
@@ -372,6 +399,9 @@ fn main() -> Result<()> {
                 })?;
                 dictionary.dicts().context("reading dictionary identities")?
             };
+            if audit {
+                return chibipop::ui::audit::run(&cfg, &dicts);
+            }
             chibipop::app::settings_only(cfg, &dicts, &config_path, &dict)
         }
         Command::Run { dict, rules, config } => {
@@ -431,6 +461,17 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::Plugin { cmd } => {
+            let root = chibipop::paths::beside_exe("plugins");
+            let code = match cmd {
+                PluginCmd::List => chibipop::plugin::cli::list(&root),
+                PluginCmd::Test { name, image } => {
+                    chibipop::plugin::cli::test_one(&root, &name, &image)
+                }
+            };
+            std::process::exit(code);
+        }
+        Command::PluginEcho { mode } => chibipop::plugin::echo::run(&mode),
     }
 }
 

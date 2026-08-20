@@ -1,7 +1,7 @@
 //! Two threads: pump and worker.
 
 use crate::anki;
-use crate::config::Config;
+use crate::config::{resolve_engine, Config, EngineChoice};
 use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
 use crate::library::{Library, Pending};
@@ -11,11 +11,15 @@ use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
+use crate::plugin::manifest::{Manifest, Role};
+use crate::plugin::text::PluginText;
+use crate::plugin::{discover, host};
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::layout::{CaptureSize, Orientation};
 use crate::text::ocr::{recogniser_available, OcrTextSource};
+use crate::text::recogniser::Recogniser;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
@@ -23,7 +27,7 @@ use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::HashSet;
 use std::mem::size_of;
@@ -347,12 +351,16 @@ pub fn settings_only(
 }
 
 /// The archive folder.
-fn library_dir() -> PathBuf {
+pub(crate) fn library_dir() -> PathBuf {
     crate::paths::beside_exe("library")
 }
 
 /// The form and the library.
-fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
+pub(crate) fn form_with_library(
+    cfg: &Config,
+    dicts: &[DictInfo],
+    dir: &Path,
+) -> SettingsForm {
     let form = settings::from_config(cfg, dicts);
     match Library::load(dir) {
         Ok(lib) => settings::with_library(form, &lib),
@@ -473,6 +481,32 @@ fn frequency_notice(library: &Path, db: &Path) -> String {
         library.display(),
         db.display()
     )
+}
+
+/// Names the active OCR engine.
+fn engine_status_line(cfg: &Config) -> String {
+    match resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled) {
+        EngineChoice::Builtin => "Engine: Built-in (Windows OCR)".to_string(),
+        EngineChoice::Plugin(name) => format!("Engine: {name}"),
+        EngineChoice::FellBack(name) => {
+            format!("Engine: {name} (not found — using Built-in)")
+        }
+    }
+}
+
+/// Recent plugin stderr lines.
+fn adapter_status_line(cfg: &Config) -> String {
+    if !matches!(resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled), EngineChoice::Plugin(_)) {
+        return "Adapter log: no plugin engine active".to_string();
+    }
+    let log = host::engine_log_lines();
+    let start = log.len().saturating_sub(5);
+    let tail = &log[start..];
+    if tail.is_empty() {
+        "Adapter log: (no output yet)".to_string()
+    } else {
+        format!("Adapter log:\r\n{}", tail.join("\r\n"))
+    }
 }
 
 /// Say the library disagrees.
@@ -856,6 +890,10 @@ struct WorkerSpawn {
     dict_path: PathBuf,
     rules_path: PathBuf,
     settings: WorkerSettings,
+    /// "builtin" or a plugin's name.
+    ocr_engine: String,
+    /// Plugins allowed to run.
+    enabled_plugins: Vec<String>,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -869,6 +907,8 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
         dict_path,
         rules_path,
         settings,
+        ocr_engine,
+        enabled_plugins,
         main_tid,
         trigger_rx,
         result_tx,
@@ -887,6 +927,8 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
             settings.capture,
             settings.scan_alphanumeric,
             settings.language,
+            ocr_engine,
+            enabled_plugins,
             settings.scan_display,
             main_tid,
             trigger_rx,
@@ -938,6 +980,8 @@ pub fn run(
         rules_path: rules_path.clone(),
         // Spawn reads the file itself.
         settings: worker_settings(&live, &[]),
+        ocr_engine: cfg.ocr.engine.clone(),
+        enabled_plugins: cfg.plugins.enabled.clone(),
         main_tid,
         trigger_rx,
         result_tx: result_tx.clone(),
@@ -1477,13 +1521,21 @@ pub fn run(
                                 save_in_background(&mut save_job, updated,
                                                    config_path.to_path_buf(),
                                                    save_tx.clone(), main_tid);
+                                let mut status_parts = Vec::new();
                                 match &clamped {
                                     Some(notice) => {
                                         w.set_capture_fields(&cfg.ocr);
-                                        w.set_status(notice);
+                                        status_parts.push(notice.clone());
                                     }
-                                    None => w.set_status("Settings applied."),
+                                    None => status_parts.push("Settings applied.".to_string()),
                                 }
+                                if cfg.debug.show_engine_log {
+                                    status_parts.push(engine_status_line(&cfg));
+                                }
+                                if cfg.debug.show_adapter_log {
+                                    status_parts.push(adapter_status_line(&cfg));
+                                }
+                                w.set_status(&status_parts.join("\r\n"));
                                 let ms = t0.elapsed().as_millis();
                                 if ms > APPLY_BUDGET_MS {
                                     eprintln!(
@@ -1844,6 +1896,58 @@ fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<
     (hover, reloads)
 }
 
+/// Finds a named text-provider.
+fn find_text_plugin<'a>(
+    found: &'a [(PathBuf, Result<Manifest>)],
+    name: &str,
+) -> Result<(&'a Path, &'a Manifest)> {
+    let hit = found.iter().find(|(dir, parsed)| {
+        parsed.as_ref().map(|m| m.name == name).unwrap_or(false)
+            || dir.file_name().map(|f| f == name).unwrap_or(false)
+    });
+    let Some((dir, parsed)) = hit else {
+        bail!("plugin \"{name}\" is not on disk");
+    };
+    let m = parsed.as_ref().map_err(|e| anyhow!("plugin \"{name}\": {e:#}"))?;
+    if !m.roles.contains(&Role::TextProvider) {
+        bail!("plugin \"{name}\" is not a text-provider");
+    }
+    Ok((dir.as_path(), m))
+}
+
+/// Spawns one plugin process.
+fn spawn_plugin_recogniser(name: &str) -> Result<Box<dyn Recogniser>> {
+    let root = crate::paths::beside_exe("plugins");
+    let found = discover::discover(&root);
+    let (dir, m) = find_text_plugin(&found, name)?;
+    let h = host::spawn(m, dir).with_context(|| format!("starting plugin \"{name}\""))?;
+    Ok(Box::new(PluginText::new(h, m)))
+}
+
+/// Picks and spawns the engine.
+///
+/// `None` picks the built-in.
+fn resolve_recogniser(ocr_engine: &str, enabled: &[String]) -> Option<Box<dyn Recogniser>> {
+    match resolve_engine(ocr_engine, enabled) {
+        EngineChoice::Builtin => None,
+        EngineChoice::Plugin(name) => match spawn_plugin_recogniser(&name) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!(
+                    "chibipop: OCR plugin \"{name}\" failed, falling back to builtin: {e:#}"
+                );
+                None
+            }
+        },
+        EngineChoice::FellBack(name) => {
+            eprintln!(
+                "chibipop: OCR engine \"{name}\" is not enabled, falling back to builtin"
+            );
+            None
+        }
+    }
+}
+
 /// Serves triggers, owns OCR.
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
@@ -1855,6 +1959,8 @@ fn worker_main(
     capture: CaptureSize,
     scan_alphanumeric: bool,
     language: String,
+    ocr_engine: String,
+    enabled_plugins: Vec<String>,
     mut scan_display: ScanDisplay,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
@@ -1863,19 +1969,30 @@ fn worker_main(
     capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
 ) {
-    let fallback = crate::config::default_ocr_language();
-    let substitute = startup_language(&language, &fallback, || recogniser_available(&language));
-    let language = match substitute {
-        Some(sub) => {
-            eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
-            sub
-        }
-        None => language,
+    // Resolved once, never saved.
+    let plugin_recogniser = resolve_recogniser(&ocr_engine, &enabled_plugins);
+    let built = if let Some(recogniser) = plugin_recogniser {
+        OcrTextSource::with_recogniser(
+            recogniser, max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language,
+        )
+    } else {
+        let fallback = crate::config::default_ocr_language();
+        let substitute =
+            startup_language(&language, &fallback, || recogniser_available(&language));
+        let language = match substitute {
+            Some(sub) => {
+                eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
+                sub
+            }
+            None => language,
+        };
+        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language)
     };
-    let built =
-        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language);
     let mut ocr = match built.context("creating the OCR text source") {
-        Ok(o) => o,
+        Ok(o) => {
+            eprintln!("chibipop: OCR engine: {}", o.recogniser().name());
+            o
+        }
         Err(e) => {
             let _ = startup_tx.send(Err(e));
             return;
@@ -3316,6 +3433,31 @@ mod tests {
         assert!(notice.contains("\r\nchibipop build-dict"), "the command needs its own line");
         assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
         assert!(notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""), "{notice}");
+    }
+
+    #[test]
+    fn engine_status_names_a_running_plugin() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".into();
+        cfg.plugins.enabled = vec!["meikiocr".into()];
+        assert_eq!("Engine: meikiocr", engine_status_line(&cfg));
+    }
+
+    #[test]
+    fn engine_status_names_the_builtin() {
+        assert_eq!(
+            "Engine: Built-in (Windows OCR)",
+            engine_status_line(&Config::default())
+        );
+    }
+
+    #[test]
+    fn engine_status_names_a_missing_plugin() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".into();
+        let s = engine_status_line(&cfg);
+        assert!(s.contains("meikiocr"), "{s}");
+        assert!(s.contains("not found"), "{s}");
     }
 
     #[test]

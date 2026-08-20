@@ -9,6 +9,9 @@ chibipop-vX.Y.Z-windows-x64/
   chibipop.exe                 the application
   data/deconjugator.json       required at runtime
   README.md
+  plugins/meikiocr/plugin.toml
+  plugins/meikiocr/adapter.py
+  plugins/meikiocr/config.toml
 ```
 
 **The dictionary database is deliberately not in it.** It is 232 MiB, and it
@@ -18,6 +21,13 @@ once. That is the one step a downloaded binary cannot remove.
 
 `chibipop.toml` is not shipped either: it is written with defaults beside the
 executable on first run.
+
+**`plugins/meikiocr/` ships disabled.** It is the reference text-provider
+plugin, per spec section 10. Discovery lists it, but `[plugins].enabled` is
+empty by default, so no plugin process starts until the user enables it from
+the Plugins tab. `config.toml` holds the machine-specific meikiocr install
+path, the HF cache directory, and the ONNX thread cap — the user edits that
+file, never `adapter.py` or `plugin.toml`.
 
 ## Cutting one
 

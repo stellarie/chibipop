@@ -8,7 +8,7 @@ use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RA
 use crate::text::ocr::tag_matches;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET, TEXTMETRICW,
 };
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_TAB_CLASSES,
+    InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, ICC_TAB_CLASSES,
 };
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
@@ -26,6 +26,7 @@ use windows::Win32::UI::Controls::Dialogs::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -98,6 +99,20 @@ const ID_PER_CHAR: i32 = 139;
 const ID_OCR_LANG: i32 = 140;
 /// 141 was Include / exclude.
 const ID_DICTS_OFF: i32 = 142;
+/// Clips the page content.
+const ID_VIEWPORT: i32 = 143;
+/// Holds the page content.
+const ID_CONTENT: i32 = 144;
+/// The Updates group box.
+const ID_UPDATES: i32 = 145;
+/// Engine combo, OCR tab.
+const ID_ENGINE: i32 = 146;
+/// Configure button, OCR tab.
+const ID_ENGINE_CONFIGURE: i32 = 147;
+/// Engine-log checkbox, OCR tab.
+const ID_ENGINE_LOG: i32 = 148;
+/// Adapter-log checkbox.
+const ID_ADAPTER_LOG: i32 = 149;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -105,6 +120,13 @@ const ID_FIELD_MAP_BASE: i32 = 200;
 /// Field-map combo choices.
 const FIELD_MAP_SOURCES: [&str; 6] =
     ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html"];
+
+/// First plugin-enable id.
+const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
+/// First plugin-configure id.
+const ID_PLUGIN_CONFIGURE_BASE: i32 = 1500;
+/// Plugin id block size.
+const PLUGIN_ID_SPAN: i32 = 100;
 
 // Win32 tab control messages
 const TCM_FIRST: u32 = 0x1300;
@@ -136,10 +158,12 @@ struct TcItemW {
 }
 
 /// What an Apply disables.
-const WHILE_BUSY: [i32; 14] = [
+const WHILE_BUSY: [i32; 16] = [
     ID_APPLY,
     ID_QUIT,
     ID_OCR_LANG,
+    ID_ENGINE,
+    ID_ENGINE_CONFIGURE,
     ID_DICTS,
     ID_DICTS_OFF,
     ID_DICT_UP,
@@ -155,7 +179,7 @@ const WHILE_BUSY: [i32; 14] = [
 
 // ---- layout, 96-DPI px ----
 
-const WIN_W: i32 = 470;
+const WIN_W: i32 = 560;
 const PAD: i32 = 14;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
@@ -167,6 +191,28 @@ const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
 /// ~3 lines of status text.
 const STATUS_H: i32 = 58;
+/// First y below the tab strip.
+const CONTENT_Y: i32 = PAD + TAB_H + 4;
+/// Below the bottom row's top.
+const BOTTOM_UPDATE_DY: i32 = 20;
+const BOTTOM_STATUS_DY: i32 = BOTTOM_UPDATE_DY + ROW_H + 8 + GROUP_GAP;
+const BOTTOM_BTN_DY: i32 = BOTTOM_STATUS_DY + STATUS_H + 2;
+/// The bottom row's own height.
+const BOTTOM_H: i32 = BOTTOM_BTN_DY + ROW_H + 8;
+/// Apply's x, right-aligned.
+const BOTTOM_APPLY_X: i32 = WIN_W - PAD - 144;
+/// Bottom row: id, x, y offset.
+const BOTTOM_ROW: [(i32, i32, i32); 5] = [
+    (ID_UPDATES, PAD - 6, 0),
+    (ID_CHECK_UPDATE, PAD, BOTTOM_UPDATE_DY),
+    (ID_STATUS, PAD, BOTTOM_STATUS_DY),
+    (ID_APPLY, BOTTOM_APPLY_X, BOTTOM_BTN_DY),
+    (ID_QUIT, PAD, BOTTOM_BTN_DY),
+];
+/// One scroll line, 96-DPI px.
+const SCROLL_LINE: i32 = 20;
+/// Lines per wheel notch.
+const WHEEL_LINES: i32 = 3;
 
 // ---- Dictionaries tab ----
 
@@ -197,6 +243,13 @@ const COL_COMBO_W: i32 = COL_W - COL_LABEL_W - COL_LABEL_GAP;
 const COL_DROPPED_W: i32 = 150;
 const COL_LABEL_MAX_CHARS: usize = 18;
 
+// ---- Plugins tab ----
+
+/// Wraps a long refusal reason.
+const PLUGIN_STATUS_H: i32 = ROW_H + 16;
+/// One plugin row's own height.
+const PLUGIN_ROW_H: i32 = 2 * ROW_H + PLUGIN_STATUS_H;
+
 /// Which list a button acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
@@ -210,10 +263,16 @@ enum Action {
     /// The file picks the list.
     Add,
     Remove(Target),
+    ConfigureEngine,
 }
 
 fn class_name() -> PCWSTR {
     w!("ChibipopSettingsClass")
+}
+
+/// Viewport and content pane.
+fn pane_class_name() -> PCWSTR {
+    w!("ChibipopSettingsPaneClass")
 }
 
 /// Scale a 96-DPI value.
@@ -242,6 +301,149 @@ fn work_area_height(hwnd: HWND) -> Option<i32> {
         };
         GetMonitorInfoW(hmon, &mut mi).as_bool().then(|| mi.rcWork.bottom - mi.rcWork.top)
     }
+}
+
+/// A window's client height.
+///
+/// Physical px; 0 if unknown.
+fn client_h(hwnd: HWND) -> i32 {
+    // SAFETY: `rc` is a stack local the call only writes through; a failure
+    // leaves it zeroed, which reads as an unknown height rather than a wrong
+    // one. `hwnd` need not be valid - the call reports `Err` for a stale one.
+    unsafe {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        rc.bottom - rc.top
+    }
+}
+
+/// Pins the bottom row.
+///
+/// The row sits a fixed distance
+/// above the client bottom, so
+/// no tab's height can move it.
+/// The band above takes what is
+/// left, so a tall tab scrolls.
+fn place_bottom(hwnd: HWND) {
+    let ch = client_h(hwnd);
+    if ch <= 0 {
+        return;
+    }
+    let top = ch - dpi_scale(hwnd, BOTTOM_H + PAD);
+    // SAFETY: every id in `BOTTOM_ROW` names a direct child of `hwnd`, made
+    // in `build`; before that `GetDlgItem` yields `Err` rather than a
+    // dangling handle, and `panes` states the same contract for the band.
+    // `SWP_NOSIZE` leaves each control's size alone, `SWP_NOMOVE` leaves the
+    // band's origin alone, and `SWP_NOZORDER` keeps the seat `place_viewport`
+    // chose.
+    unsafe {
+        for (id, x, dy) in BOTTOM_ROW {
+            let Ok(c) = GetDlgItem(Some(hwnd), id) else {
+                continue;
+            };
+            let _ = SetWindowPos(c, None, dpi_scale(hwnd, x), top + dpi_scale(hwnd, dy),
+                0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        let Ok((viewport, _)) = panes(hwnd) else {
+            return;
+        };
+        let band = (top - dpi_scale(hwnd, CONTENT_Y)).max(0);
+        let _ = SetWindowPos(viewport, None, 0, 0, dpi_scale(hwnd, WIN_W), band,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // The page it ranged by moved.
+        repage(hwnd, viewport);
+    }
+}
+
+/// Re-pages after a resize.
+///
+/// Keeps the range, takes the new
+/// band as the page, so the
+/// scrollbar stays the only copy.
+fn repage(hwnd: HWND, viewport: HWND) {
+    let mut si = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE,
+        ..Default::default()
+    };
+    // SAFETY: `si` is initialised with its own size and passed by mutable
+    // pointer for the call's duration only. `set_scroll_range` takes a height
+    // and stores it as `nMax + 1`, so reading it back this way is exact.
+    if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_err() {
+        return;
+    }
+    set_scroll_range(hwnd, si.nMax + 1, client_h(viewport));
+}
+
+/// Slides the content pane.
+///
+/// `y` is physical px, <= 0.
+fn move_content(hwnd: HWND, y: i32) {
+    // SAFETY: `panes` states its own contract and yields `Err` rather than a
+    // dangling handle; the pane it returns is a live descendant of `hwnd`,
+    // destroyed only with it. `SWP_NOSIZE` leaves the band height alone and
+    // `SWP_NOZORDER` keeps the seat `place_viewport` chose.
+    unsafe {
+        let Ok((_, content)) = panes(hwnd) else {
+            return;
+        };
+        let _ = SetWindowPos(content, None, 0, y, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Re-ranges the scrollbar.
+///
+/// Physical px. `content_h` is the
+/// SELECTED tab's, so a short tab
+/// needs no scrollbar. `view_h` is
+/// the viewport's own, read not
+/// assumed. Position resets to 0:
+/// the pane it described changed.
+fn set_scroll_range(hwnd: HWND, content_h: i32, view_h: i32) {
+    let si = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+        nMin: 0,
+        nMax: content_h.max(1) - 1,
+        nPage: view_h.max(1) as u32,
+        nPos: 0,
+        ..Default::default()
+    };
+    // SAFETY: `hwnd` is the settings window and `si` is a fully initialised
+    // local passed by const pointer; `SetScrollInfo` only reads it, and only
+    // for the duration of the call.
+    unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
+    move_content(hwnd, 0);
+}
+
+/// Moves to a new position.
+///
+/// `pick` reads the live info and
+/// names the position it wants.
+fn scroll_to(hwnd: HWND, pick: impl FnOnce(&SCROLLINFO) -> i32) {
+    let mut si = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_ALL,
+        ..Default::default()
+    };
+    // SAFETY: `si` is initialised with its own size and passed by mutable
+    // pointer for the call's duration only. Reading the position back is what
+    // keeps the scrollbar the single source of truth.
+    if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_err() {
+        return;
+    }
+    let old = si.nPos;
+    // Negative when content fits.
+    let max = (si.nMax - si.nPage as i32 + 1).max(0);
+    si.nPos = pick(&si).clamp(0, max);
+    if si.nPos == old {
+        return;
+    }
+    si.fMask = SIF_POS;
+    // SAFETY: same contract as `set_scroll_range`.
+    unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
+    move_content(hwnd, -si.nPos);
 }
 
 thread_local! {
@@ -277,6 +479,9 @@ thread_local! {
 
     // Unreadable rows, by `HWND`.
     static UNREADABLE: RefCell<Option<(isize, Vec<String>)>> = const { RefCell::new(None) };
+
+    // Plugin dirs, by `HWND`.
+    static PLUGIN_DIRS: RefCell<Option<(isize, Vec<PathBuf>)>> = const { RefCell::new(None) };
 
     // Last box selected, by `HWND`.
     static DICT_BOX: Cell<Option<(isize, DictBox)>> = const { Cell::new(None) };
@@ -315,6 +520,98 @@ fn unreadable_rows(hwnd: HWND) -> Vec<String> {
         Some((h, u)) if *h == hwnd.0 as isize => u.clone(),
         _ => Vec::new(),
     })
+}
+
+fn remember_plugin_dirs(hwnd: HWND, dirs: Vec<PathBuf>) {
+    PLUGIN_DIRS.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, dirs)));
+}
+
+/// The dir a Configure id names.
+fn plugin_dir_at(hwnd: HWND, idx: usize) -> Option<PathBuf> {
+    PLUGIN_DIRS.with(|c| match &*c.borrow() {
+        Some((h, dirs)) if *h == hwnd.0 as isize => dirs.get(idx).cloned(),
+        _ => None,
+    })
+}
+
+/// Configure button's index.
+fn plugin_configure_idx(id: i32) -> Option<usize> {
+    (ID_PLUGIN_CONFIGURE_BASE..ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN)
+        .contains(&id)
+        .then(|| (id - ID_PLUGIN_CONFIGURE_BASE) as usize)
+}
+
+/// Opens it in Explorer.
+unsafe fn open_plugin_dir(hwnd: HWND, idx: usize) {
+    let Some(dir) = plugin_dir_at(hwnd, idx) else { return };
+    let path = wide(&dir.to_string_lossy());
+    // SAFETY: `path` is NUL-terminated UTF-16 valid for the
+    // call; the OS only reads it, and a bad path just fails
+    // to open rather than causing UB.
+    unsafe {
+        let _ = ShellExecuteW(
+            Some(hwnd),
+            w!("open"),
+            PCWSTR(path.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Sets or appends the path.
+fn set_config_path(existing: &str, path: &str) -> String {
+    let escaped = path.replace('\\', "\\\\");
+    let new_line = format!("meikiocr_path = \"{escaped}\"");
+    let mut found = false;
+    let mut out: Vec<String> = existing
+        .lines()
+        .map(|line| {
+            if line.starts_with("meikiocr_path") {
+                found = true;
+                new_line.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(new_line);
+    }
+    let mut result = out.join("\n");
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+/// Pick a folder via file dialog.
+///
+/// `None` if cancelled.
+unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
+    let mut buf = vec![0u16; 1024];
+    let filter: Vec<u16> = "Any file\0*.*\0\0".encode_utf16().collect();
+    let wtitle = wide(title);
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        nFilterIndex: 1,
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(wtitle.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    // SAFETY: same contract as `pick_archives`.
+    let picked = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool();
+    if !picked {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let path = PathBuf::from(String::from_utf16_lossy(&buf[..len]));
+    path.parent().map(|p| p.to_path_buf())
 }
 
 fn record_dict_box(hwnd: HWND, which: DictBox) {
@@ -357,10 +654,10 @@ fn record_language_change(hwnd: HWND) {
 /// Starts capture mode.
 unsafe fn begin_capture(hwnd: HWND, id: i32) {
     // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
-    // children of `hwnd`, created in `build`; `window_text` and
+    // descendants of `hwnd`, created in `build`; `window_text` and
     // `SetWindowTextW` state their own contracts.
     unsafe {
-        let Ok(btn) = GetDlgItem(Some(hwnd), id) else { return };
+        let Ok(btn) = dlg_item(hwnd, id) else { return };
         let prev = window_text(btn);
         CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, prev)));
         CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, id))));
@@ -371,7 +668,7 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
 /// Ends capture, unchanged.
 unsafe fn cancel_capture(hwnd: HWND) {
     // SAFETY: `id` came from `CAPTURING`, only ever set by
-    // `begin_capture` to a live child of `hwnd`; the stashed text
+    // `begin_capture` to a live descendant of `hwnd`; the stashed text
     // was captured from that same control.
     unsafe {
         let mine = hwnd.0 as isize;
@@ -382,7 +679,7 @@ unsafe fn cancel_capture(hwnd: HWND) {
             .with(|c| c.borrow_mut().take())
             .and_then(|(h, s)| (h == mine).then_some(s));
         let Some(text) = prev else { return };
-        if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
+        if let Ok(btn) = dlg_item(hwnd, id) {
             let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
         }
     }
@@ -411,6 +708,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 record_language_change(hwnd);
                 return LRESULT(0);
             }
+            if id == ID_ENGINE && notify == CBN_SELCHANGE as u16 {
+                unsafe { update_engine_controls(hwnd) };
+                return LRESULT(0);
+            }
+            if let Some(idx) = plugin_configure_idx(id) {
+                unsafe { open_plugin_dir(hwnd, idx) };
+                return LRESULT(0);
+            }
             match id {
                 // 1 is IDOK: Enter, not the id.
                 ID_APPLY | 1 => record_outcome(hwnd, SettingsOutcome::Apply),
@@ -423,14 +728,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
                 ID_FREQ_ADD => record_action(hwnd, Action::Add),
                 ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
+                ID_ENGINE_CONFIGURE => record_action(hwnd, Action::ConfigureEngine),
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
                 ID_MODE_LIVE | ID_MODE_HOLD => unsafe {
-                    if let Ok(c) = GetDlgItem(Some(hwnd), ID_TRIGGER_KEY) {
+                    if let Ok(c) = dlg_item(hwnd, ID_TRIGGER_KEY) {
                         let _ = EnableWindow(c, id == ID_MODE_HOLD);
                     }
-                    if let Ok(c) = GetDlgItem(Some(hwnd), ID_PER_CHAR) {
+                    if let Ok(c) = dlg_item(hwnd, ID_PER_CHAR) {
                         let _ = EnableWindow(c, id == ID_MODE_LIVE);
                     }
                 },
@@ -451,6 +757,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 };
                 TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
             }
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            // The clamp lands here too.
+            place_bottom(hwnd);
+            LRESULT(0)
+        }
+        WM_VSCROLL => {
+            let code = SCROLLBAR_COMMAND((wparam.0 & 0xffff) as i32);
+            let line = dpi_scale(hwnd, SCROLL_LINE);
+            scroll_to(hwnd, |si| match code {
+                SB_LINEUP => si.nPos - line,
+                SB_LINEDOWN => si.nPos + line,
+                SB_PAGEUP => si.nPos - si.nPage as i32,
+                SB_PAGEDOWN => si.nPos + si.nPage as i32,
+                SB_THUMBTRACK | SB_THUMBPOSITION => si.nTrackPos,
+                _ => si.nPos,
+            });
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            // Signed high word; low is keys.
+            let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32;
+            let step = delta / WHEEL_DELTA as i32
+                * WHEEL_LINES
+                * dpi_scale(hwnd, SCROLL_LINE);
+            // Forward scrolls towards the top.
+            scroll_to(hwnd, |si| si.nPos - step);
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -490,6 +824,70 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
         };
         if RegisterClassExW(&wc) == 0 {
             return Err(Error::from_thread()).context("RegisterClassExW");
+        }
+    }
+
+    REGISTERED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Both panes use this.
+///
+/// Only what `wndproc` claims.
+unsafe extern "system" fn pane_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_COMMAND | WM_NOTIFY => {
+            // SAFETY: `hwnd` is a live pane created by this module, and its
+            // parent outlives it - the parent creates it and the OS destroys
+            // it with the parent. `GetParent` reports `Err` rather than
+            // handing back a stale handle, and that case forwards nothing.
+            let parent = unsafe { GetParent(hwnd) };
+            match parent {
+                // SAFETY: `p` is the live parent just returned above;
+                // `wparam` and `lparam` are passed on unchanged, so their
+                // meaning is the one the original sender gave them.
+                Ok(p) => unsafe { SendMessageW(p, msg, Some(wparam), Some(lparam)) },
+                Err(_) => LRESULT(0),
+            }
+        }
+        // SAFETY: default handling of a message this proc does not claim.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Once per process.
+///
+/// Latch only after success.
+unsafe fn register_pane_class(hinstance: HINSTANCE) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // SAFETY: `wc` is a fully-initialised `WNDCLASSEXW` (the `..Default`
+    // spread zeroes every field not set here); `lpfnWndProc` points at a
+    // `'static extern "system" fn` valid for the process lifetime, which is
+    // what the OS requires.
+    unsafe {
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(pane_wndproc),
+            hInstance: hinstance,
+            lpszClassName: pane_class_name(),
+            hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW(IDC_ARROW)")?,
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (COLOR_BTNFACE.0 + 1) as *mut core::ffi::c_void,
+            ),
+            ..Default::default()
+        };
+        if RegisterClassExW(&wc) == 0 {
+            return Err(Error::from_thread()).context("RegisterClassExW for the pane class");
         }
     }
 
@@ -646,12 +1044,47 @@ unsafe fn child(
     Ok(hwnd)
 }
 
+/// A control by id, pane or not.
+///
+/// `GetDlgItem` stops at direct
+/// children. Page controls are
+/// grandchildren of the window,
+/// inside the two panes.
+unsafe fn dlg_item(root: HWND, id: i32) -> WinResult<HWND> {
+    // SAFETY: `root` is the settings window's live handle; every `GetDlgItem`
+    // result is checked, so a missing pane or control yields `Err` here rather
+    // than a dangling handle. Every caller passes a named `ID_*`, each unique
+    // and non-zero. The id 0 that group boxes and labels share now sits only
+    // on the content pane - the Updates box took `ID_UPDATES` so
+    // `place_bottom` can reach it - and nothing ever looks 0 up anyway, so
+    // searching the window first cannot return the wrong control.
+    unsafe {
+        if let Ok(c) = GetDlgItem(Some(root), id) {
+            return Ok(c);
+        }
+        let (_, content) = panes(root)?;
+        GetDlgItem(Some(content), id)
+    }
+}
+
+/// The viewport and its content.
+unsafe fn panes(root: HWND) -> WinResult<(HWND, HWND)> {
+    // SAFETY: `root` is the settings window's live handle; both results are
+    // checked, so a window without panes - anything before `build` finishes -
+    // yields `Err` here rather than a dangling handle.
+    unsafe {
+        let viewport = GetDlgItem(Some(root), ID_VIEWPORT)?;
+        let content = GetDlgItem(Some(viewport), ID_CONTENT)?;
+        Ok((viewport, content))
+    }
+}
+
 /// A box's own selected row.
 unsafe fn box_selection(hwnd: HWND, which: DictBox) -> isize {
-    // SAFETY: both ids name live children of `hwnd`, created in `build`;
+    // SAFETY: both ids name live descendants of `hwnd`, created in `build`;
     // a missing one yields `Err` here rather than a dangling handle.
     unsafe {
-        GetDlgItem(Some(hwnd), dict_box_id(which))
+        dlg_item(hwnd, dict_box_id(which))
             .map(|l| SendMessageW(l, LB_GETCURSEL, None, None).0)
             .unwrap_or(-1)
     }
@@ -680,14 +1113,14 @@ unsafe fn select_dict_row(
     to: DictBox,
     at: usize,
 ) {
-    // SAFETY: both ids name live children of `hwnd`, created in `build`;
+    // SAFETY: both ids name live descendants of `hwnd`, created in `build`;
     // `fill_dict_list` states its own contract. LB_SETCURSEL with -1 is the
     // documented way to clear a single-selection listbox.
     unsafe {
         for (which, rows) in
             [(DictBox::Searched, searched), (DictBox::NotSearched, not_searched)]
         {
-            let Ok(list) = GetDlgItem(Some(hwnd), dict_box_id(which)) else { continue };
+            let Ok(list) = dlg_item(hwnd, dict_box_id(which)) else { continue };
             fill_dict_list(list, rows);
             let sel: isize = if which == to { at as isize } else { -1 };
             SendMessageW(list, LB_SETCURSEL, Some(WPARAM(sel as usize)), None);
@@ -726,10 +1159,10 @@ unsafe fn move_selected(hwnd: HWND, up: bool) {
 
 /// Disable what cannot act.
 unsafe fn update_list_buttons(hwnd: HWND) {
-    // SAFETY: every id below is a live child of `hwnd`, created in `build`,
-    // and each `GetDlgItem` result is checked before it is used.
+    // SAFETY: every id below is a live descendant of `hwnd`, created
+    // in `build`, and each `dlg_item` result is checked before use.
     unsafe {
-        let freqs = GetDlgItem(Some(hwnd), ID_FREQS).unwrap_or_default();
+        let freqs = dlg_item(hwnd, ID_FREQS).unwrap_or_default();
         let (Some(searched), Some(not_searched)) =
             (list_rows(hwnd, ID_DICTS), list_rows(hwnd, ID_DICTS_OFF))
         else {
@@ -739,7 +1172,7 @@ unsafe fn update_list_buttons(hwnd: HWND) {
             return;
         }
         let from = active_dict_box(hwnd);
-        let Ok(dicts) = GetDlgItem(Some(hwnd), dict_box_id(from)) else { return };
+        let Ok(dicts) = dlg_item(hwnd, dict_box_id(from)) else { return };
         let cur = box_selection(hwnd, from);
         let freq_cur = SendMessageW(freqs, LB_GETCURSEL, None, None).0;
         let unreadable = unreadable_rows(hwnd);
@@ -765,12 +1198,42 @@ unsafe fn update_list_buttons(hwnd: HWND) {
             (ID_DICT_REMOVE, dicts, picked),
             (ID_FREQ_REMOVE, freqs, freq_cur >= 0),
         ] {
-            if let Ok(btn) = GetDlgItem(Some(hwnd), id) {
+            if let Ok(btn) = dlg_item(hwnd, id) {
                 if !enable && focused == btn {
                     let _ = SetFocus(Some(list));
                 }
                 let _ = EnableWindow(btn, enable);
             }
+        }
+    }
+}
+
+/// True when idx > 0.
+fn should_show_configure(engine_combo_index: isize) -> bool {
+    engine_combo_index > 0
+}
+
+/// Lang enable, cfg show.
+unsafe fn update_engine_controls(hwnd: HWND) {
+    // SAFETY: each id is a live descendant of `hwnd`, created in
+    // `build`; a missing one is skipped via `dlg_item`'s `Err`.
+    unsafe {
+        let Ok(engine) = dlg_item(hwnd, ID_ENGINE) else { return };
+        let idx = SendMessageW(engine, CB_GETCURSEL, None, None).0;
+        if let Ok(lang) = dlg_item(hwnd, ID_OCR_LANG) {
+            let _ = EnableWindow(lang, idx <= 0);
+        }
+        if let Ok(cfg_btn) = dlg_item(hwnd, ID_ENGINE_CONFIGURE) {
+            let mut on_ocr_tab = false;
+            if let Ok(tab) = dlg_item(hwnd, ID_TAB) {
+                on_ocr_tab = SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0 == 2;
+            }
+            let cmd = if on_ocr_tab && should_show_configure(idx) {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            };
+            let _ = ShowWindow(cfg_btn, cmd);
         }
     }
 }
@@ -798,10 +1261,11 @@ unsafe fn list_row(list: HWND, index: isize) -> Option<String> {
 
 /// Every row, or None if gone.
 unsafe fn list_rows(hwnd: HWND, id: i32) -> Option<Vec<String>> {
-    // SAFETY: `id` names a child of `hwnd`; a missing one yields `Err` here
-    // rather than a dangling handle, and `list_row` states its own contract.
+    // SAFETY: `id` names a descendant of `hwnd`; a missing one yields
+    // `Err` here rather than a dangling handle, and `list_row` states
+    // its own contract.
     unsafe {
-        let list = GetDlgItem(Some(hwnd), id).ok()?;
+        let list = dlg_item(hwnd, id).ok()?;
         let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
         Some((0..count.max(0)).filter_map(|i| list_row(list, i)).collect())
     }
@@ -825,7 +1289,7 @@ unsafe fn fill_dict_list(list: HWND, rows: &[String]) {
 /// An edit or combo's own text.
 unsafe fn window_text(ctrl: HWND) -> String {
     // SAFETY: `ctrl` is a live control the caller
-    // obtained from `GetDlgItem`; the buffer is sized
+    // obtained from `dlg_item`; the buffer is sized
     // to the length `GetWindowTextLengthW` itself
     // reported, which is the contract `GetWindowTextW`
     // writes against.
@@ -945,6 +1409,104 @@ fn column_label(name: &str) -> &str {
     name.char_indices().nth(COL_LABEL_MAX_CHARS).map_or(name, |(i, _)| &name[..i])
 }
 
+/// One discovered plugin's row.
+struct PluginRow {
+    label: String,
+    roles: String,
+    status: String,
+    checked: bool,
+    /// False for a refused plugin.
+    can_enable: bool,
+}
+
+/// Config's enabled plugin list.
+fn enabled_plugin_names() -> Vec<String> {
+    let path = crate::paths::beside_exe("chibipop.toml");
+    crate::config::load_or_create(&path).map(|c| c.plugins.enabled).unwrap_or_default()
+}
+
+/// Enabled text-provider names.
+fn enabled_text_providers(
+    found: &[(PathBuf, Result<crate::plugin::manifest::Manifest>)],
+    enabled: &[String],
+) -> Vec<String> {
+    found
+        .iter()
+        .filter_map(|(_, parsed)| parsed.as_ref().ok())
+        .filter(|m| {
+            enabled.iter().any(|e| e == &m.name)
+                && m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+        })
+        .map(|m| m.name.clone())
+        .collect()
+}
+
+/// Renders one plugin's row.
+fn plugin_row(
+    dir: &Path,
+    parsed: &Result<crate::plugin::manifest::Manifest>,
+    enabled: &[String],
+) -> PluginRow {
+    match parsed {
+        Ok(m) => {
+            let on = enabled.iter().any(|n| n == &m.name);
+            PluginRow {
+                label: format!("{} {}", m.name, m.version),
+                roles: roles_text(&m.roles),
+                status: if on { "Enabled" } else { "Disabled" }.to_string(),
+                checked: on,
+                can_enable: true,
+            }
+        }
+        Err(e) => PluginRow {
+            label: dir_label(dir),
+            roles: "—".to_string(),
+            status: format!("Refused: {e:#}"),
+            checked: false,
+            can_enable: false,
+        },
+    }
+}
+
+/// A refused plugin's folder.
+fn dir_label(dir: &Path) -> String {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// This row's plugin name.
+fn plugin_key(dir: &Path, parsed: &Result<crate::plugin::manifest::Manifest>) -> String {
+    match parsed {
+        Ok(m) => m.name.clone(),
+        Err(_) => dir_label(dir),
+    }
+}
+
+/// Roles, joined for display.
+fn roles_text(roles: &[crate::plugin::manifest::Role]) -> String {
+    if roles.is_empty() {
+        return "—".to_string();
+    }
+    roles
+        .iter()
+        .map(|r| match r {
+            crate::plugin::manifest::Role::TextProvider => "text-provider",
+            crate::plugin::manifest::Role::FieldContributor => "field-contributor",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Group box height for n rows.
+fn plugins_group_h(n: usize) -> i32 {
+    let body = if n == 0 {
+        40
+    } else {
+        let n = n as i32;
+        n * PLUGIN_ROW_H + (n - 1) * ROW_GAP
+    };
+    20 + body + 8
+}
+
 /// Toggle glyph for fold state.
 fn field_map_toggle_label(collapsed: bool) -> &'static str {
     if collapsed { "Field mapping \u{25B6}" } else { "Field mapping \u{25BC}" }
@@ -1015,6 +1577,10 @@ fn stored_trigger_key(vk: u16) -> String {
 
 pub struct SettingsWindow {
     hwnd: HWND,
+    /// Clips the content pane.
+    viewport: HWND,
+    /// Slides inside the viewport.
+    content: HWND,
     font: Option<HFONT>,
     /// The numeric values each combo offers, in the order they were added, so
     /// `read` can map a selection index back to a value.
@@ -1025,6 +1591,10 @@ pub struct SettingsWindow {
     fonts: Vec<String>,
     /// Language tags, combo order.
     ocr_langs: Vec<String>,
+    /// Engine values, combo order.
+    engine_names: Vec<String>,
+    /// Engine name → plugin dir.
+    engine_dirs: HashMap<String, PathBuf>,
     /// What Apply has yet to do.
     staged: RefCell<SettingsForm>,
     /// General-tab-only controls.
@@ -1035,20 +1605,22 @@ pub struct SettingsWindow {
     ocr_ctrls: Vec<HWND>,
     /// Anki-tab-only controls.
     anki_ctrls: Vec<HWND>,
+    /// Plugins-tab-only controls.
+    plugin_ctrls: Vec<HWND>,
+    /// Plugin names, checkbox order.
+    plugin_names: Vec<String>,
     /// Anki field name -> its combo.
     field_map_rows: RefCell<Vec<(String, HWND)>>,
     /// Field-map labels + group box.
     field_map_extra: RefCell<Vec<HWND>>,
     /// True while collapsed.
     field_map_collapsed: Cell<bool>,
-    /// Where Anki's static rows end.
+    /// Anki static rows end, page y.
     anki_static_bottom: i32,
-    /// hwnd, x, y (96-dpi) to shift.
-    bottom_ctrls: Vec<(HWND, i32, i32)>,
-    /// Bottom bar's original y.
+    /// Each tab's page height, 96-DPI.
+    tab_heights: [i32; 5],
+    /// Tallest tab's bottom y.
     bottom_y0: i32,
-    /// Bottom bar's own height.
-    bottom_tail: i32,
     /// Which tab is showing.
     current_tab: Cell<u32>,
     /// What Apply will do.
@@ -1075,12 +1647,13 @@ impl SettingsWindow {
             let hinstance: HINSTANCE =
                 GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
             register_class(hinstance)?;
+            register_pane_class(hinstance)?;
 
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 class_name(),
                 w!("chibipop settings"),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VSCROLL,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 // Placeholder: fit_to sizes it after build.
@@ -1096,6 +1669,9 @@ impl SettingsWindow {
             let font = ui_font();
             let mut win = SettingsWindow {
                 hwnd,
+                // `build` creates both.
+                viewport: HWND::default(),
+                content: HWND::default(),
                 font,
                 widths: Vec::new(),
                 heights: Vec::new(),
@@ -1103,18 +1679,21 @@ impl SettingsWindow {
                 passes: Vec::new(),
                 fonts: Vec::new(),
                 ocr_langs: Vec::new(),
+                engine_names: Vec::new(),
+                engine_dirs: HashMap::new(),
                 staged: RefCell::new(form.clone()),
                 general_ctrls: Vec::new(),
                 dict_ctrls: Vec::new(),
                 ocr_ctrls: Vec::new(),
                 anki_ctrls: Vec::new(),
+                plugin_ctrls: Vec::new(),
+                plugin_names: Vec::new(),
                 field_map_rows: RefCell::new(Vec::new()),
                 field_map_extra: RefCell::new(Vec::new()),
                 field_map_collapsed: Cell::new(true),
                 anki_static_bottom: 0,
-                bottom_ctrls: Vec::new(),
+                tab_heights: [0; 5],
                 bottom_y0: 0,
-                bottom_tail: 0,
                 current_tab: Cell::new(0),
                 apply_mode: mode,
             };
@@ -1135,6 +1714,8 @@ impl SettingsWindow {
             // Sizes AND shows - see `fit_to` for why showing cannot go
             // through `ShowWindow` here.
             win.fit_to(WIN_W, content_h + PAD);
+            // General tab, from the top.
+            win.reset_scroll();
             let _ = SetForegroundWindow(hwnd);
             Ok(win)
         }
@@ -1183,10 +1764,10 @@ impl SettingsWindow {
 
     /// The Anki URL field's text.
     pub fn anki_url(&self) -> String {
-        // SAFETY: `ID_ANKI_URL` is a live child of
+        // SAFETY: `ID_ANKI_URL` is a live descendant of
         // `self.hwnd`, created in `build`.
         unsafe {
-            GetDlgItem(Some(self.hwnd), ID_ANKI_URL)
+            dlg_item(self.hwnd, ID_ANKI_URL)
                 .map(|c| window_text(c))
                 .unwrap_or_default()
         }
@@ -1194,10 +1775,10 @@ impl SettingsWindow {
 
     /// The Anki model field's text.
     pub fn anki_model(&self) -> String {
-        // SAFETY: `ID_ANKI_MODEL` is a live child of
+        // SAFETY: `ID_ANKI_MODEL` is a live descendant of
         // `self.hwnd`, created in `build`.
         unsafe {
-            GetDlgItem(Some(self.hwnd), ID_ANKI_MODEL)
+            dlg_item(self.hwnd, ID_ANKI_MODEL)
                 .map(|c| window_text(c))
                 .unwrap_or_default()
         }
@@ -1220,8 +1801,9 @@ impl SettingsWindow {
         let Some(action) = action else {
             return;
         };
-        // SAFETY: both helpers act only on live children of `self.hwnd`,
-        // which outlives this call, and each states its own contract.
+        // SAFETY: each helper acts only on live descendants of
+        // `self.hwnd`, which outlives this call, and each states
+        // its own contract.
         unsafe {
             match action {
                 Action::Remove(target) => self.remove_selected(target),
@@ -1229,6 +1811,11 @@ impl SettingsWindow {
                     // D9: the picker pumps too.
                     before_blocking();
                     self.add_picked();
+                }
+                Action::ConfigureEngine => {
+                    // D9: the picker pumps too.
+                    before_blocking();
+                    self.configure_engine();
                 }
             }
         }
@@ -1249,7 +1836,7 @@ impl SettingsWindow {
         // SAFETY: `ID_STATUS` is a live child of `self.hwnd`, created in
         // `build`; `SetWindowTextW` copies the string during the call.
         unsafe {
-            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
+            if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
                 let _ = SetWindowTextW(c, PCWSTR(wide(text).as_ptr()));
             }
         }
@@ -1257,14 +1844,14 @@ impl SettingsWindow {
 
     /// Show what was really applied.
     pub fn set_capture_fields(&self, ocr: &crate::config::OcrConfig) {
-        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are live children of
-        // `self.hwnd`, created in `build`; each `GetDlgItem` result is
+        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are live descendants of
+        // `self.hwnd`, created in `build`; each `dlg_item` result is
         // checked, and `SetWindowTextW` copies the string during the call,
         // so each temporary outlives its only use.
         unsafe {
             for (id, px) in [(ID_CAPTURE_W, ocr.capture_width), (ID_CAPTURE_H, ocr.capture_height)]
             {
-                if let Ok(c) = GetDlgItem(Some(self.hwnd), id) {
+                if let Ok(c) = dlg_item(self.hwnd, id) {
                     let _ = SetWindowTextW(c, PCWSTR(wide(&px.to_string()).as_ptr()));
                 }
             }
@@ -1278,11 +1865,11 @@ impl SettingsWindow {
         // created in `build`; `SetWindowTextW` copies each string during the
         // call, so the temporaries below outlive every use.
         unsafe {
-            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_APPLY) {
+            if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
                 let caption = wide(apply_caption(self.apply_mode));
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
-            if let Ok(c) = GetDlgItem(Some(self.hwnd), ID_STATUS) {
+            if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
                 let hint = wide(apply_hint(self.apply_mode, staged));
                 let _ = SetWindowTextW(c, PCWSTR(hint.as_ptr()));
             }
@@ -1291,21 +1878,22 @@ impl SettingsWindow {
 
     /// Lock it while Apply runs.
     pub fn set_busy(&self, busy: bool) {
-        // SAFETY: every id in `WHILE_BUSY` is a live child of `self.hwnd`,
-        // created in `build`, and each `GetDlgItem` result is checked. Focus
-        // is moved off the controls first, since a disabled window keeping
-        // focus leaves the keyboard talking to nothing.
+        // SAFETY: every id in `WHILE_BUSY` is a live descendant of
+        // `self.hwnd`, created in `build`; each `dlg_item` result is
+        // checked. Focus is moved off the controls first, since a disabled
+        // window keeping focus leaves the keyboard talking to nothing.
         unsafe {
             if busy {
                 let _ = SetFocus(Some(self.hwnd));
             }
             for id in WHILE_BUSY {
-                if let Ok(c) = GetDlgItem(Some(self.hwnd), id) {
+                if let Ok(c) = dlg_item(self.hwnd, id) {
                     let _ = EnableWindow(c, !busy);
                 }
             }
             if !busy {
                 update_list_buttons(self.hwnd);
+                update_engine_controls(self.hwnd);
             }
         }
     }
@@ -1334,10 +1922,10 @@ impl SettingsWindow {
 
     /// The language combo's own tag.
     fn selected_language(&self) -> Option<String> {
-        // SAFETY: `ID_OCR_LANG` is a live child of `self.hwnd`, created in
-        // `build`; a missing one yields `Err` here rather than a handle.
+        // SAFETY: `ID_OCR_LANG` is a live descendant of `self.hwnd`, made
+        // in `build`; a missing one yields `Err` here rather than a handle.
         let i = unsafe {
-            GetDlgItem(Some(self.hwnd), ID_OCR_LANG)
+            dlg_item(self.hwnd, ID_OCR_LANG)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
                 .unwrap_or(-1)
         };
@@ -1345,6 +1933,29 @@ impl SettingsWindow {
             return None;
         }
         self.ocr_langs.get(i as usize).cloned()
+    }
+
+    /// Selected engine's plugin dir.
+    fn selected_engine_dir(&self) -> Option<&Path> {
+        // SAFETY: `ID_ENGINE` is a live descendant of
+        // `self.hwnd`, created in `build`.
+        let idx = unsafe {
+            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else { return None };
+            SendMessageW(e, CB_GETCURSEL, None, None).0 as usize
+        };
+        let name = self.engine_names.get(idx)?;
+        self.engine_dirs.get(name).map(|p| p.as_path())
+    }
+
+    /// Selected engine's own name.
+    fn selected_engine_name(&self) -> Option<&str> {
+        // SAFETY: `ID_ENGINE` is a live descendant of
+        // `self.hwnd`, created in `build`.
+        let idx = unsafe {
+            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else { return None };
+            SendMessageW(e, CB_GETCURSEL, None, None).0 as usize
+        };
+        self.engine_names.get(idx).map(|s| s.as_str())
     }
 
     /// Re-split for the combo.
@@ -1357,8 +1968,8 @@ impl SettingsWindow {
         if prev == next {
             return;
         }
-        // SAFETY: both list ids are live children of `self.hwnd`, created in
-        // `build`; `list_rows` and `select_dict_row` state their own contracts
+        // SAFETY: both list ids are live descendants of `self.hwnd`, made
+        // in `build`; `list_rows` and `select_dict_row` state their contracts
         // and every handle is checked before it is used.
         unsafe {
             let (Some(active), Some(excluded)) =
@@ -1407,6 +2018,25 @@ impl SettingsWindow {
         })
     }
 
+    /// A tab's height, page y.
+    ///
+    /// Anki grows with its field
+    /// map: measured, not stored.
+    fn tab_page_h(&self, tab: u32) -> i32 {
+        if tab == 3 {
+            return self.field_map_bottom() - CONTENT_Y;
+        }
+        self.tab_heights.get(tab as usize).copied().unwrap_or(0)
+    }
+
+    /// Re-range for the shown tab.
+    ///
+    /// Back to the top with it.
+    fn reset_scroll(&self) {
+        let content_h = dpi_scale(self.hwnd, self.tab_page_h(self.current_tab.get()));
+        set_scroll_range(self.hwnd, content_h, client_h(self.viewport));
+    }
+
     /// Show one tab, hide the rest.
     pub fn switch_tab(&self, tab: u32) {
         // SAFETY: `self.hwnd` is live until `Drop`.
@@ -1416,13 +2046,14 @@ impl SettingsWindow {
             &self.dict_ctrls,
             &self.ocr_ctrls,
             &self.anki_ctrls,
+            &self.plugin_ctrls,
         ];
         if tab as usize >= groups.len() {
             return;
         }
         self.current_tab.set(tab);
         // SAFETY: every HWND in every group was created in
-        // `build` as a child of `self.hwnd` and lives until
+        // `build` as a descendant of `self.hwnd` and lives until
         // the window is destroyed.
         unsafe {
             for (i, ctrls) in groups.iter().enumerate() {
@@ -1432,7 +2063,9 @@ impl SettingsWindow {
                 }
             }
             self.apply_field_map_visibility();
+            update_engine_controls(self.hwnd);
         }
+        self.reset_scroll();
     }
 
     /// Flips the fold and resizes.
@@ -1444,7 +2077,7 @@ impl SettingsWindow {
         // children, created in `build`/`build_field_map_rows`.
         unsafe {
             self.apply_field_map_visibility();
-            if let Ok(btn) = GetDlgItem(Some(self.hwnd), ID_FIELD_MAP_TOGGLE) {
+            if let Ok(btn) = dlg_item(self.hwnd, ID_FIELD_MAP_TOGGLE) {
                 let text = field_map_toggle_label(collapsed);
                 let _ = SetWindowTextW(btn, PCWSTR(wide(text).as_ptr()));
             }
@@ -1454,12 +2087,14 @@ impl SettingsWindow {
 
     /// Captures `vk`; true if used.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
-        let Some((id, text)) = take_captured_key(self.hwnd, vk) else { return false };
+        let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
+            return false;
+        };
         // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
-        // children of `self.hwnd`, created in `build`; `SetWindowTextW`
+        // descendants of `self.hwnd`, created in `build`; `SetWindowTextW`
         // copies the string during the call.
         unsafe {
-            if let Ok(btn) = GetDlgItem(Some(self.hwnd), id) {
+            if let Ok(btn) = dlg_item(self.hwnd, id) {
                 let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
             }
         }
@@ -1468,11 +2103,11 @@ impl SettingsWindow {
 
     /// Fills deck/model + map rows.
     pub fn populate_combos(&self, decks: &[String], models: &[String], fields: &[String]) {
-        // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live children of
+        // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live descendants of
         // `self.hwnd`, created in `build`; each `SendMessageW` copies the
         // string during the call.
         unsafe {
-            if let Ok(deck) = GetDlgItem(Some(self.hwnd), ID_ANKI_DECK) {
+            if let Ok(deck) = dlg_item(self.hwnd, ID_ANKI_DECK) {
                 let cur = window_text(deck);
                 SendMessageW(deck, CB_RESETCONTENT, None, None);
                 for name in decks {
@@ -1482,7 +2117,7 @@ impl SettingsWindow {
                 SendMessageW(deck, WM_SETTEXT, None,
                     Some(LPARAM(wide(&cur).as_ptr() as isize)));
             }
-            if let Ok(model) = GetDlgItem(Some(self.hwnd), ID_ANKI_MODEL) {
+            if let Ok(model) = dlg_item(self.hwnd, ID_ANKI_MODEL) {
                 let cur = window_text(model);
                 SendMessageW(model, CB_RESETCONTENT, None, None);
                 for name in models {
@@ -1504,7 +2139,7 @@ impl SettingsWindow {
             return;
         }
         // SAFETY: every hwnd in `field_map_extra`/`field_map_rows` was
-        // created by this same function as a child of `self.hwnd`, and
+        // created by this same function as a descendant of `self.hwnd`, and
         // is destroyed here exactly once before its slot is reused.
         unsafe {
             for hwnd in self.field_map_extra.borrow_mut().drain(..) {
@@ -1518,7 +2153,7 @@ impl SettingsWindow {
         let (extra, rows) = self.build_field_map_rows(fields, &existing);
         *self.field_map_extra.borrow_mut() = extra;
         *self.field_map_rows.borrow_mut() = rows;
-        // SAFETY: every hwnd was just created as a child of `self.hwnd`.
+        // SAFETY: every hwnd was just created as a descendant of `self.hwnd`.
         unsafe { self.apply_field_map_visibility() };
         self.ensure_room_for(self.field_map_bottom());
     }
@@ -1527,7 +2162,7 @@ impl SettingsWindow {
     unsafe fn apply_field_map_visibility(&self) {
         let visible = self.current_tab.get() == 3 && !self.field_map_collapsed.get();
         let cmd = if visible { SW_SHOW } else { SW_HIDE };
-        // SAFETY: every hwnd here is a live child of `self.hwnd`,
+        // SAFETY: every hwnd here is a live descendant of `self.hwnd`,
         // created in `build_field_map_rows`.
         unsafe {
             for &c in self.field_map_extra.borrow().iter() {
@@ -1540,12 +2175,41 @@ impl SettingsWindow {
     }
 
     /// Field-map area's bottom.
+    ///
+    /// Window y, like `bottom_y0`.
     fn field_map_bottom(&self) -> i32 {
         let n = self.field_map_rows.borrow().len();
-        if n == 0 || self.field_map_collapsed.get() {
+        let page = if n == 0 || self.field_map_collapsed.get() {
             self.anki_static_bottom
         } else {
             self.anki_static_bottom + 20 + field_map_rows_needed(n) * ROW_H + 8
+        };
+        CONTENT_Y + page
+    }
+
+    /// Right below the tab strip.
+    ///
+    /// Tab order follows z-order, so
+    /// the pages must sit there, not
+    /// after the Apply row.
+    ///
+    /// Only the window's own
+    /// children can displace it.
+    unsafe fn place_viewport(&self) {
+        // SAFETY: `self.viewport` is a live child of `self.hwnd` from `build`
+        // on, destroyed only with it; before that it is null and the call
+        // fails harmlessly. `GetDlgItem` yields the tab control, a sibling of
+        // the viewport, which is what `SetWindowPos` requires of an insert-
+        // after handle. Without it the seat is left alone: creation order
+        // already puts the viewport there, so moving it anywhere else - to
+        // `HWND_BOTTOM` above all - would only be worse.
+        // `SWP_NOSIZE | SWP_NOMOVE` leave its rect alone.
+        unsafe {
+            let Ok(after) = GetDlgItem(Some(self.hwnd), ID_TAB) else {
+                return;
+            };
+            let _ = SetWindowPos(self.viewport, Some(after), 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
 
@@ -1557,15 +2221,18 @@ impl SettingsWindow {
     ) -> (Vec<HWND>, Vec<(String, HWND)>) {
         let f = self.font;
         let h = self.hwnd;
+        // Page y, like `build`.
+        let page = self.content;
         let y0 = self.anki_static_bottom;
         let rows_n = field_map_rows_needed(fields.len());
         let map_h = 20 + rows_n * ROW_H + 8;
         let mut extra = Vec::new();
         let mut rows = Vec::new();
-        // SAFETY: `h` is `self.hwnd`, live for the caller's duration;
-        // every control created is its child and outlives this call.
+        // SAFETY: `h` is `self.hwnd` and `page` its content pane, both live
+        // for the caller's duration; every control created is a child of
+        // `page` and outlives this call.
         unsafe {
-            if let Ok(g) = child(h, w!("BUTTON"), "",
+            if let Ok(g) = child(page, w!("BUTTON"), "",
                 WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
                 PAD - 6, y0, WIN_W - 2 * PAD, map_h, 0, f)
             {
@@ -1577,14 +2244,14 @@ impl SettingsWindow {
                 let row = idx % rows_n;
                 let x = PAD + col * (COL_W + COL_GAP);
                 let y = y0 + 20 + row * ROW_H;
-                if let Ok(l) = child(h, w!("STATIC"), column_label(name),
+                if let Ok(l) = child(page, w!("STATIC"), column_label(name),
                     WINDOW_STYLE(0), x, y + 4, COL_LABEL_W, ROW_H, 0, f)
                 {
                     extra.push(l);
                 }
                 let id = ID_FIELD_MAP_BASE + idx;
                 let combo_x = x + COL_LABEL_W + COL_LABEL_GAP;
-                if let Ok(combo) = child(h, w!("COMBOBOX"), "",
+                if let Ok(combo) = child(page, w!("COMBOBOX"), "",
                     WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                     combo_x, y, COL_COMBO_W, 140, id, f)
                 {
@@ -1619,35 +2286,38 @@ impl SettingsWindow {
     /// Never below build's own size.
     fn ensure_room_for(&self, needed_bottom: i32) {
         let new_y0 = needed_bottom.max(self.bottom_y0);
-        let dy = new_y0 - self.bottom_y0;
-        // SAFETY: every hwnd in `bottom_ctrls` is a live child of
-        // `self.hwnd`, created once in `build` and never destroyed
-        // before `self.hwnd` itself.
+        // SAFETY: `self.content` is a live descendant of `self.hwnd`, created
+        // once in `build` and never destroyed before `self.hwnd` itself.
+        // `SWP_NOMOVE` leaves its origin alone and `SWP_NOZORDER` keeps the
+        // placement `place_viewport` chose. The viewport is not touched here:
+        // `place_bottom` sizes it from the client, off `fit_to`'s `WM_SIZE`.
         unsafe {
-            for &(hwnd, x, y) in &self.bottom_ctrls {
-                let _ = SetWindowPos(
-                    hwnd, None,
-                    dpi_scale(self.hwnd, x), dpi_scale(self.hwnd, y + dy),
-                    0, 0,
-                    SWP_NOSIZE | SWP_NOZORDER,
-                );
-            }
+            // Or the pages clip.
+            let _ = SetWindowPos(
+                self.content, None,
+                0, 0,
+                dpi_scale(self.hwnd, WIN_W),
+                dpi_scale(self.hwnd, new_y0 - CONTENT_Y),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
         // Unconditional: shrink too.
-        self.fit_to(WIN_W, new_y0 + self.bottom_tail + PAD);
+        self.fit_to(WIN_W, new_y0 + BOTTOM_H + PAD);
+        // The band just changed size.
+        self.reset_scroll();
     }
 
     /// Drop the selected row.
     unsafe fn remove_selected(&self, target: Target) {
-        // SAFETY: the id below names a live child of `self.hwnd`; `list_row`,
-        // `active_dict_box` and `update_list_buttons` state their own
-        // contracts. Either box may hold the selection.
+        // SAFETY: the id below names a live descendant of `self.hwnd`;
+        // `list_row`, `active_dict_box` and `update_list_buttons` state
+        // their own contracts. Either box may hold the selection.
         unsafe {
             let id = match target {
                 Target::Dicts => dict_box_id(active_dict_box(self.hwnd)),
                 Target::Freqs => ID_FREQS,
             };
-            let Ok(list) = GetDlgItem(Some(self.hwnd), id) else {
+            let Ok(list) = dlg_item(self.hwnd, id) else {
                 return;
             };
             let cur = SendMessageW(list, LB_GETCURSEL, None, None).0;
@@ -1672,7 +2342,7 @@ impl SettingsWindow {
     /// Stage whatever was picked.
     unsafe fn add_picked(&self) {
         // SAFETY: `pick_archives` owns every buffer it hands the dialog;
-        // every id names a live child of `self.hwnd`, and the string each
+        // every id names a live descendant of `self.hwnd`, and the string each
         // `LB_ADDSTRING` copies outlives that call. `list_rows` and
         // `select_dict_row` each state their own contract.
         unsafe {
@@ -1692,7 +2362,7 @@ impl SettingsWindow {
                     continue;
                 };
                 if kind == Kind::Frequency {
-                    let Ok(list) = GetDlgItem(Some(self.hwnd), ID_FREQS) else {
+                    let Ok(list) = dlg_item(self.hwnd, ID_FREQS) else {
                         continue;
                     };
                     SendMessageW(list, LB_ADDSTRING, None,
@@ -1714,6 +2384,25 @@ impl SettingsWindow {
             update_list_buttons(self.hwnd);
             self.refresh_apply();
         }
+    }
+
+    /// Picks a folder, saves it.
+    unsafe fn configure_engine(&self) {
+        let Some(name) = self.selected_engine_name() else { return };
+        let Some(dir) = self.selected_engine_dir() else { return };
+        let title = format!("Select your {name} installation");
+        // SAFETY: `self.hwnd` is live; the picker frees its
+        // own PIDL before returning.
+        let picked = unsafe { pick_folder(self.hwnd, &title) };
+        let Some(path) = picked else { return };
+        let cfg_path = dir.join("config.toml");
+        let existing = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+        let updated = set_config_path(&existing, &path.to_string_lossy());
+        if std::fs::write(&cfg_path, updated).is_err() {
+            self.set_status(&format!("Could not save {name} path."));
+            return;
+        }
+        self.set_status(&format!("Saved {name} path."));
     }
 
     /// Resize so the client area holds `client_w` x `client_h` 96-DPI pixels,
@@ -1771,9 +2460,15 @@ impl SettingsWindow {
         let mut dict: Vec<HWND> = Vec::new();
         let mut ocr: Vec<HWND> = Vec::new();
         let mut ank: Vec<HWND> = Vec::new();
+        let mut plug: Vec<HWND> = Vec::new();
+        let mut plugin_names: Vec<String> = Vec::new();
+        let mut plugin_dirs: Vec<PathBuf> = Vec::new();
 
-        // SAFETY: `h` is the window just created by `open`; every control is
-        // a child of it and lives until the window is destroyed.
+        // SAFETY: `h` is the window just created by `open`. Every control
+        // below is created as a child of `h`, of `h`'s viewport pane, or of
+        // that pane's content pane, and each parent is created before any of
+        // its children. Windows destroys a child with its parent, so every
+        // handle taken here lives until `h` is destroyed.
         unsafe {
             // Tabs need comctl init.
             let icex = INITCOMMONCONTROLSEX {
@@ -1811,31 +2506,47 @@ impl SettingsWindow {
             item.psz_text = t3.as_mut_ptr();
             SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(3)),
                 Some(LPARAM(&item as *const _ as isize)));
-            y += TAB_H + 4;
-            let content_y = y;
+            let mut t4 = wide("Plugins");
+            item.psz_text = t4.as_mut_ptr();
+            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(4)),
+                Some(LPARAM(&item as *const _ as isize)));
+            // Sized when the band is known.
+            self.viewport = child(h, pane_class_name(), "",
+                WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                0, CONTENT_Y, WIN_W, 0, ID_VIEWPORT, None)?;
+            self.content = child(self.viewport, pane_class_name(), "", WS_CLIPSIBLINGS,
+                0, 0, WIN_W, 0, ID_CONTENT, None)?;
+            // Or Tab skips every page.
+            for pane in [self.viewport, self.content] {
+                let ex = GetWindowLongW(pane, GWL_EXSTYLE) as u32 | WS_EX_CONTROLPARENT.0;
+                SetWindowLongW(pane, GWL_EXSTYLE, ex as i32);
+            }
+            // Page y, not window y.
+            let page = self.content;
+            y = 0;
 
             let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(h, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
+                child(page, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
                       PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
             };
             // Same, but carrying WS_GROUP so it ends the preceding group.
             let group_start = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(h, w!("BUTTON"), text,
+                child(page, w!("BUTTON"), text,
                       WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
                       PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
             };
             let label = |text: &str, y: i32| -> WinResult<HWND> {
-                child(h, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H, 0, f)
+                child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H, 0, f)
             };
 
             // ---- Trigger ----
             gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
             y += 20;
-            let live = child(h, w!("BUTTON"), "Live",
+            let live = child(page, w!("BUTTON"), "Live",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
                 PAD, y, 120, ROW_H, ID_MODE_LIVE, f)?;
             gen.push(live);
-            let hold = child(h, w!("BUTTON"), "Hold key",
+            let hold = child(page, w!("BUTTON"), "Hold key",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
                 PAD + 130, y, 120, ROW_H, ID_MODE_HOLD, f)?;
             gen.push(hold);
@@ -1849,7 +2560,7 @@ impl SettingsWindow {
             let key_vk = crate::config::parse_trigger_key(&form.trigger_key).unwrap_or(0x10);
             CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, key_vk))));
             let key_name = crate::config::trigger_key_name(key_vk);
-            let key_btn = child(h, w!("BUTTON"), &key_name, WS_TABSTOP,
+            let key_btn = child(page, w!("BUTTON"), &key_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_TRIGGER_KEY, f)?;
             gen.push(key_btn);
             let _ = EnableWindow(key_btn, !is_live);
@@ -1859,11 +2570,11 @@ impl SettingsWindow {
             // WS_GROUP terminates the radio group above. Without it the group
             // runs to the end of the window and arrow keys walk straight out
             // of Live/Hold Shift into the combos.
-            gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?);
+            gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30)?);
             y += 20;
 
             gen.push(label("Theme", y)?);
-            let theme = child(h, w!("COMBOBOX"), "",
+            let theme = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_THEME, f)?;
             gen.push(theme);
@@ -1880,7 +2591,7 @@ impl SettingsWindow {
             y += ROW_H + ROW_GAP;
 
             gen.push(label("Font", y)?);
-            let fonts_hwnd = child(h, w!("COMBOBOX"), "",
+            let fonts_hwnd = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 260, ID_FONT, f)?;
             gen.push(fonts_hwnd);
@@ -1906,7 +2617,7 @@ impl SettingsWindow {
                 MAX_WIDTH_RANGE.0 as i64, MAX_WIDTH_RANGE.1 as i64, 5,
                 form.max_width_percent as i64);
             gen.push(label("Max width (% of screen)", y)?);
-            let mw = child(h, w!("COMBOBOX"), "",
+            let mw = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_MAX_WIDTH, f)?;
             gen.push(mw);
@@ -1917,7 +2628,7 @@ impl SettingsWindow {
                 MAX_HEIGHT_RANGE.0 as i64, MAX_HEIGHT_RANGE.1 as i64, 5,
                 form.max_height_percent as i64);
             gen.push(label("Max height (% of screen)", y)?);
-            let mh = child(h, w!("COMBOBOX"), "",
+            let mh = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_MAX_HEIGHT, f)?;
             gen.push(mh);
@@ -1928,7 +2639,7 @@ impl SettingsWindow {
                 SUMMARY_RANGE.0 as i64, SUMMARY_RANGE.1 as i64, 10,
                 form.summary_chars as i64);
             gen.push(label("Summary length (characters)", y)?);
-            let sm = child(h, w!("COMBOBOX"), "",
+            let sm = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_SUMMARY, f)?;
             gen.push(sm);
@@ -1936,7 +2647,7 @@ impl SettingsWindow {
             y += ROW_H + ROW_GAP + 4;
 
             let check = |text: &str, id: i32, on: bool, y: i32| -> WinResult<HWND> {
-                let c = child(h, w!("BUTTON"), text,
+                let c = child(page, w!("BUTTON"), text,
                     WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                     PAD, y, WIN_W - 2 * PAD - 20, ROW_H, id, f)?;
                 SendMessageW(c, BM_SETCHECK, Some(WPARAM(if on { 1 } else { 0 })), None);
@@ -1954,7 +2665,7 @@ impl SettingsWindow {
             let y_general = y;
 
             // ---- Dictionaries ----
-            y = content_y;
+            y = 0;
             let bx = WIN_W - PAD - BTN_W - 8;
             let list_w = bx - 2 * PAD + 4;
             dict.push(group("Dictionaries — topmost is shown first", y, dict_group_h())?);
@@ -1965,10 +2676,10 @@ impl SettingsWindow {
                 [("Searched — for the selected OCR language", ID_DICTS),
                  ("Not searched", ID_DICTS_OFF)]
             {
-                dict.push(child(h, w!("STATIC"), caption,
+                dict.push(child(page, w!("STATIC"), caption,
                     WINDOW_STYLE(0), PAD, y, list_w, DICT_CAP_H, 0, f)?);
                 y += DICT_CAP_H;
-                dict.push(child(h, w!("LISTBOX"), "",
+                dict.push(child(page, w!("LISTBOX"), "",
                     WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                     PAD, y, list_w, DICT_BOX_H, id, f)?);
                 y += DICT_BOX_H;
@@ -1983,18 +2694,18 @@ impl SettingsWindow {
             .iter()
             .enumerate()
             {
-                dict.push(child(h, w!("BUTTON"), text, WS_TABSTOP,
+                dict.push(child(page, w!("BUTTON"), text, WS_TABSTOP,
                       bx, btn_y + i as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?);
             }
             y += ROW_GAP;
-            dict.push(child(h, w!("STATIC"),
+            dict.push(child(page, w!("STATIC"),
                 "Order is matched by dictionary name. Check both lists after a change.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, DICT_HINT_H, 0, f)?);
             y += DICT_HINT_H + 8;
 
             // A rebuild is library-only.
             if form.library_empty && !form.dict_names.is_empty() {
-                dict.push(child(h, w!("STATIC"),
+                dict.push(child(page, w!("STATIC"),
                     "chibipop is using a dictionary built outside the app. Adding or \
                      removing here rebuilds from this list only — import your original \
                      .zip files first.",
@@ -2010,7 +2721,7 @@ impl SettingsWindow {
                      removed. Dictionaries it used to order are now sorted last.",
                     stale.join("\", \"")
                 );
-                dict.push(child(h, w!("STATIC"), &msg, WINDOW_STYLE(0),
+                dict.push(child(page, w!("STATIC"), &msg, WINDOW_STYLE(0),
                       PAD, y, WIN_W - 2 * PAD - 20, 32, 0, f)?);
                 y += 36;
             }
@@ -2022,7 +2733,7 @@ impl SettingsWindow {
             let freq_h = 20 + freq_span + 8;
             dict.push(group_start("Frequency data — how common each word is", y, freq_h)?);
             y += 20;
-            let freqs = child(h, w!("LISTBOX"), "",
+            let freqs = child(page, w!("LISTBOX"), "",
                 WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
                 PAD, y, list_w, freq_span, ID_FREQS, f)?;
             dict.push(freqs);
@@ -2031,19 +2742,57 @@ impl SettingsWindow {
                     Some(LPARAM(wide(name).as_ptr() as isize)));
             }
             SendMessageW(freqs, LB_SETCURSEL, Some(WPARAM(0)), None);
-            dict.push(child(h, w!("BUTTON"), "Add…", WS_TABSTOP,
+            dict.push(child(page, w!("BUTTON"), "Add…", WS_TABSTOP,
                   bx, y, BTN_W, ROW_H, ID_FREQ_ADD, f)?);
-            dict.push(child(h, w!("BUTTON"), "Remove", WS_TABSTOP,
+            dict.push(child(page, w!("BUTTON"), "Remove", WS_TABSTOP,
                   bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?);
             y += freq_span + 8 + GROUP_GAP;
             let y_dict = y;
 
             // ---- OCR / Debug ----
-            y = content_y;
-            ocr.push(group("OCR / Debug", y, 12 * ROW_H + 38)?);
+            y = 0;
+            ocr.push(group("OCR / Debug", y, 15 * ROW_H + 38)?);
             y += 20;
+            let plugins_root = crate::paths::beside_exe("plugins");
+            let found = crate::plugin::discover::discover(&plugins_root);
+            let enabled_plugins = enabled_plugin_names();
+            let mut engine_names = vec!["builtin".to_string()];
+            engine_names.extend(enabled_text_providers(&found, &enabled_plugins));
+            // Spec D4: keep it offered.
+            if form.engine != "builtin" && !engine_names.contains(&form.engine) {
+                engine_names.push(form.engine.clone());
+            }
+            ocr.push(label("OCR engine", y)?);
+            let engine = child(page, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W - BTN_W - 8, 220, ID_ENGINE, f)?;
+            ocr.push(engine);
+            for name in &engine_names {
+                let shown = if name == "builtin" { "Built-in (Windows OCR)" } else { name };
+                SendMessageW(engine, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(shown).as_ptr() as isize)));
+            }
+            let engine_idx = engine_names.iter().position(|n| n == &form.engine).unwrap_or(0);
+            SendMessageW(engine, CB_SETCURSEL, Some(WPARAM(engine_idx)), None);
+            self.engine_names = engine_names;
+            let mut engine_dirs = HashMap::new();
+            for (dir, parsed) in &found {
+                if let Ok(m) = parsed {
+                    if enabled_plugins.contains(&m.name)
+                        && m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+                    {
+                        engine_dirs.insert(m.name.clone(), dir.clone());
+                    }
+                }
+            }
+            self.engine_dirs = engine_dirs;
+            let cfg_btn = child(page, w!("BUTTON"), "Configure…", WS_TABSTOP,
+                FIELD_X + FIELD_W - BTN_W, y, BTN_W, ROW_H, ID_ENGINE_CONFIGURE, f)?;
+            ocr.push(cfg_btn);
+            let _ = ShowWindow(cfg_btn, SW_HIDE);
+            y += ROW_H;
             ocr.push(label("OCR language", y)?);
-            let lang = child(h, w!("COMBOBOX"), "",
+            let lang = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_OCR_LANG, f)?;
             ocr.push(lang);
@@ -2057,8 +2806,9 @@ impl SettingsWindow {
                 SendMessageW(lang, CB_SETCURSEL, Some(WPARAM(i)), None);
             }
             self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
+            let _ = EnableWindow(lang, engine_idx == 0);
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"),
+            ocr.push(child(page, w!("STATIC"),
                 "Installed recognizers, plus any marked (not installed).",
                 WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
             y += ROW_H;
@@ -2066,27 +2816,27 @@ impl SettingsWindow {
                 PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
                 form.max_ocr_passes as i64);
             ocr.push(label("OCR passes per hover", y)?);
-            let ps = child(h, w!("COMBOBOX"), "",
+            let ps = child(page, w!("COMBOBOX"), "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_PASSES, f)?;
             ocr.push(ps);
             fill_numeric(ps, &self.passes, form.max_ocr_passes as i64);
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"),
+            ocr.push(child(page, w!("STATIC"),
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
             ocr.push(label("Capture width (px)", y)?);
-            ocr.push(child(h, w!("EDIT"), &form.capture_width.to_string(),
+            ocr.push(child(page, w!("EDIT"), &form.capture_width.to_string(),
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_W, f)?);
             y += ROW_H;
             ocr.push(label("Capture height (px)", y)?);
-            ocr.push(child(h, w!("EDIT"), &form.capture_height.to_string(),
+            ocr.push(child(page, w!("EDIT"), &form.capture_height.to_string(),
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_H, f)?);
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"), "Vertical mode swaps these two values.",
+            ocr.push(child(page, w!("STATIC"), "Vertical mode swaps these two values.",
                 WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
             y += ROW_H;
             ocr.push(check("Prefer vertical text (manga, VN)",
@@ -2100,25 +2850,31 @@ impl SettingsWindow {
             ocr.push(per_char);
             let _ = EnableWindow(per_char, is_live);
             y += ROW_H;
-            ocr.push(child(h, w!("STATIC"),
+            ocr.push(child(page, w!("STATIC"),
                 "Live mode only. Off: the popup holds while the cursor stays on \
                  the matched word.",
                 WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
             y += 28;
-            let scan = child(h, w!("BUTTON"), "Outline what each hover captured",
+            let scan = child(page, w!("BUTTON"), "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
             ocr.push(scan);
             SendMessageW(scan, BM_SETCHECK,
                 Some(WPARAM(if form.show_scan_region { 1 } else { 0 })), None);
+            y += ROW_H;
+            ocr.push(check("Show which OCR engine is active",
+                ID_ENGINE_LOG, form.show_engine_log, y)?);
+            y += ROW_H;
+            ocr.push(check("Show adapter log in status bar",
+                ID_ADAPTER_LOG, form.show_adapter_log, y)?);
             y += ROW_H + 18;
             let y_ocr = y;
 
             // ---- Anki (own tab) ----
-            y = content_y;
+            y = 0;
             ank.push(group("Anki", y, 6 * ROW_H + 34)?);
             y += 20;
-            let anki_chk = child(h, w!("BUTTON"), "Enable Anki integration",
+            let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_ANKI_ENABLED, f)?;
             ank.push(anki_chk);
@@ -2126,12 +2882,12 @@ impl SettingsWindow {
                 Some(WPARAM(if form.anki_enabled { 1 } else { 0 })), None);
             y += ROW_H;
             ank.push(label("AnkiConnect URL", y)?);
-            ank.push(child(h, w!("EDIT"), &form.anki_url,
+            ank.push(child(page, w!("EDIT"), &form.anki_url,
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_URL, f)?);
             y += ROW_H;
             ank.push(label("Deck", y)?);
-            let deck = child(h, w!("COMBOBOX"), &form.anki_deck,
+            let deck = child(page, w!("COMBOBOX"), &form.anki_deck,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_ANKI_DECK, f)?;
             ank.push(deck);
@@ -2139,7 +2895,7 @@ impl SettingsWindow {
                 Some(LPARAM(wide(&form.anki_deck).as_ptr() as isize)));
             y += ROW_H;
             ank.push(label("Note type", y)?);
-            let model = child(h, w!("COMBOBOX"), &form.anki_model,
+            let model = child(page, w!("COMBOBOX"), &form.anki_model,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 160, ID_ANKI_MODEL, f)?;
             ank.push(model);
@@ -2150,61 +2906,114 @@ impl SettingsWindow {
             let add_vk = crate::config::parse_trigger_key(&form.anki_add_key).unwrap_or(0x41);
             ANKI_CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, add_vk))));
             let add_name = crate::config::trigger_key_name(add_vk);
-            ank.push(child(h, w!("BUTTON"), &add_name, WS_TABSTOP,
+            ank.push(child(page, w!("BUTTON"), &add_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_ADD_KEY, f)?);
             y += ROW_H;
-            ank.push(child(h, w!("BUTTON"), "Refresh", WS_TABSTOP,
+            ank.push(child(page, w!("BUTTON"), "Refresh", WS_TABSTOP,
                   PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
-            ank.push(child(h, w!("STATIC"),
+            ank.push(child(page, w!("STATIC"),
                 "Click to load decks and field mappings from Anki",
                 WINDOW_STYLE(0), PAD + 88, y + 2, WIN_W - 2 * PAD - 96, ROW_H, 0, f)?);
             y += ROW_H + 8 + GROUP_GAP;
 
             // ---- Field-map toggle ----
             let toggle_text = field_map_toggle_label(self.field_map_collapsed.get());
-            ank.push(child(h, w!("BUTTON"), toggle_text, WS_TABSTOP,
+            ank.push(child(page, w!("BUTTON"), toggle_text, WS_TABSTOP,
                   PAD, y, 160, ROW_H, ID_FIELD_MAP_TOGGLE, f)?);
             y += ROW_H + 8;
 
             let y_ank = y;
-            y = y_general.max(y_dict).max(y_ocr).max(y_ank);
-            let bottom_y0 = y;
-            let mut bottom: Vec<(HWND, i32, i32)> = Vec::new();
+
+            // ---- Plugins ----
+            y = 0;
+            let plugins_root = crate::paths::beside_exe("plugins");
+            let found = crate::plugin::discover::discover(&plugins_root);
+            let enabled_plugins = enabled_plugin_names();
+            plug.push(group("Plugins", y, plugins_group_h(found.len()))?);
+            y += 20;
+            if found.is_empty() {
+                plug.push(child(page, w!("STATIC"),
+                    &format!("No plugins found in {}.", plugins_root.display()),
+                    WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 36, 0, f)?);
+                y += 40;
+            } else {
+                for (idx, (dir, parsed)) in found.iter().enumerate() {
+                    if idx > 0 {
+                        y += ROW_GAP;
+                    }
+                    let ry = y;
+                    let idx = idx as i32;
+                    let row = plugin_row(dir, parsed, &enabled_plugins);
+                    plugin_names.push(plugin_key(dir, parsed));
+                    plugin_dirs.push(dir.clone());
+                    plug.push(child(page, w!("STATIC"), &row.label, WINDOW_STYLE(0),
+                        PAD, ry + 4, bx - PAD - 8, ROW_H, 0, f)?);
+                    let chk = child(page, w!("BUTTON"), "Enable",
+                        WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                        bx, ry, BTN_W, ROW_H,
+                        ID_PLUGIN_ENABLE_BASE + idx, f)?;
+                    SendMessageW(chk, BM_SETCHECK,
+                        Some(WPARAM(if row.checked { 1 } else { 0 })), None);
+                    let _ = EnableWindow(chk, row.can_enable);
+                    plug.push(chk);
+                    plug.push(child(page, w!("STATIC"), &row.roles, WINDOW_STYLE(0),
+                        PAD, ry + ROW_H + 4, bx - PAD - 8, ROW_H, 0, f)?);
+                    let status_y = ry + 2 * ROW_H;
+                    plug.push(child(page, w!("STATIC"), &row.status, WINDOW_STYLE(0),
+                        PAD, status_y, bx - PAD - 8, PLUGIN_STATUS_H, 0, f)?);
+                    plug.push(child(page, w!("BUTTON"), "Configure", WS_TABSTOP,
+                        bx, status_y, BTN_W, ROW_H,
+                        ID_PLUGIN_CONFIGURE_BASE + idx, f)?);
+                    y = ry + PLUGIN_ROW_H;
+                }
+            }
+            y += 8 + GROUP_GAP;
+            let y_plugins = y;
+
+            // Window y from here on.
+            // place_bottom re-pins these.
+            let bottom_y0 =
+                y_general.max(y_dict).max(y_ocr).max(y_ank).max(y_plugins) + CONTENT_Y;
 
             // ---- Updates ----
-            let updates_group = group("Updates", y, ROW_H + 24)?;
-            bottom.push((updates_group, PAD - 6, y));
-            y += 20;
-            let update_btn = child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
-                  PAD, y, 136, ROW_H, ID_CHECK_UPDATE, f)?;
-            bottom.push((update_btn, PAD, y));
-            y += ROW_H + 8 + GROUP_GAP;
+            // Stays on `h`, not the pane.
+            child(h, w!("BUTTON"), "Updates",
+                WINDOW_STYLE(BS_GROUPBOX as u32),
+                PAD - 6, bottom_y0, WIN_W - 2 * PAD, ROW_H + 24, ID_UPDATES, f)?;
+            child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
+                  PAD, bottom_y0 + BOTTOM_UPDATE_DY, 136, ROW_H, ID_CHECK_UPDATE, f)?;
 
             // ---- Apply / Cancel ----
             // Also the progress line.
             let staged = form.has_staged();
-            let status = child(h, w!("EDIT"),
+            child(h, w!("EDIT"),
                 apply_hint(self.apply_mode, staged),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
-                PAD, y, WIN_W - 2 * PAD - 16, STATUS_H, ID_STATUS, f)?;
-            bottom.push((status, PAD, y));
-            y += STATUS_H + 2;
-            let apply_btn = child(h, w!("BUTTON"), apply_caption(self.apply_mode),
+                PAD, bottom_y0 + BOTTOM_STATUS_DY, WIN_W - 2 * PAD - 16, STATUS_H,
+                ID_STATUS, f)?;
+            child(h, w!("BUTTON"), apply_caption(self.apply_mode),
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
-                  WIN_W - PAD - 144, y, 136, ROW_H + 4, ID_APPLY, f)?;
-            bottom.push((apply_btn, WIN_W - PAD - 144, y));
+                  BOTTOM_APPLY_X, bottom_y0 + BOTTOM_BTN_DY, 136, ROW_H + 4, ID_APPLY, f)?;
             // Far left: not beside Apply.
-            let quit_btn = child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
-                  PAD, y, 116, ROW_H + 4, ID_QUIT, f)?;
-            bottom.push((quit_btn, PAD, y));
+            child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
+                  PAD, bottom_y0 + BOTTOM_BTN_DY, 116, ROW_H + 4, ID_QUIT, f)?;
+
+            // The band the tabs occupy.
+            let band_h = bottom_y0 - CONTENT_Y;
+            let _ = SetWindowPos(self.viewport, None, 0, 0,
+                dpi_scale(h, WIN_W), dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(self.content, None, 0, 0,
+                dpi_scale(h, WIN_W), dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            self.place_viewport();
 
             self.anki_static_bottom = y_ank;
+            self.tab_heights = [y_general, y_dict, y_ocr, y_ank, y_plugins];
             self.bottom_y0 = bottom_y0;
-            self.bottom_tail = y + ROW_H + 8 - bottom_y0;
-            self.bottom_ctrls = bottom;
 
             // Start on General tab.
-            for &c in dict.iter().chain(&ocr).chain(&ank) {
+            for &c in dict.iter().chain(&ocr).chain(&ank).chain(&plug) {
                 let _ = ShowWindow(c, SW_HIDE);
             }
 
@@ -2214,22 +3023,25 @@ impl SettingsWindow {
         self.dict_ctrls = dict;
         self.ocr_ctrls = ocr;
         self.anki_ctrls = ank;
-        Ok(y + ROW_H + 8)
+        self.plugin_ctrls = plug;
+        self.plugin_names = plugin_names;
+        remember_plugin_dirs(h, plugin_dirs);
+        Ok(self.bottom_y0 + BOTTOM_H)
     }
 
     /// The controls' current values, as a form.
     pub fn read(&self, template: &SettingsForm) -> SettingsForm {
-        // SAFETY: every id below is a live child of `self.hwnd`, created in
-        // `build` and destroyed only with the window in `Drop`.
+        // SAFETY: every id below is a live descendant of `self.hwnd`, made
+        // in `build` and destroyed only with the window in `Drop`.
         unsafe {
             let h = self.hwnd;
             let checked = |id: i32| -> bool {
-                GetDlgItem(Some(h), id)
+                dlg_item(h, id)
                     .map(|c| SendMessageW(c, BM_GETCHECK, None, None).0 == 1)
                     .unwrap_or(false)
             };
             let combo_index = |id: i32| -> isize {
-                GetDlgItem(Some(h), id)
+                dlg_item(h, id)
                     .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
                     .unwrap_or(-1)
             };
@@ -2238,7 +3050,7 @@ impl SettingsWindow {
                 if i < 0 { fallback } else { *values.get(i as usize).unwrap_or(&fallback) }
             };
             let text_of = |id: i32| -> String {
-                GetDlgItem(Some(h), id).map(|c| window_text(c)).unwrap_or_default()
+                dlg_item(h, id).map(|c| window_text(c)).unwrap_or_default()
             };
             let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
@@ -2270,6 +3082,18 @@ impl SettingsWindow {
                         .get(i as usize)
                         .cloned()
                         .unwrap_or_else(|| template.ocr_language.clone())
+                }
+            };
+
+            let engine = {
+                let i = combo_index(ID_ENGINE);
+                if i < 0 {
+                    template.engine.clone()
+                } else {
+                    self.engine_names
+                        .get(i as usize)
+                        .cloned()
+                        .unwrap_or_else(|| template.engine.clone())
                 }
             };
 
@@ -2321,7 +3145,10 @@ impl SettingsWindow {
                 scan_alphanumeric: checked(ID_SCAN_ALNUM),
                 per_character_lookup: checked(ID_PER_CHAR),
                 ocr_language,
+                engine,
                 show_scan_region: checked(ID_SHOW_SCAN),
+                show_engine_log: checked(ID_ENGINE_LOG),
+                show_adapter_log: checked(ID_ADAPTER_LOG),
                 freq_names,
                 staged_adds: staged.staged_adds.clone(),
                 staged_removes: staged.staged_removes.clone(),
@@ -2333,6 +3160,13 @@ impl SettingsWindow {
                 anki_model: text_of(ID_ANKI_MODEL),
                 anki_add_key,
                 field_map,
+                enabled_plugins: self
+                    .plugin_names
+                    .iter()
+                    .enumerate()
+                    .filter(|&(idx, _)| checked(ID_PLUGIN_ENABLE_BASE + idx as i32))
+                    .map(|(_, name)| name.clone())
+                    .collect(),
             }
         }
     }
@@ -2414,6 +3248,12 @@ impl Drop for SettingsWindow {
             }
         });
         UNREADABLE.with(|c| {
+            let mut slot = c.borrow_mut();
+            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
+                *slot = None;
+            }
+        });
+        PLUGIN_DIRS.with(|c| {
             let mut slot = c.borrow_mut();
             if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
                 *slot = None;
@@ -3122,6 +3962,19 @@ mod tests {
         assert_eq!(Some(2), language_index(&rows, "ZH-hans"));
     }
 
+    // ---- engine configure ----
+
+    #[test]
+    fn configure_button_hidden_when_builtin_selected() {
+        assert!(!should_show_configure(0));
+    }
+
+    #[test]
+    fn configure_button_visible_when_plugin_selected() {
+        assert!(should_show_configure(1));
+        assert!(should_show_configure(3));
+    }
+
     // ---- re-scoping ----
 
     fn installed_two() -> Vec<String> {
@@ -3432,5 +4285,199 @@ mod tests {
     #[test]
     fn the_dictionaries_group_did_not_outgrow_the_one_box_layout() {
         assert_eq!(20 + 20 + (4 * BTN_PITCH + ROW_H) + ROW_GAP + 28 + 8, dict_group_h());
+    }
+
+    // ---- Plugins tab ----
+
+    fn manifest_stub(
+        name: &str,
+        roles: Vec<crate::plugin::manifest::Role>,
+    ) -> crate::plugin::manifest::Manifest {
+        crate::plugin::manifest::Manifest {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            protocol: 1,
+            command: "python".to_string(),
+            args: vec![],
+            roles,
+            text_provider: None,
+            field_contributor: None,
+        }
+    }
+
+    #[test]
+    fn an_enabled_plugin_is_labelled_enabled() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let row = plugin_row(Path::new("meikiocr"), &Ok(m), &["meikiocr".to_string()]);
+        assert_eq!("Enabled", row.status);
+        assert!(row.checked);
+        assert!(row.can_enable);
+        assert_eq!("meikiocr 0.1.0", row.label);
+    }
+
+    #[test]
+    fn an_unlisted_plugin_is_labelled_disabled() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let row = plugin_row(Path::new("meikiocr"), &Ok(m), &[]);
+        assert_eq!("Disabled", row.status);
+        assert!(!row.checked);
+        assert!(row.can_enable);
+    }
+
+    /// The core rule: never dropped.
+    #[test]
+    fn a_refused_plugin_shows_its_error_and_cannot_enable() {
+        let err = anyhow::anyhow!("plugin \"beta\" declares no roles");
+        let row = plugin_row(Path::new("some/dir/beta"), &Err(err), &["beta".to_string()]);
+        assert!(row.status.contains("declares no roles"), "{}", row.status);
+        assert!(row.status.starts_with("Refused"));
+        assert!(!row.checked);
+        assert!(!row.can_enable);
+        assert_eq!("beta", row.label);
+    }
+
+    #[test]
+    fn enabled_text_providers_includes_an_enabled_provider() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let found = vec![(PathBuf::from("meikiocr"), Ok(m))];
+        let names = enabled_text_providers(&found, &["meikiocr".to_string()]);
+        assert_eq!(vec!["meikiocr".to_string()], names);
+    }
+
+    #[test]
+    fn enabled_text_providers_excludes_a_disabled_provider() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let found = vec![(PathBuf::from("meikiocr"), Ok(m))];
+        assert!(enabled_text_providers(&found, &[]).is_empty());
+    }
+
+    #[test]
+    fn enabled_text_providers_excludes_a_non_provider_role() {
+        let m = manifest_stub("scorer", vec![crate::plugin::manifest::Role::FieldContributor]);
+        let found = vec![(PathBuf::from("scorer"), Ok(m))];
+        let names = enabled_text_providers(&found, &["scorer".to_string()]);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn enabled_text_providers_excludes_a_refused_manifest() {
+        let err = anyhow::anyhow!("plugin \"beta\" declares no roles");
+        let found = vec![(PathBuf::from("beta"), Err(err))];
+        let names = enabled_text_providers(&found, &["beta".to_string()]);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn roles_text_joins_multiple_roles() {
+        let roles = vec![
+            crate::plugin::manifest::Role::TextProvider,
+            crate::plugin::manifest::Role::FieldContributor,
+        ];
+        assert_eq!("text-provider, field-contributor", roles_text(&roles));
+    }
+
+    #[test]
+    fn roles_text_handles_a_single_role() {
+        assert_eq!("text-provider", roles_text(&[crate::plugin::manifest::Role::TextProvider]));
+    }
+
+    #[test]
+    fn roles_text_is_a_dash_for_no_roles() {
+        assert_eq!("—", roles_text(&[]));
+    }
+
+    #[test]
+    fn dir_label_reads_the_folder_name() {
+        assert_eq!("meikiocr", dir_label(Path::new("C:/plugins/meikiocr")));
+    }
+
+    #[test]
+    fn plugins_group_h_for_no_plugins() {
+        assert_eq!(20 + 40 + 8, plugins_group_h(0));
+    }
+
+    #[test]
+    fn plugins_group_h_for_one_plugin() {
+        assert_eq!(20 + PLUGIN_ROW_H + 8, plugins_group_h(1));
+    }
+
+    #[test]
+    fn plugins_group_h_for_two_plugins() {
+        assert_eq!(20 + 2 * PLUGIN_ROW_H + ROW_GAP + 8, plugins_group_h(2));
+    }
+
+    #[test]
+    fn plugin_key_uses_the_manifest_name() {
+        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        assert_eq!("meikiocr", plugin_key(Path::new("meikiocr"), &Ok(m)));
+    }
+
+    #[test]
+    fn plugin_key_falls_back_to_the_folder_when_refused() {
+        let err = anyhow::anyhow!("bad manifest");
+        assert_eq!("beta", plugin_key(Path::new("some/dir/beta"), &Err(err)));
+    }
+
+    #[test]
+    fn plugin_configure_idx_reads_the_first_and_last_row() {
+        assert_eq!(Some(0), plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE));
+        assert_eq!(
+            Some((PLUGIN_ID_SPAN - 1) as usize),
+            plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN - 1),
+        );
+    }
+
+    #[test]
+    fn plugin_configure_idx_is_none_outside_the_block() {
+        assert_eq!(None, plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE - 1));
+        assert_eq!(None, plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN));
+        assert_eq!(None, plugin_configure_idx(ID_PLUGIN_ENABLE_BASE));
+    }
+
+    #[test]
+    fn plugin_dir_at_reads_back_what_build_remembered() {
+        let hwnd = dummy_hwnd(9101);
+        remember_plugin_dirs(hwnd, vec![PathBuf::from("plugins/meikiocr")]);
+        assert_eq!(Some(PathBuf::from("plugins/meikiocr")), plugin_dir_at(hwnd, 0));
+    }
+
+    #[test]
+    fn plugin_dir_at_is_none_for_another_window_or_row() {
+        let hwnd = dummy_hwnd(9102);
+        remember_plugin_dirs(hwnd, vec![PathBuf::from("plugins/meikiocr")]);
+        assert_eq!(None, plugin_dir_at(hwnd, 1));
+        assert_eq!(None, plugin_dir_at(dummy_hwnd(9103), 0));
+    }
+
+    #[test]
+    fn engine_dirs_maps_name_to_path() {
+        let mut dirs = HashMap::new();
+        dirs.insert("meikiocr".to_string(), PathBuf::from("plugins/meikiocr"));
+        assert_eq!(dirs.get("meikiocr").unwrap().as_os_str(), "plugins/meikiocr");
+        assert!(!dirs.contains_key("nonexistent"));
+    }
+
+    #[test]
+    fn write_config_replaces_existing_path() {
+        let existing = "meikiocr_path = \"\"\nhf_home = ''\nthreads = 4\n";
+        let result = set_config_path(existing, r"C:\tools\meikiocr\.venv\Lib\site-packages");
+        assert!(result.contains(r#"meikiocr_path = "C:\\tools\\meikiocr\\.venv\\Lib\\site-packages""#));
+        assert!(result.contains("hf_home = ''"));
+        assert!(result.contains("threads = 4"));
+    }
+
+    #[test]
+    fn write_config_appends_when_missing() {
+        let existing = "hf_home = ''\nthreads = 4\n";
+        let result = set_config_path(existing, r"C:\tools\meikiocr");
+        assert!(result.contains("hf_home = ''"));
+        assert!(result.contains("threads = 4"));
+        assert!(result.ends_with("meikiocr_path = \"C:\\\\tools\\\\meikiocr\"\n"));
+    }
+
+    #[test]
+    fn write_config_creates_from_empty() {
+        let result = set_config_path("", r"C:\tools\meikiocr");
+        assert_eq!(result, "meikiocr_path = \"C:\\\\tools\\\\meikiocr\"\n");
     }
 }

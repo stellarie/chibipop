@@ -118,8 +118,18 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
   built exe and locating `RT_MANIFEST` id 1 inside it. No `Cargo.toml` change was needed — Cargo
   runs a root `build.rs` by convention. `rc.exe` must still be run from PowerShell; MSYS2 mangles
   its `/flag` arguments under git-bash.
-- **`TextSource::at` / `resolve_at` are unreachable *and* single-pass.** An M4 hazard: the UIA
-  tier will come in through that trait and silently get the old behaviour.
+- ~~**`TextSource::at` / `resolve_at` are unreachable *and* single-pass.**~~ **DONE** — `TextSource`
+  is deleted, and so is the `TextProvider` that replaced it. **Reworded 2026-08-19**: the seam
+  moved one layer down, so the earlier proof of reachability — *"`src/app.rs`'s `resolve_trigger`
+  calls it through the trait"* — no longer describes the code. What is true now: the trait is
+  `text::recogniser::Recogniser` (`src/text/recogniser.rs`), `WindowsOcr` implements it, and the
+  live OCR path calls it at both of its capture sites, `recognise_at_capture` and `words_in`
+  inside `src/text/ocr.rs`. That is the part that actually proves reachable, not just the `impl`
+  block existing. `src/app.rs`'s `resolve_trigger` now calls the multi-pass
+  `resolve_at_tiled_scanned` concretely at both its call sites, which is what reaches that path.
+  The single-pass `resolve_at` is deleted too — see item 34. `docs/REGRESSION.md` §1.24 is the
+  human check that the swap changed nothing on screen, and it is **still owed**: it covers this
+  re-cut as well as the one it was written for.
 - **Ruby hover on pass 1.** `nearest_line` keeps the tiled path from splicing furigana, but
   `hit_scan` on pass 1 will happily resolve a ruby character if the cursor is nearer to it than
   to the base text. Reproduced live at (3550,1450) → `ん` from `かんたん`.
@@ -394,7 +404,57 @@ the overlay again on some cheaper grounds, this is the predicate it would want b
 
 ---
 
-## 11. The settings window is height-constrained and cannot scroll
+## 11. ~~The settings window is height-constrained and cannot scroll~~ — DONE
+
+> **DONE 2026-08-19**, built across the scrollable-settings-window plan (commits `17cc8ea` spike,
+> `75c8f0a` viewport, `2eedf8b`+`db95d84` reparenting, `9f59d03` scrollbar, `4b87873` pinned button
+> row). The window now carries a clipping viewport and a scrollable content pane under a fixed
+> bottom row — the first "If picked up" option below — **plus** the bottom row is pinned to the
+> window's real client bottom (`place_bottom`) rather than laid out at the cross-tab `max()`'s own
+> `y`, so `fit_to`'s clamp now costs only visibility, recovered by scrolling, never the ability to
+> reach Apply. The window's *target* height is still the cross-tab `max()` — that deliberately did
+> not change, since that is the number `fit_to` clamps in the first place. The
+> `y = y_general.max(y_dict).max(y_ocr).max(y_ank)` line this item cites has moved twice since:
+> **`settings_window.rs:2169`** here, corrected to **2170** while this plan was scoped, and now
+> **`settings_window.rs:2555`** (`+ CONTENT_Y` was folded in along the way) — the file keeps
+> growing under a change like this, so re-grep rather than trust either number.
+>
+> **Two more of this item's own figures were wrong, both corrected by measuring a running window,
+> not by arguing with the table below.** The table gives Dictionaries as 364 clean / 448 worst
+> case; a real run measured **412**, because only the `library_empty` branch was firing on that
+> machine — 364 + 48 (that branch's cost) = 412 exactly, and the further +36 the stale-entries
+> branch would add reaches the table's own 448. The three figures agree; 412 is just a real machine
+> caught between the table's two extremes. And the margin the clean-config figure implies against
+> the governing 426 (426 − 364 = **62**) is not what a real window shows: measured directly against
+> the real Dictionaries figure, it is **426 − 412 = 14px** — a materially thinner cushion than the
+> table alone would suggest.
+>
+> **"The two want deciding together", below — resolved, see item 12.** Both items closed in this
+> same round, and item 12's own closure found the coupling this sentence feared never held: its
+> fix spent none of this item's headroom.
+>
+> Tasks 4-6 verified each of their changes with `chibipop settings --audit` (Task 0's tool, added
+> mid-plan; see [`REFERENCE.md`](REFERENCE.md)) — a JSON dump of the window's control tree, diffed
+> before and after. Tasks 1-3, which predate that tool, each built and threw away their own
+> harness instead.
+
+### Why `ScrollWindowEx` was rejected
+
+The first attempt (`17cc8ea`, a throwaway spike, never shipped) tried the obvious Win32 primitive
+instead of a clipping parent, so nobody has to re-run the experiment to learn why it does not work
+here.
+
+- **`SW_SCROLLCHILDREN` moves hidden children too, not only the visible ones.** Every scroll
+  displaced every tab's controls, including tabs `SW_HIDE`n at the time. After three scrolls of
+  General, switching to Dictionaries showed it **120px out of place**, its list box painted
+  straight over the tab strip — and switching back left the strip itself overpainted and
+  unclickable.
+- **`prcClip` clips the blit, not the children.** A child scrolled above the clip band keeps
+  drawing at its new position regardless, over the tab strip, because the flag only limits what
+  `ScrollWindowEx` itself paints, not where a repositioned child is free to paint on its own.
+- **Neither is fixable without a clipping parent** — a real window whose client area *is* the
+  scrolling band, so its children are clipped for free and cannot paint outside it. That parent is
+  the viewport this item shipped with.
 
 **Raised 2026-08-11 by the per-character-retrigger / OCR-language branch, which nearly tripped it
 and was rerouted instead of fixing it.** Not a regression — this ceiling predates the branch and
@@ -484,9 +544,13 @@ the "one tab grows, every tab pays" coupling that makes this so easy to trip.
 **Note the interaction with item 12** — that fix makes the General tab ~38px taller, which spends
 headroom this item says is already thin at 150%. The two want deciding together.
 
+**Resolved 2026-08-19.** Both were closed in the same round. Item 12's own closure measured the
+coupling this paragraph predicts and found it did not hold — see the DONE note at the top of this
+item and item 12's own closure below.
+
 ---
 
-## 12. The General tab's "Popup" group box is 32px too short for its contents
+## 12. ~~The General tab's "Popup" group box is 32px too short for its contents~~ — DONE
 
 **Present in shipped v0.6.0. Spotted 2026-08-11 by the per-character-retrigger / OCR-language
 branch and correctly left alone — it was out of that branch's scope and is purely cosmetic.**
@@ -494,6 +558,34 @@ branch and correctly left alone — it was out of that branch's scope and is pur
 The `Popup` group box on the General tab is drawn 238px tall but encloses 270px of controls, so the
 fourth checkbox — **`Hide the popup from screen capture`** — draws entirely **below its own frame**,
 and the third (`Show related words beside the popup`) has its bottom 8px clipped by it too.
+
+> **DONE 2026-08-19**, commit `e0a5c09` (`fix(ui): make the Popup group box tall enough for its
+> four checkboxes`), `settings_window.rs:2245` (not the `:1600` cited below — the file has grown):
+>
+> ```rust
+> // before
+> gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 3 * ROW_H + 16)?);
+> // after
+> gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30)?);
+> ```
+>
+> Height **238 → 276**, exactly this item's own "If picked up" arithmetic below. Proven by rects
+> from `chibipop settings --audit`, not just arithmetic: the fourth checkbox (id 110) sits at
+> `y=384, h=24`, bottom **408**, unmoved by the fix. The group box now bottoms at **414**
+> (`y=138, h=276`) — the checkbox sits **6px inside** the frame, where it used to sit **32px past**
+> it (old frame bottom 376 against the same 408 — this item's own title). The third checkbox moves
+> from 8px clipped to 30px inside, matching the "8px clipped" claim above exactly.
+>
+> **This item's central prediction, below, did not hold — say so plainly.** It claims this fix
+> "lands squarely on item 11", adding ~38px to the General tab and spending item 11's headroom.
+> The audit diff between the two builds is **ten lines total, all `"h": 238` → `"h": 276` on this
+> one group box**, once per dump, across all five dumps — nothing else in any hunk. `group_start`'s
+> height argument only sizes the drawn `BS_GROUPBOX` rectangle; every control's position comes from
+> the hand-threaded `y` counter, which never reads that height back. So the frame can grow to match
+> its own contents without moving `y_general`, any checkbox, or anything on another tab. **Items 11
+> and 12 shared a piece of reasoning that turned out to be false**: they did not, in the end, need
+> deciding together, and this fix shipped spending none of item 11's headroom. See item 11's own
+> DONE note.
 
 ### The arithmetic, so nobody has to re-derive it
 
@@ -527,6 +619,11 @@ matching height is **276**, i.e. **+38px** on today's 238.
 **That +38px lands squarely on item 11.** It makes the General tab, already the tallest, taller
 still, and General is what sets the bottom row's position on every tab. Fix the scrolling or the
 per-tab layout first, or fix both in one round; do not spend the headroom without looking at it.
+
+**Resolved 2026-08-19 — this did not hold.** See the DONE note above: the audit diff proved growing
+this frame moves nothing else, on this tab or any other. Item 11 was fixed in the same round anyway
+(the real fix, a scrollable viewport), so the question this paragraph raises never had to be
+answered on its own terms.
 
 ---
 
@@ -1130,3 +1227,275 @@ merged: keep the component rects on the merged entry (`Vec<PhysRect>` beside `ch
 parallel per-character geom vector that `union_chars` indexes), so `union_chars` can slice inside an
 entry instead of only between entries. Whatever the shape, the guard is the missing test above:
 resolve a real evenly-spaced CJK run and assert a 2-char match yields ink + 2×3px, not the line.
+
+---
+
+## 30. ~~`plugin::host`, `plugin::text`, `plugin::strikes` and `PluginText` have no production caller~~ — **FIXED 2026-08-19**
+
+> **Fixed by giving config a real engine choice.** `[ocr].engine` and `[plugins].enabled`
+> (`src/config.rs`) resolve through `resolve_engine` to an `EngineChoice`. `src/app.rs`'s
+> `worker_main` calls it once at startup: `EngineChoice::Plugin(name)` runs `find_text_plugin`
+> against `plugin::discover::discover`, then `plugin::host::spawn` and `PluginText::new`, and hands
+> the result to `text::ocr::OcrTextSource::with_recogniser` — a new, additive constructor next to
+> `new`, so the built-in path is untouched. `EngineChoice::Builtin`, `EngineChoice::FellBack` and
+> any discovery/spawn failure all take the same fallback: one `eprintln!` naming the plugin and the
+> reason, then the built-in engine, with `cfg.ocr.engine` never rewritten — a returning plugin
+> resumes on the next start, per spec section 6.
+>
+> **Verified live, not reasoned.** A throwaway test (written, run, deleted) drove exactly this
+> chain against the real meikiocr plugin under `target/release/plugins/`: `with_recogniser` built
+> an `OcrTextSource` around a spawned `PluginText`, and `recognise()` read `"昨日は"` off
+> `tests/fixtures/japanese_bgra.bin` — the same string Task 3 read directly off `PluginText`, now
+> reached through the config seam instead of by hand.
+>
+> `PluginText`'s five fields (`src/plugin/text.rs:84-89`) are `pub(crate)` again — `app.rs`'s
+> `spawn_plugin_recogniser` is the second crate-internal caller of `PluginText::new` the item asked
+> to check for, and `cargo check` stays clean at that visibility, confirming every field now has an
+> in-crate reader.
+
+**Raised 2026-08-18 by the whole-branch review. Deliberate, not an oversight — recorded because
+nothing tracked will say so once this branch merges.**
+
+Nothing in the popup path calls a plugin. `chibipop plugin list` and `chibipop plugin test` are
+the only way any of `src/plugin/host.rs`, `src/plugin/text.rs` or `src/plugin/strikes.rs` runs.
+`PluginText::new` (`src/plugin/text.rs:91`) has **zero callers anywhere in the crate**, including
+its own test module — a full grep of `src/` and `tests/` for `PluginText` returns only its
+declaration, its `impl` block, and the constructor body itself. `Strikes`
+(`src/plugin/strikes.rs`) is built only inside that constructor, so it sits one layer further from
+anything that runs.
+
+This gap is by design. The `TextProvider` impl that would wire `PluginText` into the popup path
+was withheld on purpose: an impl whose only method always errors type-checks as a working provider
+and fails at run time, not build time, which hides the gap instead of naming it. Task 8 shipped
+the struct and its pure helpers. It did not connect them.
+
+**The cost this leaves behind.** `PluginText`'s five fields — `host`, `name`, `geometry`,
+`language`, `timeout` (`src/plugin/text.rs:81-88`) — are `pub`, wider than any of them needs to
+be, **only** to satisfy `dead_code`. BACKLOG item 10 already records the reason: a `pub` item in a
+crate that is both a library and a binary never trips that lint, caller or not, and Task 8's
+review used exactly that fact to widen these fields rather than reach for `#[allow]`. `strikes`
+alone stays `pub(crate)`, because `disabled()` reads it from inside the same module.
+
+**If picked up:** the moment a real `impl TextProvider for PluginText` reads these fields, shrink
+all five back to `pub(crate)`. Widening them was a workaround for an impl that did not exist yet,
+not a decision that plugin internals should be public API. Grep for `PluginText::new` before
+landing that impl, to confirm it still has exactly one caller — the new impl — and not a second
+one hiding somewhere else.
+
+---
+
+## 31. ~~`TextProvider` is shaped as "do the whole lookup", not "supply text"~~ — **FIXED 2026-08-19**
+
+> **Fixed by the re-cut this item predicted.** `TextProvider`, `TextRead` and `read_at` are
+> deleted, and `src/text/provider.rs` with them. The trait is now
+> `text::recogniser::Recogniser` (`src/text/recogniser.rs`):
+> `recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>>`, plus `name` and
+> `provides_geometry`. That is the shape `text::ocr::recognise` already had, and it is exactly
+> what a plugin can promise — pixels in, lines out.
+>
+> **Everything the item said a plugin cannot supply now sits above the seam and never reaches
+> one.** Capture, tiling, orientation, `nearest_line`, hit scan and the `ScanRect` debug overlay
+> all stay inside `OcrTextSource`. `src/app.rs`'s `resolve_trigger` calls the concrete
+> `resolve_at_tiled_scanned` again, which is simpler than the trait call it replaced.
+>
+> `OcrTextSource` holds `Box<dyn Recogniser>` and the built-in engine is `WindowsOcr`, so the
+> two live call sites — `recognise_at_capture` and `words_in` — are the only places OCR happens.
+> Net effect on `src/` and `tests/`: **+101 lines, −193**. `tests/ocr_fixture.rs` proves the
+> delegation is faithful against the real Windows engine and the committed BGRA fixture.
+
+**Raised 2026-08-18 by the whole-branch review. This is the branch's known seam, expected to be
+re-cut on first contact — not a hidden defect.**
+
+`TextProvider::read_at(&self, cursor: PhysPoint, collect_scan: bool) -> Result<TextRead>`
+(`src/text/provider.rs:10-11`) was widened during Task 2 to fit its one live caller, `app.rs`'s
+`resolve_trigger`. `TextRead` carries `{ resolved: Option<Resolved>, scan: Vec<ScanRect> }`
+(`:5-8`), and `Resolved` carries `{ span: TextSpan, orientation: Orientation }`
+(`src/text/layout.rs:51-54`).
+
+`PluginText` cannot implement this trait as it stands. A plugin supplies OCR text over a pipe. It
+does not capture the screen, tile a region, detect orientation, or scan a debug overlay —
+redoing any of those inside a plugin's impl would duplicate work the host already does for the
+built-in engine. `orientation` has no plugin-side source at all: the wire protocol
+(`src/plugin/proto.rs`'s `RecogniseResult`, `Line`, `Word`) carries no such field, so an impl
+would have to invent a value rather than report one.
+
+`ScanRect` reaches the trait for the same reason. It is a debug-overlay concept — the boxes
+`probe --show-region` draws — that means nothing to a plugin; it is only in `TextRead` because
+the one existing caller needed it.
+
+**If picked up:** narrow `TextProvider` to what a plugin can actually promise — text, and
+geometry only when geometry exists — and give the built-in engine's tiling, scanning and
+orientation detection their own interface above that, called only from the one site that still
+needs `ScanRect`. This is design work, not a mechanical split: it touches
+`impl TextProvider for OcrTextSource` (`src/text/ocr.rs:506-513`) and every call site in
+`src/app.rs` and `src/main.rs`.
+
+---
+
+## 32. The host's inbox is unbounded — the mirror of a bug already fixed on the outbox
+
+**Raised 2026-08-18 by the whole-branch review. Harmless today; stops being harmless the moment a
+host outlives one CLI command.**
+
+`host::spawn` (`src/plugin/host.rs:166-174`) reads a plugin's stdout on its own thread, one line
+at a time, and forwards every line onto an `mpsc::channel()` with no bound. `Host::attempt`
+(`:232-274`) drains that channel with `recv_timeout` against a deadline, but the deadline only
+bounds how long `attempt` **waits** for the next line. It does nothing to the reader thread, which
+keeps pushing every line the child prints, on schedule or not, for as long as the process lives.
+
+**This is the exact mirror of a bug Task 6 already fixed, one direction over.** Task 6's review
+found `call`'s write to the plugin's stdin unbounded — a plugin that stopped draining its input
+could block the caller forever. The fix bounded the *outbox* (`Outbox`, `:39-77`) to a single
+slot: a second request replaces the first instead of queueing behind it. Nobody applied the same
+fix to the *inbox*. A plugin that never emits a newline, or emits lines continuously while idle —
+a heartbeat, a stray log, a bug — grows this channel's backing `Vec` without limit.
+
+**Why it has not bitten anyone yet.** Every `Host` this branch creates lives for the length of one
+`chibipop plugin test` invocation, seconds at most, and the channel goes away with the process.
+The leak needs a long-lived host — the kind a future "keep the plugin warm across hovers" feature
+would create — before it becomes a real, unbounded process.
+
+**If picked up, `sync_channel` is the wrong fix.** A bounded `mpsc::sync_channel` sender
+**blocks** when full, and blocking the reader thread on a full channel reintroduces the exact
+caller-blocking defect Task 6 removed, only moved from the write side to the read side. The
+honest fix bounds the channel's logical backlog, not the call that fills it — drop or coalesce
+lines the way `Outbox::put` already replaces a stale outbound request, so the reader thread never
+blocks and the channel never grows past a small constant.
+
+---
+
+## 33. ~~`span_from_lines` reads `lines.first()` only and ignores `cursor.y`~~ — **DISSOLVED 2026-08-19**
+
+> **Dissolved, not repaired.** `span_from_lines` is deleted, together with its private `to_screen`
+> helper and its three tests. The seam moved down to `Recogniser` (item 31), so a plugin now
+> returns `Vec<OcrLine>` and line choice belongs to the layer above — where
+> `text::layout::nearest_line` already does exactly this job, by geometry, with 7 tests.
+>
+> The item asked for `span_from_lines` to be given `nearest_line`'s behaviour. Deleting the caller
+> was cheaper than duplicating the callee. `estimate_offset` and `PluginText` are untouched and
+> still have no production caller; item 30 tracks that, and Task 4 of the current plan closes it.
+
+**Raised 2026-08-18 by the whole-branch review.**
+
+`span_from_lines` (`src/plugin/text.rs:28-73`) opens with `let line = r.lines.first()?;` and
+never reads `cursor.y` or looks at any other entry in `r.lines`. Any plugin response carrying more
+than one line resolves against whichever line the plugin put first, regardless of where the
+cursor actually sits.
+
+The built-in engine does not have this gap. `text::layout::nearest_line`
+(`src/text/layout.rs:140`) picks a line by comparing the cursor's position against every
+candidate, and the OCR path calls it for exactly that reason. `span_from_lines` has no
+equivalent. Its own tests — `geometry_maps_image_pixels_back_to_the_screen`,
+`a_text_only_line_yields_empty_geometry` and the rest — all build a `RecogniseResult` with exactly
+one line, so nothing in the suite exercises the multi-line case at all.
+
+**If picked up:** give `span_from_lines` the same job `nearest_line` already does for the
+built-in path — pick the line closest to `cursor.y` (by geometry when words are present, by read
+order when they are not), then run the existing per-line offset logic against that line instead
+of `lines[0]`. The fix needs a new test with two or more lines and a cursor placed over the second
+one; nothing today covers that shape.
+
+---
+
+## 34. ~~The inherent single-pass `resolve_at` on `OcrTextSource` is dead~~ — **FIXED 2026-08-19**
+
+> **Deleted, after the fresh grep this item asked for.** `.resolve_at(` returned nothing anywhere
+> in `src/` or `tests/` — only the definition — so `resolve_at` and its doc comment are gone. The
+> differently-named `resolve_at_tiled`, `resolve_at_tiled_scanned` and `resolve_at_verbose` are
+> untouched and still live.
+>
+> **One claim in the same round's design note was wrong, and is corrected here.** That note listed
+> `OcrTextSource::engine()` as a second zero-caller deletion. It had one caller:
+> `tests/ocr_fixture.rs`, which reached through it to run the real engine. `engine()` is gone all
+> the same — it leaked a raw WinRT `OcrEngine` out of a type that no longer holds one — and
+> `recogniser(&self) -> &dyn Recogniser` replaces it. The fixture test now exercises the built-in
+> path **through the trait**, which is a better regression check than the one it replaced.
+
+**Raised 2026-08-18 by the whole-branch review. Task 2's review flagged this as a deferred minor
+and named the whole-branch review as the place to triage it.**
+
+`OcrTextSource::resolve_at` (`src/text/ocr.rs:369-371`) has had zero callers repo-wide since
+Task 2 (`a98efc2`) moved `app.rs`'s two live call sites onto `TextProvider::read_at`, which
+reaches the multi-pass `resolve_at_tiled_scanned` instead. A direct grep confirms it: no
+`.resolve_at(` call survives anywhere in `src/` or `tests/` — only the definition itself, and the
+differently-named `resolve_at_tiled`, `resolve_at_tiled_scanned` and `resolve_at_verbose`, which
+are all still live and called.
+
+**Nothing will warn.** `resolve_at` is `pub`, and BACKLOG item 10 already records the blind spot
+this depends on: a `pub` item in a crate that is both a library and a binary counts as library API
+to `dead_code`, caller or not. The clippy gate that would normally catch an orphaned function
+structurally cannot see this one.
+
+A `pub` single-pass `resolve_at` sitting beside a `pub` multi-pass `resolve_at_tiled_scanned`,
+both callable by name, is the same trap BACKLOG item 4 was originally about — a faster,
+wrong-shaped path left reachable beside the real one, waiting for some future caller to reach for
+the shorter name and get single-pass accuracy by accident.
+
+**If picked up:** delete `resolve_at` (`:369-371`) and its doc comment. It is three lines with no
+test of its own; `resolve_at_verbose`, which it wraps, is what the existing tests already
+exercise. Confirm with a fresh grep for `.resolve_at(` (not `resolve_at_tiled`, not
+`resolve_at_verbose`) that nothing started calling it between this being written and it being
+removed.
+
+---
+
+## 35. Spec section 7.2's capability check is one-directional
+
+**Raised 2026-08-18 by the whole-branch review.**
+
+`test_one` (`src/plugin/cli.rs:112-117`) checks one half of the capability contract the design
+spec's section 7.2 defines:
+
+```rust
+let claimed = cfg.provides_geometry;
+let got = parsed.lines.iter().any(|l| l.words.is_some());
+if claimed && !got {
+    eprintln!("VIOLATION: manifest claims geometry, the response carries none");
+    return 1;
+}
+```
+
+This catches a plugin whose manifest sets `provides_geometry = true` while its response carries
+no `words` on any line. It does not catch the reverse: `provides_geometry = false` in the
+manifest, with a response that **does** carry `words`. The spec calls both directions a violation
+— any disagreement between the manifest and the response — but only one direction here ever sets
+the exit code. (The spec lives under the gitignored `docs/superpowers/`, not published with the
+repo — the same caveat as BACKLOG item 1's sources.)
+
+`cli.rs` is the only place in the crate that compares claimed geometry against actual geometry at
+all, since no `TextProvider` impl for a plugin exists yet (BACKLOG item 30) to make the same
+comparison at run time. So today the gap is silent everywhere it could matter.
+
+**If picked up:** add the second branch — `!claimed && got` — with its own message naming the
+direction ("manifest claims no geometry, the response carries words"). The two branches are
+symmetric, so the code change is small; the reason only one shipped is that only one direction
+had a fixture to expose it — `plugin-echo`'s `text/recognise` reply always carries `words`, so
+nothing in this branch's tests could have failed on the missing half.
+
+---
+
+## 36. A blank region is not a protocol violation — **FIXED 2026-08-19**
+
+> **Fixed in `31c7ca7`, the day it was raised.** `test_one` decided whether a plugin had
+> honoured its `provides_geometry` claim with `parsed.lines.iter().any(|l|
+> l.words.is_some())`. `.any()` over an empty `Vec` returns `false`, so a blank region —
+> correctly reported as zero lines — was indistinguishable from a plugin that claimed
+> geometry and silently withheld it. Both exited **1**, the code this command's contract
+> reserves for the plugin author's fault.
+>
+> The check is now `violates_geometry(claimed, r)`, gated on `r.lines.is_empty()` before
+> the `.any()` call, with three unit tests over the predicate. Proven against the real
+> meikiocr plugin, both cases in one session: `blank-500x100.png` now exits 0 with 0
+> lines and no accusation; `ref-line.png` still exits 0 with its 23-word line.
+
+**Found 2026-08-19 by the controller, running the real meikiocr plugin against a blank
+region — not by anything in the suite.** It survived Task 9's review, that task's fix
+round, and its scoped re-review, because every test written against this check pointed
+at an image that had text in it. The general shape is worth naming: a `.any()` predicate
+over a collection that can legitimately be empty makes "no matches" and "nothing to
+match against" the same `false`, unless the empty case is excluded first, explicitly.
+
+Item **35**, raised the day before against this same function, is the check's other gap
+— the missing reverse direction, `!claimed && got`. That item's code quote and line
+citation were not re-verified against this fix and may now be stale; item 35 itself
+stays open, per this plan.

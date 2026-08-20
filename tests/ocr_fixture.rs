@@ -32,7 +32,9 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         }
     };
 
-    let lines = chibipop::text::ocr::recognise(source.engine(), &buf, FIX_W, FIX_H)
+    let lines = source
+        .recogniser()
+        .recognise(&buf, FIX_W, FIX_H)
         .expect("the engine must accept a Bgra8 buffer in capture.rs's format");
 
     let assembled: String = lines

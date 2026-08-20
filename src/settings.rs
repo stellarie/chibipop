@@ -39,7 +39,11 @@ pub struct SettingsForm {
     pub scan_alphanumeric: bool,
     pub per_character_lookup: bool,
     pub ocr_language: String,
+    /// "builtin" or a plugin's name.
+    pub engine: String,
     pub show_scan_region: bool,
+    pub show_engine_log: bool,
+    pub show_adapter_log: bool,
     pub freq_names: Vec<String>,
     pub staged_adds: Vec<StagedAdd>,
     pub staged_removes: Vec<String>,
@@ -54,6 +58,8 @@ pub struct SettingsForm {
     pub anki_model: String,
     pub anki_add_key: String,
     pub field_map: Vec<FieldMapping>,
+    /// Plugin names allowed to run.
+    pub enabled_plugins: Vec<String>,
 }
 
 /// An import waiting for Apply.
@@ -300,7 +306,10 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
         per_character_lookup: cfg.trigger.per_character_lookup,
         ocr_language: cfg.ocr.language.clone(),
+        engine: cfg.ocr.engine.clone(),
         show_scan_region: cfg.debug.show_scan_region,
+        show_engine_log: cfg.debug.show_engine_log,
+        show_adapter_log: cfg.debug.show_adapter_log,
         freq_names: Vec::new(),
         staged_adds: Vec::new(),
         staged_removes: Vec::new(),
@@ -312,6 +321,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_model: cfg.anki.model.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
+        enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
 
@@ -356,7 +366,10 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.ocr.scan_alphanumeric = form.scan_alphanumeric;
     out.trigger.per_character_lookup = form.per_character_lookup;
     out.ocr.language = form.ocr_language.clone();
+    out.ocr.engine = form.engine.clone();
     out.debug.show_scan_region = form.show_scan_region;
+    out.debug.show_engine_log = form.show_engine_log;
+    out.debug.show_adapter_log = form.show_adapter_log;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
     out.anki.deck = form.anki_deck.clone();
@@ -365,6 +378,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
+    out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
         form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
     out.dictionaries.display_order =
@@ -684,6 +698,8 @@ mod tests {
         cfg.ocr.capture_height = 180;
         cfg.ocr.scan_alphanumeric = false;
         cfg.debug.show_scan_region = true;
+        cfg.debug.show_engine_log = true;
+        cfg.debug.show_adapter_log = true;
         cfg.anki.enabled = true;
         cfg.anki.url = "http://localhost:9999".into();
         cfg.anki.deck = "Mining".into();
@@ -835,6 +851,46 @@ mod tests {
         cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
         assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+    }
+
+    #[test]
+    fn apply_to_carries_the_engine() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.engine = "meikiocr".to_string();
+        assert_eq!("meikiocr", apply_to(&form, &cfg).ocr.engine);
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_the_engine() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".to_string();
+        assert_eq!("meikiocr", from_config(&cfg, &dicts()).engine);
+        assert_eq!("builtin", from_config(&Config::default(), &dicts()).engine);
+    }
+
+    #[test]
+    fn apply_to_carries_enabled_plugins() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.enabled_plugins = vec!["meikiocr".to_string()];
+        assert_eq!(
+            vec!["meikiocr".to_string()],
+            apply_to(&form, &cfg).plugins.enabled
+        );
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_enabled_plugins() {
+        let mut cfg = Config::default();
+        cfg.plugins.enabled = vec!["meikiocr".to_string()];
+        assert_eq!(
+            vec!["meikiocr".to_string()],
+            from_config(&cfg, &dicts()).enabled_plugins
+        );
+        assert!(from_config(&Config::default(), &dicts()).enabled_plugins.is_empty());
     }
 
     #[test]

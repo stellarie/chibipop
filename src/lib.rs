@@ -13,6 +13,7 @@ pub mod library;
 pub mod lock;
 pub mod lookup;
 pub mod paths;
+pub mod plugin;
 pub mod present;
 pub mod rebuild;
 pub mod settings;

@@ -30,6 +30,8 @@ pub struct Config {
     pub popup: PopupConfig,
     pub dictionaries: DictionariesConfig,
     #[serde(default)]
+    pub plugins: PluginsConfig,
+    #[serde(default)]
     pub ocr: OcrConfig,
     #[serde(default)]
     pub debug: DebugConfig,
@@ -186,6 +188,14 @@ pub struct DictionariesConfig {
     pub per_language: BTreeMap<String, Vec<String>>,
 }
 
+/// `[plugins]`, optional.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PluginsConfig {
+    /// Plugin names allowed to run.
+    #[serde(default)]
+    pub enabled: Vec<String>,
+}
+
 /// `[ocr]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrConfig {
@@ -209,6 +219,9 @@ pub struct OcrConfig {
     /// OCR recogniser language tag.
     #[serde(default = "default_ocr_language")]
     pub language: String,
+    /// "builtin" or a plugin's name.
+    #[serde(default = "default_ocr_engine")]
+    pub engine: String,
 }
 
 /// 1: tiling is off by default.
@@ -228,6 +241,10 @@ fn default_scan_alphanumeric() -> bool {
     true
 }
 
+fn default_ocr_engine() -> String {
+    "builtin".to_string()
+}
+
 impl Default for OcrConfig {
     fn default() -> OcrConfig {
         OcrConfig {
@@ -237,7 +254,31 @@ impl Default for OcrConfig {
             capture_height: default_capture_height(),
             scan_alphanumeric: default_scan_alphanumeric(),
             language: default_ocr_language(),
+            engine: default_ocr_engine(),
         }
+    }
+}
+
+/// A resolved OCR engine choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineChoice {
+    /// The Windows built-in engine.
+    Builtin,
+    /// An enabled plugin, by name.
+    Plugin(String),
+    /// Named, but not enabled/found.
+    FellBack(String),
+}
+
+/// Picks the engine from config.
+pub fn resolve_engine(engine: &str, enabled: &[String]) -> EngineChoice {
+    if engine == "builtin" {
+        return EngineChoice::Builtin;
+    }
+    if enabled.iter().any(|e| e == engine) {
+        EngineChoice::Plugin(engine.to_string())
+    } else {
+        EngineChoice::FellBack(engine.to_string())
     }
 }
 
@@ -252,6 +293,12 @@ pub struct DebugConfig {
     /// A console of each hover.
     #[serde(default)]
     pub show_lookup_log: bool,
+    /// Name the active engine.
+    #[serde(default)]
+    pub show_engine_log: bool,
+    /// Show the adapter's log.
+    #[serde(default)]
+    pub show_adapter_log: bool,
 }
 
 /// Maps one field to Anki.
@@ -348,6 +395,7 @@ impl Default for Config {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
                 per_language: BTreeMap::new(),
             },
+            plugins: PluginsConfig::default(),
             ocr: OcrConfig::default(),
             debug: DebugConfig::default(),
             anki: AnkiConfig::default(),
@@ -1241,5 +1289,97 @@ mod tests {
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
         assert_eq!(c.dictionaries.per_language, back.dictionaries.per_language);
+    }
+
+    // ---- plugin engine ----
+
+    #[test]
+    fn builtin_is_the_default_engine() {
+        let c = Config::default();
+        assert_eq!(c.ocr.engine, "builtin");
+    }
+
+    #[test]
+    fn an_engine_naming_a_plugin_that_is_not_enabled_falls_back() {
+        let chosen = resolve_engine("manga-ocr", &["meikiocr".to_string()]);
+        assert_eq!(chosen, EngineChoice::FellBack("manga-ocr".into()));
+    }
+
+    #[test]
+    fn an_enabled_plugin_is_chosen() {
+        let chosen = resolve_engine("meikiocr", &["meikiocr".to_string()]);
+        assert_eq!(chosen, EngineChoice::Plugin("meikiocr".into()));
+    }
+
+    /// Builtin never needs the list.
+    #[test]
+    fn builtin_wins_even_with_plugins_enabled() {
+        let chosen = resolve_engine("builtin", &["meikiocr".to_string()]);
+        assert_eq!(chosen, EngineChoice::Builtin);
+    }
+
+    #[test]
+    fn an_unknown_engine_falls_back_with_no_plugins_enabled() {
+        let chosen = resolve_engine("meikiocr", &[]);
+        assert_eq!(chosen, EngineChoice::FellBack("meikiocr".into()));
+    }
+
+    #[test]
+    fn plugins_enabled_defaults_to_empty() {
+        assert!(Config::default().plugins.enabled.is_empty());
+    }
+
+    #[test]
+    fn plugins_enabled_round_trips() {
+        let p = tmp("plugins_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.plugins.enabled = vec!["meikiocr".to_string()];
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(vec!["meikiocr".to_string()], back.plugins.enabled);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A missing section must load.
+    #[test]
+    fn a_config_without_plugins_section_still_loads() {
+        let p = tmp("no_plugins_section");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-plugins config must load");
+        assert!(c.plugins.enabled.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn ocr_engine_round_trips() {
+        let p = tmp("engine_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.ocr.engine = "meikiocr".to_string();
+        c.save(&p).unwrap();
+        assert_eq!("meikiocr", load_or_create(&p).unwrap().ocr.engine);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The bare-serde-default trap.
+    #[test]
+    fn an_ocr_section_without_engine_still_defaults_to_builtin() {
+        let p = tmp("ocr_no_engine");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[ocr]\nmax_ocr_passes = 1\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-engine config must load");
+        assert_eq!("builtin", c.ocr.engine, "a missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
     }
 }

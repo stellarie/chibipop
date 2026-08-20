@@ -106,6 +106,79 @@ A few worth knowing about:
 
 ---
 
+## OCR plugins
+
+chibipop reads text with the Windows OCR engine by default. You can replace it
+with a different engine through the plugin system.
+
+### What a plugin does
+
+A plugin runs as a separate process. chibipop sends it a screenshot. The plugin
+returns the text it found, with a bounding box for each character. chibipop
+handles everything else — the popup, the dictionary lookup, the highlight.
+
+### Setting up meikiocr
+
+[meikiocr](https://github.com/rtr46/meikiocr) is a game-trained Japanese
+OCR engine. It ships with chibipop as a reference plugin, disabled by default.
+
+**Step 1 — Install meikiocr.** Follow its own README. You need a Python
+environment with meikiocr, OpenCV and ONNX Runtime installed.
+
+**Step 2 — Enable the plugin.** Open the chibipop settings window. Go to the
+**Plugins** tab. Check the box next to **meikiocr**. Press **Apply**.
+
+**Step 3 — Point it at your installation.** Go to the **OCR / Debug** tab.
+Select **meikiocr** from the **OCR engine** dropdown. Click **Configure…** and
+pick any file inside your meikiocr folder. chibipop saves the path to the
+plugin's `config.toml`.
+
+**Step 4 — Restart chibipop.** The next start loads meikiocr. The startup line
+confirms which engine is active:
+
+```
+chibipop: OCR engine: meikiocr
+```
+
+If meikiocr fails to load, chibipop falls back to the built-in engine and says
+so:
+
+```
+chibipop: OCR plugin "meikiocr" failed, falling back to builtin: ...
+```
+
+### Verifying the engine
+
+Open the settings window. Check **Show which OCR engine is active** on the
+**OCR / Debug** tab. Press **Apply**. The status bar shows the active engine.
+
+Check **Show adapter log in status bar** to see the plugin's last recognise
+timing. For live streaming, start chibipop from a terminal and read stderr:
+
+```powershell
+.\chibipop.exe run 2>engine.log
+Get-Content engine.log -Wait -Tail 20
+```
+
+Each hover produces a line like `[meikiocr-adapter] recognise 95ms 2 line(s)`.
+
+### Writing your own plugin
+
+A plugin is a folder inside `plugins/` beside `chibipop.exe`. It contains:
+
+- `plugin.toml` — declares the plugin name, version, command, and roles.
+- An executable or script that speaks newline-delimited JSON on stdin/stdout.
+
+The meikiocr adapter (`plugins/meikiocr/adapter.py`) is a working example. The
+protocol uses two methods: `hello` (handshake) and `text/recognise` (OCR). Both
+sides ignore unknown fields, so the protocol can grow without breaking existing
+plugins.
+
+A plugin that fails three times in a row is disabled for the rest of the
+session.
+
+---
+
 ## If something doesn't work or if a game seems to be not compatible
 
 Head over to [Issues](https://github.com/stellarie/chibipop/issues) or raise a PR!
