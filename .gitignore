@@ -10,3 +10,6 @@ __pycache__/
 # Design specs, plans and findings - local only.
 /docs/superpowers/
 /.superpowers/
+
+# Local-only scripts.
+/scripts/
