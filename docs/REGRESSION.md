@@ -96,7 +96,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **928** total across **8** targets, 2 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 on 2026-08-18, reconfirmed 928 on 2026-08-19; see below) |
+| Rust tests | **all green**, **979** total across **8** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
