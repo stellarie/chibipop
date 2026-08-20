@@ -119,7 +119,7 @@ handles everything else — the popup, the dictionary lookup, the highlight.
 
 ### Setting up meikiocr
 
-[meikiocr](https://github.com/arcanite24/meikiocr) is a game-trained Japanese
+[meikiocr](https://github.com/rtr46/meikiocr) is a game-trained Japanese
 OCR engine. It ships with chibipop as a reference plugin, disabled by default.
 
 **Step 1 — Install meikiocr.** Follow its own README. You need a Python
