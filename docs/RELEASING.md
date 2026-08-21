@@ -47,8 +47,8 @@ file, never `adapter.py` or `plugin.toml`.
 > run, and a tag would invite one. **v0.8.0 deletes that path**, which is what
 > makes the deadlock unreachable; see [`BACKLOG.md`](BACKLOG.md) §24.
 >
-> The release workflow would refuse a `v0.7.2` tag anyway now that `Cargo.toml`
-> reads `0.8.0`, but that is a backstop, not the reason.
+> The release workflow would refuse a `v0.7.2` tag anyway — `Cargo.toml`
+> is past that version, and the workflow checks the match.
 3. **Commit** the version bump.
 4. **Tag and push:**
    ```bash
