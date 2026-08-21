@@ -130,9 +130,9 @@ fn is_rotated(rot: DXGI_MODE_ROTATION) -> bool {
 
 /// Every pixel bit-identical?
 fn is_uniform(buf: &[u8]) -> bool {
-    let mut px = buf.chunks_exact(4);
-    let Some(first) = px.next() else { return true };
-    px.all(|p| p == first)
+    let (px, _) = buf.as_chunks::<4>();
+    let Some(first) = px.first() else { return true };
+    px.iter().all(|p| p == first)
 }
 
 thread_local! {
