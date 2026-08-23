@@ -37,6 +37,8 @@ pub struct Config {
     pub debug: DebugConfig,
     #[serde(default)]
     pub anki: AnkiConfig,
+    #[serde(default)]
+    pub actions: ActionsConfig,
 }
 
 /// `[trigger]`.
@@ -371,6 +373,89 @@ impl Default for AnkiConfig {
     }
 }
 
+/// Ctrl modifier bit.
+pub const MOD_CTRL: u8 = 0b001;
+/// Shift modifier bit.
+pub const MOD_SHIFT: u8 = 0b010;
+/// Alt modifier bit.
+pub const MOD_ALT: u8 = 0b100;
+
+/// `[actions]` section.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionsConfig {
+    #[serde(default = "default_actions_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub screenshot: ScreenshotConfig,
+}
+
+/// `[actions.screenshot]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenshotConfig {
+    #[serde(default = "default_screenshot_hotkey")]
+    pub hotkey: String,
+    #[serde(default = "default_screenshot_save_dir")]
+    pub save_dir: String,
+    #[serde(default = "default_screenshot_anki_field")]
+    pub anki_field: String,
+}
+
+/// On by default.
+fn default_actions_enabled() -> bool {
+    true
+}
+
+/// Default screenshot hotkey.
+fn default_screenshot_hotkey() -> String {
+    "ctrl+shift+s".to_string()
+}
+
+/// Default save folder.
+fn default_screenshot_save_dir() -> String {
+    "screenshots".to_string()
+}
+
+/// Default Anki field name.
+fn default_screenshot_anki_field() -> String {
+    "Context".to_string()
+}
+
+impl Default for ActionsConfig {
+    fn default() -> ActionsConfig {
+        ActionsConfig {
+            enabled: default_actions_enabled(),
+            screenshot: ScreenshotConfig::default(),
+        }
+    }
+}
+
+impl Default for ScreenshotConfig {
+    fn default() -> ScreenshotConfig {
+        ScreenshotConfig {
+            hotkey: default_screenshot_hotkey(),
+            save_dir: default_screenshot_save_dir(),
+            anki_field: default_screenshot_anki_field(),
+        }
+    }
+}
+
+/// VK + mods, from a string.
+pub fn parse_hotkey(s: &str) -> Option<(u16, u8)> {
+    let parts: Vec<&str> = s.split('+').collect();
+    let (key, mod_parts) = parts.split_last()?;
+    let mut mods = 0u8;
+    for part in mod_parts {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods |= MOD_CTRL,
+            "shift" => mods |= MOD_SHIFT,
+            "alt" => mods |= MOD_ALT,
+            _ => return None,
+        }
+    }
+    let vk = parse_trigger_key(key)?;
+    Some((vk, mods))
+}
+
 impl Default for Config {
     /// Spec §4.3's shipped values.
     fn default() -> Config {
@@ -399,6 +484,7 @@ impl Default for Config {
             ocr: OcrConfig::default(),
             debug: DebugConfig::default(),
             anki: AnkiConfig::default(),
+            actions: ActionsConfig::default(),
         }
     }
 }
@@ -1381,5 +1467,66 @@ mod tests {
         let c = load_or_create(&p).expect("a pre-engine config must load");
         assert_eq!("builtin", c.ocr.engine, "a missing key takes the field default");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn parse_hotkey_single_key() {
+        let (vk, mods) = parse_hotkey("a").unwrap();
+        assert_eq!(0x41, vk);
+        assert_eq!(0, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_ctrl_shift_s() {
+        let (vk, mods) = parse_hotkey("ctrl+shift+s").unwrap();
+        assert_eq!(0x53, vk);
+        assert_eq!(0b011, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_alt_f10() {
+        let (vk, mods) = parse_hotkey("alt+f10").unwrap();
+        assert_eq!(0x79, vk);
+        assert_eq!(0b100, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_case_insensitive() {
+        let (vk, mods) = parse_hotkey("Ctrl+Shift+S").unwrap();
+        assert_eq!(0x53, vk);
+        assert_eq!(0b011, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_garbage() {
+        assert!(parse_hotkey("garbage+garbage").is_none());
+    }
+
+    #[test]
+    fn parse_hotkey_empty() {
+        assert!(parse_hotkey("").is_none());
+    }
+
+    #[test]
+    fn actions_config_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.actions.enabled);
+        assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
+        assert_eq!("screenshots", cfg.actions.screenshot.save_dir);
+        assert_eq!("Context", cfg.actions.screenshot.anki_field);
+    }
+
+    /// No `[actions]` section.
+    #[test]
+    fn actions_config_missing_section_uses_defaults() {
+        let toml = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n",
+        );
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.actions.enabled);
+        assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
     }
 }
