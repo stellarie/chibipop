@@ -8,7 +8,7 @@ use crate::present::Presentation;
 use anyhow::Result;
 use std::path::Path;
 
-/// One hotkey-triggered behavior.
+/// A hotkey-triggered behavior.
 pub trait Action {
     /// Short, stable identifier.
     fn name(&self) -> &str;
@@ -18,7 +18,7 @@ pub trait Action {
     fn execute(&mut self, ctx: &mut ActionContext) -> Result<ActionOutcome>;
 }
 
-/// Read-only app snapshot for gating.
+/// State snapshot for gating.
 pub struct AppState<'a> {
     pub popup_visible: bool,
     pub presentation: Option<&'a Presentation>,
@@ -26,7 +26,7 @@ pub struct AppState<'a> {
     pub anki_connected: bool,
 }
 
-/// What a running action may use.
+/// What an action may use.
 pub struct ActionContext<'a> {
     pub exe_dir: &'a Path,
 }
@@ -49,7 +49,7 @@ pub enum ActionOutcome {
     Failed(String),
 }
 
-/// Ordered, hotkey-indexed actions.
+/// Actions, indexed by hotkey.
 #[derive(Default)]
 pub struct ActionRegistry {
     actions: Vec<Box<dyn Action>>,
@@ -60,12 +60,12 @@ impl ActionRegistry {
         Self::default()
     }
 
-    /// Appends to the end of the list.
+    /// Appends one action.
     pub fn register(&mut self, action: Box<dyn Action>) {
         self.actions.push(action);
     }
 
-    /// `None` if unavailable or out of range.
+    /// None if skipped or missing.
     pub fn dispatch(
         &mut self,
         index: usize,
