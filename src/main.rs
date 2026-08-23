@@ -107,6 +107,11 @@ enum Command {
         #[arg(default_value = "ok")]
         mode: String,
     },
+    /// Manual action testing.
+    Action {
+        #[command(subcommand)]
+        cmd: ActionCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -119,6 +124,12 @@ enum PluginCmd {
         #[arg(long)]
         image: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum ActionCmd {
+    /// Test the selection overlay.
+    TestSelection,
 }
 
 fn main() -> Result<()> {
@@ -472,6 +483,17 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         Command::PluginEcho { mode } => chibipop::plugin::echo::run(&mode),
+        Command::Action { cmd } => match cmd {
+            ActionCmd::TestSelection => {
+                chibipop::text::capture::init_dpi_awareness()?;
+                let mut sel = chibipop::action::selection::RegionSelection::new()?;
+                match sel.run() {
+                    Some(r) => println!("selected: x={} y={} w={} h={}", r.x, r.y, r.w, r.h),
+                    None => println!("cancelled"),
+                }
+                Ok(())
+            }
+        },
     }
 }
 
