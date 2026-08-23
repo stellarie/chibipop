@@ -495,6 +495,16 @@ impl RegionSelection {
     }
 }
 
+impl RegionSelection {
+    /// No window, just compiles.
+    #[cfg(test)]
+    pub(crate) fn dummy() -> Self {
+        RegionSelection {
+            hwnd: HWND::default(),
+        }
+    }
+}
+
 impl Drop for RegionSelection {
     fn drop(&mut self) {
         if !self.hwnd.is_invalid() {

@@ -6,7 +6,9 @@ pub mod selection;
 use crate::geom::PhysRect;
 use crate::present::Presentation;
 use anyhow::Result;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 /// A hotkey-triggered behavior.
 pub trait Action {
@@ -28,15 +30,22 @@ pub struct AppState<'a> {
 
 /// What an action may use.
 pub struct ActionContext<'a> {
+    pub selection: &'a mut selection::RegionSelection,
+    pub config: &'a crate::config::ActionsConfig,
     pub exe_dir: &'a Path,
+    pub screenshot_tx: &'a mpsc::Sender<ScreenshotCommand>,
 }
 
 impl ActionContext<'_> {
     /// Test-only, minimal context.
     #[cfg(test)]
     pub fn empty() -> ActionContext<'static> {
+        let (tx, _rx) = mpsc::channel();
         ActionContext {
+            selection: Box::leak(Box::new(selection::RegionSelection::dummy())),
+            config: Box::leak(Box::new(crate::config::ActionsConfig::default())),
             exe_dir: Path::new("."),
+            screenshot_tx: Box::leak(Box::new(tx)),
         }
     }
 }
@@ -45,8 +54,37 @@ impl ActionContext<'_> {
 #[derive(Debug)]
 pub enum ActionOutcome {
     Completed,
+    /// Pixels ready for the pump.
+    ScreenshotCaptured {
+        bgra_buf: Vec<u8>,
+        width: i32,
+        height: i32,
+        save_dir: PathBuf,
+    },
     Cancelled,
     Failed(String),
+}
+
+/// Worker's input.
+pub struct ScreenshotCommand {
+    pub bgra_buf: Vec<u8>,
+    pub width: i32,
+    pub height: i32,
+    pub save_path: PathBuf,
+    pub expr: String,
+    pub fields: HashMap<String, String>,
+    pub field_map: Vec<crate::config::FieldMapping>,
+    pub anki_url: String,
+    pub anki_deck: String,
+    pub anki_model: String,
+    pub anki_field: String,
+    pub anki_connected: bool,
+}
+
+/// Worker's output.
+pub struct ScreenshotResult {
+    pub expr: String,
+    pub err: Option<String>,
 }
 
 /// Actions, indexed by hotkey.

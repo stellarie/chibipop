@@ -70,6 +70,9 @@ const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 /// Background save finished.
 const WM_APP_SAVED: u32 = WM_APP + 9;
 
+/// Screenshot worker finished.
+const WM_APP_SCREENSHOT_DONE: u32 = WM_APP + 11;
+
 /// Hide-ack wait, then capture.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -1088,6 +1091,9 @@ pub fn run(
     if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
         Hooks::set_add_hotkey(vk);
     }
+    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
+        Hooks::set_action_hotkey(0, vk, mods);
+    }
 
     // No tray means no control.
     let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
@@ -1129,6 +1135,16 @@ pub fn run(
     let (detect_tx, detect_rx) =
         mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
+    let (screenshot_tx, screenshot_rx) = mpsc::channel::<crate::action::ScreenshotCommand>();
+    let (screenshot_done_tx, screenshot_done_rx) =
+        mpsc::channel::<crate::action::ScreenshotResult>();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut region_selection = crate::action::selection::RegionSelection::new()?;
+    let mut action_registry = crate::action::ActionRegistry::new();
+    action_registry.register(Box::new(crate::action::screenshot::MiningContextScreenshot));
     // One writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
     let mut popup_gen: u64 = 0;
@@ -1201,6 +1217,33 @@ pub fn run(
             }
         }
     };
+
+    // PNG encoding needs WinRT.
+    {
+        let rx = screenshot_rx;
+        let tx = screenshot_done_tx;
+        let tid = main_tid;
+        thread::spawn(move || {
+            // SAFETY: initialises the WinRT apartment for this
+            // thread; `RO_INIT_MULTITHREADED` is always valid
+            // and calling it on a thread that already has one is
+            // harmless (returns `RPC_E_CHANGED_MODE` which we
+            // discard).
+            unsafe {
+                let _ = windows::Win32::System::WinRT::RoInitialize(
+                    windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
+                );
+            }
+            for cmd in rx {
+                let result = handle_screenshot_save(cmd);
+                let _ = tx.send(result);
+                // SAFETY: wakes the pump thread.
+                unsafe {
+                    let _ = PostThreadMessageW(tid, WM_APP_SCREENSHOT_DONE, WPARAM(0), LPARAM(0));
+                }
+            }
+        });
+    }
 
     let mut msg = MSG::default();
 
@@ -1394,6 +1437,102 @@ pub fn run(
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
+            }
+
+            // Action hotkey dispatch.
+            for slot in 0..crate::input::hooks::MAX_ACTION_SLOTS {
+                if !Hooks::take_action_hotkey(slot) {
+                    continue;
+                }
+                if shown.is_none() {
+                    continue;
+                }
+                let _ = popup.hide();
+                if let Some(b) = &anki_button {
+                    b.hide();
+                }
+
+                let outcome = {
+                    let s = shown.as_ref().unwrap();
+                    let state = crate::action::AppState {
+                        popup_visible: true,
+                        presentation: Some(&s.presentation),
+                        anchor: Some(s.anchor),
+                        anki_connected: s.anki.connected,
+                    };
+                    let mut ctx = crate::action::ActionContext {
+                        selection: &mut region_selection,
+                        config: &cfg.actions,
+                        exe_dir: &exe_dir,
+                        screenshot_tx: &screenshot_tx,
+                    };
+                    action_registry.dispatch(slot, &state, &mut ctx)
+                };
+
+                match outcome {
+                    Some(crate::action::ActionOutcome::ScreenshotCaptured {
+                        bgra_buf,
+                        width,
+                        height,
+                        save_dir,
+                    }) => {
+                        if let Some(s) = shown.as_ref() {
+                            let (expr, fields) = s
+                                .presentation
+                                .top
+                                .as_ref()
+                                .map(|card| {
+                                    let expr = card
+                                        .written
+                                        .as_deref()
+                                        .or(card.reading.as_deref())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let fields =
+                                        anki::fields_from_card(card, &card.blocks);
+                                    (expr, fields)
+                                })
+                                .unwrap_or_default();
+                            let word = crate::action::screenshot::sanitize_filename(&expr);
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let filename = format!("{word}_{now}.png");
+                            let save_path = save_dir.join(filename);
+                            let cmd = crate::action::ScreenshotCommand {
+                                bgra_buf,
+                                width,
+                                height,
+                                save_path,
+                                expr,
+                                fields,
+                                field_map: live.anki_field_map.clone(),
+                                anki_url: live.anki_url.clone(),
+                                anki_deck: live.anki_deck.clone(),
+                                anki_model: live.anki_model.clone(),
+                                anki_field: cfg.actions.screenshot.anki_field.clone(),
+                                anki_connected: s.anki.connected,
+                            };
+                            let _ = screenshot_tx.send(cmd);
+                        }
+                    }
+                    Some(crate::action::ActionOutcome::Failed(msg)) => {
+                        eprintln!("chibipop: action failed: {msg}");
+                    }
+                    _ => {}
+                }
+
+                // Restore after capture.
+                let _ = popup.show_without_activating();
+                if let Some(b) = &anki_button {
+                    b.show_without_activating();
+                }
+                sync_anki_button(
+                    anki_button.as_ref(),
+                    shown.as_ref(),
+                    &theme,
+                );
             }
 
             let has_hist = shown.as_ref().is_some_and(|s| !s.history.is_empty());
@@ -1812,6 +1951,49 @@ pub fn run(
                             "Settings applied, but could not be saved - \
                              they will be lost on restart.",
                         );
+                    }
+                }
+            }
+        } else if msg.message == WM_APP_SCREENSHOT_DONE {
+            while let Ok(result) = screenshot_done_rx.try_recv() {
+                if let Some(e) = &result.err {
+                    eprintln!("chibipop: screenshot failed: {e}");
+                } else if let Some(s) = shown.as_mut() {
+                    if !result.expr.is_empty() {
+                        s.anki.added.insert(result.expr);
+                    }
+                    let back = !s.history.is_empty();
+                    match show_presentation(
+                        &popup,
+                        &mut renderer,
+                        &theme,
+                        live.max_height_percent,
+                        live.max_width_percent,
+                        &s.presentation,
+                        s.anchor,
+                        s.scroll,
+                        back,
+                        live.side_panel,
+                    ) {
+                        Ok((rect, content_h, view_h)) => {
+                            s.popup = rect;
+                            s.content_h = content_h;
+                            s.view_h = view_h;
+                            let m = max_scroll(s.content_h, s.view_h);
+                            if s.scroll > m {
+                                s.scroll = m;
+                            }
+                            sync_anki_button(
+                                anki_button.as_ref(),
+                                Some(s),
+                                &theme,
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "chibipop: repaint after screenshot failed: {e:#}"
+                            );
+                        }
                     }
                 }
             }
@@ -2384,6 +2566,53 @@ fn start_add_to_anki(
     });
 }
 
+/// PNG + optional Anki card.
+fn handle_screenshot_save(
+    cmd: crate::action::ScreenshotCommand,
+) -> crate::action::ScreenshotResult {
+    let result = (|| -> anyhow::Result<()> {
+        std::fs::create_dir_all(
+            cmd.save_path
+                .parent()
+                .unwrap_or(Path::new(".")),
+        )?;
+        let png = crate::text::capture::encode_bgra_to_png(
+            &cmd.bgra_buf,
+            cmd.width,
+            cmd.height,
+        )?;
+        std::fs::write(&cmd.save_path, &png)?;
+        if cmd.anki_connected && !cmd.expr.is_empty() {
+            use base64::Engine;
+            let pic = crate::anki::NotePicture {
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(&png),
+                filename: format!(
+                    "chibipop-screenshot-{}.png",
+                    cmd.save_path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+                fields: vec![cmd.anki_field.clone()],
+            };
+            crate::anki::add_note_with_picture(
+                &cmd.anki_url,
+                &cmd.anki_deck,
+                &cmd.anki_model,
+                &cmd.fields,
+                &cmd.field_map,
+                Some(&pic),
+            )?;
+        }
+        Ok(())
+    })();
+    crate::action::ScreenshotResult {
+        expr: cmd.expr,
+        err: result.err().map(|e| format!("{e:#}")),
+    }
+}
+
 /// Would it redraw the same?
 fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
     prev.presentation == *new
@@ -2616,6 +2845,7 @@ struct LiveSettings {
     trigger_key: String,
     anki_add_key: String,
     per_character_lookup: bool,
+    actions_screenshot_hotkey: String,
 }
 
 /// Rebuilt on each change.
@@ -2652,6 +2882,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         trigger_key: cfg.trigger.trigger_key.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
         per_character_lookup: cfg.trigger.per_character_lookup,
+        actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
     }
 }
 
@@ -2721,6 +2952,9 @@ fn apply_live(
     }
     if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
         Hooks::set_add_hotkey(vk);
+    }
+    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
+        Hooks::set_action_hotkey(0, vk, mods);
     }
 }
 

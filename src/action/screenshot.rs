@@ -1,5 +1,51 @@
 //! Mining context screenshot.
 
+use crate::action::{Action, ActionContext, ActionOutcome, AppState};
+use crate::text::capture;
+use anyhow::Result;
+use std::path::PathBuf;
+
+/// Captures a region for mining.
+pub struct MiningContextScreenshot;
+
+impl Action for MiningContextScreenshot {
+    fn name(&self) -> &str {
+        "screenshot"
+    }
+
+    fn is_available(&self, state: &AppState) -> bool {
+        state.popup_visible
+            && state
+                .presentation
+                .as_ref()
+                .and_then(|p| p.top.as_ref())
+                .is_some()
+    }
+
+    fn execute(&mut self, ctx: &mut ActionContext) -> Result<ActionOutcome> {
+        let region = match ctx.selection.run() {
+            Some(r) => r,
+            None => return Ok(ActionOutcome::Cancelled),
+        };
+
+        let cap = capture::capture_upscaled_by(region, 1)?;
+
+        let cfg = &ctx.config.screenshot;
+        let save_dir = if std::path::Path::new(&cfg.save_dir).is_absolute() {
+            PathBuf::from(&cfg.save_dir)
+        } else {
+            ctx.exe_dir.join(&cfg.save_dir)
+        };
+
+        Ok(ActionOutcome::ScreenshotCaptured {
+            bgra_buf: cap.buf,
+            width: cap.w,
+            height: cap.h,
+            save_dir,
+        })
+    }
+}
+
 /// Sanitizes a Windows filename.
 pub fn sanitize_filename(word: &str) -> String {
     let cleaned: String = word
