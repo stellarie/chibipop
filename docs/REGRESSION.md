@@ -96,7 +96,7 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **979** total across **8** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc; see below) |
+| Rust tests | **all green**, **1010** total across **8** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system; see below) |
 | Clippy | **exactly 3** accepted errors (was 4; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -527,6 +527,15 @@ separate reports: still **928**, the same eight-way split, **910 + 0 + 1 + 2 + 7
 identical to the row directly above, control included, since neither round touched a test. Clippy
 was not re-run in the doc round; no `src/` file changed there, and no task in the plan reported the
 raw-3/bin-0 counts moving either.
+
+**979 → 1010 is a re-baseline, not a finding.** It is the action-system branch, nine tasks on
+top of v0.9.0 (`18e464d`). `git diff 18e464d..HEAD -- src/` adds **31** `#[test]` and removes
+**none** — exactly the gap. Per task: +3 (action registry), +8 (config/hotkey parsing), +6 (hooks
+slots), +0 (refactor), +2 (Anki picture), +6 (filename sanitizer), +6 (selection geometry) = 31.
+Task 8 (integration wiring) added 0 — the feature requires tier-1 manual testing, not unit tests.
+Three runs, all **1010**: eight targets splitting 998 + 0 + 1 + 2 + 7 + 0 + 0 + 2, **0 failed**,
+the same **3 ignored**. Clippy did not move: **3** raw, at the same three sites (`deconj.rs:78`,
+`model.rs:86`, `render.rs:699`).
 
 > [!warning] A red `dropping_the_host_kills_the_grandchild_too` **wedges the whole run**, and the
 > test binary is not the thing that hangs
@@ -1904,6 +1913,35 @@ the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J
 **Pass** when both engines resolve a recorded word at `m26`, all three startup lines match verbatim,
 `[meikiocr-adapter]` lines appear only while meikiocr is the engine, and the fallback case starts
 clean on Windows OCR with the exact warning quoted above.
+
+### 1.30 Screenshot action — added 2026-08-24, not run
+
+With `chibipop run` live and a popup visible (hover a Japanese word):
+
+1. Press the screenshot hotkey (`Ctrl+Shift+S` by default). The screen dims and a crosshair
+   cursor appears over the full virtual desktop.
+2. Click and drag to select a region. The selected area stays un-dimmed with a white border.
+   Release the mouse button.
+3. A PNG is saved to `screenshots/` beside the exe. The filename is
+   `{word}_{unix_seconds}.png` where `{word}` is the mined expression sanitized for the
+   filesystem. Verify the file exists and opens as a valid image showing the selected region.
+4. If Anki is connected: a card is created with the word, reading, and glossary, plus a context
+   image attached to the configured field (default `Context`). Verify the card in Anki — the
+   Context field should contain an `<img src="chibipop-screenshot-...">` tag, and the image
+   should be in the collection media folder.
+5. **Esc during selection** — the overlay closes, the popup returns unchanged, no file is saved.
+6. **Right-click during selection** — same as Esc.
+7. **Accidental click (drag < 5px)** — treated as cancel.
+8. **Without a popup visible**, the hotkey does nothing (silently ignored).
+9. **After the screenshot**, the popup shows the word as "added" (the Anki button state updates),
+   and pressing the regular Anki add key on the same word hits `allowDuplicate: false` — not a
+   bug, expected behavior.
+10. **Hot reload**: change `actions.screenshot.hotkey` in `chibipop.toml`, press Apply in
+    Settings. The new hotkey works, the old one does not. **PID unchanged.**
+
+**Pass** when the PNG is saved, the Anki card carries the image, Esc/right-click/tiny-drag all
+cancel cleanly, the hotkey is inert without a popup, and Apply re-registers the binding without
+a restart.
 
 ---
 
