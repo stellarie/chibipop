@@ -186,6 +186,65 @@ pub fn add_note(
         .context("addNote did not return a note ID")
 }
 
+/// One image to attach.
+pub struct NotePicture {
+    pub data_base64: String,
+    pub filename: String,
+    /// Anki fields to embed it in.
+    pub fields: Vec<String>,
+}
+
+/// Builds an addNote request.
+fn build_add_note_body(
+    deck: &str,
+    model: &str,
+    fields: &HashMap<String, String>,
+    field_map: &[crate::config::FieldMapping],
+    picture: Option<&NotePicture>,
+) -> serde_json::Value {
+    let mut note = serde_json::json!({
+        "deckName": deck,
+        "modelName": model,
+        "fields": mapped_fields(fields, field_map),
+        "options": { "allowDuplicate": false },
+    });
+    if let Some(pic) = picture {
+        note["picture"] = serde_json::json!([{
+            "data": pic.data_base64,
+            "filename": pic.filename,
+            "fields": pic.fields,
+        }]);
+    }
+    serde_json::json!({
+        "action": "addNote",
+        "version": VERSION,
+        "params": { "note": note },
+    })
+}
+
+/// Adds a note with a picture.
+pub fn add_note_with_picture(
+    url: &str,
+    deck: &str,
+    model: &str,
+    fields: &HashMap<String, String>,
+    field_map: &[crate::config::FieldMapping],
+    picture: Option<&NotePicture>,
+) -> Result<i64> {
+    if !field_map_routes(field_map, "expression") {
+        anyhow::bail!(
+            "field_map has no entry mapping the \"expression\" source, so the \
+             looked-up word would never reach Anki - fix the mapping in \
+             Settings, Anki tab"
+        );
+    }
+    let body = build_add_note_body(deck, model, fields, field_map, picture);
+    let resp = post(url, &body)?;
+    resp.get("result")
+        .and_then(|r| r.as_i64())
+        .context("addNote did not return a note ID")
+}
+
 /// Minimal escaping for text placed into an HTML-destined Anki field
 /// (currently just the dictionary name, which is arbitrary text pulled from
 /// the Yomitan archive's index.json).
@@ -461,5 +520,38 @@ mod tests {
         ];
         let err = add_note("not-a-url", "Default", "Lapis", &fields, &field_map).unwrap_err();
         assert!(format!("{err:#}").contains("expression"));
+    }
+
+    #[test]
+    fn add_note_with_picture_includes_picture_array() {
+        let fields = HashMap::from([("expression".to_string(), "宿舎".to_string())]);
+        let field_map = vec![crate::config::FieldMapping {
+            anki_field: "Expression".into(),
+            source: "expression".into(),
+        }];
+        let pic = NotePicture {
+            data_base64: "iVBOR...".to_string(),
+            filename: "chibipop-screenshot-test.png".to_string(),
+            fields: vec!["Context".to_string()],
+        };
+        let body = build_add_note_body("Default", "Lapis", &fields, &field_map, Some(&pic));
+        let note = &body["params"]["note"];
+        assert!(note["picture"].is_array());
+        let pic_entry = &note["picture"][0];
+        assert_eq!("iVBOR...", pic_entry["data"].as_str().unwrap());
+        assert_eq!("chibipop-screenshot-test.png", pic_entry["filename"].as_str().unwrap());
+        assert_eq!("Context", pic_entry["fields"][0].as_str().unwrap());
+    }
+
+    #[test]
+    fn add_note_with_picture_none_omits_picture() {
+        let fields = HashMap::from([("expression".to_string(), "宿舎".to_string())]);
+        let field_map = vec![crate::config::FieldMapping {
+            anki_field: "Expression".into(),
+            source: "expression".into(),
+        }];
+        let body = build_add_note_body("Default", "Lapis", &fields, &field_map, None);
+        let note = &body["params"]["note"];
+        assert!(note.get("picture").is_none());
     }
 }
