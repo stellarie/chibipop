@@ -1524,7 +1524,7 @@ mod tests {
 
     #[test]
     fn field_map_screenshot_source_resolves() {
-        let map = vec![
+        let map = [
             FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
             FieldMapping { anki_field: "Context".into(), source: "screenshot".into() },
         ];
@@ -1536,7 +1536,7 @@ mod tests {
 
     #[test]
     fn field_map_without_screenshot_returns_none() {
-        let map = vec![
+        let map = [
             FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
             FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
         ];
