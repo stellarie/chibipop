@@ -278,14 +278,19 @@ pub fn fields_from_card(
         .map(plain_dict_group)
         .collect::<Vec<_>>()
         .join("\n\n");
-    // \n is a no-op; use <br>.
+    // \n is a no-op; use <li> tags.
     let glossary_html = blocks.iter()
         .map(|b| {
-            let joined = b.glosses_html.join("; ");
-            format!("<b>{}</b><br>{joined}", escape_html(&b.dict_name))
+            let items: String = b.glosses_html.iter()
+                .map(|g| format!("<li>{g}</li>"))
+                .collect();
+            format!(
+                "<b>{}</b><ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>",
+                escape_html(&b.dict_name)
+            )
         })
         .collect::<Vec<_>>()
-        .join("<br><br>");
+        .join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">");
     let mut fields = HashMap::from([
         ("expression".to_string(), expression),
         ("reading".to_string(), reading),
@@ -332,7 +337,7 @@ mod tests {
             f.get("glossary"),
         );
         assert_eq!(
-            Some(&"<b>大辞林</b><br>ネコ科の<b>哺乳類</b>。<br><br><b>Jitendex</b><br>cat; <i>feline</i>".to_string()),
+            Some(&"<b>大辞林</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>ネコ科の<b>哺乳類</b>。</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>Jitendex</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li><li><i>feline</i></li></ol>".to_string()),
             f.get("glossary_html"),
         );
         assert_eq!(Some(&"42".to_string()), f.get("frequency"));
@@ -355,13 +360,69 @@ mod tests {
         }];
         let f = fields_from_card(&card, &blocks);
         assert_eq!(
-            Some(&"<b>A &amp; B &lt;dict&gt;</b><br>cat".to_string()),
+            Some(&"<b>A &amp; B &lt;dict&gt;</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
             f.get("glossary_html"),
         );
     }
 
     #[test]
-    fn glossary_separates_dictionaries_with_headers_and_blank_lines() {
+    fn glossary_html_wraps_one_dictionary_in_a_list_with_no_divider() {
+        let card = crate::present::Card {
+            written: Some("猫".into()),
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 1,
+        };
+        let blocks = vec![crate::present::GlossBlock {
+            dict_name: "Wenlin".into(),
+            glosses: vec!["supper".into(), "dinner".into()],
+            glosses_html: vec!["supper".into(), "dinner".into()],
+        }];
+        let f = fields_from_card(&card, &blocks);
+        let html = f.get("glossary_html").unwrap();
+        assert_eq!(
+            "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li><li>dinner</li></ol>",
+            html,
+        );
+        assert!(!html.contains("<hr"), "single dict has no divider");
+    }
+
+    #[test]
+    fn glossary_html_separates_multiple_dictionaries_with_a_divider() {
+        let card = crate::present::Card {
+            written: Some("猫".into()),
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 1,
+        };
+        let blocks = vec![
+            crate::present::GlossBlock {
+                dict_name: "Wenlin".into(),
+                glosses: vec!["supper".into()],
+                glosses_html: vec!["supper".into()],
+            },
+            crate::present::GlossBlock {
+                dict_name: "CC-CEDICT".into(),
+                glosses: vec!["evening meal".into()],
+                glosses_html: vec!["evening meal".into()],
+            },
+        ];
+        let f = fields_from_card(&card, &blocks);
+        let html = f.get("glossary_html").unwrap();
+        assert_eq!(
+            "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>evening meal</li></ol>",
+            html,
+        );
+        assert_eq!(1, html.matches("<hr").count(), "one divider, none trailing");
+        assert!(html.ends_with("</ol>"), "no divider after last dict");
+    }
+
+    #[test]
+    fn glossary_separates_dictionaries_with_headers_and_dividers() {
         let card = crate::present::Card {
             written: Some("犬".into()),
             reading: Some("いぬ".into()),
@@ -392,7 +453,7 @@ mod tests {
         let html = f.get("glossary_html").unwrap();
         assert!(html.contains("<b>大辞林</b>"));
         assert!(html.contains("<b>Jitendex</b>"));
-        assert!(html.contains("<br><br>"), "visual break between groups");
+        assert!(html.contains("<hr"), "divider between groups");
     }
 
     #[test]
