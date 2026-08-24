@@ -118,6 +118,7 @@ pub struct WorkerSettings {
     pub language: String,
     pub present_cfg: PresentConfig,
     pub scan_display: ScanDisplay,
+    pub sentence_mode: String,
     /// Refreshed by every edit.
     pub dicts: Vec<DictInfo>,
 }
@@ -947,6 +948,7 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
             ocr_engine,
             enabled_plugins,
             settings.scan_display,
+            settings.sentence_mode,
             main_tid,
             trigger_rx,
             result_tx,
@@ -2167,10 +2169,12 @@ fn take_reload(
     s: WorkerSettings,
     present_cfg: &mut PresentConfig,
     scan_display: &mut ScanDisplay,
+    sentence_mode: &mut String,
     dicts: &mut Vec<DictInfo>,
 ) {
     *present_cfg = s.present_cfg;
     *scan_display = s.scan_display;
+    *sentence_mode = s.sentence_mode;
     *dicts = s.dicts;
 }
 
@@ -2255,6 +2259,7 @@ fn worker_main(
     ocr_engine: String,
     enabled_plugins: Vec<String>,
     mut scan_display: ScanDisplay,
+    mut sentence_mode: String,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -2339,7 +2344,7 @@ fn worker_main(
                 s.scan_alphanumeric,
                 &s.language,
             );
-            take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
+            take_reload(s, &mut present_cfg, &mut scan_display, &mut sentence_mode, &mut dicts);
         }
         let Some(trigger) = hover else {
             continue;
@@ -2364,6 +2369,7 @@ fn worker_main(
                     cursor,
                     guard,
                     scan_display,
+                    &sentence_mode,
                 ),
                 TriggerKind::DrillDown(ref text) => resolve_drilldown(
                     &dict,
@@ -2388,6 +2394,19 @@ fn worker_main(
     }
 }
 
+/// The line at cursor_offset.
+fn extract_sentence_line(text: &str, cursor_offset: usize) -> &str {
+    let mut pos = 0;
+    for line in text.split('\n') {
+        let end = pos + line.len();
+        if cursor_offset >= pos && cursor_offset <= end {
+            return line;
+        }
+        pos = end + 1;
+    }
+    text
+}
+
 /// One hover: OCR to present.
 #[allow(clippy::too_many_arguments)]
 fn resolve_trigger(
@@ -2399,6 +2418,7 @@ fn resolve_trigger(
     cursor: PhysPoint,
     capture_guard: Option<&CaptureGuard>,
     scan_display: ScanDisplay,
+    sentence_mode: &str,
 ) -> WorkerOutcome {
     let raw = match capture_guard {
         Some(guard) => {
@@ -2425,7 +2445,12 @@ fn resolve_trigger(
     }
 
     let mut presentation = present::build(&hits, dicts, present_cfg);
-    presentation.sentence = Some(resolved.span.text.clone());
+    let sentence = match sentence_mode {
+        "all" => resolved.span.text.clone(),
+        _ => extract_sentence_line(&resolved.span.text, resolved.span.cursor_byte_offset)
+            .to_string(),
+    };
+    presentation.sentence = Some(sentence);
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if scan_display.highlight {
         if let Some(rect) = matched {
@@ -2968,6 +2993,7 @@ struct LiveSettings {
     anki_deck: String,
     anki_model: String,
     anki_field_map: Vec<crate::config::FieldMapping>,
+    sentence_mode: String,
     trigger_mode: crate::config::TriggerMode,
     trigger_key: String,
     anki_add_key: String,
@@ -3007,6 +3033,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         } else {
             cfg.anki.field_map.clone()
         },
+        sentence_mode: cfg.anki.sentence_mode.clone(),
         trigger_mode: cfg.trigger.mode,
         trigger_key: cfg.trigger.trigger_key.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
@@ -3027,6 +3054,7 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
         language: live.language.clone(),
         present_cfg: live.present_cfg.clone(),
         scan_display: live.scan_display,
+        sentence_mode: live.sentence_mode.clone(),
         dicts: dicts.to_vec(),
     }
 }
@@ -3167,6 +3195,30 @@ mod tests {
     use super::*;
     use crate::config::PopupConfig;
     use crate::present::Card;
+
+    #[test]
+    fn extract_sentence_line_single_line_returns_it_all() {
+        assert_eq!("hello world", extract_sentence_line("hello world", 5));
+    }
+
+    #[test]
+    fn extract_sentence_line_picks_the_containing_line() {
+        let text = "abc\ndef\nghi";
+        assert_eq!("def", extract_sentence_line(text, 5));
+    }
+
+    /// Inclusive of the line end.
+    #[test]
+    fn extract_sentence_line_boundary_offset_stays_on_that_line() {
+        let text = "abc\ndef";
+        assert_eq!("abc", extract_sentence_line(text, 3));
+    }
+
+    #[test]
+    fn extract_sentence_line_past_the_end_falls_back_to_all() {
+        let text = "abc\ndef";
+        assert_eq!(text, extract_sentence_line(text, 999));
+    }
 
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
         PopupConfig {
@@ -3336,6 +3388,7 @@ mod tests {
             language: "ja".to_string(),
             present_cfg: Config::default().present_config(),
             scan_display: ScanDisplay { captures: false, highlight: false },
+            sentence_mode: "line".to_string(),
             dicts: Vec::new(),
         }
     }
@@ -3994,11 +4047,12 @@ mod tests {
     fn a_reload_replaces_the_cached_dictionary_identities() {
         let mut present_cfg = Config::default().present_config();
         let mut scan_display = ScanDisplay { captures: false, highlight: false };
+        let mut sentence_mode = "line".to_string();
         let mut dicts = vec![di(7, "Removed")];
         let mut s = ws(2);
         s.dicts = vec![di(7, "Added")];
 
-        take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
+        take_reload(s, &mut present_cfg, &mut scan_display, &mut sentence_mode, &mut dicts);
 
         assert_eq!(vec![di(7, "Added")], dicts, "the removed name must not answer");
     }

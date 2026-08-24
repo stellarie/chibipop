@@ -330,6 +330,9 @@ pub struct AnkiConfig {
     /// Which fields go where.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
+    /// "line" or "all".
+    #[serde(default = "default_sentence_mode")]
+    pub sentence_mode: String,
 }
 
 /// Default Anki URL.
@@ -357,6 +360,11 @@ fn default_notify_on_add() -> bool {
     true
 }
 
+/// Default sentence mode.
+fn default_sentence_mode() -> String {
+    "line".to_string()
+}
+
 /// The Lapis field mapping.
 fn default_field_map() -> Vec<FieldMapping> {
     vec![
@@ -378,6 +386,7 @@ impl Default for AnkiConfig {
             add_key: default_anki_add_key(),
             notify_on_add: default_notify_on_add(),
             field_map: default_field_map(),
+            sentence_mode: default_sentence_mode(),
         }
     }
 }
@@ -1007,6 +1016,11 @@ mod tests {
     #[test]
     fn notify_on_add_defaults_to_true() {
         assert!(Config::default().anki.notify_on_add);
+    }
+
+    #[test]
+    fn sentence_mode_defaults_to_line() {
+        assert_eq!("line", Config::default().anki.sentence_mode);
     }
 
     /// Guards the shipped default.

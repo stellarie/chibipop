@@ -120,6 +120,8 @@ const ID_INCLUDE_SCREENSHOT: i32 = 150;
 const ID_NOTIFY_ON_ADD: i32 = 151;
 /// Customize CSS button.
 const ID_CSS_EDITOR: i32 = 152;
+/// Sentence combo, Anki tab.
+const ID_SENTENCE_MODE: i32 = 156;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -2922,7 +2924,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 7 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 8 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
@@ -2964,6 +2966,23 @@ impl SettingsWindow {
             y += ROW_H;
             ank.push(check("Include screenshot when adding",
                 ID_INCLUDE_SCREENSHOT, form.include_screenshot, y)?);
+            y += ROW_H;
+            ank.push(label("Sentence capture", y)?);
+            let sentence_combo = child(page, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_SENTENCE_MODE, f)?;
+            ank.push(sentence_combo);
+            let modes = [("line", "Current line"), ("all", "All lines")];
+            for (i, (val, text)) in modes.iter().enumerate() {
+                SendMessageW(sentence_combo, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)));
+                if form.sentence_mode == *val {
+                    SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(sentence_combo, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
             y += ROW_H;
             ank.push(child(page, w!("BUTTON"), "Refresh", WS_TABSTOP,
                   PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
@@ -3121,6 +3140,8 @@ impl SettingsWindow {
             let staged = self.staged.borrow();
 
             let theme = if combo_index(ID_THEME) == 1 { "light" } else { "dark" };
+            let sentence_mode =
+                if combo_index(ID_SENTENCE_MODE) == 1 { "all" } else { "line" };
             let font = {
                 let i = combo_index(ID_FONT);
                 if i < 0 {
@@ -3217,6 +3238,7 @@ impl SettingsWindow {
                 anki_add_key,
                 field_map,
                 notify_on_add: checked(ID_NOTIFY_ON_ADD),
+                sentence_mode: sentence_mode.to_string(),
                 include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
                 enabled_plugins: self
                     .plugin_names

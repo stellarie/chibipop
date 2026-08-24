@@ -59,6 +59,7 @@ pub struct SettingsForm {
     pub anki_add_key: String,
     pub field_map: Vec<FieldMapping>,
     pub notify_on_add: bool,
+    pub sentence_mode: String,
     pub include_screenshot: bool,
     /// Plugin names allowed to run.
     pub enabled_plugins: Vec<String>,
@@ -324,6 +325,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
         notify_on_add: cfg.anki.notify_on_add,
+        sentence_mode: cfg.anki.sentence_mode.clone(),
         include_screenshot: cfg.actions.screenshot.include_on_add,
         enabled_plugins: cfg.plugins.enabled.clone(),
     }
@@ -383,6 +385,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
+    out.anki.sentence_mode = form.sentence_mode.clone();
     out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
@@ -781,6 +784,23 @@ mod tests {
         let form = from_config(&cfg, &dicts());
         let out = apply_to(&form, &cfg);
         assert_eq!("f10", out.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn sentence_mode_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.sentence_mode = "all".to_string();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("all", form.sentence_mode);
+        let out = apply_to(&form, &cfg);
+        assert_eq!("all", out.anki.sentence_mode);
+    }
+
+    #[test]
+    fn sentence_mode_defaults_to_line_in_the_form() {
+        let cfg = Config::default();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("line", form.sentence_mode);
     }
 
     #[test]
