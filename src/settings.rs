@@ -60,6 +60,7 @@ pub struct SettingsForm {
     pub field_map: Vec<FieldMapping>,
     pub notify_on_add: bool,
     pub sentence_mode: String,
+    pub static_region_key: String,
     pub include_screenshot: bool,
     /// Plugin names allowed to run.
     pub enabled_plugins: Vec<String>,
@@ -326,6 +327,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         field_map: cfg.anki.field_map.clone(),
         notify_on_add: cfg.anki.notify_on_add,
         sentence_mode: cfg.anki.sentence_mode.clone(),
+        static_region_key: cfg.anki.static_region_key.clone(),
         include_screenshot: cfg.actions.screenshot.include_on_add,
         enabled_plugins: cfg.plugins.enabled.clone(),
     }
@@ -386,6 +388,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
         out.anki.field_map = form.field_map.clone();
     }
     out.anki.sentence_mode = form.sentence_mode.clone();
+    out.anki.static_region_key = form.static_region_key.clone();
     out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
@@ -801,6 +804,26 @@ mod tests {
         let cfg = Config::default();
         let form = from_config(&cfg, &dicts());
         assert_eq!("line", form.sentence_mode);
+    }
+
+    #[test]
+    fn static_region_key_round_trips_through_the_form() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.static_region_key = "alt+r".to_string();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("alt+r", form.static_region_key);
+        let out = apply_to(&form, &cfg);
+        assert_eq!("alt+r", out.anki.static_region_key);
+    }
+
+    #[test]
+    fn sentence_mode_static_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.sentence_mode = "static".to_string();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("static", form.sentence_mode);
+        let out = apply_to(&form, &cfg);
+        assert_eq!("static", out.anki.sentence_mode);
     }
 
     #[test]

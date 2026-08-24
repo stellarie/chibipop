@@ -21,6 +21,7 @@ use crate::text::layout::{CaptureSize, OcrLine, Orientation};
 use crate::text::ocr::{recogniser_available, OcrTextSource};
 use crate::text::recogniser::Recogniser;
 use crate::ui::overlay::Overlay;
+use crate::ui::static_overlay::StaticRegionOverlay;
 use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
@@ -119,6 +120,8 @@ pub struct WorkerSettings {
     pub present_cfg: PresentConfig,
     pub scan_display: ScanDisplay,
     pub sentence_mode: String,
+    /// Fixed OCR region, if set.
+    pub static_region: Option<PhysRect>,
     /// Refreshed by every edit.
     pub dicts: Vec<DictInfo>,
 }
@@ -949,6 +952,7 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
             enabled_plugins,
             settings.scan_display,
             settings.sentence_mode,
+            settings.static_region,
             main_tid,
             trigger_rx,
             result_tx,
@@ -1060,6 +1064,24 @@ pub fn run(
         eprintln!("chibipop: ============================================================");
     }
 
+    // Static region outline.
+    let static_overlay = match StaticRegionOverlay::create(live.exclude_from_capture) {
+        Ok(o) => Some(o),
+        Err(e) => {
+            eprintln!(
+                "chibipop: the static region overlay could not be created: {e:#}"
+            );
+            None
+        }
+    };
+    if let (Some(ref ov), Some(region)) = (&static_overlay, live.static_region) {
+        if live.sentence_mode == "static" {
+            if let Err(e) = ov.show(region) {
+                eprintln!("chibipop: showing static region overlay failed: {e:#}");
+            }
+        }
+    }
+
     // Never fatal - spec §5.
     //
     // Always live; shown on demand.
@@ -1110,6 +1132,9 @@ pub fn run(
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
     }
+    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.static_region_key) {
+        Hooks::set_action_hotkey(1, vk, mods);
+    }
 
     // No tray means no control.
     let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
@@ -1143,6 +1168,9 @@ pub fn run(
     let overlay_prev_visible = std::cell::Cell::new(false);
     // Anki button visibility.
     let btn_prev_visible = std::cell::Cell::new(false);
+    // Static overlay visibility.
+    let sr_prev_visible = std::cell::Cell::new(false);
+    let sr_hwnd = static_overlay.as_ref().map(StaticRegionOverlay::hwnd);
     // What is on screen now.
     let mut shown: Option<Shown> = None;
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
@@ -1211,6 +1239,13 @@ pub fn run(
                             let _ = ShowWindow(hwnd, SW_HIDE);
                         }
                     }
+                    if let Some(hwnd) = sr_hwnd {
+                        // SAFETY: same as overlay above.
+                        sr_prev_visible.set(unsafe { IsWindowVisible(hwnd).as_bool() });
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_HIDE);
+                        }
+                    }
                     let _ = ack.send(());
                 }
                 CaptureGuardMsg::Restore => {
@@ -1225,6 +1260,14 @@ pub fn run(
                     if let Some(hwnd) = overlay_hwnd {
                         if overlay_prev_visible.get() {
                             // SAFETY: same handle, same guarantee as above.
+                            unsafe {
+                                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                            }
+                        }
+                    }
+                    if let Some(hwnd) = sr_hwnd {
+                        if sr_prev_visible.get() {
+                            // SAFETY: same as overlay.
                             unsafe {
                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                             }
@@ -1531,8 +1574,63 @@ pub fn run(
                 }
             }
 
+            // Static region hotkey (slot 1).
+            if Hooks::take_action_hotkey(1)
+                && live.sentence_mode == "static"
+            {
+                    let _ = popup.hide();
+                    if let Some(b) = &anki_button {
+                        b.hide();
+                    }
+                    if let Some(ov) = &static_overlay {
+                        ov.hide();
+                    }
+                    let rect = region_selection.run();
+                    if let Some(rect) = rect {
+                        live.static_region = Some(rect);
+                        cfg.anki.static_region =
+                            Some([rect.x, rect.y, rect.w, rect.h]);
+                        save_in_background(
+                            &mut save_job,
+                            cfg.clone(),
+                            config_path.to_path_buf(),
+                            save_tx.clone(),
+                            main_tid,
+                        );
+                        if let Some(ov) = &static_overlay {
+                            if let Err(e) = ov.show(rect) {
+                                eprintln!(
+                                    "chibipop: showing static region overlay failed: {e:#}"
+                                );
+                            }
+                        }
+                        // Push to worker.
+                        next_id += 1;
+                        latest_dispatched = RequestId(next_id);
+                        let _ = trigger_tx.send(Trigger {
+                            kind: TriggerKind::Reload(
+                                Box::new(worker_settings(&live, &dicts)),
+                            ),
+                            id: latest_dispatched,
+                        });
+                        eprintln!(
+                            "chibipop: static region set to ({}, {}, {}x{})",
+                            rect.x, rect.y, rect.w, rect.h
+                        );
+                    }
+                    if shown.is_some() {
+                        let _ = popup.show_without_activating();
+                        if let Some(b) = &anki_button {
+                            b.show_without_activating();
+                        }
+                    }
+            }
+
             // Action hotkey dispatch.
             for slot in 0..crate::input::hooks::MAX_ACTION_SLOTS {
+                if slot == 1 {
+                    continue; // Handled above.
+                }
                 if !Hooks::take_action_hotkey(slot) {
                     continue;
                 }
@@ -1690,7 +1788,9 @@ pub fn run(
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
                                 apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(), &mut theme,
+                                           anki_button.as_ref(),
+                                           static_overlay.as_ref(),
+                                           &mut theme,
                                            &capture_guard_active);
                                 // Kills stale results.
                                 next_id += 1;
@@ -1752,7 +1852,9 @@ pub fn run(
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
                                 apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(), &mut theme,
+                                           anki_button.as_ref(),
+                                           static_overlay.as_ref(),
+                                           &mut theme,
                                            &capture_guard_active);
                                 next_id += 1;
                                 latest_dispatched = RequestId(next_id);
@@ -2170,11 +2272,13 @@ fn take_reload(
     present_cfg: &mut PresentConfig,
     scan_display: &mut ScanDisplay,
     sentence_mode: &mut String,
+    static_region: &mut Option<PhysRect>,
     dicts: &mut Vec<DictInfo>,
 ) {
     *present_cfg = s.present_cfg;
     *scan_display = s.scan_display;
     *sentence_mode = s.sentence_mode;
+    *static_region = s.static_region;
     *dicts = s.dicts;
 }
 
@@ -2260,6 +2364,7 @@ fn worker_main(
     enabled_plugins: Vec<String>,
     mut scan_display: ScanDisplay,
     mut sentence_mode: String,
+    mut static_region: Option<PhysRect>,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
     result_tx: mpsc::Sender<WorkerResult>,
@@ -2344,7 +2449,7 @@ fn worker_main(
                 s.scan_alphanumeric,
                 &s.language,
             );
-            take_reload(s, &mut present_cfg, &mut scan_display, &mut sentence_mode, &mut dicts);
+            take_reload(s, &mut present_cfg, &mut scan_display, &mut sentence_mode, &mut static_region, &mut dicts);
         }
         let Some(trigger) = hover else {
             continue;
@@ -2370,6 +2475,7 @@ fn worker_main(
                     guard,
                     scan_display,
                     &sentence_mode,
+                    static_region,
                 ),
                 TriggerKind::DrillDown(ref text) => resolve_drilldown(
                     &dict,
@@ -2428,7 +2534,22 @@ fn resolve_trigger(
     capture_guard: Option<&CaptureGuard>,
     scan_display: ScanDisplay,
     sentence_mode: &str,
+    static_region: Option<PhysRect>,
 ) -> WorkerOutcome {
+    if sentence_mode == "static" {
+        if let Some(region) = static_region {
+            return resolve_static(
+                ocr, dict, engine, dicts,
+                present_cfg, cursor,
+                capture_guard, scan_display,
+                region,
+            );
+        }
+        // No region yet; fall through.
+        eprintln!(
+            "chibipop: static mode but no region set; using line mode"
+        );
+    }
     let raw = match capture_guard {
         Some(guard) => {
             guard.hide_for_capture();
@@ -2461,6 +2582,64 @@ fn resolve_trigger(
     };
     presentation.sentence = Some(sentence);
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
+    if scan_display.highlight {
+        if let Some(rect) = matched {
+            scan.push(ScanRect { rect, kind: ScanKind::Match });
+        }
+    }
+    WorkerOutcome::Ready {
+        presentation: Box::new(presentation),
+        anchor: resolved.span.anchor,
+        orientation: resolved.orientation,
+        matched,
+        scan,
+    }
+}
+
+/// Static-region capture path.
+#[allow(clippy::too_many_arguments)]
+fn resolve_static(
+    ocr: &OcrTextSource,
+    dict: &SqliteDictionary,
+    engine: &LookupEngine,
+    dicts: &[DictInfo],
+    present_cfg: &PresentConfig,
+    cursor: PhysPoint,
+    capture_guard: Option<&CaptureGuard>,
+    scan_display: ScanDisplay,
+    region: PhysRect,
+) -> WorkerOutcome {
+    let raw = match capture_guard {
+        Some(guard) => {
+            guard.hide_for_capture();
+            let r = ocr.resolve_in_region(cursor, region);
+            guard.restore_after_capture();
+            r
+        }
+        None => ocr.resolve_in_region(cursor, region),
+    };
+    let read = match raw {
+        Ok(r) => r,
+        Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
+    };
+    let resolved = match read.resolved {
+        Some(r) => r,
+        None => return WorkerOutcome::Hide,
+    };
+
+    let text = &resolved.span.text[resolved.span.cursor_byte_offset..];
+    let hits = match engine.run(dict, text) {
+        Ok(h) => h,
+        Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
+    };
+    if hits.is_empty() {
+        return WorkerOutcome::Hide;
+    }
+
+    let mut presentation = present::build(&hits, dicts, present_cfg);
+    presentation.sentence = Some(join_all_lines(&read.lines));
+    let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
+    let mut scan = Vec::new();
     if scan_display.highlight {
         if let Some(rect) = matched {
             scan.push(ScanRect { rect, kind: ScanKind::Match });
@@ -3003,6 +3182,8 @@ struct LiveSettings {
     anki_model: String,
     anki_field_map: Vec<crate::config::FieldMapping>,
     sentence_mode: String,
+    static_region: Option<PhysRect>,
+    static_region_key: String,
     trigger_mode: crate::config::TriggerMode,
     trigger_key: String,
     anki_add_key: String,
@@ -3043,6 +3224,10 @@ fn derive(cfg: &Config) -> LiveSettings {
             cfg.anki.field_map.clone()
         },
         sentence_mode: cfg.anki.sentence_mode.clone(),
+        static_region: cfg.anki.static_region.map(|a| PhysRect {
+            x: a[0], y: a[1], w: a[2], h: a[3],
+        }),
+        static_region_key: cfg.anki.static_region_key.clone(),
         trigger_mode: cfg.trigger.mode,
         trigger_key: cfg.trigger.trigger_key.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
@@ -3064,6 +3249,7 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
         present_cfg: live.present_cfg.clone(),
         scan_display: live.scan_display,
         sentence_mode: live.sentence_mode.clone(),
+        static_region: live.static_region,
         dicts: dicts.to_vec(),
     }
 }
@@ -3081,11 +3267,13 @@ fn capture_guard_needed(
 }
 
 /// Push settings to windows.
+#[allow(clippy::too_many_arguments)]
 fn apply_live(
     live: &LiveSettings,
     popup: &Popup,
     overlay: Option<&Overlay>,
     button: Option<&AnkiButton>,
+    sr_overlay: Option<&StaticRegionOverlay>,
     theme: &mut Theme,
     capture_guard_active: &AtomicBool,
 ) {
@@ -3098,6 +3286,18 @@ fn apply_live(
         b.set_capture_exclusion(live.exclude_from_capture);
         if !live.anki_enabled {
             b.hide();
+        }
+    }
+    if let Some(sr) = sr_overlay {
+        sr.set_capture_exclusion(live.exclude_from_capture);
+        if live.sentence_mode == "static" {
+            if let Some(region) = live.static_region {
+                if let Err(e) = sr.show(region) {
+                    eprintln!("chibipop: static overlay: {e:#}");
+                }
+            }
+        } else {
+            sr.hide();
         }
     }
     capture_guard_active.store(
@@ -3123,6 +3323,9 @@ fn apply_live(
     }
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
+    }
+    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.static_region_key) {
+        Hooks::set_action_hotkey(1, vk, mods);
     }
 }
 
@@ -3424,6 +3627,7 @@ mod tests {
             present_cfg: Config::default().present_config(),
             scan_display: ScanDisplay { captures: false, highlight: false },
             sentence_mode: "line".to_string(),
+            static_region: None,
             dicts: Vec::new(),
         }
     }
@@ -4087,7 +4291,8 @@ mod tests {
         let mut s = ws(2);
         s.dicts = vec![di(7, "Added")];
 
-        take_reload(s, &mut present_cfg, &mut scan_display, &mut sentence_mode, &mut dicts);
+        let mut static_region = None;
+        take_reload(s, &mut present_cfg, &mut scan_display, &mut sentence_mode, &mut static_region, &mut dicts);
 
         assert_eq!(vec![di(7, "Added")], dicts, "the removed name must not answer");
     }
