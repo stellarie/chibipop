@@ -14,7 +14,7 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::plugin::manifest::{Manifest, Role};
 use crate::plugin::text::PluginText;
 use crate::plugin::{discover, host};
-use crate::present::{self, DictInfo, Presentation, PresentConfig};
+use crate::present::{self, DictInfo, PresentConfig, Presentation};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::layout::{CaptureSize, OcrLine, Orientation};
@@ -44,9 +44,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetCursorPos, GetMessageW, IDC_HAND, IsDialogMessageW, IsWindowVisible,
-    KillTimer, LoadCursorW, PostQuitMessage, PostThreadMessageW, SetCursor, SetTimer, ShowWindow,
-    TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
+    DispatchMessageW, GetCursorPos, GetMessageW, IsDialogMessageW, IsWindowVisible, KillTimer,
+    LoadCursorW, PostQuitMessage, PostThreadMessageW, SetCursor, SetTimer, ShowWindow,
+    TranslateMessage, IDC_HAND, MSG, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
     WM_TIMER,
 };
 
@@ -97,7 +97,6 @@ const REBUILD_TICK_MS: u32 = 100;
 
 /// Over this, hooks stall.
 const APPLY_BUDGET_MS: u128 = 50;
-
 
 /// Staleness by id, no sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -188,7 +187,11 @@ impl CaptureGuard {
     /// Blocks until hidden.
     fn hide_for_capture(&self) {
         let (ack_tx, ack_rx) = mpsc::channel();
-        if self.request_tx.send(CaptureGuardMsg::Hide { ack: ack_tx }).is_err() {
+        if self
+            .request_tx
+            .send(CaptureGuardMsg::Hide { ack: ack_tx })
+            .is_err()
+        {
             return; // main thread gone - nothing left to hide.
         }
         self.wake_main_thread();
@@ -232,8 +235,7 @@ pub fn settings_only(
     let mut tick = 0usize;
     let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) =
-        mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
+    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     // SAFETY: no preconditions.
     let tid = unsafe { GetCurrentThreadId() };
 
@@ -276,8 +278,10 @@ pub fn settings_only(
             window.switch_tab(tab);
             if tab == 3 {
                 spawn_detect(
-                    window.anki_url(), window.anki_model(),
-                    detect_tx.clone(), tid,
+                    window.anki_url(),
+                    window.anki_model(),
+                    detect_tx.clone(),
+                    tid,
                 );
             }
         }
@@ -292,7 +296,9 @@ pub fn settings_only(
             let Some(built) = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, &window)) else {
                 continue;
             };
-            let Some(flight) = rebuild.take() else { continue };
+            let Some(flight) = rebuild.take() else {
+                continue;
+            };
             // SAFETY: `tick` is this loop's own timer, set below.
             unsafe {
                 let _ = KillTimer(None, tick);
@@ -302,9 +308,9 @@ pub fn settings_only(
                 Ok(()) => {
                     keep_apply(&flight, &window);
                     let updated = pending.take().unwrap_or_else(|| cfg.clone());
-                    updated.save(config_path).with_context(|| {
-                        format!("saving settings to {}", config_path.display())
-                    })?;
+                    updated
+                        .save(config_path)
+                        .with_context(|| format!("saving settings to {}", config_path.display()))?;
                     println!("chibipop: rebuilt {}.", dict_path.display());
                     println!("chibipop: settings saved to {}.", config_path.display());
                     // New dictionary: start it.
@@ -333,9 +339,9 @@ pub fn settings_only(
                 let updated = settings::apply_to(&edited, &cfg);
                 // A font is not a rebuild.
                 if !edited.has_staged() {
-                    updated.save(config_path).with_context(|| {
-                        format!("saving settings to {}", config_path.display())
-                    })?;
+                    updated
+                        .save(config_path)
+                        .with_context(|| format!("saving settings to {}", config_path.display()))?;
                     println!("chibipop: settings saved to {}.", config_path.display());
                     println!("chibipop: restart chibipop for them to take effect.");
                     return Ok(());
@@ -364,11 +370,7 @@ pub(crate) fn library_dir() -> PathBuf {
 }
 
 /// The form and the library.
-pub(crate) fn form_with_library(
-    cfg: &Config,
-    dicts: &[DictInfo],
-    dir: &Path,
-) -> SettingsForm {
+pub(crate) fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
     let form = settings::from_config(cfg, dicts);
     match Library::load(dir) {
         Ok(lib) => settings::with_library(form, &lib),
@@ -392,7 +394,11 @@ struct InFlight {
 fn start_rebuild(form: &SettingsForm, dir: &Path, out: &Path) -> Result<InFlight> {
     let lock = LibraryLock::acquire(dir)?;
     let (pending, rx) = stage_and_spawn(form, dir, out)?;
-    Ok(InFlight { pending, rx, _lock: lock })
+    Ok(InFlight {
+        pending,
+        rx,
+        _lock: lock,
+    })
 }
 
 /// Stage, then start the build.
@@ -504,7 +510,10 @@ fn engine_status_line(cfg: &Config) -> String {
 
 /// Recent plugin stderr lines.
 fn adapter_status_line(cfg: &Config) -> String {
-    if !matches!(resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled), EngineChoice::Plugin(_)) {
+    if !matches!(
+        resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled),
+        EngineChoice::Plugin(_)
+    ) {
         return "Adapter log: no plugin engine active".to_string();
     }
     let log = host::engine_log_lines();
@@ -537,9 +546,11 @@ fn drifted(dir: &Path, db: &Path) -> Result<Option<String>> {
 fn read_source_hashes(db: &Path) -> Result<Option<String>> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("opening {} to read its source list", db.display()))?;
-    conn.query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
-        .optional()
-        .with_context(|| format!("reading source_hashes from {}", db.display()))
+    conn.query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| {
+        r.get(0)
+    })
+    .optional()
+    .with_context(|| format!("reading source_hashes from {}", db.display()))
 }
 
 /// Say nothing was changed.
@@ -606,10 +617,14 @@ fn open_writer(path: &Path) -> Result<Connection> {
 ///
 /// Those still need a rebuild.
 fn stages_frequency(form: &SettingsForm, dicts: &[DictInfo]) -> bool {
-    let added = form.staged_adds.iter().any(|a| form.freq_names.contains(&a.name));
-    let removed = form.staged_removes.iter().any(|name| {
-        !dicts.iter().any(|d| &d.name == name) && !form.unreadable.contains(name)
-    });
+    let added = form
+        .staged_adds
+        .iter()
+        .any(|a| form.freq_names.contains(&a.name));
+    let removed = form
+        .staged_removes
+        .iter()
+        .any(|name| !dicts.iter().any(|d| &d.name == name) && !form.unreadable.contains(name));
     added || removed
 }
 
@@ -628,7 +643,10 @@ fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPla
                 .map(|e| e.file.clone()),
         })
         .collect();
-    EditPlan { removals, additions: form.staged_adds.clone() }
+    EditPlan {
+        removals,
+        additions: form.staged_adds.clone(),
+    }
 }
 
 /// Count from this dictionary.
@@ -707,7 +725,8 @@ fn apply_edits(
         }
     }
 
-    lib.save(dir).with_context(|| format!("saving {}", dir.display()))?;
+    lib.save(dir)
+        .with_context(|| format!("saving {}", dir.display()))?;
     pending.commit()?;
     report.dicts = reader.dicts().context("re-reading dictionary identities")?;
     Ok(Box::new(report))
@@ -722,14 +741,19 @@ fn remove_one(
     removal: &Removal,
 ) -> Result<()> {
     if let Some(dict_id) = removal.dict_id {
-        let archive = removal.file.as_ref().map(|f| dir.join(f)).unwrap_or_default();
+        let archive = removal
+            .file
+            .as_ref()
+            .map(|f| dir.join(f))
+            .unwrap_or_default();
         let done = crate::dict::edit::remove_dictionary(conn, dict_id, &archive)?;
         if done.dicts == 0 {
             anyhow::bail!("dictionary {dict_id} was no longer in the database");
         }
     }
     if let Some(file) = &removal.file {
-        lib.quarantine(dir, file).with_context(|| format!("removing {file}"))?;
+        lib.quarantine(dir, file)
+            .with_context(|| format!("removing {file}"))?;
         pending.held(file.clone());
     }
     Ok(())
@@ -774,7 +798,9 @@ fn pump_edit(rx: &mpsc::Receiver<EditMsg>, w: &SettingsWindow) -> Option<Result<
             Ok(EditMsg::Done(done)) => return Some(done),
             Err(mpsc::TryRecvError::Empty) => return None,
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Some(Err(anyhow!("the dictionary change ended without reporting")));
+                return Some(Err(anyhow!(
+                    "the dictionary change ended without reporting"
+                )));
             }
         }
     }
@@ -808,10 +834,7 @@ fn spawn_detect(
         let _ = tx.send((decks, models, fields));
         // SAFETY: wakes the pump.
         unsafe {
-            let _ = PostThreadMessageW(
-                tid, WM_APP_ANKI_DETECT,
-                WPARAM(0), LPARAM(0),
-            );
+            let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
         }
     });
 }
@@ -848,18 +871,12 @@ fn service_settings_click(
                     let _ = detect_tx.send((decks, models, fields));
                     // SAFETY: wakes the pump thread.
                     unsafe {
-                        let _ = PostThreadMessageW(
-                            tid, WM_APP_ANKI_DETECT,
-                            WPARAM(0), LPARAM(0),
-                        );
+                        let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
                     }
                 }
                 // SAFETY: wakes the pump thread.
                 unsafe {
-                    let _ = PostThreadMessageW(
-                        tid, WM_APP_SETTINGS,
-                        WPARAM(0), LPARAM(0),
-                    );
+                    let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
             });
         }
@@ -869,27 +886,16 @@ fn service_settings_click(
             thread::spawn(move || {
                 let msg = match update::check(env!("CARGO_PKG_VERSION")) {
                     Ok(None) => "You already have the latest version.".into(),
-                    Ok(Some(release)) => {
-                        match update::download_and_replace(&release) {
-                            Ok(()) => format!(
-                                "Updated to {}. Restart to use it.",
-                                release.tag,
-                            ),
-                            Err(e) => format!(
-                                "Update to {} failed: {e:#}",
-                                release.tag,
-                            ),
-                        }
-                    }
+                    Ok(Some(release)) => match update::download_and_replace(&release) {
+                        Ok(()) => format!("Updated to {}. Restart to use it.", release.tag,),
+                        Err(e) => format!("Update to {} failed: {e:#}", release.tag,),
+                    },
                     Err(e) => format!("Update check failed: {e:#}"),
                 };
                 let _ = tx.send(msg);
                 // SAFETY: wakes the pump thread.
                 unsafe {
-                    let _ = PostThreadMessageW(
-                        tid, WM_APP_SETTINGS,
-                        WPARAM(0), LPARAM(0),
-                    );
+                    let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
             });
         }
@@ -970,12 +976,7 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
 }
 
 /// Run until the user quits.
-pub fn run(
-    mut cfg: Config,
-    dict_path: &Path,
-    rules_path: &Path,
-    config_path: &Path,
-) -> Result<()> {
+pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
     // Nothing built yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
@@ -1022,18 +1023,24 @@ pub fn run(
             );
         }
         CaptureExclusion::DeliberatelyNotExcluded => {
-            println!("chibipop: capture exclusion disabled (exclude_from_capture = false in the config)");
+            println!(
+                "chibipop: capture exclusion disabled (exclude_from_capture = false in the config)"
+            );
             println!("chibipop: the popup IS recordable now - each capture briefly hides and reshows it,");
             println!("chibipop: so hovering keeps resolving the real text underneath, not its own");
         }
         CaptureExclusion::AttemptFailed => {
             eprintln!("chibipop: ============================================================");
             eprintln!("chibipop: WARNING: capture exclusion is NOT active for the popup window.");
-            eprintln!("chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,");
+            eprintln!(
+                "chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,"
+            );
             eprintln!("chibipop: even though exclude_from_capture = true. This was NOT requested.");
             eprintln!("chibipop: The capture guard below will still hide/reshow the popup around");
             eprintln!("chibipop: every capture, so lookups stay correct, at the cost of a flicker");
-            eprintln!("chibipop: this build did not expect to pay. Investigate why the OS refused.");
+            eprintln!(
+                "chibipop: this build did not expect to pay. Investigate why the OS refused."
+            );
             eprintln!("chibipop: ============================================================");
         }
     }
@@ -1053,9 +1060,12 @@ pub fn run(
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
 
     // Spec D5: can diverge.
-    if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion) {
+    if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion)
+    {
         eprintln!("chibipop: ============================================================");
-        eprintln!("chibipop: WARNING: capture exclusion is NOT active for the scan overlay window.");
+        eprintln!(
+            "chibipop: WARNING: capture exclusion is NOT active for the scan overlay window."
+        );
         eprintln!("chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,");
         eprintln!("chibipop: even though exclude_from_capture = true. This was NOT requested.");
         eprintln!("chibipop: The capture guard below will still hide/reshow the overlay around");
@@ -1117,6 +1127,8 @@ pub fn run(
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
     let mut theme = theme_from_config(&live.popup);
+    let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+    popup.set_alpha(alpha);
     if live.show_lookup_log {
         crate::ui::console::show();
     }
@@ -1150,8 +1162,7 @@ pub fn run(
 
     let mut next_id: u64 = 0;
     // Spawned before dicts existed.
-    let (order, restrict) =
-        resolve_dict_filter(&cfg, &dicts, || configured_recogniser_runs(&cfg));
+    let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || configured_recogniser_runs(&cfg));
     live.present_cfg.dict_order = order;
     live.present_cfg.restrict_to_order = restrict;
     next_id += 1;
@@ -1176,8 +1187,7 @@ pub fn run(
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) =
-        mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
+    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
     let mut css_editor: Option<crate::ui::editor::CssEditor> = None;
     let (screenshot_tx, screenshot_rx) = mpsc::channel::<crate::action::ScreenshotCommand>();
@@ -1222,9 +1232,7 @@ pub fn run(
                 CaptureGuardMsg::Hide { ack } => {
                     capture_guard_prev_visible.set(popup.is_visible());
                     let _ = popup.hide();
-                    btn_prev_visible.set(
-                        anki_button.as_ref().is_some_and(|b| b.is_visible()),
-                    );
+                    btn_prev_visible.set(anki_button.as_ref().is_some_and(|b| b.is_visible()));
                     if let Some(b) = &anki_button {
                         b.hide();
                     }
@@ -1338,10 +1346,7 @@ pub fn run(
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
                 if tab == 3 {
-                    spawn_detect(
-                        w.anki_url(), w.anki_model(),
-                        detect_tx.clone(), main_tid,
-                    );
+                    spawn_detect(w.anki_url(), w.anki_model(), detect_tx.clone(), main_tid);
                 }
             }
             if w.take_field_map_toggle() {
@@ -1356,14 +1361,16 @@ pub fn run(
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             // Spec D7: the popup's own rect.
             let cursor_pos = cursor_now();
-            let over_popup = shown.as_ref().is_some_and(|s| {
-                s.popup.contains(cursor_pos)
-            });
+            let over_popup = shown.as_ref().is_some_and(|s| s.popup.contains(cursor_pos));
             let over_popup_or_btn = shown.as_ref().is_some_and(|s| {
-                let btn_h = anki_button.as_ref()
+                let btn_h = anki_button
+                    .as_ref()
                     .filter(|b| b.is_visible())
                     .map_or(0, |b| b.height_phys());
-                let full = PhysRect { h: s.popup.h + btn_h, ..s.popup };
+                let full = PhysRect {
+                    h: s.popup.h + btn_h,
+                    ..s.popup
+                };
                 full.contains(cursor_pos)
             });
             let armed = live.scroll_popup
@@ -1406,8 +1413,13 @@ pub fn run(
                     if next != s.scroll {
                         s.scroll = next;
                         let back = !s.history.is_empty();
-                        let painted = renderer
-                            .paint(&s.presentation, &theme, s.scroll, back, live.side_panel);
+                        let painted = renderer.paint(
+                            &s.presentation,
+                            &theme,
+                            s.scroll,
+                            back,
+                            live.side_panel,
+                        );
                         if let Err(e) = painted {
                             eprintln!("chibipop: repainting for scroll failed: {e:#}");
                         }
@@ -1458,18 +1470,30 @@ pub fn run(
                             }
                             HitAction::Back => {
                                 pop_history(
-                                    s, &popup, &mut renderer, &theme,
-                                    live.max_height_percent, live.max_width_percent,
-                                    anki_button.as_ref(), live.side_panel,
+                                    s,
+                                    &popup,
+                                    &mut renderer,
+                                    &theme,
+                                    live.max_height_percent,
+                                    live.max_width_percent,
+                                    anki_button.as_ref(),
+                                    live.side_panel,
                                 );
                             }
                         }
                     } else if click_y >= s.popup.h && live.anki_enabled {
                         // Below popup = button area.
                         start_add_to_anki(
-                            s, &mut renderer, &theme,
-                            &live.anki_url, &live.anki_deck, &live.anki_model,
-                            &live.anki_field_map, &add_tx, main_tid, live.side_panel,
+                            s,
+                            &mut renderer,
+                            &theme,
+                            &live.anki_url,
+                            &live.anki_deck,
+                            &live.anki_model,
+                            &live.anki_field_map,
+                            &add_tx,
+                            main_tid,
+                            live.side_panel,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                     }
@@ -1480,9 +1504,16 @@ pub fn run(
             if anki_button.as_ref().is_some_and(|b| b.take_click()) {
                 if let Some(s) = shown.as_mut() {
                     start_add_to_anki(
-                        s, &mut renderer, &theme,
-                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
-                        &add_tx, main_tid, live.side_panel,
+                        s,
+                        &mut renderer,
+                        &theme,
+                        &live.anki_url,
+                        &live.anki_deck,
+                        &live.anki_model,
+                        &live.anki_field_map,
+                        &add_tx,
+                        main_tid,
+                        live.side_panel,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -1497,9 +1528,7 @@ pub fn run(
                         }
                         let rect = region_selection.run();
                         if let Some(rect) = rect {
-                            if let Ok(cap) =
-                                crate::text::capture::capture_upscaled_by(rect, 1)
-                            {
+                            if let Ok(cap) = crate::text::capture::capture_upscaled_by(rect, 1) {
                                 let (expr, fields) = s
                                     .presentation
                                     .top
@@ -1511,31 +1540,25 @@ pub fn run(
                                             .or(card.reading.as_deref())
                                             .unwrap_or("")
                                             .to_string();
-                                        let mut fields =
-                                            anki::fields_from_card(card, &card.blocks);
+                                        let mut fields = anki::fields_from_card(card, &card.blocks);
                                         if let Some(sentence) = &s.presentation.sentence {
-                                            fields.insert(
-                                                "sentence".to_string(),
-                                                sentence.clone(),
-                                            );
+                                            fields.insert("sentence".to_string(), sentence.clone());
                                         }
                                         (expr, fields)
                                     })
                                     .unwrap_or_default();
-                                let word =
-                                    crate::action::screenshot::sanitize_filename(&expr);
+                                let word = crate::action::screenshot::sanitize_filename(&expr);
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_secs();
                                 let filename = format!("{word}_{now}.png");
                                 let ss_cfg = &cfg.actions.screenshot;
-                                let save_dir =
-                                    if Path::new(&ss_cfg.save_dir).is_absolute() {
-                                        PathBuf::from(&ss_cfg.save_dir)
-                                    } else {
-                                        exe_dir.join(&ss_cfg.save_dir)
-                                    };
+                                let save_dir = if Path::new(&ss_cfg.save_dir).is_absolute() {
+                                    PathBuf::from(&ss_cfg.save_dir)
+                                } else {
+                                    exe_dir.join(&ss_cfg.save_dir)
+                                };
                                 let save_path = save_dir.join(filename);
                                 let cmd = crate::action::ScreenshotCommand {
                                     bgra_buf: cap.buf,
@@ -1554,9 +1577,16 @@ pub fn run(
                             }
                         } else {
                             start_add_to_anki(
-                                s, &mut renderer, &theme,
-                                &live.anki_url, &live.anki_deck, &live.anki_model,
-                                &live.anki_field_map, &add_tx, main_tid, live.side_panel,
+                                s,
+                                &mut renderer,
+                                &theme,
+                                &live.anki_url,
+                                &live.anki_deck,
+                                &live.anki_model,
+                                &live.anki_field_map,
+                                &add_tx,
+                                main_tid,
+                                live.side_panel,
                             );
                         }
                         let _ = popup.show_without_activating();
@@ -1565,9 +1595,16 @@ pub fn run(
                         }
                     } else {
                         start_add_to_anki(
-                            s, &mut renderer, &theme,
-                            &live.anki_url, &live.anki_deck, &live.anki_model,
-                            &live.anki_field_map, &add_tx, main_tid, live.side_panel,
+                            s,
+                            &mut renderer,
+                            &theme,
+                            &live.anki_url,
+                            &live.anki_deck,
+                            &live.anki_model,
+                            &live.anki_field_map,
+                            &add_tx,
+                            main_tid,
+                            live.side_panel,
                         );
                     }
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
@@ -1677,8 +1714,7 @@ pub fn run(
                                         .or(card.reading.as_deref())
                                         .unwrap_or("")
                                         .to_string();
-                                    let mut fields =
-                                        anki::fields_from_card(card, &card.blocks);
+                                    let mut fields = anki::fields_from_card(card, &card.blocks);
                                     if let Some(sentence) = &s.presentation.sentence {
                                         fields.insert("sentence".to_string(), sentence.clone());
                                     }
@@ -1719,11 +1755,7 @@ pub fn run(
                 if let Some(b) = &anki_button {
                     b.show_without_activating();
                 }
-                sync_anki_button(
-                    anki_button.as_ref(),
-                    shown.as_ref(),
-                    &theme,
-                );
+                sync_anki_button(anki_button.as_ref(), shown.as_ref(), &theme);
             }
 
             let has_hist = shown.as_ref().is_some_and(|s| !s.history.is_empty());
@@ -1731,9 +1763,14 @@ pub fn run(
             if Hooks::take_back() {
                 if let Some(s) = shown.as_mut() {
                     pop_history(
-                        s, &popup, &mut renderer, &theme,
-                        live.max_height_percent, live.max_width_percent,
-                        anki_button.as_ref(), live.side_panel,
+                        s,
+                        &popup,
+                        &mut renderer,
+                        &theme,
+                        live.max_height_percent,
+                        live.max_width_percent,
+                        anki_button.as_ref(),
+                        live.side_panel,
                     );
                 }
             }
@@ -1743,7 +1780,13 @@ pub fn run(
                     theme = theme_from_config(&live.popup);
                     if let Some(s) = shown.as_ref() {
                         let back = !s.history.is_empty();
-                        let _ = renderer.paint(&s.presentation, &theme, s.scroll, back, live.side_panel);
+                        let _ = renderer.paint(
+                            &s.presentation,
+                            &theme,
+                            s.scroll,
+                            back,
+                            live.side_panel,
+                        );
                     }
                 }
                 if !ed.is_visible() {
@@ -1767,8 +1810,7 @@ pub fn run(
                             Ok(report) => {
                                 let report = *report;
                                 let status = edit_status(&report);
-                                let mut updated =
-                                    edit_cfg.take().unwrap_or_else(|| cfg.clone());
+                                let mut updated = edit_cfg.take().unwrap_or_else(|| cfg.clone());
                                 // Removals first: keys collide.
                                 for name in &report.removed {
                                     settings::dictionary_removed(&mut updated, name);
@@ -1782,26 +1824,36 @@ pub fn run(
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
                                 live = derive(&cfg);
-                                let (order, restrict) = resolve_dict_filter(
-                                    &cfg, &dicts, || configured_recogniser_runs(&cfg));
+                                let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || {
+                                    configured_recogniser_runs(&cfg)
+                                });
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
-                                apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(),
-                                           static_overlay.as_ref(),
-                                           &mut theme,
-                                           &capture_guard_active);
+                                apply_live(
+                                    &live,
+                                    &popup,
+                                    overlay.as_ref(),
+                                    anki_button.as_ref(),
+                                    static_overlay.as_ref(),
+                                    &mut theme,
+                                    &capture_guard_active,
+                                );
                                 // Kills stale results.
                                 next_id += 1;
                                 latest_dispatched = RequestId(next_id);
                                 let _ = trigger_tx.send(Trigger {
-                                    kind: TriggerKind::Reload(
-                                        Box::new(worker_settings(&live, &dicts))),
+                                    kind: TriggerKind::Reload(Box::new(worker_settings(
+                                        &live, &dicts,
+                                    ))),
                                     id: latest_dispatched,
                                 });
-                                save_in_background(&mut save_job, updated,
-                                                   config_path.to_path_buf(),
-                                                   save_tx.clone(), main_tid);
+                                save_in_background(
+                                    &mut save_job,
+                                    updated,
+                                    config_path.to_path_buf(),
+                                    save_tx.clone(),
+                                    main_tid,
+                                );
                                 w.set_status(&status);
                             }
                         }
@@ -1826,12 +1878,14 @@ pub fn run(
                                         begin_apply(w);
                                         edit_cfg = Some(updated);
                                         let (etx, erx) = mpsc::channel::<EditMsg>();
-                                        edit = Some(EditFlight { rx: erx, _lock: lock });
+                                        edit = Some(EditFlight {
+                                            rx: erx,
+                                            _lock: lock,
+                                        });
                                         let db = db_path.clone();
                                         let dir = library.clone();
                                         thread::spawn(move || {
-                                            let done =
-                                                apply_edits(&db, &dir, &edited, &etx);
+                                            let done = apply_edits(&db, &dir, &edited, &etx);
                                             let _ = etx.send(EditMsg::Done(done));
                                         });
                                         let ms = t0.elapsed().as_millis();
@@ -1845,29 +1899,39 @@ pub fn run(
                                 }
                             } else {
                                 live = derive(&updated);
-                                let (order, restrict) = resolve_dict_filter(
-                                    &updated, &dicts,
-                                    || configured_recogniser_runs(&updated));
+                                let (order, restrict) =
+                                    resolve_dict_filter(&updated, &dicts, || {
+                                        configured_recogniser_runs(&updated)
+                                    });
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
-                                apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(),
-                                           static_overlay.as_ref(),
-                                           &mut theme,
-                                           &capture_guard_active);
+                                apply_live(
+                                    &live,
+                                    &popup,
+                                    overlay.as_ref(),
+                                    anki_button.as_ref(),
+                                    static_overlay.as_ref(),
+                                    &mut theme,
+                                    &capture_guard_active,
+                                );
                                 next_id += 1;
                                 latest_dispatched = RequestId(next_id);
                                 let _ = trigger_tx.send(Trigger {
-                                    kind: TriggerKind::Reload(
-                                        Box::new(worker_settings(&live, &dicts))),
+                                    kind: TriggerKind::Reload(Box::new(worker_settings(
+                                        &live, &dicts,
+                                    ))),
                                     id: latest_dispatched,
                                 });
                                 let clamped = settings::clamp_notice(&edited, &updated);
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
-                                save_in_background(&mut save_job, updated,
-                                                   config_path.to_path_buf(),
-                                                   save_tx.clone(), main_tid);
+                                save_in_background(
+                                    &mut save_job,
+                                    updated,
+                                    config_path.to_path_buf(),
+                                    save_tx.clone(),
+                                    main_tid,
+                                );
                                 let mut status_parts = Vec::new();
                                 match &clamped {
                                     Some(notice) => {
@@ -1922,14 +1986,20 @@ pub fn run(
                 // is blocked (e.g. by anti-cheat).
                 let pos = cursor_pos;
                 let dominated = Hooks::poll_gate(pos);
-                if dominated { pos } else {
-                    PhysPoint { x: i32::MIN, y: i32::MIN }
+                if dominated {
+                    pos
+                } else {
+                    PhysPoint {
+                        x: i32::MIN,
+                        y: i32::MIN,
+                    }
                 }
             });
             if cursor.x != i32::MIN {
                 // Spec D3: hold, do not resolve.
                 let frozen = shown.as_ref().is_some_and(|s| {
-                    let btn_h = anki_button.as_ref()
+                    let btn_h = anki_button
+                        .as_ref()
                         .filter(|b| b.is_visible())
                         .map_or(0, |b| b.height_phys());
                     let sticky_rect = PhysRect {
@@ -1960,9 +2030,15 @@ pub fn run(
                 } else if let WorkerOutcome::DrillDown(pres) = result.outcome {
                     if let Some(s) = shown.as_mut() {
                         push_drilldown(
-                            s, *pres, &popup, &mut renderer, &theme,
-                            live.max_height_percent, live.max_width_percent,
-                            live.anki_enabled, live.side_panel,
+                            s,
+                            *pres,
+                            &popup,
+                            &mut renderer,
+                            &theme,
+                            live.max_height_percent,
+                            live.max_width_percent,
+                            live.anki_enabled,
+                            live.side_panel,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                         if live.anki_enabled {
@@ -1970,7 +2046,8 @@ pub fn run(
                             s.gen = popup_gen;
                             let mut exprs: Vec<String> = Vec::new();
                             if let Some(card) = &s.presentation.top {
-                                if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
+                                if let Some(e) = card.written.as_deref().or(card.reading.as_deref())
+                                {
                                     exprs.push(e.to_string());
                                 }
                             }
@@ -1981,19 +2058,24 @@ pub fn run(
                                 let gen = popup_gen;
                                 let tx = anki_tx.clone();
                                 thread::spawn(move || {
-                                    let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                    let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
-                                        Ok(d) => Some(d),
-                                        Err(e) => {
-                                            eprintln!("chibipop: dupe check failed: {e:#}");
-                                            None
-                                        }
-                                    };
+                                    let refs: Vec<&str> =
+                                        exprs.iter().map(|s| s.as_str()).collect();
+                                    let dupes =
+                                        match anki::find_duplicates(&url, &deck, &model, &refs) {
+                                            Ok(d) => Some(d),
+                                            Err(e) => {
+                                                eprintln!("chibipop: dupe check failed: {e:#}");
+                                                None
+                                            }
+                                        };
                                     let _ = tx.send(AnkiDupeResult { gen, dupes });
                                     // SAFETY: wakes the pump.
                                     unsafe {
                                         let _ = PostThreadMessageW(
-                                            main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
+                                            main_tid,
+                                            WM_APP_ANKI,
+                                            WPARAM(0),
+                                            LPARAM(0),
                                         );
                                     }
                                 });
@@ -2021,7 +2103,8 @@ pub fn run(
                         if let Some(s) = shown.as_mut() {
                             s.gen = popup_gen;
                             if let Some(card) = &s.presentation.top {
-                                if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
+                                if let Some(e) = card.written.as_deref().or(card.reading.as_deref())
+                                {
                                     exprs.push(e.to_string());
                                 }
                             }
@@ -2039,7 +2122,8 @@ pub fn run(
                             let tx = anki_tx.clone();
                             thread::spawn(move || {
                                 let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
+                                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs)
+                                {
                                     Ok(d) => Some(d),
                                     Err(e) => {
                                         eprintln!("chibipop: dupe check failed: {e:#}");
@@ -2050,7 +2134,10 @@ pub fn run(
                                 // SAFETY: wakes the pump.
                                 unsafe {
                                     let _ = PostThreadMessageW(
-                                        main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
+                                        main_tid,
+                                        WM_APP_ANKI,
+                                        WPARAM(0),
+                                        LPARAM(0),
                                     );
                                 }
                             });
@@ -2090,7 +2177,9 @@ pub fn run(
                                 s.content_h = content_h;
                                 s.view_h = view_h;
                                 let m = max_scroll(s.content_h, s.view_h);
-                                if s.scroll > m { s.scroll = m; }
+                                if s.scroll > m {
+                                    s.scroll = m;
+                                }
                                 sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                             }
                             Err(e) => {
@@ -2131,7 +2220,9 @@ pub fn run(
                             s.content_h = content_h;
                             s.view_h = view_h;
                             let m = max_scroll(s.content_h, s.view_h);
-                            if s.scroll > m { s.scroll = m; }
+                            if s.scroll > m {
+                                s.scroll = m;
+                            }
                             sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                         }
                         Err(e) => {
@@ -2155,8 +2246,10 @@ pub fn run(
         } else if msg.message == WM_APP_SAVED {
             while let Ok(result) = save_rx.try_recv() {
                 if let Err(e) = result {
-                    eprintln!("chibipop: could not save settings to {}: {e:#}",
-                              config_path.display());
+                    eprintln!(
+                        "chibipop: could not save settings to {}: {e:#}",
+                        config_path.display()
+                    );
                     if let Some(w) = &settings {
                         w.set_status(
                             "Settings applied, but could not be saved - \
@@ -2197,16 +2290,10 @@ pub fn run(
                             if s.scroll > m {
                                 s.scroll = m;
                             }
-                            sync_anki_button(
-                                anki_button.as_ref(),
-                                Some(s),
-                                &theme,
-                            );
+                            sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "chibipop: repaint after screenshot failed: {e:#}"
-                            );
+                            eprintln!("chibipop: repaint after screenshot failed: {e:#}");
                         }
                     }
                 }
@@ -2308,7 +2395,9 @@ fn find_text_plugin<'a>(
     let Some((dir, parsed)) = hit else {
         bail!("plugin \"{name}\" is not on disk");
     };
-    let m = parsed.as_ref().map_err(|e| anyhow!("plugin \"{name}\": {e:#}"))?;
+    let m = parsed
+        .as_ref()
+        .map_err(|e| anyhow!("plugin \"{name}\": {e:#}"))?;
     if !m.roles.contains(&Role::TextProvider) {
         bail!("plugin \"{name}\" is not a text-provider");
     }
@@ -2333,16 +2422,12 @@ fn resolve_recogniser(ocr_engine: &str, enabled: &[String]) -> Option<Box<dyn Re
         EngineChoice::Plugin(name) => match spawn_plugin_recogniser(&name) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!(
-                    "chibipop: OCR plugin \"{name}\" failed, falling back to builtin: {e:#}"
-                );
+                eprintln!("chibipop: OCR plugin \"{name}\" failed, falling back to builtin: {e:#}");
                 None
             }
         },
         EngineChoice::FellBack(name) => {
-            eprintln!(
-                "chibipop: OCR engine \"{name}\" is not enabled, falling back to builtin"
-            );
+            eprintln!("chibipop: OCR engine \"{name}\" is not enabled, falling back to builtin");
             None
         }
     }
@@ -2375,12 +2460,16 @@ fn worker_main(
     let plugin_recogniser = resolve_recogniser(&ocr_engine, &enabled_plugins);
     let built = if let Some(recogniser) = plugin_recogniser {
         OcrTextSource::with_recogniser(
-            recogniser, max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language,
+            recogniser,
+            max_ocr_passes,
+            prefer_vertical,
+            capture,
+            scan_alphanumeric,
+            &language,
         )
     } else {
         let fallback = crate::config::default_ocr_language();
-        let substitute =
-            startup_language(&language, &fallback, || recogniser_available(&language));
+        let substitute = startup_language(&language, &fallback, || recogniser_available(&language));
         let language = match substitute {
             Some(sub) => {
                 eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
@@ -2388,7 +2477,13 @@ fn worker_main(
             }
             None => language,
         };
-        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language)
+        OcrTextSource::new(
+            max_ocr_passes,
+            prefer_vertical,
+            capture,
+            scan_alphanumeric,
+            &language,
+        )
     };
     let mut ocr = match built.context("creating the OCR text source") {
         Ok(o) => {
@@ -2430,7 +2525,10 @@ fn worker_main(
         }
     };
 
-    let capture_guard = CaptureGuard { main_tid, request_tx: capture_guard_tx };
+    let capture_guard = CaptureGuard {
+        main_tid,
+        request_tx: capture_guard_tx,
+    };
 
     // An Arc would be ceremony.
     if startup_tx.send(Ok(dicts.clone())).is_err() {
@@ -2462,8 +2560,8 @@ fn worker_main(
         };
 
         // One bad frame is not fatal.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match trigger.kind {
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match trigger.kind {
                 TriggerKind::Hover(cursor) => resolve_trigger(
                     &ocr,
                     &dict,
@@ -2476,21 +2574,22 @@ fn worker_main(
                     &sentence_mode,
                     static_region,
                 ),
-                TriggerKind::DrillDown(ref text) => resolve_drilldown(
-                    &dict,
-                    &engine,
-                    &dicts,
-                    &present_cfg,
-                    text,
-                ),
+                TriggerKind::DrillDown(ref text) => {
+                    resolve_drilldown(&dict, &engine, &dicts, &present_cfg, text)
+                }
                 TriggerKind::Reload(_) => {
                     WorkerOutcome::Failed("a reload reached the hover path".to_string())
                 }
-            }
-        }))
-        .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
+            }))
+            .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
 
-        if result_tx.send(WorkerResult { id: trigger.id, outcome }).is_err() {
+        if result_tx
+            .send(WorkerResult {
+                id: trigger.id,
+                outcome,
+            })
+            .is_err()
+        {
             break; // main thread gone
         }
         unsafe {
@@ -2583,7 +2682,10 @@ fn resolve_trigger(
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if scan_display.highlight {
         if let Some(rect) = matched {
-            scan.push(ScanRect { rect, kind: ScanKind::Match });
+            scan.push(ScanRect {
+                rect,
+                kind: ScanKind::Match,
+            });
         }
     }
     WorkerOutcome::Ready {
@@ -2672,7 +2774,6 @@ fn resolve_drilldown(
     WorkerOutcome::DrillDown(Box::new(p))
 }
 
-
 /// Saved for back navigation.
 struct HistoryEntry {
     presentation: Presentation,
@@ -2736,13 +2837,24 @@ fn handle_worker_outcome(
             *shown = None;
             false
         }
-        WorkerOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
-            if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
+        WorkerOutcome::Ready {
+            presentation,
+            anchor,
+            orientation,
+            matched,
+            scan,
+        } => {
+            if shown
+                .as_ref()
+                .is_some_and(|prev| same_content(prev, &presentation, anchor))
+            {
                 return false;
             }
             if log {
                 if let Some(card) = &presentation.top {
-                    let head = card.written.clone()
+                    let head = card
+                        .written
+                        .clone()
                         .or_else(|| card.reading.clone())
                         .unwrap_or_default();
                     println!("{head}  match={}", card.match_len);
@@ -2782,8 +2894,7 @@ fn handle_worker_outcome(
                 }
                 Ok((rect, content_h, view_h)) => {
                     Hooks::discard_scroll();
-                    let HoldRects { hold, hold_char } =
-                        hold_regions(anchor, matched, orientation);
+                    let HoldRects { hold, hold_char } = hold_regions(anchor, matched, orientation);
                     let s = Shown {
                         anchor,
                         popup: rect,
@@ -2836,7 +2947,8 @@ fn show_presentation(
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
-    renderer.paint(presentation, theme, scroll, show_back, side_panel)
+    renderer
+        .paint(presentation, theme, scroll, show_back, side_panel)
         .context("painting the popup")?;
     Ok((rect, content_h, view_h))
 }
@@ -2856,7 +2968,9 @@ fn start_add_to_anki(
     side_panel: bool,
 ) {
     let info = s.presentation.top.as_ref().map(|card| {
-        let expr = card.written.as_deref()
+        let expr = card
+            .written
+            .as_deref()
             .or(card.reading.as_deref())
             .unwrap_or("")
             .to_string();
@@ -2898,26 +3012,19 @@ fn handle_screenshot_save(
     cmd: crate::action::ScreenshotCommand,
 ) -> crate::action::ScreenshotResult {
     let result = (|| -> anyhow::Result<()> {
-        std::fs::create_dir_all(
-            cmd.save_path
-                .parent()
-                .unwrap_or(Path::new(".")),
-        )?;
-        let png = crate::text::capture::encode_bgra_to_png(
-            &cmd.bgra_buf,
-            cmd.width,
-            cmd.height,
-        )?;
+        std::fs::create_dir_all(cmd.save_path.parent().unwrap_or(Path::new(".")))?;
+        let png = crate::text::capture::encode_bgra_to_png(&cmd.bgra_buf, cmd.width, cmd.height)?;
         std::fs::write(&cmd.save_path, &png)?;
         if cmd.anki_connected && !cmd.expr.is_empty() {
-            let screenshot_field = cmd.field_map.iter()
+            let screenshot_field = cmd
+                .field_map
+                .iter()
                 .find(|m| m.source == "screenshot")
                 .map(|m| m.anki_field.clone());
             let pic = screenshot_field.map(|field| {
                 use base64::Engine;
                 crate::anki::NotePicture {
-                    data_base64: base64::engine::general_purpose::STANDARD
-                        .encode(&png),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&png),
                     filename: format!(
                         "chibipop-screenshot-{}.png",
                         cmd.save_path
@@ -3023,13 +3130,26 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     unsafe {
         // Never null, so never checked.
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut mi = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
         if GetMonitorInfoW(hmon, &mut mi).as_bool() {
             let rc = mi.rcWork;
-            PhysRect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top }
+            PhysRect {
+                x: rc.left,
+                y: rc.top,
+                w: rc.right - rc.left,
+                h: rc.bottom - rc.top,
+            }
         } else {
             eprintln!("chibipop: GetMonitorInfoW failed; placing against a 1920x1080 fallback");
-            PhysRect { x: 0, y: 0, w: 1920, h: 1080 }
+            PhysRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            }
         }
     }
 }
@@ -3090,10 +3210,16 @@ fn push_drilldown(
     };
     s.scroll = 0;
     match show_presentation(
-        popup, renderer, theme,
-        max_h_pct, max_w_pct,
-        &s.presentation, s.anchor,
-        0, true, side_panel,
+        popup,
+        renderer,
+        theme,
+        max_h_pct,
+        max_w_pct,
+        &s.presentation,
+        s.anchor,
+        0,
+        true,
+        side_panel,
     ) {
         Ok((rect, content_h, view_h)) => {
             s.popup = rect;
@@ -3124,10 +3250,16 @@ fn pop_history(
     s.scroll = 0;
     let back = !s.history.is_empty();
     match show_presentation(
-        popup, renderer, theme,
-        max_h_pct, max_w_pct,
-        &s.presentation, s.anchor,
-        0, back, side_panel,
+        popup,
+        renderer,
+        theme,
+        max_h_pct,
+        max_w_pct,
+        &s.presentation,
+        s.anchor,
+        0,
+        back,
+        side_panel,
     ) {
         Ok((rect, content_h, view_h)) => {
             s.popup = rect;
@@ -3204,7 +3336,10 @@ fn derive(cfg: &Config) -> LiveSettings {
         },
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
-        capture: CaptureSize { w: cfg.ocr.capture_width, h: cfg.ocr.capture_height },
+        capture: CaptureSize {
+            w: cfg.ocr.capture_width,
+            h: cfg.ocr.capture_height,
+        },
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
         language: cfg.ocr.language.clone(),
         exclude_from_capture: cfg.popup.exclude_from_capture,
@@ -3310,6 +3445,8 @@ fn apply_live(
         Ordering::SeqCst,
     );
     *theme = theme_from_config(&live.popup);
+    let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+    popup.set_alpha(alpha);
     if live.show_lookup_log {
         crate::ui::console::show();
     } else {
@@ -3369,8 +3506,11 @@ fn freeze_rect(s: &Shown, on: bool, mode: crate::config::TriggerMode) -> PhysRec
 }
 
 /// Some = substitute it.
-fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -> bool)
-    -> Option<String> {
+fn startup_language(
+    configured: &str,
+    fallback: &str,
+    available: impl FnOnce() -> bool,
+) -> Option<String> {
     if configured.eq_ignore_ascii_case(fallback) || available() {
         None
     } else {
@@ -3482,8 +3622,14 @@ mod tests {
 
     #[test]
     fn theme_selection_by_name_is_unaffected_by_the_font_field() {
-        assert_eq!(Theme::light().background, theme_from_config(&popup_config("light", "X")).background);
-        assert_eq!(Theme::dark().background, theme_from_config(&popup_config("anything-else", "X")).background);
+        assert_eq!(
+            Theme::light().background,
+            theme_from_config(&popup_config("light", "X")).background
+        );
+        assert_eq!(
+            Theme::dark().background,
+            theme_from_config(&popup_config("anything-else", "X")).background
+        );
     }
 
     fn presentation_of(written: &str) -> Presentation {
@@ -3506,7 +3652,12 @@ mod tests {
     fn shown_of(written: &str, anchor: PhysRect) -> Shown {
         Shown {
             anchor,
-            popup: PhysRect { x: anchor.x, y: anchor.y + anchor.h + POPUP_GAP, w: 420, h: 300 },
+            popup: PhysRect {
+                x: anchor.x,
+                y: anchor.y + anchor.h + POPUP_GAP,
+                w: 420,
+                h: 300,
+            },
             hold: anchor,
             hold_char: anchor,
             presentation: presentation_of(written),
@@ -3522,24 +3673,49 @@ mod tests {
     /// UPSCALE 2 jitters each edge.
     #[test]
     fn an_equal_card_with_a_jittered_anchor_is_the_same_content() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let a = PhysRect {
+            x: 100,
+            y: 200,
+            w: 26,
+            h: 27,
+        };
         let prev = shown_of("宿舎", a);
-        let jittered = PhysRect { x: 101, y: 199, w: 26, h: 27 };
+        let jittered = PhysRect {
+            x: 101,
+            y: 199,
+            w: 26,
+            h: 27,
+        };
         assert!(same_content(&prev, &presentation_of("宿舎"), jittered));
     }
 
     /// One word twice; it must move.
     #[test]
     fn an_equal_card_that_moved_is_not_the_same_content() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let a = PhysRect {
+            x: 100,
+            y: 200,
+            w: 26,
+            h: 27,
+        };
         let prev = shown_of("猫", a);
-        let elsewhere = PhysRect { x: 700, y: 900, w: 26, h: 27 };
+        let elsewhere = PhysRect {
+            x: 700,
+            y: 900,
+            w: 26,
+            h: 27,
+        };
         assert!(!same_content(&prev, &presentation_of("猫"), elsewhere));
     }
 
     #[test]
     fn a_different_card_at_the_same_anchor_is_not_the_same_content() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let a = PhysRect {
+            x: 100,
+            y: 200,
+            w: 26,
+            h: 27,
+        };
         let prev = shown_of("宿舎", a);
         assert!(!same_content(&prev, &presentation_of("駅長"), a));
     }
@@ -3547,60 +3723,144 @@ mod tests {
     /// One word, one popup.
     #[test]
     fn the_hold_region_covers_the_whole_matched_word() {
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        let anchor = PhysRect {
+            x: 3010,
+            y: 257,
+            w: 27,
+            h: 26,
+        };
         // 通ってる matched 4 characters.
-        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        let popup = PhysRect { x: 3007, y: 300, w: 420, h: 300 };
+        let matched = PhysRect {
+            x: 3007,
+            y: 254,
+            w: 120,
+            h: 32,
+        };
+        let popup = PhysRect {
+            x: 3007,
+            y: 300,
+            w: 420,
+            h: 300,
+        };
 
         // Same word, later glyphs.
-        assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, matched, popup));
-        assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, matched, popup));
+        assert!(in_sticky(
+            PhysPoint { x: 3051, y: 270 },
+            matched,
+            matched,
+            popup
+        ));
+        assert!(in_sticky(
+            PhysPoint { x: 3100, y: 270 },
+            matched,
+            matched,
+            popup
+        ));
         // Past the match: re-resolve.
-        assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, matched, popup));
+        assert!(!in_sticky(
+            PhysPoint { x: 3200, y: 270 },
+            matched,
+            matched,
+            popup
+        ));
         // The anchor alone releases.
-        assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, anchor, popup));
+        assert!(!in_sticky(
+            PhysPoint { x: 3051, y: 270 },
+            anchor,
+            anchor,
+            popup
+        ));
     }
 
     /// A 22px は resolves over 34px.
     #[test]
     fn the_hold_covers_the_vertical_slack_hit_scan_allows() {
-        let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
-        let matched = Some(PhysRect { x: 2701, y: 257, w: 30, h: 28 });
+        let anchor = PhysRect {
+            x: 2704,
+            y: 260,
+            w: 24,
+            h: 22,
+        };
+        let matched = Some(PhysRect {
+            x: 2701,
+            y: 257,
+            w: 30,
+            h: 28,
+        });
         let hold = hold_region(anchor, matched, Orientation::Horizontal);
 
-        assert!(hold.y <= 254, "must reach the measured top of the region, got {}", hold.y);
+        assert!(
+            hold.y <= 254,
+            "must reach the measured top of the region, got {}",
+            hold.y
+        );
         assert!(hold.y + hold.h >= 288, "must reach the measured bottom");
         // The line above starts at 248.
-        assert!(hold.y > 248, "reaching the line above would hold a stale popup");
+        assert!(
+            hold.y > 248,
+            "reaching the line above would hold a stale popup"
+        );
     }
 
     /// 宿 resolves 8px past は's box.
     #[test]
     fn the_hold_never_widens_along_the_reading_axis() {
-        let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
-        let matched = PhysRect { x: 2701, y: 257, w: 30, h: 28 };
+        let anchor = PhysRect {
+            x: 2704,
+            y: 260,
+            w: 24,
+            h: 22,
+        };
+        let matched = PhysRect {
+            x: 2701,
+            y: 257,
+            w: 30,
+            h: 28,
+        };
         let hold = hold_region(anchor, Some(matched), Orientation::Horizontal);
         assert_eq!(matched.x, hold.x);
         assert_eq!(matched.w, hold.w);
-        assert!(!hold.contains(PhysPoint { x: 2736, y: 271 }), "2736 resolves 宿");
+        assert!(
+            !hold.contains(PhysPoint { x: 2736, y: 271 }),
+            "2736 resolves 宿"
+        );
     }
 
     /// Vertical: slack on x.
     #[test]
     fn the_hold_mirrors_for_vertical_text() {
-        let anchor = PhysRect { x: 2860, y: 1650, w: 28, h: 25 };
-        let matched = PhysRect { x: 2857, y: 1647, w: 34, h: 90 };
+        let anchor = PhysRect {
+            x: 2860,
+            y: 1650,
+            w: 28,
+            h: 25,
+        };
+        let matched = PhysRect {
+            x: 2857,
+            y: 1647,
+            w: 34,
+            h: 90,
+        };
         let hold = hold_region(anchor, Some(matched), Orientation::Vertical);
         assert_eq!(matched.y, hold.y, "the reading axis keeps the match span");
         assert_eq!(matched.h, hold.h);
-        assert_eq!(anchor.x - anchor.w / 2, hold.x, "slack goes across the column");
+        assert_eq!(
+            anchor.x - anchor.w / 2,
+            hold.x,
+            "slack goes across the column"
+        );
         assert_eq!(anchor.w * 2, hold.w);
     }
 
     /// No match still gets slack.
     #[test]
     fn the_hold_without_a_match_still_carries_its_slack() {
-        let anchor = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let anchor = PhysRect {
+            x: 100,
+            y: 200,
+            w: 26,
+            h: 27,
+        };
         let hold = hold_region(anchor, None, Orientation::Horizontal);
         assert_eq!(anchor.x, hold.x);
         assert_eq!(anchor.w, hold.w);
@@ -3610,10 +3870,25 @@ mod tests {
     /// At tolerance yes, past it no.
     #[test]
     fn the_jitter_tolerance_is_inclusive_and_bounded() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
+        let a = PhysRect {
+            x: 100,
+            y: 200,
+            w: 26,
+            h: 27,
+        };
         let prev = shown_of("宿舎", a);
-        let at = PhysRect { x: 100 + ANCHOR_JITTER_PX, y: 200, w: 26, h: 27 };
-        let past = PhysRect { x: 100 + ANCHOR_JITTER_PX + 1, y: 200, w: 26, h: 27 };
+        let at = PhysRect {
+            x: 100 + ANCHOR_JITTER_PX,
+            y: 200,
+            w: 26,
+            h: 27,
+        };
+        let past = PhysRect {
+            x: 100 + ANCHOR_JITTER_PX + 1,
+            y: 200,
+            w: 26,
+            h: 27,
+        };
         assert!(same_content(&prev, &presentation_of("宿舎"), at));
         assert!(!same_content(&prev, &presentation_of("宿舎"), past));
     }
@@ -3626,7 +3901,10 @@ mod tests {
             scan_alphanumeric: true,
             language: "ja".to_string(),
             present_cfg: Config::default().present_config(),
-            scan_display: ScanDisplay { captures: false, highlight: false },
+            scan_display: ScanDisplay {
+                captures: false,
+                highlight: false,
+            },
             sentence_mode: "line".to_string(),
             static_region: None,
             dicts: Vec::new(),
@@ -3638,16 +3916,34 @@ mod tests {
     fn drain_keeps_the_newest_hover_and_every_reload() {
         let (tx, rx) = mpsc::channel::<Trigger>();
         let reload = TriggerKind::Reload(Box::new(ws(2)));
-        tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
+        tx.send(Trigger {
+            kind: reload,
+            id: RequestId(2),
+        })
+        .unwrap();
         let newer = TriggerKind::Hover(PhysPoint { x: 9, y: 9 });
-        tx.send(Trigger { kind: newer, id: RequestId(3) }).unwrap();
+        tx.send(Trigger {
+            kind: newer,
+            id: RequestId(3),
+        })
+        .unwrap();
         let second = TriggerKind::Reload(Box::new(ws(4)));
-        tx.send(Trigger { kind: second, id: RequestId(4) }).unwrap();
+        tx.send(Trigger {
+            kind: second,
+            id: RequestId(4),
+        })
+        .unwrap();
         let older = TriggerKind::Hover(PhysPoint { x: 1, y: 1 });
-        let first = Trigger { kind: older, id: RequestId(1) };
+        let first = Trigger {
+            kind: older,
+            id: RequestId(1),
+        };
         let (hover, reloads) = drain(first, &rx);
         let hover = hover.expect("a hover survives");
-        assert!(matches!(hover.kind, TriggerKind::Hover(p) if p.x == 9), "newest hover wins");
+        assert!(
+            matches!(hover.kind, TriggerKind::Hover(p) if p.x == 9),
+            "newest hover wins"
+        );
         assert_eq!(2, reloads.len(), "neither reload may be swallowed");
         let passes: Vec<u8> = reloads.iter().map(|r| r.max_passes).collect();
         assert_eq!(vec![2, 4], passes, "reloads keep the order they were sent");
@@ -3658,7 +3954,10 @@ mod tests {
     fn drain_returns_no_hover_when_only_a_reload_queued() {
         let (tx, rx) = mpsc::channel::<Trigger>();
         drop(tx);
-        let first = Trigger { kind: TriggerKind::Reload(Box::new(ws(3))), id: RequestId(1) };
+        let first = Trigger {
+            kind: TriggerKind::Reload(Box::new(ws(3))),
+            id: RequestId(1),
+        };
         let (hover, reloads) = drain(first, &rx);
         assert!(hover.is_none());
         assert_eq!(1, reloads.len());
@@ -3769,7 +4068,11 @@ mod tests {
 
     #[test]
     fn a_window_that_was_never_created_cannot_need_the_guard() {
-        assert!(!capture_guard_needed(CaptureExclusion::Excluded, None, None));
+        assert!(!capture_guard_needed(
+            CaptureExclusion::Excluded,
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -3785,12 +4088,18 @@ mod tests {
         let mut cfg = Config::default();
         cfg.trigger.per_character_lookup = true;
         assert!(derive(&cfg).per_character_lookup);
-        assert!(!derive(&Config::default()).per_character_lookup, "must default off");
+        assert!(
+            !derive(&Config::default()).per_character_lookup,
+            "must default off"
+        );
     }
 
     #[test]
     fn a_startup_language_with_no_pack_falls_back_to_the_default() {
-        assert_eq!(Some("ja".to_string()), startup_language("ko", "ja", || false));
+        assert_eq!(
+            Some("ja".to_string()),
+            startup_language("ko", "ja", || false)
+        );
     }
 
     #[test]
@@ -3820,11 +4129,30 @@ mod tests {
     #[test]
     fn the_freeze_rect_is_the_char_hold_only_when_per_character_is_live() {
         use crate::config::TriggerMode;
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        let anchor = PhysRect {
+            x: 3010,
+            y: 257,
+            w: 27,
+            h: 26,
+        };
         let mut s = shown_of("字", anchor);
-        s.hold = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        s.hold_char = PhysRect { x: 3010, y: 254, w: 27, h: 32 };
-        assert_eq!(s.hold, freeze_rect(&s, false, TriggerMode::Live), "default off");
+        s.hold = PhysRect {
+            x: 3007,
+            y: 254,
+            w: 120,
+            h: 32,
+        };
+        s.hold_char = PhysRect {
+            x: 3010,
+            y: 254,
+            w: 27,
+            h: 32,
+        };
+        assert_eq!(
+            s.hold,
+            freeze_rect(&s, false, TriggerMode::Live),
+            "default off"
+        );
         assert_eq!(s.hold_char, freeze_rect(&s, true, TriggerMode::Live));
         assert_eq!(s.hold, freeze_rect(&s, true, TriggerMode::HoldKey));
     }
@@ -3842,9 +4170,19 @@ mod tests {
     /// What `Shown` really gets.
     #[test]
     fn the_char_hold_ignores_the_matched_span() {
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
+        let anchor = PhysRect {
+            x: 3010,
+            y: 257,
+            w: 27,
+            h: 26,
+        };
         // 通ってる matched 4 characters.
-        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        let matched = PhysRect {
+            x: 3007,
+            y: 254,
+            w: 120,
+            h: 32,
+        };
         let HoldRects { hold, hold_char } =
             hold_regions(anchor, Some(matched), Orientation::Horizontal);
         let next_glyph = PhysPoint { x: 3100, y: 270 };
@@ -3856,11 +4194,26 @@ mod tests {
     /// The freeze/reach seam.
     #[test]
     fn a_char_freeze_still_reaches_the_popup() {
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
-        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
+        let anchor = PhysRect {
+            x: 3010,
+            y: 257,
+            w: 27,
+            h: 26,
+        };
+        let matched = PhysRect {
+            x: 3007,
+            y: 254,
+            w: 120,
+            h: 32,
+        };
         let HoldRects { hold, hold_char } =
             hold_regions(anchor, Some(matched), Orientation::Horizontal);
-        let popup = PhysRect { x: 3007, y: hold.y + hold.h + POPUP_GAP, w: 420, h: 300 };
+        let popup = PhysRect {
+            x: 3007,
+            y: hold.y + hold.h + POPUP_GAP,
+            w: 420,
+            h: 300,
+        };
         let x = anchor.x + anchor.w / 2;
         for y in hold_char.y..(popup.y + popup.h) {
             assert!(
@@ -3871,15 +4224,19 @@ mod tests {
     }
 
     fn di(id: i64, name: &str) -> crate::present::DictInfo {
-        crate::present::DictInfo { dict_id: id, name: name.to_string() }
+        crate::present::DictInfo {
+            dict_id: id,
+            name: name.to_string(),
+        }
     }
 
     #[test]
     fn the_active_language_selects_its_own_list() {
         let mut cfg = Config::default();
         cfg.ocr.language = "zh-Hans-CN".to_string();
-        cfg.dictionaries.per_language.insert(
-            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
         let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert_eq!(vec!["中日大辞典".to_string()], order);
@@ -3900,8 +4257,9 @@ mod tests {
     fn a_list_matching_nothing_installed_falls_back() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["Typoo".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["Typoo".to_string()]);
         let dicts = [di(1, "大辞林　第四版")];
         let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert!(!restrict, "all patterns missed, so do not restrict");
@@ -3912,8 +4270,9 @@ mod tests {
     fn a_substituted_recogniser_ignores_the_language_list() {
         let mut cfg = Config::default();
         cfg.ocr.language = "zh-Hans-CN".to_string();
-        cfg.dictionaries.per_language.insert(
-            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
         let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || false);
         assert_eq!(cfg.dictionaries.display_order, order);
@@ -3924,7 +4283,9 @@ mod tests {
     fn an_empty_list_does_not_restrict() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert("ja".to_string(), Vec::new());
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), Vec::new());
         let dicts = [di(1, "大辞林　第四版")];
         let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert!(!restrict);
@@ -3948,7 +4309,9 @@ mod tests {
     }
 
     fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/yomitan")
+            .join(name)
     }
 
     /// WAL, as build-dict writes it.
@@ -3962,7 +4325,9 @@ mod tests {
 
     fn dict_rows(db: &Path) -> Vec<(i64, String)> {
         let conn = rusqlite::Connection::open(db).unwrap();
-        let mut stmt = conn.prepare("SELECT dict_id, name FROM dict ORDER BY dict_id").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT dict_id, name FROM dict ORDER BY dict_id")
+            .unwrap();
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         rows.map(std::result::Result::unwrap).collect()
     }
@@ -4014,12 +4379,16 @@ mod tests {
         let (dir, _guard) = edit_scratch("legacy_mode");
         let legacy = dir.join("legacy.sqlite");
         let conn = rusqlite::Connection::open(&legacy).unwrap();
-        conn.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE t(x);").unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE t(x);")
+            .unwrap();
         drop(conn);
 
         let err = open_writer(&legacy).expect_err("a delete-mode file must be refused");
         let msg = format!("{err:#}");
-        assert!(msg.contains("delete"), "the message must name the mode found: {msg}");
+        assert!(
+            msg.contains("delete"),
+            "the message must name the mode found: {msg}"
+        );
         assert!(msg.contains("WAL"), "the message must name WAL: {msg}");
     }
 
@@ -4037,14 +4406,20 @@ mod tests {
     fn the_writer_never_creates_a_missing_database() {
         let (dir, _guard) = edit_scratch("no_create");
         let missing = dir.join("absent.sqlite");
-        assert!(open_writer(&missing).is_err(), "a missing database must not open");
+        assert!(
+            open_writer(&missing).is_err(),
+            "a missing database must not open"
+        );
         assert!(!missing.exists(), "opening must not create the file");
     }
 
     /// Absolute ids read wrong.
     #[test]
     fn progress_counts_from_the_dictionary_being_added() {
-        assert_eq!("progress  4997 / ?", rebased("progress  365000 / ?", 360004));
+        assert_eq!(
+            "progress  4997 / ?",
+            rebased("progress  365000 / ?", 360004)
+        );
         assert_eq!(
             Some("4,997 entries\u{2026}".to_string()),
             rebuild::friendly(&rebased("progress  365000 / ?", 360004))
@@ -4058,7 +4433,10 @@ mod tests {
 
     #[test]
     fn a_line_that_is_not_progress_survives_rebasing() {
-        assert_eq!("building  creating index", rebased("building  creating index", 360004));
+        assert_eq!(
+            "building  creating index",
+            rebased("building  creating index", 360004)
+        );
         assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
     }
 
@@ -4079,7 +4457,10 @@ mod tests {
     #[test]
     fn removing_a_row_the_database_never_had_is_refused() {
         let form = staged_form(&[], &["JA Freq"]);
-        assert!(stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+        assert!(stages_frequency(
+            &form,
+            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
+        ));
     }
 
     #[test]
@@ -4089,9 +4470,15 @@ mod tests {
             Path::new(r"C:\a\data\chibipop.sqlite"),
         );
         assert!(notice.contains("Nothing was changed."), "{notice}");
-        assert!(notice.contains("\r\nchibipop build-dict"), "the command needs its own line");
+        assert!(
+            notice.contains("\r\nchibipop build-dict"),
+            "the command needs its own line"
+        );
         assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
-        assert!(notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""), "{notice}");
+        assert!(
+            notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""),
+            "{notice}"
+        );
     }
 
     #[test]
@@ -4122,7 +4509,10 @@ mod tests {
     #[test]
     fn removing_an_installed_dictionary_stays_incremental() {
         let form = staged_form(&[], &["\u{5927}\u{8f9e}\u{6797}"]);
-        assert!(!stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+        assert!(!stages_frequency(
+            &form,
+            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
+        ));
     }
 
     /// A broken zip has no dict row.
@@ -4130,7 +4520,10 @@ mod tests {
     fn removing_an_unreadable_file_stays_incremental() {
         let mut form = staged_form(&[], &["broken.zip"]);
         form.unreadable = vec!["broken.zip".to_string()];
-        assert!(!stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+        assert!(!stages_frequency(
+            &form,
+            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
+        ));
     }
 
     #[test]
@@ -4172,14 +4565,23 @@ mod tests {
     #[test]
     fn the_status_names_what_failed_beside_what_worked() {
         let s = edit_status(&report_of(&["New"], &[], &["Bad: the zip is corrupt"]));
-        assert!(s.contains("New"), "the applied change must still be named: {s}");
+        assert!(
+            s.contains("New"),
+            "the applied change must still be named: {s}"
+        );
         assert!(s.contains("Bad"), "the failure must be named: {s}");
-        assert!(s.contains("the zip is corrupt"), "the reason must be named: {s}");
+        assert!(
+            s.contains("the zip is corrupt"),
+            "the reason must be named: {s}"
+        );
     }
 
     #[test]
     fn a_change_that_did_nothing_says_so() {
-        assert_eq!("No dictionary changed.", edit_status(&report_of(&[], &[], &[])));
+        assert_eq!(
+            "No dictionary changed.",
+            edit_status(&report_of(&[], &[], &[]))
+        );
     }
 
     /// The release's whole point.
@@ -4199,7 +4601,11 @@ mod tests {
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(2, report.dicts.len(), "{:?}", report.dicts);
         assert_eq!(2, dict_rows(&db).len());
-        assert_eq!(before * 2, entry_count(&db), "every entry must be kept and doubled");
+        assert_eq!(
+            before * 2,
+            entry_count(&db),
+            "every entry must be kept and doubled"
+        );
         assert!(
             rx.try_iter().any(|m| matches!(m, EditMsg::Status(_))),
             "the edit must report progress"
@@ -4232,9 +4638,19 @@ mod tests {
         assert_eq!(vec!["extra.zip".to_string()], report.removed);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(1, dict_rows(&db).len());
-        assert_eq!(kept, entry_count(&db), "the other dictionary must be untouched");
-        assert!(!library.join("extra.zip").exists(), "the archive must be gone");
-        assert!(!library.join(".removed").exists(), "nothing may stay quarantined");
+        assert_eq!(
+            kept,
+            entry_count(&db),
+            "the other dictionary must be untouched"
+        );
+        assert!(
+            !library.join("extra.zip").exists(),
+            "the archive must be gone"
+        );
+        assert!(
+            !library.join(".removed").exists(),
+            "nothing may stay quarantined"
+        );
         assert_eq!(1, report.dicts.len());
     }
 
@@ -4252,7 +4668,10 @@ mod tests {
 
         assert!(report.added.is_empty(), "{:?}", report.added);
         assert_eq!(1, report.failed.len(), "{:?}", report.failed);
-        assert!(!library.join("freq.zip").exists(), "the imported copy must be removed");
+        assert!(
+            !library.join("freq.zip").exists(),
+            "the imported copy must be removed"
+        );
         assert_eq!(before, entry_count(&db));
         assert_eq!(1, dict_rows(&db).len());
     }
@@ -4286,7 +4705,10 @@ mod tests {
     #[test]
     fn a_reload_replaces_the_cached_dictionary_identities() {
         let mut present_cfg = Config::default().present_config();
-        let mut scan_display = ScanDisplay { captures: false, highlight: false };
+        let mut scan_display = ScanDisplay {
+            captures: false,
+            highlight: false,
+        };
         let mut sentence_mode = "line".to_string();
         let mut dicts = vec![di(7, "Removed")];
         let mut s = ws(2);
@@ -4295,7 +4717,11 @@ mod tests {
         let mut static_region = None;
         take_reload(s, &mut present_cfg, &mut scan_display, &mut sentence_mode, &mut static_region, &mut dicts);
 
-        assert_eq!(vec![di(7, "Added")], dicts, "the removed name must not answer");
+        assert_eq!(
+            vec![di(7, "Added")],
+            dicts,
+            "the removed name must not answer"
+        );
     }
 
     /// Never the last dictionary.
@@ -4321,8 +4747,13 @@ mod tests {
         let library = dir.join("library");
         let db = built_db(&dir, &library);
 
-        let raw = read_source_hashes(&db).unwrap().expect("build-dict records what it read");
-        assert!(raw.contains(r#""name": "terms.zip""#), "json.dumps spacing: {raw}");
+        let raw = read_source_hashes(&db)
+            .unwrap()
+            .expect("build-dict records what it read");
+        assert!(
+            raw.contains(r#""name": "terms.zip""#),
+            "json.dumps spacing: {raw}"
+        );
         assert_eq!(None, drifted(&library, &db).unwrap(), "the two agree");
     }
 
@@ -4334,7 +4765,9 @@ mod tests {
         let db = built_db(&dir, &library);
         std::fs::copy(fixture("freq.zip"), library.join("freq.zip")).unwrap();
 
-        let text = drifted(&library, &db).unwrap().expect("a dropped-in archive is drift");
+        let text = drifted(&library, &db)
+            .unwrap()
+            .expect("a dropped-in archive is drift");
 
         assert!(text.contains("freq.zip"), "{text}");
         assert!(text.contains("chibipop build-dict --library"), "{text}");

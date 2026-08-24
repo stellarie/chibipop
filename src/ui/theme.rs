@@ -30,6 +30,8 @@ pub struct Theme {
     pub collapsed_text: (u8, u8, u8),
     /// Frequency, POS, `…` marker.
     pub dimmed_text: (u8, u8, u8),
+    /// The frequency badge.
+    pub frequency_text: (u8, u8, u8),
 
     /// Yu Gothic UI in both themes.
     pub font_name: String,
@@ -45,6 +47,26 @@ pub struct Theme {
     pub collapsed_size: f32,
     /// Frequency, POS tags.
     pub dimmed_size: f32,
+    /// The frequency badge size.
+    pub frequency_size: f32,
+
+    /// DirectWrite weight, 100-900.
+    pub headword_weight: u16,
+    pub reading_weight: u16,
+    pub body_weight: u16,
+    pub dict_label_weight: u16,
+    pub collapsed_weight: u16,
+    pub dimmed_weight: u16,
+    pub frequency_weight: u16,
+
+    /// DirectWrite italic flag.
+    pub headword_italic: bool,
+    pub reading_italic: bool,
+    pub body_italic: bool,
+    pub dict_label_italic: bool,
+    pub collapsed_italic: bool,
+    pub dimmed_italic: bool,
+    pub frequency_italic: bool,
 
     /// Inner panel padding, px.
     pub padding: i32,
@@ -52,6 +74,10 @@ pub struct Theme {
     pub corner_radius: i32,
     /// Horizontal rule thickness.
     pub separator_height: f32,
+    /// Panel border stroke, px.
+    pub border_width: f32,
+    /// Window alpha, 0.0-1.0.
+    pub opacity: f32,
 
     /// Overlay: pass-1 capture box.
     pub scan_pass1: (u8, u8, u8),
@@ -76,6 +102,7 @@ impl Theme {
             dict_label_text: (130, 170, 220),
             collapsed_text: (150, 152, 160),
             dimmed_text: (110, 112, 120),
+            frequency_text: (110, 112, 120),
             font_name: "Yu Gothic UI".to_string(),
             headword_size: 20.0,
             reading_size: 15.0,
@@ -83,9 +110,26 @@ impl Theme {
             dict_label_size: 13.0,
             collapsed_size: 13.0,
             dimmed_size: 13.0,
+            frequency_size: 13.0,
+            headword_weight: 400,
+            reading_weight: 400,
+            body_weight: 400,
+            dict_label_weight: 400,
+            collapsed_weight: 400,
+            dimmed_weight: 400,
+            frequency_weight: 400,
+            headword_italic: false,
+            reading_italic: false,
+            body_italic: false,
+            dict_label_italic: false,
+            collapsed_italic: false,
+            dimmed_italic: false,
+            frequency_italic: false,
             padding: 12,
             corner_radius: 12,
             separator_height: 1.0,
+            border_width: 1.0,
+            opacity: 0.9,
             scan_pass1: (110, 150, 200),
             scan_tile: (240, 160, 50),
             scan_anchor: (255, 240, 120),
@@ -105,6 +149,7 @@ impl Theme {
             dict_label_text: (30, 90, 160),
             collapsed_text: (100, 102, 110),
             dimmed_text: (150, 152, 158),
+            frequency_text: (150, 152, 158),
             font_name: "Yu Gothic UI".to_string(),
             headword_size: 20.0,
             reading_size: 15.0,
@@ -112,9 +157,26 @@ impl Theme {
             dict_label_size: 13.0,
             collapsed_size: 13.0,
             dimmed_size: 13.0,
+            frequency_size: 13.0,
+            headword_weight: 400,
+            reading_weight: 400,
+            body_weight: 400,
+            dict_label_weight: 400,
+            collapsed_weight: 400,
+            dimmed_weight: 400,
+            frequency_weight: 400,
+            headword_italic: false,
+            reading_italic: false,
+            body_italic: false,
+            dict_label_italic: false,
+            collapsed_italic: false,
+            dimmed_italic: false,
+            frequency_italic: false,
             padding: 12,
             corner_radius: 12,
             separator_height: 1.0,
+            border_width: 1.0,
+            opacity: 0.9,
             scan_pass1: (70, 100, 150),
             scan_tile: (210, 110, 20),
             scan_anchor: (200, 20, 20),

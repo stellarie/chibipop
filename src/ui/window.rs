@@ -151,7 +151,10 @@ impl Popup {
                 CaptureExclusion::DeliberatelyNotExcluded
             };
 
-            Ok(Popup { hwnd, capture_exclusion: Cell::new(capture_exclusion) })
+            Ok(Popup {
+                hwnd,
+                capture_exclusion: Cell::new(capture_exclusion),
+            })
         }
     }
 
@@ -160,7 +163,11 @@ impl Popup {
         unsafe {
             let region = CreateRoundRectRgn(0, 0, r.w, r.h, CORNER_RADIUS, CORNER_RADIUS);
             if region.is_invalid() {
-                anyhow::bail!("CreateRoundRectRgn({}, {}) returned a null region", r.w, r.h);
+                anyhow::bail!(
+                    "CreateRoundRectRgn({}, {}) returned a null region",
+                    r.w,
+                    r.h
+                );
             }
             // Ours only if it failed.
             if SetWindowRgn(self.hwnd, Some(region), true) == 0 {
@@ -215,6 +222,14 @@ impl Popup {
         self.capture_exclusion.get()
     }
 
+    /// Update the popup's alpha.
+    pub fn set_alpha(&self, alpha: u8) {
+        // SAFETY: `self.hwnd` is live.
+        unsafe {
+            let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), alpha, LWA_ALPHA);
+        }
+    }
+
     /// Re-applies live; may refuse.
     pub fn set_capture_exclusion(&self, on: bool) {
         let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
@@ -223,7 +238,8 @@ impl Popup {
         // is an accepted, non-fatal outcome, exactly as in `create` -
         // here it is also recorded, because it is the new state.
         let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
-        self.capture_exclusion.set(CaptureExclusion::from_attempt(on, ok));
+        self.capture_exclusion
+            .set(CaptureExclusion::from_attempt(on, ok));
     }
 }
 
@@ -304,8 +320,11 @@ unsafe fn paint_button(hwnd: HWND) {
         let _ = unsafe { GetClientRect(hwnd, &mut rc) };
 
         let px = dpi_scale(hwnd, state.font_size as i32);
-        let face: Vec<u16> =
-            state.font_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let face: Vec<u16> = state
+            .font_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut text: Vec<u16> = state.text.encode_utf16().collect();
 
         // SAFETY: `hdc` was checked non-invalid above; `face` and
@@ -318,16 +337,30 @@ unsafe fn paint_button(hwnd: HWND) {
             let _ = DeleteObject(bg_brush.into());
 
             let font = CreateFontW(
-                -px, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+                -px,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
                 (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
                 PCWSTR::from_raw(face.as_ptr()),
             );
             let old_font = SelectObject(hdc, font.into());
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, colorref(state.text_color));
-            DrawTextW(hdc, &mut text, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(
+                hdc,
+                &mut text,
+                &mut rc,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
             SelectObject(hdc, old_font);
             let _ = DeleteObject(font.into());
         }
@@ -455,7 +488,10 @@ impl AnkiButton {
                 CaptureExclusion::DeliberatelyNotExcluded
             };
 
-            Ok(AnkiButton { hwnd, capture_exclusion: Cell::new(capture_exclusion) })
+            Ok(AnkiButton {
+                hwnd,
+                capture_exclusion: Cell::new(capture_exclusion),
+            })
         }
     }
 
@@ -467,14 +503,12 @@ impl AnkiButton {
         // it — deleted only on failure); `SetWindowPos`'s result is
         // checked via `?`.
         unsafe {
-            let rgn = CreateRoundRectRgn(
-                0, 0, r.w, r.h,
-                CORNER_RADIUS, CORNER_RADIUS,
-            );
+            let rgn = CreateRoundRectRgn(0, 0, r.w, r.h, CORNER_RADIUS, CORNER_RADIUS);
             if rgn.is_invalid() {
                 anyhow::bail!(
                     "CreateRoundRectRgn({}, {}) returned a null region",
-                    r.w, r.h,
+                    r.w,
+                    r.h,
                 );
             }
             if SetWindowRgn(self.hwnd, Some(rgn), true) == 0 {
@@ -559,7 +593,8 @@ impl AnkiButton {
         // Refusal is an accepted outcome, exactly as in `create` -
         // here it is also recorded, because it is the new state.
         let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
-        self.capture_exclusion.set(CaptureExclusion::from_attempt(on, ok));
+        self.capture_exclusion
+            .set(CaptureExclusion::from_attempt(on, ok));
     }
 
     /// Fixed height, DPI-scaled.

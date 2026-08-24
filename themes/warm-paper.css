@@ -1,0 +1,76 @@
+/* chibipop popup theme */
+/* Warm Paper — soft cream on dark brown, like aged paper. */
+/* Best on: dark base theme. */
+
+/* Panel background, border, shape */
+.popup {
+  background-color: #2c2418;
+  border-color: #4a3c2a;
+  border-radius: 6px;
+  border-width: 1px;
+  padding: 14px;
+  font-family: "Yu Mincho";
+  opacity: 0.94;
+}
+
+/* Main word */
+.headword {
+  color: #f0e4c8;
+  font-size: 22px;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Kana reading */
+.reading {
+  color: #c8b898;
+  font-size: 14px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Definition text */
+.body {
+  color: #e0d4b8;
+  font-size: 15px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Dictionary name label */
+.dict-label {
+  color: #b89860;
+  font-size: 12px;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Frequency badge */
+.frequency {
+  color: #887858;
+  font-size: 12px;
+  font-weight: normal;
+  font-style: italic;
+}
+
+/* Other results (collapsed) */
+.collapsed {
+  color: #a09078;
+  font-size: 13px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Frequency, POS tags */
+.dimmed {
+  color: #786850;
+  font-size: 12px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Horizontal rule */
+.separator {
+  color: #4a3c2a;
+  height: 1px;
+}

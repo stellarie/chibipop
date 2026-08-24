@@ -102,6 +102,9 @@ struct Line {
     size: f32,
     /// Extra space above this line.
     top_gap: f32,
+    /// DirectWrite weight, 100-900.
+    weight: u16,
+    italic: bool,
 }
 
 enum Elem {
@@ -110,7 +113,9 @@ enum Elem {
     ///
     /// Steals width from the next.
     Corner(Line),
-    Separator { top_gap: f32 },
+    Separator {
+        top_gap: f32,
+    },
     /// A clickable collapsed row.
     Collapsed(usize, Line),
     /// Per-char click targets.
@@ -169,36 +174,53 @@ pub struct Renderer {
     hit_rects: RefCell<Vec<HitRect>>,
 }
 
-/// One font's formats, by size.
+/// Cached by font+size+weight+style.
 #[derive(Default)]
 struct FormatCache {
     font: String,
-    by_size: HashMap<u32, IDWriteTextFormat>,
+    by_key: HashMap<u64, IDWriteTextFormat>,
 }
 
-/// One format per font and size.
+/// Pack size+weight+style into one key.
+fn format_key(size: f32, weight: u16, italic: bool) -> u64 {
+    let s = size.to_bits() as u64;
+    let w = (weight as u64) << 32;
+    let i = if italic { 1u64 << 48 } else { 0 };
+    s | w | i
+}
+
+/// One format per font+size+weight+style.
 fn text_format(
     dwrite: &IDWriteFactory,
     formats: &RefCell<FormatCache>,
     font: &str,
     size: f32,
+    weight: u16,
+    italic: bool,
 ) -> windows::core::Result<IDWriteTextFormat> {
-    let key = size.to_bits();
+    let key = format_key(size, weight, italic);
     {
         let cache = formats.borrow();
         if cache.font == font {
-            if let Some(f) = cache.by_size.get(&key) {
+            if let Some(f) = cache.by_key.get(&key) {
                 return Ok(f.clone());
             }
         }
     }
 
+    let dw_weight = DWRITE_FONT_WEIGHT(weight as i32);
+    let dw_style = if italic {
+        DWRITE_FONT_STYLE_ITALIC
+    } else {
+        DWRITE_FONT_STYLE_NORMAL
+    };
+
     let created = unsafe {
         dwrite.CreateTextFormat(
             &HSTRING::from(font),
             None,
-            DWRITE_FONT_WEIGHT_REGULAR,
-            DWRITE_FONT_STYLE_NORMAL,
+            dw_weight,
+            dw_style,
             DWRITE_FONT_STRETCH_NORMAL,
             size,
             w!("ja-JP"),
@@ -208,9 +230,9 @@ fn text_format(
     let mut cache = formats.borrow_mut();
     if cache.font != font {
         cache.font = font.to_string();
-        cache.by_size.clear();
+        cache.by_key.clear();
     }
-    cache.by_size.insert(key, created.clone());
+    cache.by_key.insert(key, created.clone());
     Ok(created)
 }
 
@@ -235,7 +257,11 @@ impl Renderer {
 
     fn dpi_scale(&self) -> f32 {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
-        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+        if dpi == 0 {
+            1.0
+        } else {
+            dpi as f32 / 96.0
+        }
     }
 
     /// Finds the action at (x, y).
@@ -299,6 +325,8 @@ impl Renderer {
                 &self.formats,
                 &theme.font_name,
                 theme.collapsed_size,
+                theme.collapsed_weight,
+                theme.collapsed_italic,
                 &side,
                 SIDE_PANEL_W,
             )?
@@ -331,8 +359,11 @@ impl Renderer {
         show_back: bool,
         side_panel: bool,
     ) -> Result<()> {
-        let (w, h) = self.client_size().context("querying the popup's client size")?;
-        self.ensure_target(w, h).context("preparing the D2D render target")?;
+        let (w, h) = self
+            .client_size()
+            .context("querying the popup's client size")?;
+        self.ensure_target(w, h)
+            .context("preparing the D2D render target")?;
 
         if let Err(e) = self.paint_once(p, theme, w, h, scroll, show_back, side_panel) {
             if e.code() == D2DERR_RECREATE_TARGET {
@@ -356,7 +387,10 @@ impl Renderer {
 
     /// Creates or resizes it.
     fn ensure_target(&mut self, w: i32, h: i32) -> Result<()> {
-        let size = D2D_SIZE_U { width: w.max(1) as u32, height: h.max(1) as u32 };
+        let size = D2D_SIZE_U {
+            width: w.max(1) as u32,
+            height: h.max(1) as u32,
+        };
 
         if let Some(target) = &self.target {
             unsafe { target.Resize(&size) }.context("ID2D1HwndRenderTarget::Resize")?;
@@ -381,8 +415,11 @@ impl Renderer {
             pixelSize: size,
             presentOptions: D2D1_PRESENT_OPTIONS_NONE,
         };
-        let target = unsafe { self.d2d_factory.CreateHwndRenderTarget(&rt_props, &hwnd_props) }
-            .context("ID2D1Factory::CreateHwndRenderTarget")?;
+        let target = unsafe {
+            self.d2d_factory
+                .CreateHwndRenderTarget(&rt_props, &hwnd_props)
+        }
+        .context("ID2D1Factory::CreateHwndRenderTarget")?;
         self.target = Some(target);
         Ok(())
     }
@@ -412,7 +449,9 @@ impl Renderer {
         let scroll = (scroll as f32 / scale) as i32;
 
         unsafe { target.BeginDraw() };
-        let scope = DrawScope { target: Some(target) };
+        let scope = DrawScope {
+            target: Some(target),
+        };
 
         let draw_result: windows::core::Result<()> = (|| {
             let (elems, side) = build_elements(p, theme, show_back, side_panel);
@@ -428,14 +467,19 @@ impl Renderer {
 
                 let bg_brush = target.CreateSolidColorBrush(&color_f(theme.background), None)?;
                 let panel = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: 0.0, top: 0.0, right: w as f32, bottom: h as f32 },
+                    rect: D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: w as f32,
+                        bottom: h as f32,
+                    },
                     radiusX: theme.corner_radius as f32,
                     radiusY: theme.corner_radius as f32,
                 };
                 target.FillRoundedRectangle(&panel, &bg_brush);
 
                 let border_brush = target.CreateSolidColorBrush(&color_f(theme.border), None)?;
-                target.DrawRoundedRectangle(&panel, &border_brush, 1.0, None);
+                target.DrawRoundedRectangle(&panel, &border_brush, theme.border_width, None);
             }
 
             let main_w = (w as f32 - 2.0 * theme.padding as f32 - side_extra).max(0.0);
@@ -536,7 +580,12 @@ impl Drop for DrawScope<'_> {
 }
 
 fn color_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
-    D2D1_COLOR_F { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
+    D2D1_COLOR_F {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a: 1.0,
+    }
 }
 
 /// `p`'s content, in draw order.
@@ -556,6 +605,8 @@ fn build_elements(
             color: theme.dict_label_text,
             size: theme.collapsed_size,
             top_gap: 0.0,
+            weight: theme.dict_label_weight,
+            italic: theme.dict_label_italic,
         }));
     }
 
@@ -564,13 +615,17 @@ fn build_elements(
         if let Some(freq) = card.freq {
             out.push(Elem::Corner(Line {
                 text: format!("freq {freq}"),
-                color: theme.dimmed_text,
-                size: theme.dimmed_size,
+                color: theme.frequency_text,
+                size: theme.frequency_size,
                 top_gap: 0.0,
+                weight: theme.frequency_weight,
+                italic: theme.frequency_italic,
             }));
         }
 
-        let headword = card.written.clone()
+        let headword = card
+            .written
+            .clone()
             .or_else(|| card.reading.clone())
             .unwrap_or_default();
         if !headword.is_empty() {
@@ -582,6 +637,8 @@ fn build_elements(
                     color: theme.headword_text,
                     size: theme.headword_size,
                     top_gap: if show_back { LINE_GAP } else { 0.0 },
+                    weight: theme.headword_weight,
+                    italic: theme.headword_italic,
                 },
             });
         }
@@ -594,6 +651,8 @@ fn build_elements(
                     color: theme.reading_text,
                     size: theme.reading_size,
                     top_gap: LINE_GAP,
+                    weight: theme.reading_weight,
+                    italic: theme.reading_italic,
                 }));
             }
         }
@@ -604,6 +663,8 @@ fn build_elements(
                 color: theme.dimmed_text,
                 size: theme.dimmed_size,
                 top_gap: LINE_GAP,
+                weight: theme.dimmed_weight,
+                italic: theme.dimmed_italic,
             }));
         }
 
@@ -613,6 +674,8 @@ fn build_elements(
                 color: theme.dict_label_text,
                 size: theme.dict_label_size,
                 top_gap: SECTION_GAP,
+                weight: theme.dict_label_weight,
+                italic: theme.dict_label_italic,
             }));
             if !block.glosses.is_empty() {
                 out.push(Elem::Text(Line {
@@ -620,6 +683,8 @@ fn build_elements(
                     color: theme.body_text,
                     size: theme.body_size,
                     top_gap: LINE_GAP,
+                    weight: theme.body_weight,
+                    italic: theme.body_italic,
                 }));
             }
         }
@@ -630,10 +695,14 @@ fn build_elements(
     if !p.collapsed.is_empty() {
         if side_panel {
             for (i, row) in p.collapsed.iter().enumerate() {
-                let head = row.written.clone()
+                let head = row
+                    .written
+                    .clone()
                     .or_else(|| row.reading.clone())
                     .unwrap_or_default();
-                if head.is_empty() { continue; }
+                if head.is_empty() {
+                    continue;
+                }
                 side.push(SideEntry {
                     idx: i,
                     text: head,
@@ -641,9 +710,13 @@ fn build_elements(
                 });
             }
         } else {
-            out.push(Elem::Separator { top_gap: SEPARATOR_MARGIN });
+            out.push(Elem::Separator {
+                top_gap: SEPARATOR_MARGIN,
+            });
             for (i, row) in p.collapsed.iter().enumerate() {
-                let head = row.written.clone()
+                let head = row
+                    .written
+                    .clone()
                     .or_else(|| row.reading.clone())
                     .unwrap_or_default();
                 let text = if head.is_empty() {
@@ -651,12 +724,17 @@ fn build_elements(
                 } else {
                     format!("{head} \u{2014} {}", row.summary)
                 };
-                out.push(Elem::Collapsed(i, Line {
-                    text,
-                    color: theme.collapsed_text,
-                    size: theme.collapsed_size,
-                    top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
-                }));
+                out.push(Elem::Collapsed(
+                    i,
+                    Line {
+                        text,
+                        color: theme.collapsed_text,
+                        size: theme.collapsed_size,
+                        top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
+                        weight: theme.collapsed_weight,
+                        italic: theme.collapsed_italic,
+                    },
+                ));
             }
         }
     }
@@ -672,9 +750,15 @@ pub(crate) fn anki_button_label(
     theme: &Theme,
     anki: &AnkiPopupState,
 ) -> Option<(String, (u8, u8, u8))> {
-    if !anki.enabled { return None; }
-    if !anki.connected { return None; }
-    let expr = p.top.as_ref()
+    if !anki.enabled {
+        return None;
+    }
+    if !anki.connected {
+        return None;
+    }
+    let expr = p
+        .top
+        .as_ref()
         .and_then(|c| c.written.as_deref().or(c.reading.as_deref()))
         .unwrap_or("");
     let (text, color) = if anki.checking {
@@ -717,7 +801,8 @@ fn layout_pass(
                 let h = theme.separator_height;
                 y += top_gap;
                 if let Some(t) = target {
-                    let brush = unsafe { t.CreateSolidColorBrush(&color_f(theme.separator), None) }?;
+                    let brush =
+                        unsafe { t.CreateSolidColorBrush(&color_f(theme.separator), None) }?;
                     let rect = D2D_RECT_F {
                         left: origin_x,
                         top: origin_y + y - scroll,
@@ -736,7 +821,10 @@ fn layout_pass(
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
                         t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            Vector2 {
+                                X: origin_x,
+                                Y: origin_y + y - scroll,
+                            },
                             &layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -757,7 +845,10 @@ fn layout_pass(
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
                         t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            Vector2 {
+                                X: origin_x,
+                                Y: origin_y + y - scroll,
+                            },
                             &layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -786,7 +877,10 @@ fn layout_pass(
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
                         t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            Vector2 {
+                                X: origin_x,
+                                Y: origin_y + y - scroll,
+                            },
                             &layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -795,7 +889,11 @@ fn layout_pass(
                 }
                 h
             }
-            Elem::Headword { ref headword, prefix_u16, ref line } => {
+            Elem::Headword {
+                ref headword,
+                prefix_u16,
+                ref line,
+            } => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
                 let (layout, m) =
@@ -814,11 +912,7 @@ fn layout_pass(
                             // layout's UTF-16 text.
                             unsafe {
                                 layout.HitTestTextPosition(
-                                    u16_pos,
-                                    false,
-                                    &mut px,
-                                    &mut py,
-                                    &mut hm,
+                                    u16_pos, false, &mut px, &mut py, &mut hm,
                                 )?;
                             }
                             hits.borrow_mut().push(HitRect {
@@ -826,9 +920,7 @@ fn layout_pass(
                                 y: origin_y + y + hm.top,
                                 w: Some(hm.width),
                                 h: hm.height,
-                                action: HitAction::DrillDown(
-                                    ch.to_string(),
-                                ),
+                                action: HitAction::DrillDown(ch.to_string()),
                             });
                         }
                         u16_pos += ch.len_utf16() as u32;
@@ -838,7 +930,10 @@ fn layout_pass(
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
                         t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            Vector2 {
+                                X: origin_x,
+                                Y: origin_y + y - scroll,
+                            },
                             &layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -865,7 +960,10 @@ fn layout_pass(
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
                         t.DrawTextLayout(
-                            Vector2 { X: origin_x, Y: origin_y + y - scroll },
+                            Vector2 {
+                                X: origin_x,
+                                Y: origin_y + y - scroll,
+                            },
                             &layout,
                             &brush,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -889,7 +987,7 @@ fn build_text_layout(
     line: &Line,
     max_w: f32,
 ) -> windows::core::Result<(IDWriteTextLayout, DWRITE_TEXT_METRICS)> {
-    let format = text_format(dwrite, formats, font, line.size)?;
+    let format = text_format(dwrite, formats, font, line.size, line.weight, line.italic)?;
     let wide: Vec<u16> = line.text.encode_utf16().collect();
     let layout = unsafe { dwrite.CreateTextLayout(&wide, &format, max_w.max(1.0), f32::MAX) }?;
     let mut metrics = DWRITE_TEXT_METRICS::default();
@@ -903,23 +1001,21 @@ fn side_measure(
     formats: &RefCell<FormatCache>,
     font: &str,
     size: f32,
+    weight: u16,
+    italic: bool,
     entries: &[SideEntry],
     col_w: f32,
 ) -> windows::core::Result<f32> {
-    let format = text_format(dwrite, formats, font, size)?;
+    let format = text_format(dwrite, formats, font, size, weight, italic)?;
     let heading: Vec<u16> = "See also".encode_utf16().collect();
-    let layout = unsafe {
-        dwrite.CreateTextLayout(&heading, &format, col_w.max(1.0), f32::MAX)
-    }?;
+    let layout = unsafe { dwrite.CreateTextLayout(&heading, &format, col_w.max(1.0), f32::MAX) }?;
     let mut m = DWRITE_TEXT_METRICS::default();
     unsafe { layout.GetMetrics(&mut m) }?;
     let mut y = m.height + LINE_GAP;
 
     for entry in entries {
         let wide: Vec<u16> = entry.text.encode_utf16().collect();
-        let layout = unsafe {
-            dwrite.CreateTextLayout(&wide, &format, col_w.max(1.0), f32::MAX)
-        }?;
+        let layout = unsafe { dwrite.CreateTextLayout(&wide, &format, col_w.max(1.0), f32::MAX) }?;
         let mut em = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut em) }?;
         y += LINE_GAP + em.height;
@@ -942,35 +1038,38 @@ fn side_paint(
     scroll: f32,
     hit_out: &RefCell<Vec<HitRect>>,
 ) -> windows::core::Result<()> {
-    let format = text_format(dwrite, formats, font, theme.collapsed_size)?;
-    let dim_brush = unsafe {
-        target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None)
-    }?;
+    let format = text_format(
+        dwrite,
+        formats,
+        font,
+        theme.collapsed_size,
+        theme.collapsed_weight,
+        theme.collapsed_italic,
+    )?;
+    let dim_brush = unsafe { target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None) }?;
 
     let heading: Vec<u16> = "See also".encode_utf16().collect();
-    let layout = unsafe {
-        dwrite.CreateTextLayout(&heading, &format, col_w.max(1.0), f32::MAX)
-    }?;
+    let layout = unsafe { dwrite.CreateTextLayout(&heading, &format, col_w.max(1.0), f32::MAX) }?;
     let mut m = DWRITE_TEXT_METRICS::default();
     unsafe { layout.GetMetrics(&mut m) }?;
     let mut y = 0.0f32;
     unsafe {
         target.DrawTextLayout(
-            Vector2 { X: x, Y: origin_y + y - scroll },
-            &layout, &dim_brush,
+            Vector2 {
+                X: x,
+                Y: origin_y + y - scroll,
+            },
+            &layout,
+            &dim_brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
     }
     y += m.height + LINE_GAP;
 
     for entry in entries {
-        let brush = unsafe {
-            target.CreateSolidColorBrush(&color_f(entry.color), None)
-        }?;
+        let brush = unsafe { target.CreateSolidColorBrush(&color_f(entry.color), None) }?;
         let wide: Vec<u16> = entry.text.encode_utf16().collect();
-        let layout = unsafe {
-            dwrite.CreateTextLayout(&wide, &format, col_w.max(1.0), f32::MAX)
-        }?;
+        let layout = unsafe { dwrite.CreateTextLayout(&wide, &format, col_w.max(1.0), f32::MAX) }?;
         let mut em = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut em) }?;
         hit_out.borrow_mut().push(HitRect {
@@ -982,8 +1081,12 @@ fn side_paint(
         });
         unsafe {
             target.DrawTextLayout(
-                Vector2 { X: x, Y: origin_y + y - scroll },
-                &layout, &brush,
+                Vector2 {
+                    X: x,
+                    Y: origin_y + y - scroll,
+                },
+                &layout,
+                &brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
         }
@@ -1027,7 +1130,7 @@ mod tests {
         match &elems[0] {
             Elem::Corner(line) => {
                 assert_eq!("freq 7671", line.text);
-                assert_eq!(theme.dimmed_text, line.color);
+                assert_eq!(theme.frequency_text, line.color);
             }
             _ => panic!("the frequency corner must be the first element"),
         }
@@ -1042,7 +1145,8 @@ mod tests {
     #[test]
     fn part_of_speech_is_dimmed_metadata_not_body_text() {
         let theme = Theme::dark();
-        let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, false, false);
+        let (elems, _) =
+            build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, false, false);
         let pos = elems
             .iter()
             .find_map(|e| match e {
@@ -1053,7 +1157,7 @@ mod tests {
         assert_eq!("noun · suru", pos.text);
         assert_eq!(theme.dimmed_text, pos.color);
         assert_ne!(theme.body_text, pos.color, "POS must not read as body text");
-        assert_eq!(theme.collapsed_size, pos.size);
+        assert_eq!(theme.dimmed_size, pos.size);
     }
 
     /// 大辞林 has no POS markup.
@@ -1129,7 +1233,11 @@ mod tests {
     #[test]
     fn anki_button_label_shows_add_by_default() {
         let theme = Theme::dark();
-        let anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+        let anki = AnkiPopupState {
+            enabled: true,
+            connected: true,
+            ..AnkiPopupState::disabled()
+        };
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
         assert_eq!("\u{ff0b} Add to Anki", text);
         assert_eq!(theme.dict_label_text, color);
@@ -1138,7 +1246,12 @@ mod tests {
     #[test]
     fn anki_button_label_shows_adding_while_in_flight() {
         let theme = Theme::dark();
-        let anki = AnkiPopupState { enabled: true, connected: true, adding: true, ..AnkiPopupState::disabled() };
+        let anki = AnkiPopupState {
+            enabled: true,
+            connected: true,
+            adding: true,
+            ..AnkiPopupState::disabled()
+        };
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
         assert_eq!("Adding\u{2026}", text);
         assert_eq!(theme.dimmed_text, color);
@@ -1147,7 +1260,11 @@ mod tests {
     #[test]
     fn anki_button_label_flags_a_known_dupe() {
         let theme = Theme::dark();
-        let mut anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+        let mut anki = AnkiPopupState {
+            enabled: true,
+            connected: true,
+            ..AnkiPopupState::disabled()
+        };
         anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
         assert_eq!("\u{ff0b} Add to Anki (duplicate)", text);
@@ -1157,7 +1274,11 @@ mod tests {
     #[test]
     fn anki_button_label_shows_added_after_success() {
         let theme = Theme::dark();
-        let mut anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+        let mut anki = AnkiPopupState {
+            enabled: true,
+            connected: true,
+            ..AnkiPopupState::disabled()
+        };
         anki.added.insert("\u{96D1}\u{8AC7}".to_string());
         let (text, _) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
         assert_eq!("\u{2713} Added", text);
@@ -1184,7 +1305,9 @@ mod tests {
     fn anki_button_label_shows_checking() {
         let theme = Theme::dark();
         let anki = AnkiPopupState {
-            enabled: true, connected: true, checking: true,
+            enabled: true,
+            connected: true,
+            checking: true,
             ..AnkiPopupState::disabled()
         };
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
@@ -1196,7 +1319,9 @@ mod tests {
     fn anki_button_label_shows_failed() {
         let theme = Theme::dark();
         let anki = AnkiPopupState {
-            enabled: true, connected: true, failed: true,
+            enabled: true,
+            connected: true,
+            failed: true,
             ..AnkiPopupState::disabled()
         };
         let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
@@ -1208,7 +1333,8 @@ mod tests {
     #[test]
     fn anki_button_label_is_none_when_disconnected() {
         let anki = AnkiPopupState {
-            enabled: true, connected: false,
+            enabled: true,
+            connected: false,
             ..AnkiPopupState::disabled()
         };
         assert!(anki_button_label(&one_card(&[], None), &Theme::dark(), &anki).is_none());
@@ -1217,12 +1343,13 @@ mod tests {
     /// No marks on collapsed rows.
     #[test]
     fn collapsed_rows_carry_no_dupe_marks() {
-        let (elems, _) = build_elements(
-            &with_collapsed(), &Theme::dark(), false, false,
-        );
+        let (elems, _) = build_elements(&with_collapsed(), &Theme::dark(), false, false);
         for e in &elems {
             if let Elem::Collapsed(_, line) = e {
-                assert!(!line.text.starts_with('\u{2713}'), "no check marks on collapsed rows");
+                assert!(
+                    !line.text.starts_with('\u{2713}'),
+                    "no check marks on collapsed rows"
+                );
             }
         }
     }
@@ -1324,18 +1451,14 @@ mod tests {
 
     #[test]
     fn side_panel_false_keeps_collapsed_rows_inline() {
-        let (elems, side) = build_elements(
-            &with_collapsed(), &Theme::dark(), false, false,
-        );
+        let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, false);
         assert!(side.is_empty());
         assert!(elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
     }
 
     #[test]
     fn side_panel_true_moves_collapsed_rows_to_side() {
-        let (elems, side) = build_elements(
-            &with_collapsed(), &Theme::dark(), false, true,
-        );
+        let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true);
         assert!(!elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
         assert_eq!(2, side.len());
         assert!(side[0].text.contains('\u{96D1}'));
@@ -1343,18 +1466,14 @@ mod tests {
 
     #[test]
     fn side_entries_carry_expand_indices() {
-        let (_, side) = build_elements(
-            &with_collapsed(), &Theme::dark(), false, true,
-        );
+        let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true);
         assert_eq!(0, side[0].idx);
         assert_eq!(1, side[1].idx);
     }
 
     #[test]
     fn side_entries_show_headword_only() {
-        let (_, side) = build_elements(
-            &with_collapsed(), &Theme::dark(), false, true,
-        );
+        let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true);
         assert!(!side[0].text.contains("noise"));
         assert!(!side[1].text.contains("magazine"));
     }
