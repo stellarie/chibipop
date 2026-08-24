@@ -1,0 +1,75 @@
+/* chibipop popup theme */
+/* Midnight Purple — deep violet tones. */
+
+/* Panel background, border, shape */
+.popup {
+  background-color: #1a1a2e;
+  border-color: #2d2d50;
+  border-radius: 10px;
+  border-width: 1px;
+  padding: 14px;
+  font-family: "Noto Sans JP";
+  opacity: 0.92;
+}
+
+/* Main word */
+.headword {
+  color: #e0d0ff;
+  font-size: 22px;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Kana reading */
+.reading {
+  color: #b0a0d0;
+  font-size: 14px;
+  font-weight: normal;
+  font-style: italic;
+}
+
+/* Definition text */
+.body {
+  color: #d0cce0;
+  font-size: 15px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Dictionary name label */
+.dict-label {
+  color: #8080cc;
+  font-size: 12px;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Frequency badge */
+.frequency {
+  color: #606088;
+  font-size: 12px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Other results (collapsed) */
+.collapsed {
+  color: #9090b0;
+  font-size: 13px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Frequency, POS tags */
+.dimmed {
+  color: #606078;
+  font-size: 12px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Horizontal rule */
+.separator {
+  color: #2d2d50;
+  height: 1px;
+}

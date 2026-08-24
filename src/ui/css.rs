@@ -17,9 +17,13 @@ struct Property {
     color: Option<(u8, u8, u8)>,
     font_size: Option<f32>,
     font_family: Option<String>,
+    font_weight: Option<u16>,
+    font_style_italic: Option<bool>,
     border_radius: Option<i32>,
+    border_width: Option<f32>,
     padding: Option<i32>,
     height: Option<f32>,
+    opacity: Option<f32>,
 }
 
 impl Property {
@@ -28,9 +32,13 @@ impl Property {
             color: None,
             font_size: None,
             font_family: None,
+            font_weight: None,
+            font_style_italic: None,
             border_radius: None,
+            border_width: None,
             padding: None,
             height: None,
+            opacity: None,
         }
     }
 }
@@ -44,6 +52,7 @@ const SELECTORS: &[&str] = &[
     "dict-label",
     "collapsed",
     "dimmed",
+    "frequency",
     "separator",
 ];
 
@@ -94,6 +103,22 @@ fn parse_font_family(s: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// "bold" → 700, "normal" → 400, or 100-900.
+fn parse_font_weight(s: &str) -> Option<u16> {
+    match s.trim() {
+        "normal" => Some(400),
+        "bold" => Some(700),
+        n => {
+            let v: u16 = n.parse().ok()?;
+            if (100..=900).contains(&v) {
+                Some(v)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Parse one property value.
 fn parse_property(name: &str, value: &str, out: &mut Property) -> Result<(), String> {
     match name {
@@ -109,9 +134,22 @@ fn parse_property(name: &str, value: &str, out: &mut Property) -> Result<(), Str
             Some(f) => out.font_family = Some(f),
             None => return Err(format!("bad font-family: {value}")),
         },
+        "font-weight" => match parse_font_weight(value) {
+            Some(w) => out.font_weight = Some(w),
+            None => return Err(format!("bad font-weight: {value}")),
+        },
+        "font-style" => match value.trim() {
+            "italic" => out.font_style_italic = Some(true),
+            "normal" => out.font_style_italic = Some(false),
+            _ => return Err(format!("bad font-style: {value}")),
+        },
         "border-radius" => match parse_px_i32(value) {
             Some(r) => out.border_radius = Some(r),
             None => return Err(format!("bad border-radius: {value}")),
+        },
+        "border-width" => match parse_px_f32(value) {
+            Some(w) => out.border_width = Some(w),
+            None => return Err(format!("bad border-width: {value}")),
         },
         "padding" => match parse_px_i32(value) {
             Some(p) => out.padding = Some(p),
@@ -121,7 +159,11 @@ fn parse_property(name: &str, value: &str, out: &mut Property) -> Result<(), Str
             Some(h) => out.height = Some(h),
             None => return Err(format!("bad height: {value}")),
         },
-        _ => {} // Unknown: silently ignored.
+        "opacity" => match value.trim().parse::<f32>() {
+            Ok(o) if (0.0..=1.0).contains(&o) => out.opacity = Some(o),
+            _ => return Err(format!("bad opacity: {value}")),
+        },
+        _ => {}
     }
     Ok(())
 }
@@ -235,6 +277,16 @@ pub fn parse(css: &str, base: &mut Theme) -> Vec<CssError> {
     errors
 }
 
+/// Apply text weight/style to theme.
+fn apply_text_style(prop: &Property, weight: &mut u16, italic: &mut bool) {
+    if let Some(w) = prop.font_weight {
+        *weight = w;
+    }
+    if let Some(i) = prop.font_style_italic {
+        *italic = i;
+    }
+}
+
 /// Apply one parsed property.
 fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
     match class {
@@ -254,6 +306,11 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
                     theme.corner_radius = r;
                 }
             }
+            "border-width" => {
+                if let Some(w) = prop.border_width {
+                    theme.border_width = w;
+                }
+            }
             "padding" => {
                 if let Some(p) = prop.padding {
                     theme.padding = p;
@@ -262,6 +319,11 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
             "font-family" => {
                 if let Some(ref f) = prop.font_family {
                     theme.font_name = f.clone();
+                }
+            }
+            "opacity" => {
+                if let Some(o) = prop.opacity {
+                    theme.opacity = o;
                 }
             }
             _ => {}
@@ -273,6 +335,7 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
             if let Some(s) = prop.font_size {
                 theme.headword_size = s;
             }
+            apply_text_style(prop, &mut theme.headword_weight, &mut theme.headword_italic);
         }
         "reading" => {
             if let Some(c) = prop.color {
@@ -281,6 +344,7 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
             if let Some(s) = prop.font_size {
                 theme.reading_size = s;
             }
+            apply_text_style(prop, &mut theme.reading_weight, &mut theme.reading_italic);
         }
         "body" => {
             if let Some(c) = prop.color {
@@ -289,6 +353,7 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
             if let Some(s) = prop.font_size {
                 theme.body_size = s;
             }
+            apply_text_style(prop, &mut theme.body_weight, &mut theme.body_italic);
         }
         "dict-label" => {
             if let Some(c) = prop.color {
@@ -297,6 +362,11 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
             if let Some(s) = prop.font_size {
                 theme.dict_label_size = s;
             }
+            apply_text_style(
+                prop,
+                &mut theme.dict_label_weight,
+                &mut theme.dict_label_italic,
+            );
         }
         "collapsed" => {
             if let Some(c) = prop.color {
@@ -305,6 +375,11 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
             if let Some(s) = prop.font_size {
                 theme.collapsed_size = s;
             }
+            apply_text_style(
+                prop,
+                &mut theme.collapsed_weight,
+                &mut theme.collapsed_italic,
+            );
         }
         "dimmed" => {
             if let Some(c) = prop.color {
@@ -313,6 +388,20 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
             if let Some(s) = prop.font_size {
                 theme.dimmed_size = s;
             }
+            apply_text_style(prop, &mut theme.dimmed_weight, &mut theme.dimmed_italic);
+        }
+        "frequency" => {
+            if let Some(c) = prop.color {
+                theme.frequency_text = c;
+            }
+            if let Some(s) = prop.font_size {
+                theme.frequency_size = s;
+            }
+            apply_text_style(
+                prop,
+                &mut theme.frequency_weight,
+                &mut theme.frequency_italic,
+            );
         }
         "separator" => {
             if let Some(c) = prop.color {
@@ -326,9 +415,30 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
     }
 }
 
+/// Format a weight for CSS output.
+fn weight_str(w: u16) -> &'static str {
+    match w {
+        400 => "normal",
+        700 => "bold",
+        _ => "",
+    }
+}
+
+/// Format a weight, with numeric fallback.
+fn weight_css(w: u16) -> String {
+    let s = weight_str(w);
+    if s.is_empty() {
+        w.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Serialize a theme to CSS.
 pub fn to_css(theme: &Theme) -> String {
     let c = |rgb: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2);
+    let style = |italic: bool| if italic { "italic" } else { "normal" };
+
     let lines = [
         "/* chibipop popup theme */",
         "/* Share this file to share your theme. */",
@@ -337,45 +447,67 @@ pub fn to_css(theme: &Theme) -> String {
         ".popup {",
         &format!("  background-color: {};", c(theme.background)),
         &format!("  border-color: {};", c(theme.border)),
+        &format!("  border-width: {}px;", theme.border_width),
         &format!("  border-radius: {}px;", theme.corner_radius),
         &format!("  padding: {}px;", theme.padding),
         &format!("  font-family: \"{}\";", theme.font_name),
+        &format!("  opacity: {};", theme.opacity),
         "}",
         "",
         "/* Main word */",
         ".headword {",
         &format!("  color: {};", c(theme.headword_text)),
         &format!("  font-size: {}px;", theme.headword_size),
+        &format!("  font-weight: {};", weight_css(theme.headword_weight)),
+        &format!("  font-style: {};", style(theme.headword_italic)),
         "}",
         "",
         "/* Kana reading */",
         ".reading {",
         &format!("  color: {};", c(theme.reading_text)),
         &format!("  font-size: {}px;", theme.reading_size),
+        &format!("  font-weight: {};", weight_css(theme.reading_weight)),
+        &format!("  font-style: {};", style(theme.reading_italic)),
         "}",
         "",
         "/* Definition text */",
         ".body {",
         &format!("  color: {};", c(theme.body_text)),
         &format!("  font-size: {}px;", theme.body_size),
+        &format!("  font-weight: {};", weight_css(theme.body_weight)),
+        &format!("  font-style: {};", style(theme.body_italic)),
         "}",
         "",
         "/* Dictionary name label */",
         ".dict-label {",
         &format!("  color: {};", c(theme.dict_label_text)),
         &format!("  font-size: {}px;", theme.dict_label_size),
+        &format!("  font-weight: {};", weight_css(theme.dict_label_weight)),
+        &format!("  font-style: {};", style(theme.dict_label_italic)),
         "}",
         "",
         "/* Other results (collapsed) */",
         ".collapsed {",
         &format!("  color: {};", c(theme.collapsed_text)),
         &format!("  font-size: {}px;", theme.collapsed_size),
+        &format!("  font-weight: {};", weight_css(theme.collapsed_weight)),
+        &format!("  font-style: {};", style(theme.collapsed_italic)),
         "}",
         "",
         "/* Frequency, POS tags */",
         ".dimmed {",
         &format!("  color: {};", c(theme.dimmed_text)),
         &format!("  font-size: {}px;", theme.dimmed_size),
+        &format!("  font-weight: {};", weight_css(theme.dimmed_weight)),
+        &format!("  font-style: {};", style(theme.dimmed_italic)),
+        "}",
+        "",
+        "/* Frequency badge */",
+        ".frequency {",
+        &format!("  color: {};", c(theme.frequency_text)),
+        &format!("  font-size: {}px;", theme.frequency_size),
+        &format!("  font-weight: {};", weight_css(theme.frequency_weight)),
+        &format!("  font-style: {};", style(theme.frequency_italic)),
         "}",
         "",
         "/* Horizontal rule */",
@@ -502,13 +634,19 @@ mod tests {
         assert_eq!(original.dict_label_text, rebuilt.dict_label_text);
         assert_eq!(original.collapsed_text, rebuilt.collapsed_text);
         assert_eq!(original.dimmed_text, rebuilt.dimmed_text);
+        assert_eq!(original.frequency_text, rebuilt.frequency_text);
         assert_eq!(original.separator, rebuilt.separator);
         assert_eq!(original.font_name, rebuilt.font_name);
         assert_eq!(original.headword_size, rebuilt.headword_size);
         assert_eq!(original.body_size, rebuilt.body_size);
         assert_eq!(original.collapsed_size, rebuilt.collapsed_size);
+        assert_eq!(original.frequency_size, rebuilt.frequency_size);
         assert_eq!(original.padding, rebuilt.padding);
         assert_eq!(original.corner_radius, rebuilt.corner_radius);
+        assert_eq!(original.border_width, rebuilt.border_width);
+        assert_eq!(original.opacity, rebuilt.opacity);
+        assert_eq!(original.headword_weight, rebuilt.headword_weight);
+        assert_eq!(original.headword_italic, rebuilt.headword_italic);
     }
 
     #[test]
@@ -568,8 +706,10 @@ mod tests {
             "  background-color: #112233;\n",
             "  border-color: #445566;\n",
             "  border-radius: 8px;\n",
+            "  border-width: 2px;\n",
             "  padding: 16px;\n",
             "  font-family: \"Noto Sans JP\";\n",
+            "  opacity: 0.8;\n",
             "}\n",
         );
         let errors = parse(css, &mut theme);
@@ -577,8 +717,10 @@ mod tests {
         assert_eq!((0x11, 0x22, 0x33), theme.background);
         assert_eq!((0x44, 0x55, 0x66), theme.border);
         assert_eq!(8, theme.corner_radius);
+        assert_eq!(2.0, theme.border_width);
         assert_eq!(16, theme.padding);
         assert_eq!("Noto Sans JP", theme.font_name);
+        assert_eq!(0.8, theme.opacity);
     }
 
     #[test]
@@ -649,5 +791,84 @@ mod tests {
         let mut theme = dark();
         let errors = parse(".headword color: #ff0000; }", &mut theme);
         assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn frequency_selector_applies_color_and_size() {
+        let mut theme = dark();
+        let css = ".frequency { color: #aabb00; font-size: 11px; }";
+        let errors = parse(css, &mut theme);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!((0xaa, 0xbb, 0x00), theme.frequency_text);
+        assert_eq!(11.0, theme.frequency_size);
+    }
+
+    #[test]
+    fn font_weight_bold_maps_to_700() {
+        let mut theme = dark();
+        let css = ".headword { font-weight: bold; }";
+        let errors = parse(css, &mut theme);
+        assert!(errors.is_empty());
+        assert_eq!(700, theme.headword_weight);
+    }
+
+    #[test]
+    fn font_weight_numeric_600() {
+        let mut theme = dark();
+        let css = ".headword { font-weight: 600; }";
+        let errors = parse(css, &mut theme);
+        assert!(errors.is_empty());
+        assert_eq!(600, theme.headword_weight);
+    }
+
+    #[test]
+    fn font_style_italic() {
+        let mut theme = dark();
+        let css = ".reading { font-style: italic; }";
+        let errors = parse(css, &mut theme);
+        assert!(errors.is_empty());
+        assert!(theme.reading_italic);
+    }
+
+    #[test]
+    fn opacity_applies() {
+        let mut theme = dark();
+        let css = ".popup { opacity: 0.75; }";
+        let errors = parse(css, &mut theme);
+        assert!(errors.is_empty());
+        assert_eq!(0.75, theme.opacity);
+    }
+
+    #[test]
+    fn border_width_applies() {
+        let mut theme = dark();
+        let css = ".popup { border-width: 2px; }";
+        let errors = parse(css, &mut theme);
+        assert!(errors.is_empty());
+        assert_eq!(2.0, theme.border_width);
+    }
+
+    #[test]
+    fn opacity_out_of_range_is_rejected() {
+        let mut theme = dark();
+        let errors = parse(".popup { opacity: 1.5; }", &mut theme);
+        assert_eq!(1, errors.len());
+        assert!(errors[0].message.contains("bad opacity"));
+    }
+
+    #[test]
+    fn font_weight_out_of_range_is_rejected() {
+        let mut theme = dark();
+        let errors = parse(".headword { font-weight: 50; }", &mut theme);
+        assert_eq!(1, errors.len());
+        assert!(errors[0].message.contains("bad font-weight"));
+    }
+
+    #[test]
+    fn font_style_garbage_is_rejected() {
+        let mut theme = dark();
+        let errors = parse(".reading { font-style: oblique; }", &mut theme);
+        assert_eq!(1, errors.len());
+        assert!(errors[0].message.contains("bad font-style"));
     }
 }

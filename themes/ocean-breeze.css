@@ -1,0 +1,76 @@
+/* chibipop popup theme */
+/* Ocean Breeze — cool blue-green on deep navy. */
+/* Best on: dark base theme. */
+
+/* Panel background, border, shape */
+.popup {
+  background-color: #0e1a24;
+  border-color: #1e3a4a;
+  border-radius: 14px;
+  border-width: 1px;
+  padding: 12px;
+  font-family: "Noto Sans JP";
+  opacity: 0.90;
+}
+
+/* Main word */
+.headword {
+  color: #c0e8f0;
+  font-size: 20px;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Kana reading */
+.reading {
+  color: #80b8c8;
+  font-size: 15px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Definition text */
+.body {
+  color: #b0d0d8;
+  font-size: 15px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Dictionary name label */
+.dict-label {
+  color: #50a0c0;
+  font-size: 13px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Frequency badge */
+.frequency {
+  color: #406878;
+  font-size: 12px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Other results (collapsed) */
+.collapsed {
+  color: #7098a8;
+  font-size: 13px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Frequency, POS tags */
+.dimmed {
+  color: #406070;
+  font-size: 13px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Horizontal rule */
+.separator {
+  color: #1e3a4a;
+  height: 1px;
+}
