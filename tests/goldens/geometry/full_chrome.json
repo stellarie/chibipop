@@ -1,0 +1,226 @@
+{
+  "fixture": "full_chrome",
+  "variants": {
+    "default": {
+      "anki_button": {
+        "color": [
+          130,
+          170,
+          220
+        ],
+        "label": "＋ Add to Anki (duplicate)"
+      },
+      "content": {
+        "content_w": "456.00",
+        "origin": "12.00",
+        "used_h": "203.96"
+      },
+      "elements": [
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "kind": "BackButton",
+          "lines": 1,
+          "text": "← Back",
+          "top_gap": "0.00",
+          "w": "43.09",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "0.00",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 1,
+          "kind": "Corner",
+          "lines": 1,
+          "text": "freq 7671",
+          "top_gap": "0.00",
+          "w": "54.63",
+          "wrap_w": "456.00",
+          "x": "413.37",
+          "y": "29.29"
+        },
+        {
+          "advance": "26.60",
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 2,
+          "kind": "Headword",
+          "lines": 1,
+          "text": "雑談",
+          "top_gap": "4.00",
+          "w": "40.00",
+          "wrap_w": "393.37",
+          "x": "12.00",
+          "y": "33.29"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 3,
+          "kind": "Text",
+          "lines": 1,
+          "text": "ざつだん",
+          "top_gap": "4.00",
+          "w": "46.43",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "63.89"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "kind": "Text",
+          "lines": 1,
+          "text": "noun · suru verb",
+          "top_gap": "4.00",
+          "w": "93.13",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "87.84"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 5,
+          "kind": "Text",
+          "lines": 1,
+          "text": "Jitendex",
+          "top_gap": "10.00",
+          "w": "46.77",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "115.13"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 6,
+          "kind": "Text",
+          "lines": 1,
+          "text": "chatting; idle talk",
+          "top_gap": "4.00",
+          "w": "113.39",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "136.43"
+        },
+        {
+          "advance": "1.00",
+          "font_size": "0.00",
+          "h": "1.00",
+          "i": 7,
+          "kind": "Separator",
+          "lines": 0,
+          "text": "",
+          "top_gap": "10.00",
+          "w": "456.00",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "166.38"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 8,
+          "kind": "Collapsed",
+          "lines": 1,
+          "text": "雑 — rough; crude; miscellaneous",
+          "top_gap": "10.00",
+          "w": "192.94",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "177.38"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 9,
+          "kind": "Collapsed",
+          "lines": 1,
+          "text": "談 — talk; conversation",
+          "top_gap": "4.00",
+          "w": "133.31",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "198.67"
+        }
+      ],
+      "hits": [
+        {
+          "action": "Back",
+          "h": "17.29",
+          "i": 0,
+          "w": null,
+          "x": null,
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"雑\")",
+          "h": "26.60",
+          "i": 1,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "33.29"
+        },
+        {
+          "action": "DrillDown(\"談\")",
+          "h": "26.60",
+          "i": 2,
+          "w": "20.00",
+          "x": "32.00",
+          "y": "33.29"
+        },
+        {
+          "action": "ExpandEntry(0)",
+          "h": "17.29",
+          "i": 3,
+          "w": null,
+          "x": null,
+          "y": "177.38"
+        },
+        {
+          "action": "ExpandEntry(1)",
+          "h": "17.29",
+          "i": 4,
+          "w": null,
+          "x": null,
+          "y": "198.67"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "full_chrome",
+        "max_h": 486,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": true,
+        "side_panel": false,
+        "variant": "default"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 228,
+        "total_w": 480,
+        "view_h": 228
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    }
+  }
+}

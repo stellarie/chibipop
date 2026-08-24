@@ -1,0 +1,362 @@
+{
+  "fixture": "side_panel",
+  "variants": {
+    "inline": {
+      "anki_button": null,
+      "content": {
+        "content_w": "456.00",
+        "origin": "12.00",
+        "used_h": "203.96"
+      },
+      "elements": [
+        {
+          "advance": "0.00",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "kind": "Corner",
+          "lines": 1,
+          "text": "freq 1204",
+          "top_gap": "0.00",
+          "w": "54.63",
+          "wrap_w": "456.00",
+          "x": "413.37",
+          "y": "12.00"
+        },
+        {
+          "advance": "26.60",
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 1,
+          "kind": "Headword",
+          "lines": 1,
+          "text": "生",
+          "top_gap": "0.00",
+          "w": "20.00",
+          "wrap_w": "393.37",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 2,
+          "kind": "Text",
+          "lines": 1,
+          "text": "なま",
+          "top_gap": "4.00",
+          "w": "24.13",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "42.60"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 3,
+          "kind": "Text",
+          "lines": 1,
+          "text": "adjectival noun · noun",
+          "top_gap": "4.00",
+          "w": "126.64",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "66.55"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "kind": "Text",
+          "lines": 1,
+          "text": "Jitendex",
+          "top_gap": "10.00",
+          "w": "46.77",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "93.84"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 5,
+          "kind": "Text",
+          "lines": 1,
+          "text": "raw; uncooked; fresh; natural; unedited",
+          "top_gap": "4.00",
+          "w": "256.57",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "115.13"
+        },
+        {
+          "advance": "1.00",
+          "font_size": "0.00",
+          "h": "1.00",
+          "i": 6,
+          "kind": "Separator",
+          "lines": 0,
+          "text": "",
+          "top_gap": "10.00",
+          "w": "456.00",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "145.09"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 7,
+          "kind": "Collapsed",
+          "lines": 1,
+          "text": "生 — life; living",
+          "top_gap": "10.00",
+          "w": "87.35",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "156.09"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 8,
+          "kind": "Collapsed",
+          "lines": 1,
+          "text": "生 — pure; undiluted",
+          "top_gap": "4.00",
+          "w": "120.70",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "177.38"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 9,
+          "kind": "Collapsed",
+          "lines": 1,
+          "text": "summary-only row with no headword",
+          "top_gap": "4.00",
+          "w": "214.97",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "198.67"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"生\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "action": "ExpandEntry(0)",
+          "h": "17.29",
+          "i": 1,
+          "w": null,
+          "x": null,
+          "y": "156.09"
+        },
+        {
+          "action": "ExpandEntry(1)",
+          "h": "17.29",
+          "i": 2,
+          "w": null,
+          "x": null,
+          "y": "177.38"
+        },
+        {
+          "action": "ExpandEntry(2)",
+          "h": "17.29",
+          "i": 3,
+          "w": null,
+          "x": null,
+          "y": "198.67"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "side_panel",
+        "max_h": 486,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "inline"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 228,
+        "total_w": 480,
+        "view_h": 228
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    },
+    "panel": {
+      "anki_button": null,
+      "content": {
+        "content_w": "321.00",
+        "origin": "12.00",
+        "used_h": "123.09"
+      },
+      "elements": [
+        {
+          "advance": "0.00",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "kind": "Corner",
+          "lines": 1,
+          "text": "freq 1204",
+          "top_gap": "0.00",
+          "w": "54.63",
+          "wrap_w": "321.00",
+          "x": "278.37",
+          "y": "12.00"
+        },
+        {
+          "advance": "26.60",
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 1,
+          "kind": "Headword",
+          "lines": 1,
+          "text": "生",
+          "top_gap": "0.00",
+          "w": "20.00",
+          "wrap_w": "258.37",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 2,
+          "kind": "Text",
+          "lines": 1,
+          "text": "なま",
+          "top_gap": "4.00",
+          "w": "24.13",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "42.60"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 3,
+          "kind": "Text",
+          "lines": 1,
+          "text": "adjectival noun · noun",
+          "top_gap": "4.00",
+          "w": "126.64",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "66.55"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "kind": "Text",
+          "lines": 1,
+          "text": "Jitendex",
+          "top_gap": "10.00",
+          "w": "46.77",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "93.84"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 5,
+          "kind": "Text",
+          "lines": 1,
+          "text": "raw; uncooked; fresh; natural; unedited",
+          "top_gap": "4.00",
+          "w": "256.57",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "115.13"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"生\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "side_panel",
+        "max_h": 486,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": true,
+        "variant": "panel"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 148,
+        "total_w": 480,
+        "view_h": 148
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": {
+        "col_w": "110.00",
+        "col_x": "358.00",
+        "height": "63.87",
+        "rows": [
+          {
+            "h": "17.29",
+            "idx": null,
+            "text": "See also",
+            "y": "0.00"
+          },
+          {
+            "h": "17.29",
+            "idx": 0,
+            "text": "生",
+            "y": "21.29"
+          },
+          {
+            "h": "17.29",
+            "idx": 1,
+            "text": "生",
+            "y": "42.58"
+          }
+        ],
+        "separator_x": "345.00"
+      }
+    }
+  }
+}

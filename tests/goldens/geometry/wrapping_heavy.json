@@ -1,0 +1,175 @@
+{
+  "fixture": "wrapping_heavy",
+  "variants": {
+    "default": {
+      "anki_button": null,
+      "content": {
+        "content_w": "336.00",
+        "origin": "12.00",
+        "used_h": "313.99"
+      },
+      "elements": [
+        {
+          "advance": "0.00",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "kind": "Corner",
+          "lines": 1,
+          "text": "freq 24810",
+          "top_gap": "0.00",
+          "w": "61.64",
+          "wrap_w": "336.00",
+          "x": "286.36",
+          "y": "12.00"
+        },
+        {
+          "advance": "26.60",
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 1,
+          "kind": "Headword",
+          "lines": 1,
+          "text": "胡蝶の夢",
+          "top_gap": "0.00",
+          "w": "76.32",
+          "wrap_w": "266.36",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 2,
+          "kind": "Text",
+          "lines": 1,
+          "text": "こちょうのゆめ",
+          "top_gap": "4.00",
+          "w": "77.16",
+          "wrap_w": "336.00",
+          "x": "12.00",
+          "y": "42.60"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 3,
+          "kind": "Text",
+          "lines": 1,
+          "text": "expression · noun",
+          "top_gap": "4.00",
+          "w": "100.51",
+          "wrap_w": "336.00",
+          "x": "12.00",
+          "y": "66.55"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "kind": "Text",
+          "lines": 1,
+          "text": "Jitendex",
+          "top_gap": "10.00",
+          "w": "46.77",
+          "wrap_w": "336.00",
+          "x": "12.00",
+          "y": "93.84"
+        },
+        {
+          "advance": "119.71",
+          "font_size": "15.00",
+          "h": "119.71",
+          "i": 5,
+          "kind": "Text",
+          "lines": 6,
+          "text": "the butterfly dream: the illusion that it is impossible to distinguish between the dreamer and the dream, between waking life and the images it leaves behind; an experience impossible to tell apart from a vivid dream of the same experience",
+          "top_gap": "4.00",
+          "w": "328.74",
+          "wrap_w": "336.00",
+          "x": "12.00",
+          "y": "115.13"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 6,
+          "kind": "Text",
+          "lines": 1,
+          "text": "大辞林",
+          "top_gap": "10.00",
+          "w": "39.00",
+          "wrap_w": "336.00",
+          "x": "12.00",
+          "y": "244.84"
+        },
+        {
+          "advance": "59.85",
+          "font_size": "15.00",
+          "h": "59.85",
+          "i": 7,
+          "kind": "Text",
+          "lines": 3,
+          "text": "夢の中で胡蝶となった荘子が、夢がさめてから、自分が夢で胡蝶となったのか、胡蝶が夢で自分となっているのかと疑ったという故事。人生の儚さのたとえ。",
+          "top_gap": "4.00",
+          "w": "333.03",
+          "wrap_w": "336.00",
+          "x": "12.00",
+          "y": "266.13"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"胡\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"蝶\")",
+          "h": "26.60",
+          "i": 1,
+          "w": "20.00",
+          "x": "32.00",
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"夢\")",
+          "h": "26.60",
+          "i": 2,
+          "w": "20.00",
+          "x": "68.32",
+          "y": "12.00"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "wrapping_heavy",
+        "max_h": 700,
+        "max_w": 360,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "default"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 338,
+        "total_w": 360,
+        "view_h": 338
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    }
+  }
+}

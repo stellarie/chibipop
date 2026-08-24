@@ -1,0 +1,107 @@
+{
+  "fixture": "minimal_edge",
+  "variants": {
+    "empty": {
+      "anki_button": null,
+      "content": {
+        "content_w": "456.00",
+        "origin": "12.00",
+        "used_h": "0.00"
+      },
+      "elements": [],
+      "hits": [],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "minimal_edge",
+        "max_h": 486,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "empty"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 24,
+        "total_w": 480,
+        "view_h": 24
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    },
+    "sparse": {
+      "anki_button": null,
+      "content": {
+        "content_w": "456.00",
+        "origin": "12.00",
+        "used_h": "53.89"
+      },
+      "elements": [
+        {
+          "advance": "26.60",
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 0,
+          "kind": "Headword",
+          "lines": 1,
+          "text": "猫",
+          "top_gap": "0.00",
+          "w": "20.00",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 1,
+          "kind": "Text",
+          "lines": 1,
+          "text": "大辞林",
+          "top_gap": "10.00",
+          "w": "39.00",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "48.60"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"猫\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "minimal_edge",
+        "max_h": 486,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "sparse"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 78,
+        "total_w": 480,
+        "view_h": 78
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    }
+  }
+}

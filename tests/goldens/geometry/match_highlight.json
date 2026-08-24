@@ -1,0 +1,152 @@
+{
+  "fixture": "match_highlight",
+  "variants": {
+    "default": {
+      "anki_button": null,
+      "content": {
+        "content_w": "456.00",
+        "origin": "12.00",
+        "used_h": "123.09"
+      },
+      "elements": [
+        {
+          "advance": "0.00",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "kind": "Corner",
+          "lines": 1,
+          "text": "freq 5120",
+          "top_gap": "0.00",
+          "w": "54.63",
+          "wrap_w": "456.00",
+          "x": "413.37",
+          "y": "12.00"
+        },
+        {
+          "advance": "26.60",
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 1,
+          "kind": "Headword",
+          "lines": 1,
+          "text": "可哀想",
+          "top_gap": "0.00",
+          "w": "60.00",
+          "wrap_w": "393.37",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 2,
+          "kind": "Text",
+          "lines": 1,
+          "text": "かわいそう",
+          "top_gap": "4.00",
+          "w": "58.45",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "42.60"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 3,
+          "kind": "Text",
+          "lines": 1,
+          "text": "adjectival noun",
+          "top_gap": "4.00",
+          "w": "87.01",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "66.55"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "kind": "Text",
+          "lines": 1,
+          "text": "Jitendex",
+          "top_gap": "10.00",
+          "w": "46.77",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "93.84"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 5,
+          "kind": "Text",
+          "lines": 1,
+          "text": "poor; pitiable; pathetic",
+          "top_gap": "4.00",
+          "w": "148.94",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "115.13"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"可\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"哀\")",
+          "h": "26.60",
+          "i": 1,
+          "w": "20.00",
+          "x": "32.00",
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"想\")",
+          "h": "26.60",
+          "i": 2,
+          "w": "20.00",
+          "x": "52.00",
+          "y": "12.00"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "match_highlight",
+        "max_h": 486,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "default"
+      },
+      "match_highlight": {
+        "h": 46,
+        "w": 96,
+        "x": 157,
+        "y": 197
+      },
+      "measure": {
+        "content_h": 148,
+        "total_w": 480,
+        "view_h": 148
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    }
+  }
+}
