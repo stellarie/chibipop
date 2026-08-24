@@ -113,13 +113,17 @@ const ID_ENGINE_CONFIGURE: i32 = 147;
 const ID_ENGINE_LOG: i32 = 148;
 /// Adapter-log checkbox.
 const ID_ADAPTER_LOG: i32 = 149;
+/// Screenshot hotkey button.
+const ID_SCREENSHOT_KEY: i32 = 150;
+/// Notify-on-add checkbox.
+const ID_NOTIFY_ON_ADD: i32 = 151;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
 
 /// Field-map combo choices.
-const FIELD_MAP_SOURCES: [&str; 6] =
-    ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html"];
+const FIELD_MAP_SOURCES: [&str; 7] =
+    ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html", "screenshot"];
 
 /// First plugin-enable id.
 const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
@@ -471,6 +475,9 @@ thread_local! {
     // Anki add-key vk, by `HWND`.
     static ANKI_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
+    // Screenshot hotkey vk.
+    static SCREENSHOT_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+
     // Field-map toggle click, by `HWND`.
     static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
 
@@ -653,9 +660,10 @@ fn record_language_change(hwnd: HWND) {
 
 /// Starts capture mode.
 unsafe fn begin_capture(hwnd: HWND, id: i32) {
-    // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
-    // descendants of `hwnd`, created in `build`; `window_text` and
-    // `SetWindowTextW` state their own contracts.
+    // SAFETY: `id` is one of {ID_TRIGGER_KEY, ID_ANKI_ADD_KEY,
+    // ID_SCREENSHOT_KEY}, all live descendants of `hwnd`, created in
+    // `build`; `window_text` and `SetWindowTextW` state their own
+    // contracts.
     unsafe {
         let Ok(btn) = dlg_item(hwnd, id) else { return };
         let prev = window_text(btn);
@@ -742,6 +750,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 },
                 ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
                 ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
+                ID_SCREENSHOT_KEY => unsafe { begin_capture(hwnd, ID_SCREENSHOT_KEY) },
                 _ => {}
             }
             LRESULT(0)
@@ -1537,7 +1546,11 @@ fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
     let id = CAPTURING.with(|c| c.get()).and_then(|(h, id)| (h == mine).then_some(id))?;
     CAPTURING.with(|c| c.set(None));
-    let cell = if id == ID_TRIGGER_KEY { &CAPTURED_VK } else { &ANKI_CAPTURED_VK };
+    let cell = match id {
+        ID_TRIGGER_KEY => &CAPTURED_VK,
+        ID_SCREENSHOT_KEY => &SCREENSHOT_CAPTURED_VK,
+        _ => &ANKI_CAPTURED_VK,
+    };
     cell.with(|c| c.set(Some((mine, vk))));
     Some((id, crate::config::trigger_key_name(vk)))
 }
@@ -1562,6 +1575,11 @@ fn resolved_trigger_key(hwnd: HWND, template: &str) -> String {
 /// Same, for the Anki add key.
 fn resolved_anki_add_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&ANKI_CAPTURED_VK, hwnd, template)
+}
+
+/// Same, for screenshot hotkey.
+fn resolved_screenshot_key(hwnd: HWND, template: &str) -> String {
+    resolved_captured_key(&SCREENSHOT_CAPTURED_VK, hwnd, template)
 }
 
 /// Parseable form of `vk`.
@@ -2090,9 +2108,10 @@ impl SettingsWindow {
         let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
             return false;
         };
-        // SAFETY: `id` is ID_TRIGGER_KEY or ID_ANKI_ADD_KEY, both live
-        // descendants of `self.hwnd`, created in `build`; `SetWindowTextW`
-        // copies the string during the call.
+        // SAFETY: `id` is one of {ID_TRIGGER_KEY, ID_ANKI_ADD_KEY,
+        // ID_SCREENSHOT_KEY}, all live descendants of `self.hwnd`,
+        // created in `build`; `SetWindowTextW` copies the string
+        // during the call.
         unsafe {
             if let Ok(btn) = dlg_item(self.hwnd, id) {
                 let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
@@ -2872,7 +2891,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 6 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 7 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
@@ -2880,6 +2899,9 @@ impl SettingsWindow {
             ank.push(anki_chk);
             SendMessageW(anki_chk, BM_SETCHECK,
                 Some(WPARAM(if form.anki_enabled { 1 } else { 0 })), None);
+            y += ROW_H;
+            ank.push(check("Show notification when a card is added",
+                ID_NOTIFY_ON_ADD, form.notify_on_add, y)?);
             y += ROW_H;
             ank.push(label("AnkiConnect URL", y)?);
             ank.push(child(page, w!("EDIT"), &form.anki_url,
@@ -2908,6 +2930,16 @@ impl SettingsWindow {
             let add_name = crate::config::trigger_key_name(add_vk);
             ank.push(child(page, w!("BUTTON"), &add_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_ADD_KEY, f)?);
+            y += ROW_H;
+            ank.push(label("Screenshot key", y)?);
+            let ss_vk = crate::config::parse_hotkey(&form.screenshot_hotkey)
+                .map(|(vk, _)| vk)
+                .or_else(|| crate::config::parse_trigger_key(&form.screenshot_hotkey))
+                .unwrap_or(0x53);
+            SCREENSHOT_CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, ss_vk))));
+            let ss_name = crate::config::trigger_key_name(ss_vk);
+            ank.push(child(page, w!("BUTTON"), &ss_name, WS_TABSTOP,
+                FIELD_X, y, FIELD_W, ROW_H, ID_SCREENSHOT_KEY, f)?);
             y += ROW_H;
             ank.push(child(page, w!("BUTTON"), "Refresh", WS_TABSTOP,
                   PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
@@ -3099,6 +3131,7 @@ impl SettingsWindow {
 
             let trigger_key = resolved_trigger_key(h, &template.trigger_key);
             let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
+            let screenshot_hotkey = resolved_screenshot_key(h, &template.screenshot_hotkey);
 
             // Empty is not missing.
             let rows = self.field_map_rows.borrow();
@@ -3160,6 +3193,8 @@ impl SettingsWindow {
                 anki_model: text_of(ID_ANKI_MODEL),
                 anki_add_key,
                 field_map,
+                notify_on_add: checked(ID_NOTIFY_ON_ADD),
+                screenshot_hotkey,
                 enabled_plugins: self
                     .plugin_names
                     .iter()
@@ -3232,6 +3267,11 @@ impl Drop for SettingsWindow {
             }
         });
         ANKI_CAPTURED_VK.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        SCREENSHOT_CAPTURED_VK.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
@@ -3755,6 +3795,37 @@ mod tests {
 
         assert_eq!("f4", resolved_anki_add_key(hwnd, "a"));
         ANKI_CAPTURED_VK.with(|c| c.set(None));
+    }
+
+    // ---- screenshot key capture ----
+
+    #[test]
+    fn take_captured_key_routes_screenshot_to_its_own_cell() {
+        let hwnd = HWND(6020 as *mut core::ffi::c_void);
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_SCREENSHOT_KEY))));
+
+        let got = take_captured_key(hwnd, 0x53);
+
+        assert_eq!(Some((ID_SCREENSHOT_KEY, "S".to_string())), got);
+        assert_eq!(None, CAPTURING.with(|c| c.get()));
+        SCREENSHOT_CAPTURED_VK.with(|c| c.set(None));
+    }
+
+    #[test]
+    fn resolved_screenshot_key_falls_back_when_uncaptured() {
+        let hwnd = HWND(6021 as *mut core::ffi::c_void);
+        SCREENSHOT_CAPTURED_VK.with(|c| c.set(None));
+
+        assert_eq!("ctrl", resolved_screenshot_key(hwnd, "ctrl"));
+    }
+
+    #[test]
+    fn resolved_screenshot_key_uses_captured_vk() {
+        let hwnd = HWND(6022 as *mut core::ffi::c_void);
+        SCREENSHOT_CAPTURED_VK.with(|c| c.set(Some((hwnd.0 as isize, 0x79))));
+
+        assert_eq!("f10", resolved_screenshot_key(hwnd, "s"));
+        SCREENSHOT_CAPTURED_VK.with(|c| c.set(None));
     }
 
     #[test]

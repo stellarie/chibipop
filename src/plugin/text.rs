@@ -10,11 +10,6 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use std::cell::RefCell;
 use std::time::Duration;
-use windows::Graphics::Imaging::{
-    BitmapAlphaMode, BitmapEncoder, BitmapPixelFormat, SoftwareBitmap,
-};
-use windows::Security::Cryptography::CryptographicBuffer;
-use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream};
 
 /// Wire rects are image-local.
 fn to_ocr_lines(r: &RecogniseResult) -> Vec<OcrLine> {
@@ -40,33 +35,7 @@ fn to_ocr_lines(r: &RecogniseResult) -> Vec<OcrLine> {
 }
 
 fn encode_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
-    let ibuffer =
-        CryptographicBuffer::CreateFromByteArray(bgra).context("wrapping the pixel buffer")?;
-    // 32bpp BGRA; alpha is junk.
-    let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
-        &ibuffer,
-        BitmapPixelFormat::Bgra8,
-        w,
-        h,
-        BitmapAlphaMode::Ignore,
-    )
-    .context("building a SoftwareBitmap from the capture")?;
-
-    let stream = InMemoryRandomAccessStream::new().context("opening a PNG stream")?;
-    let encoder = BitmapEncoder::CreateAsync(BitmapEncoder::PngEncoderId()?, &stream)
-        .and_then(|op| op.join())
-        .context("creating the PNG encoder")?;
-    encoder.SetSoftwareBitmap(&bitmap).context("handing the encoder its pixels")?;
-    encoder.FlushAsync().and_then(|op| op.join()).context("encoding the PNG")?;
-
-    let size = u32::try_from(stream.Size().context("sizing the PNG")?)
-        .context("the encoded PNG does not fit in a read")?;
-    let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0)?)
-        .context("reading the PNG back")?;
-    reader.LoadAsync(size).and_then(|op| op.join()).context("reading the PNG back")?;
-    let mut out = vec![0u8; size as usize];
-    reader.ReadBytes(&mut out).context("reading the PNG back")?;
-    Ok(out)
+    crate::text::capture::encode_bgra_to_png(bgra, w, h)
 }
 
 pub fn estimate_offset(line: &str, cursor_x: i32, region: PhysRect) -> usize {

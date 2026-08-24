@@ -172,6 +172,29 @@ impl Tray {
         }
     }
 
+    /// Shows a balloon notification.
+    pub fn notify(&self, title: &str, message: &str) {
+        // SAFETY: `self.notify_hwnd` is the live window handle
+        // passed to `Tray::create` and used by the existing icon;
+        // `NIM_MODIFY` + `NIF_INFO` asks Shell32 to show a balloon
+        // on the icon already registered with this `uID` and `hWnd`.
+        // The `szInfoTitle` and `szInfo` buffers are written from
+        // owned stack data that outlives the call.
+        unsafe {
+            let mut nid = NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.notify_hwnd,
+                uID: self.uid,
+                uFlags: NIF_INFO,
+                ..Default::default()
+            };
+            set_info_title(&mut nid, title);
+            set_info(&mut nid, message);
+            nid.Anonymous.uTimeout = 5000;
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+    }
+
     /// Shows the menu; blocks.
     ///
     /// Its pump eats thread messages.
@@ -245,6 +268,22 @@ fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
     let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
     wide.push(0);
     nid.szTip[..wide.len()].copy_from_slice(&wide);
+}
+
+/// UTF-16 into `szInfo`, NUL-term.
+fn set_info(nid: &mut NOTIFYICONDATAW, text: &str) {
+    let cap = nid.szInfo.len();
+    let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
+    wide.push(0);
+    nid.szInfo[..wide.len()].copy_from_slice(&wide);
+}
+
+/// UTF-16 into `szInfoTitle`.
+fn set_info_title(nid: &mut NOTIFYICONDATAW, text: &str) {
+    let cap = nid.szInfoTitle.len();
+    let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
+    wide.push(0);
+    nid.szInfoTitle[..wide.len()].copy_from_slice(&wide);
 }
 
 /// The right-click menu.
@@ -349,5 +388,35 @@ mod tests {
         set_tip(&mut nid, "chibipop");
         let n = nid.szTip.iter().position(|&c| c == 0).expect("terminated");
         assert_eq!("chibipop", String::from_utf16_lossy(&nid.szTip[..n]));
+    }
+
+    #[test]
+    fn a_short_info_round_trips() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_info(&mut nid, "added to Anki");
+        let n = nid.szInfo.iter().position(|&c| c == 0).expect("terminated");
+        assert_eq!("added to Anki", String::from_utf16_lossy(&nid.szInfo[..n]));
+    }
+
+    #[test]
+    fn a_long_info_is_still_terminated() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_info(&mut nid, &"あ".repeat(500));
+        assert_eq!(0, nid.szInfo[nid.szInfo.len() - 1]);
+    }
+
+    #[test]
+    fn a_short_info_title_round_trips() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_info_title(&mut nid, "chibipop");
+        let n = nid.szInfoTitle.iter().position(|&c| c == 0).expect("terminated");
+        assert_eq!("chibipop", String::from_utf16_lossy(&nid.szInfoTitle[..n]));
+    }
+
+    #[test]
+    fn a_long_info_title_is_truncated() {
+        let mut nid = NOTIFYICONDATAW::default();
+        set_info_title(&mut nid, &"x".repeat(200));
+        assert_eq!(0, nid.szInfoTitle[nid.szInfoTitle.len() - 1]);
     }
 }

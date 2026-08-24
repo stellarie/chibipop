@@ -58,6 +58,8 @@ pub struct SettingsForm {
     pub anki_model: String,
     pub anki_add_key: String,
     pub field_map: Vec<FieldMapping>,
+    pub notify_on_add: bool,
+    pub screenshot_hotkey: String,
     /// Plugin names allowed to run.
     pub enabled_plugins: Vec<String>,
 }
@@ -321,6 +323,8 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_model: cfg.anki.model.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
+        notify_on_add: cfg.anki.notify_on_add,
+        screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
         enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
@@ -375,9 +379,11 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.deck = form.anki_deck.clone();
     out.anki.model = form.anki_model.clone();
     out.anki.add_key = form.anki_add_key.clone();
+    out.anki.notify_on_add = form.notify_on_add;
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
+    out.actions.screenshot.hotkey = form.screenshot_hotkey.clone();
     out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
         form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
@@ -705,6 +711,7 @@ mod tests {
         cfg.anki.deck = "Mining".into();
         cfg.anki.model = "Custom".into();
         cfg.anki.add_key = "f2".into();
+        cfg.anki.notify_on_add = false;
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
     }
@@ -736,6 +743,16 @@ mod tests {
         let cfg = cfg_with(&[]);
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
+    }
+
+    #[test]
+    fn screenshot_hotkey_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.hotkey = "f10".into();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("f10", form.screenshot_hotkey);
+        let out = apply_to(&form, &cfg);
+        assert_eq!("f10", out.actions.screenshot.hotkey);
     }
 
     #[test]
