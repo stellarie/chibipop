@@ -44,6 +44,12 @@ pub struct TriggerConfig {
     /// Which key gates popups.
     #[serde(default = "default_trigger_key")]
     pub trigger_key: String,
+    /// Which chord gates popups on Linux.
+    ///
+    /// XDG GlobalShortcuts preferred-binding syntax; advisory on the
+    /// wlr-native channel, where the compositor bind is the truth.
+    #[serde(default = "default_trigger_key_linux")]
+    pub trigger_key_linux: String,
     /// Re-look-up per character?
     #[serde(default)]
     pub per_character_lookup: bool,
@@ -52,6 +58,11 @@ pub struct TriggerConfig {
 /// `"shift"` for backwards compat.
 fn default_trigger_key() -> String {
     "shift".to_string()
+}
+
+/// A chord, not a bare key: a portal binding is a system-wide grab.
+fn default_trigger_key_linux() -> String {
+    "ALT+F".to_string()
 }
 
 pub fn default_ocr_language() -> String {
@@ -159,6 +170,9 @@ pub struct PopupConfig {
     /// Collapsed rows beside, not below.
     #[serde(default)]
     pub side_panel: bool,
+    /// Which layer the popup sits on, on Linux.
+    #[serde(default)]
+    pub layer: PopupLayer,
 }
 
 /// 25% of the monitor.
@@ -174,6 +188,95 @@ fn default_highlight_match() -> bool {
 /// On by default.
 fn default_scroll_popup() -> bool {
     true
+}
+
+/// `popup.layer`: which wlr layer the Linux popup sits on.
+///
+/// `overlay` clears everything including fullscreen clients; `top` sits
+/// under them, which some compositors handle better.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PopupLayer {
+    /// Above everything, the default.
+    #[default]
+    Overlay,
+    /// Below fullscreen clients.
+    Top,
+}
+
+/// Which platform a field is being read for.
+///
+/// Every field lives on the one shared `Config`; this only picks which
+/// of a per-platform pair a caller means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Windows,
+    Linux,
+}
+
+impl Platform {
+    /// The platform this build runs on.
+    pub const fn current() -> Platform {
+        if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        }
+    }
+
+    /// The font a fresh config is created with.
+    pub const fn default_font(self) -> &'static str {
+        match self {
+            Platform::Windows => "Yu Gothic UI",
+            Platform::Linux => "Noto Sans CJK JP",
+        }
+    }
+}
+
+/// Which font family a popup should actually use.
+///
+/// `popup.font` is a dumb literal, so a config carried from the other
+/// platform names a family this one may not have. The caller renders the
+/// warning; the choice is made here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontChoice {
+    /// The configured family resolved.
+    Configured(String),
+    /// It did not; the platform default stands in.
+    Fallback {
+        /// What the config asked for.
+        requested: String,
+        /// What will be used instead.
+        family: &'static str,
+    },
+}
+
+impl FontChoice {
+    /// The family to render with, either way.
+    pub fn family(&self) -> &str {
+        match self {
+            FontChoice::Configured(f) => f,
+            FontChoice::Fallback { family, .. } => family,
+        }
+    }
+}
+
+/// Picks the family to render with.
+///
+/// `resolvable` answers whether the font stack has the family; an empty
+/// literal is never asked about, it just falls back.
+pub fn resolve_font(
+    configured: &str,
+    platform: Platform,
+    resolvable: impl FnOnce(&str) -> bool,
+) -> FontChoice {
+    if !configured.is_empty() && resolvable(configured) {
+        return FontChoice::Configured(configured.to_string());
+    }
+    FontChoice::Fallback {
+        requested: configured.to_string(),
+        family: platform.default_font(),
+    }
 }
 
 /// `[dictionaries]`.
@@ -241,6 +344,17 @@ impl Default for OcrConfig {
     }
 }
 
+impl OcrConfig {
+    /// The tag to warn about, on a Japanese-only engine.
+    ///
+    /// `ocr.language` is a Windows field: hidden on Linux, preserved on
+    /// save, worth one diagnostic when it names something meikiocr
+    /// cannot deliver.
+    pub fn unsupported_language(&self) -> Option<&str> {
+        (!self.language.eq_ignore_ascii_case("ja")).then_some(self.language.as_str())
+    }
+}
+
 /// `[debug]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
@@ -275,6 +389,9 @@ pub struct AnkiConfig {
     /// Shortcut: add the top card.
     #[serde(default = "default_anki_add_key")]
     pub add_key: String,
+    /// Same shortcut on Linux, in portal syntax.
+    #[serde(default = "default_anki_add_key_linux")]
+    pub add_key_linux: String,
     /// Which fields go where.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
@@ -300,6 +417,12 @@ fn default_anki_add_key() -> String {
     "a".to_string()
 }
 
+/// Mirrors the trigger's modifier family: a portal
+/// binding is system-wide, so a bare letter will not do.
+fn default_anki_add_key_linux() -> String {
+    "ALT+A".to_string()
+}
+
 /// The Lapis field mapping.
 fn default_field_map() -> Vec<FieldMapping> {
     vec![
@@ -319,6 +442,7 @@ impl Default for AnkiConfig {
             deck: default_anki_deck(),
             model: default_anki_model(),
             add_key: default_anki_add_key(),
+            add_key_linux: default_anki_add_key_linux(),
             field_map: default_field_map(),
         }
     }
@@ -331,6 +455,7 @@ impl Default for Config {
             trigger: TriggerConfig {
                 mode: TriggerMode::Live,
                 trigger_key: default_trigger_key(),
+                trigger_key_linux: default_trigger_key_linux(),
                 per_character_lookup: false,
             },
             popup: PopupConfig {
@@ -339,10 +464,11 @@ impl Default for Config {
                 max_width_percent: default_max_width_percent(),
                 max_height_percent: 45,
                 summary_chars: 40,
-                font: "Yu Gothic UI".to_string(),
+                font: Platform::current().default_font().to_string(),
                 highlight_match: default_highlight_match(),
                 scroll_popup: default_scroll_popup(),
                 side_panel: false,
+                layer: PopupLayer::default(),
             },
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
@@ -426,6 +552,29 @@ impl Config {
             restrict_to_order: false,
         }
     }
+
+    /// Which layer the Linux popup sits on.
+    ///
+    /// The conduit the Linux popup reads; Windows ignores it.
+    pub fn popup_layer(&self) -> PopupLayer {
+        self.popup.layer
+    }
+
+    /// The trigger chord this platform binds.
+    pub fn trigger_key_for(&self, platform: Platform) -> &str {
+        match platform {
+            Platform::Windows => &self.trigger.trigger_key,
+            Platform::Linux => &self.trigger.trigger_key_linux,
+        }
+    }
+
+    /// The Anki-add chord this platform binds.
+    pub fn add_key_for(&self, platform: Platform) -> &str {
+        match platform {
+            Platform::Windows => &self.anki.add_key,
+            Platform::Linux => &self.anki.add_key_linux,
+        }
+    }
 }
 
 /// Clamps, naming any move.
@@ -484,7 +633,10 @@ mod tests {
         assert_eq!(25, c.popup.max_width_percent);
         assert_eq!(45, c.popup.max_height_percent);
         assert_eq!(40, c.popup.summary_chars);
-        assert_eq!("Yu Gothic UI", c.popup.font);
+        assert_eq!(Platform::current().default_font(), c.popup.font);
+        assert_eq!("ALT+F", c.trigger.trigger_key_linux);
+        assert_eq!("ALT+A", c.anki.add_key_linux);
+        assert_eq!(PopupLayer::Overlay, c.popup.layer);
         assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()],
                    c.dictionaries.display_order);
     }
@@ -1241,5 +1393,202 @@ mod tests {
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
         assert_eq!(c.dictionaries.per_language, back.dictionaries.per_language);
+    }
+
+    /// ADR-0012: the creation-time font is a per-platform literal.
+    #[test]
+    fn each_platform_creates_its_own_default_font() {
+        assert_eq!("Yu Gothic UI", Platform::Windows.default_font());
+        assert_eq!("Noto Sans CJK JP", Platform::Linux.default_font());
+    }
+
+    /// ADR-0012: every field serializes on every platform, so a config
+    /// exercising both platforms' fields survives a save/load unchanged.
+    #[test]
+    fn a_config_with_both_platforms_fields_round_trips_losslessly() {
+        let p = tmp("both_platforms_round_trip");
+        let mut c = Config::default();
+        c.trigger.mode = TriggerMode::HoldKey;
+        c.trigger.trigger_key = "f2".to_string();
+        c.trigger.trigger_key_linux = "CTRL+ALT+F".to_string();
+        c.trigger.per_character_lookup = true;
+        c.popup.theme = "light".to_string();
+        c.popup.exclude_from_capture = true;
+        c.popup.max_width_percent = 30;
+        c.popup.max_height_percent = 50;
+        c.popup.summary_chars = 60;
+        c.popup.font = "IPAexGothic".to_string();
+        c.popup.highlight_match = false;
+        c.popup.scroll_popup = false;
+        c.popup.side_panel = true;
+        c.popup.layer = PopupLayer::Top;
+        c.dictionaries.per_language.insert("ja".to_string(), vec!["大辞林".to_string()]);
+        c.ocr.max_ocr_passes = 3;
+        c.ocr.prefer_vertical = true;
+        c.ocr.capture_width = 640;
+        c.ocr.capture_height = 120;
+        c.ocr.scan_alphanumeric = false;
+        c.ocr.language = "en".to_string();
+        c.debug.show_scan_region = true;
+        c.anki.enabled = true;
+        c.anki.url = "http://localhost:1234".to_string();
+        c.anki.deck = "Mining".to_string();
+        c.anki.model = "Kaishi".to_string();
+        c.anki.add_key = "d".to_string();
+        c.anki.add_key_linux = "CTRL+ALT+A".to_string();
+        c.save(&p).unwrap();
+        assert_eq!(c, load_or_create(&p).unwrap());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A Windows-shaped file predating the Linux fields loads with every
+    /// stored value intact and the new fields at their documented defaults.
+    #[test]
+    fn a_windows_shaped_legacy_file_loads_unchanged_and_gains_defaults() {
+        let p = tmp("windows_legacy");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"hold-key\"\ntrigger_key = \"f2\"\n\n",
+            "[popup]\ntheme = \"light\"\nexclude_from_capture = true\n",
+            "max_height_percent = 50\nsummary_chars = 60\nfont = \"Meiryo\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n\n",
+            "[anki]\nadd_key = \"d\"\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        // Windows-rendered fields: exactly what the file said.
+        assert_eq!(TriggerMode::HoldKey, c.trigger.mode);
+        assert_eq!("f2", c.trigger.trigger_key);
+        assert_eq!("light", c.popup.theme);
+        assert!(c.popup.exclude_from_capture);
+        assert_eq!("Meiryo", c.popup.font);
+        assert_eq!("d", c.anki.add_key);
+        // New fields: the documented defaults, no migration.
+        assert_eq!("ALT+F", c.trigger.trigger_key_linux);
+        assert_eq!("ALT+A", c.anki.add_key_linux);
+        assert_eq!(PopupLayer::Overlay, c.popup.layer);
+        // The whole-struct save writes the new keys with those defaults
+        // and the old values verbatim.
+        c.save(&p).unwrap();
+        let saved = std::fs::read_to_string(&p).unwrap();
+        assert!(saved.contains("trigger_key = \"f2\""));
+        assert!(saved.contains("trigger_key_linux = \"ALT+F\""));
+        assert!(saved.contains("add_key = \"d\""));
+        assert!(saved.contains("add_key_linux = \"ALT+A\""));
+        assert!(saved.contains("layer = \"overlay\""));
+        assert!(saved.contains("font = \"Meiryo\""));
+        assert_eq!(c, load_or_create(&p).unwrap());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The other platform's fields survive a save untouched.
+    #[test]
+    fn a_save_preserves_the_other_platforms_fields() {
+        let p = tmp("preserve_other_platform");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\ntrigger_key_linux = \"SUPER+J\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Noto Sans CJK JP\"\n",
+            "layer = \"top\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n\n",
+            "[ocr]\nlanguage = \"en\"\n\n",
+            "[anki]\nadd_key_linux = \"SUPER+K\"\n",
+        )).unwrap();
+        // A Windows-style edit: change a rendered field, save the struct.
+        let mut c = load_or_create(&p).unwrap();
+        c.popup.theme = "light".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!("SUPER+J", back.trigger.trigger_key_linux);
+        assert_eq!("SUPER+K", back.anki.add_key_linux);
+        assert_eq!(PopupLayer::Top, back.popup.layer);
+        assert_eq!("en", back.ocr.language, "hidden on Linux, never dropped");
+        assert_eq!("light", back.popup.theme);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// `popup.layer` accepts exactly `overlay` and `top`.
+    #[test]
+    fn popup_layer_parses_overlay_and_top_and_rejects_garbage() {
+        let base = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"X\"\n",
+        );
+        let parse = |layer_line: &str| {
+            toml::from_str::<Config>(&format!("{base}{layer_line}"))
+        };
+        assert_eq!(PopupLayer::Overlay, parse("layer = \"overlay\"\n").unwrap().popup.layer);
+        assert_eq!(PopupLayer::Top, parse("layer = \"top\"\n").unwrap().popup.layer);
+        assert_eq!(PopupLayer::Overlay, parse("").unwrap().popup.layer, "absent takes the default");
+        assert!(parse("layer = \"bottom\"\n").is_err(), "garbage layers are a parse error");
+    }
+
+    /// The conduit the Linux popup reads.
+    #[test]
+    fn popup_layer_reaches_the_accessor() {
+        let mut c = Config::default();
+        assert_eq!(PopupLayer::Overlay, c.popup_layer());
+        c.popup.layer = PopupLayer::Top;
+        assert_eq!(PopupLayer::Top, c.popup_layer());
+    }
+
+    /// Each bin reads only its own key fields.
+    #[test]
+    fn key_accessors_pick_the_platforms_field() {
+        let mut c = Config::default();
+        c.trigger.trigger_key = "f2".to_string();
+        c.anki.add_key = "d".to_string();
+        assert_eq!("f2", c.trigger_key_for(Platform::Windows));
+        assert_eq!("ALT+F", c.trigger_key_for(Platform::Linux));
+        assert_eq!("d", c.add_key_for(Platform::Windows));
+        assert_eq!("ALT+A", c.add_key_for(Platform::Linux));
+    }
+
+    /// A resolvable literal is used as-is.
+    #[test]
+    fn a_resolvable_font_is_kept() {
+        let choice = resolve_font("IPAexGothic", Platform::Linux, |_| true);
+        assert_eq!(FontChoice::Configured("IPAexGothic".to_string()), choice);
+        assert_eq!("IPAexGothic", choice.family());
+    }
+
+    /// ADR-0004/0012: an unresolvable literal falls back to the
+    /// platform default, naming what was asked for.
+    #[test]
+    fn an_unresolvable_font_falls_back_to_the_platform_default() {
+        let choice = resolve_font("Yu Gothic UI", Platform::Linux, |_| false);
+        assert_eq!(
+            FontChoice::Fallback {
+                requested: "Yu Gothic UI".to_string(),
+                family: "Noto Sans CJK JP",
+            },
+            choice
+        );
+        assert_eq!("Noto Sans CJK JP", choice.family());
+        let windows = resolve_font("Noto Sans CJK JP", Platform::Windows, |_| false);
+        assert_eq!("Yu Gothic UI", windows.family());
+    }
+
+    /// An empty literal never reaches the resolver.
+    #[test]
+    fn an_empty_font_falls_back_without_asking() {
+        let choice = resolve_font("", Platform::Linux, |_| panic!("asked about an empty literal"));
+        assert_eq!("Noto Sans CJK JP", choice.family());
+    }
+
+    /// meikiocr is Japanese-only; `ja` needs no diagnostic.
+    #[test]
+    fn a_ja_language_is_not_flagged() {
+        assert_eq!(None, OcrConfig::default().unsupported_language());
+        let ocr = OcrConfig { language: "JA".to_string(), ..OcrConfig::default() };
+        assert_eq!(None, ocr.unsupported_language(), "case folds");
+    }
+
+    /// A non-`ja` tag is preserved and named once.
+    #[test]
+    fn a_non_ja_language_is_flagged_but_kept() {
+        let ocr = OcrConfig { language: "en".to_string(), ..OcrConfig::default() };
+        assert_eq!(Some("en"), ocr.unsupported_language());
+        assert_eq!("en", ocr.language, "the value itself is untouched");
     }
 }
