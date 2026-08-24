@@ -39,11 +39,17 @@ jobs:
 
       # Tagging a red commit is the one mistake a release process must not
       # make quietly.
+      #
+      # --workspace --exclude chibipop-linux, not bare: default-members
+      # serves the Linux dev box since ticket 29, so a bare command here
+      # would skip the Windows crate - and a bare build would uplift the
+      # Linux crate's foreign-target stub as target/release/chibipop.exe,
+      # shipping a refusal binary. Same collision rule as ci.yml.
       - name: Tests
-        run: cargo test
+        run: cargo test --workspace --exclude chibipop-linux
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --workspace --exclude chibipop-linux
 
       # Everything the binary needs at runtime. The database is ~232 MiB and
       # is not ours to redistribute, so the user builds it from their own
