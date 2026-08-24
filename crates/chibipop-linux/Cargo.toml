@@ -1,0 +1,25 @@
+[package]
+name = "chibipop-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The binary keeps its name, exactly like the Windows crate: a Linux user
+# types `chibipop`, and the release tarball ships it as such (ADR-0007).
+[[bin]]
+name = "chibipop"
+path = "src/main.rs"
+
+[dependencies]
+chibipop = { path = "../.." }
+anyhow.workspace = true
+clap.workspace = true
+
+# Wayland/calloop only when actually compiling for Linux, mirroring the
+# Windows crate's cfg-stub arrangement: on a foreign target this bin is a
+# two-line refusal (src/main.rs) and pulls none of the platform stack, so
+# `cargo test --workspace` stays one command on both CI runners.
+[target.'cfg(target_os = "linux")'.dependencies]
+calloop = { workspace = true, features = ["signals"] }
+calloop-wayland-source.workspace = true
+wayland-client.workspace = true
