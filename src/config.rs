@@ -324,6 +324,9 @@ pub struct AnkiConfig {
     /// Shortcut: add the top card.
     #[serde(default = "default_anki_add_key")]
     pub add_key: String,
+    /// Tray balloon on add.
+    #[serde(default = "default_notify_on_add")]
+    pub notify_on_add: bool,
     /// Which fields go where.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
@@ -349,6 +352,11 @@ fn default_anki_add_key() -> String {
     "a".to_string()
 }
 
+/// On by default.
+fn default_notify_on_add() -> bool {
+    true
+}
+
 /// The Lapis field mapping.
 fn default_field_map() -> Vec<FieldMapping> {
     vec![
@@ -368,6 +376,7 @@ impl Default for AnkiConfig {
             deck: default_anki_deck(),
             model: default_anki_model(),
             add_key: default_anki_add_key(),
+            notify_on_add: default_notify_on_add(),
             field_map: default_field_map(),
         }
     }
@@ -990,6 +999,11 @@ mod tests {
     #[test]
     fn anki_add_key_defaults_to_a() {
         assert_eq!("a", Config::default().anki.add_key);
+    }
+
+    #[test]
+    fn notify_on_add_defaults_to_true() {
+        assert!(Config::default().anki.notify_on_add);
     }
 
     /// Guards the shipped default.

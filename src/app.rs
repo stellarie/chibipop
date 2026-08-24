@@ -1899,6 +1899,9 @@ pub fn run(
                         eprintln!("chibipop: add to Anki failed: {e}");
                         s.anki.failed = true;
                     } else {
+                        if live.notify_on_add {
+                            tray.notify("chibipop", &format!("{} added", result.expr));
+                        }
                         s.anki.added.insert(result.expr);
                     }
                     let back = !s.history.is_empty();
@@ -1959,6 +1962,9 @@ pub fn run(
                     eprintln!("chibipop: screenshot failed: {e}");
                 } else if let Some(s) = shown.as_mut() {
                     if !result.expr.is_empty() {
+                        if live.notify_on_add {
+                            tray.notify("chibipop", &format!("{} added", result.expr));
+                        }
                         s.anki.added.insert(result.expr);
                     }
                     let back = !s.history.is_empty();
@@ -2848,6 +2854,7 @@ struct LiveSettings {
     trigger_mode: crate::config::TriggerMode,
     trigger_key: String,
     anki_add_key: String,
+    notify_on_add: bool,
     per_character_lookup: bool,
     actions_screenshot_hotkey: String,
 }
@@ -2885,6 +2892,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         trigger_mode: cfg.trigger.mode,
         trigger_key: cfg.trigger.trigger_key.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
+        notify_on_add: cfg.anki.notify_on_add,
         per_character_lookup: cfg.trigger.per_character_lookup,
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
     }

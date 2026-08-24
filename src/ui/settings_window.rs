@@ -115,6 +115,8 @@ const ID_ENGINE_LOG: i32 = 148;
 const ID_ADAPTER_LOG: i32 = 149;
 /// Screenshot hotkey button.
 const ID_SCREENSHOT_KEY: i32 = 150;
+/// Notify-on-add checkbox.
+const ID_NOTIFY_ON_ADD: i32 = 151;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -2889,7 +2891,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 6 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 7 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
@@ -2897,6 +2899,9 @@ impl SettingsWindow {
             ank.push(anki_chk);
             SendMessageW(anki_chk, BM_SETCHECK,
                 Some(WPARAM(if form.anki_enabled { 1 } else { 0 })), None);
+            y += ROW_H;
+            ank.push(check("Show notification when a card is added",
+                ID_NOTIFY_ON_ADD, form.notify_on_add, y)?);
             y += ROW_H;
             ank.push(label("AnkiConnect URL", y)?);
             ank.push(child(page, w!("EDIT"), &form.anki_url,
@@ -3188,6 +3193,7 @@ impl SettingsWindow {
                 anki_model: text_of(ID_ANKI_MODEL),
                 anki_add_key,
                 field_map,
+                notify_on_add: checked(ID_NOTIFY_ON_ADD),
                 screenshot_hotkey,
                 enabled_plugins: self
                     .plugin_names
