@@ -1575,9 +1575,8 @@ pub fn run(
             }
 
             // Static region hotkey (slot 1).
-            if Hooks::take_action_hotkey(1)
-                && live.sentence_mode == "static"
-            {
+            // Works in any sentence mode.
+            if Hooks::take_action_hotkey(1) {
                     let _ = popup.hide();
                     if let Some(b) = &anki_button {
                         b.hide();

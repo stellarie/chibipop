@@ -128,6 +128,8 @@ const ID_STATIC_REGION_KEY: i32 = 157;
 const ID_STATIC_REGION_LABEL: i32 = 158;
 /// Overlay outline checkbox.
 const ID_SHOW_STATIC_OVERLAY: i32 = 159;
+/// Capture-exclusion hint text.
+const ID_STATIC_CAPTURE_HINT: i32 = 160;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -1287,6 +1289,9 @@ unsafe fn update_static_controls(hwnd: HWND) {
             let _ = ShowWindow(c, cmd);
         }
         if let Ok(c) = dlg_item(hwnd, ID_SHOW_STATIC_OVERLAY) {
+            let _ = ShowWindow(c, cmd);
+        }
+        if let Ok(c) = dlg_item(hwnd, ID_STATIC_CAPTURE_HINT) {
             let _ = ShowWindow(c, cmd);
         }
     }
@@ -3048,9 +3053,14 @@ impl SettingsWindow {
             y += ROW_H;
             ank.push(check("Show capture region outline",
                 ID_SHOW_STATIC_OVERLAY, form.show_static_overlay, y)?);
+            y += ROW_H;
+            ank.push(child(page, w!("STATIC"),
+                "Tip: enable capture exclusion in General for best results",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD, ROW_H,
+                ID_STATIC_CAPTURE_HINT, f)?);
             if !is_static {
                 for &id in &[ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY,
-                             ID_SHOW_STATIC_OVERLAY] {
+                             ID_SHOW_STATIC_OVERLAY, ID_STATIC_CAPTURE_HINT] {
                     if let Ok(c) = dlg_item(h, id) {
                         let _ = ShowWindow(c, SW_HIDE);
                     }
