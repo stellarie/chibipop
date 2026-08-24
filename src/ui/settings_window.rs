@@ -130,6 +130,8 @@ const ID_STATIC_REGION_LABEL: i32 = 158;
 const ID_SHOW_STATIC_OVERLAY: i32 = 159;
 /// Capture-exclusion hint text.
 const ID_STATIC_CAPTURE_HINT: i32 = 160;
+/// First-dict-only checkbox.
+const ID_FIRST_DICT_ONLY: i32 = 161;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -2971,7 +2973,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 8 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 9 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
@@ -3013,6 +3015,9 @@ impl SettingsWindow {
             y += ROW_H;
             ank.push(check("Include screenshot when adding",
                 ID_INCLUDE_SCREENSHOT, form.include_screenshot, y)?);
+            y += ROW_H;
+            ank.push(check("First dictionary only",
+                ID_FIRST_DICT_ONLY, form.first_dict_only, y)?);
             y += ROW_H;
             ank.push(label("Sentence capture", y)?);
             let sentence_combo = child(page, w!("COMBOBOX"), "",
@@ -3328,6 +3333,7 @@ impl SettingsWindow {
                 static_region_key: resolved_sr_key(h, &template.static_region_key),
                 show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
                 include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
+                first_dict_only: checked(ID_FIRST_DICT_ONLY),
                 enabled_plugins: self
                     .plugin_names
                     .iter()
