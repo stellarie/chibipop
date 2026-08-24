@@ -1,4 +1,8 @@
 //! Rebuild, against a child.
+//!
+//! Windows-only: it spawns the real chibipop.exe, whose build-dict path
+//! lives behind cfg(windows). Elsewhere this file compiles to zero tests.
+#![cfg(windows)]
 
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
