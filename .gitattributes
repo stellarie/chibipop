@@ -1,0 +1,5 @@
+# ADR-0011: the geometry goldens are compared byte-for-byte against the
+# capture's own serialization, which emits LF. GitHub's hosted Windows
+# runners set core.autocrlf=true machine-wide, so without this a checkout
+# rewrites them to CRLF and every golden reds on line endings alone.
+tests/goldens/geometry/*.json -text
