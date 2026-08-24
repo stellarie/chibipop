@@ -2697,6 +2697,7 @@ mod tests {
             highlight_match: true,
             scroll_popup: true,
             side_panel: false,
+            layer: Default::default(),
         }
     }
 

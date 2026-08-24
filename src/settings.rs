@@ -593,6 +593,23 @@ mod tests {
         );
     }
 
+    /// ADR-0012: the Windows Apply pipeline renders its subset and
+    /// carries the Linux platform fields untouched.
+    #[test]
+    fn applying_the_form_preserves_the_other_platforms_fields() {
+        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        cfg.trigger.trigger_key_linux = "SUPER+J".to_string();
+        cfg.anki.add_key_linux = "SUPER+K".to_string();
+        cfg.popup.layer = crate::config::PopupLayer::Top;
+        let mut form = from_config(&cfg, &dicts());
+        form.theme = "light".to_string();
+        let out = apply_to(&form, &cfg);
+        assert_eq!("SUPER+J", out.trigger.trigger_key_linux);
+        assert_eq!("SUPER+K", out.anki.add_key_linux);
+        assert_eq!(crate::config::PopupLayer::Top, out.popup.layer);
+        assert_eq!("light", out.popup.theme);
+    }
+
     #[test]
     fn a_never_ordered_dictionary_derives_a_key_without_the_date() {
         let cfg = cfg_with(&[]);
