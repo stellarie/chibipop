@@ -2,6 +2,8 @@
 
 pub mod audit;
 pub mod console;
+pub mod css;
+pub mod editor;
 pub mod overlay;
 pub mod render;
 pub mod settings_window;
