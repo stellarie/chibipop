@@ -405,6 +405,8 @@ pub struct ScreenshotConfig {
     pub hotkey: String,
     #[serde(default = "default_screenshot_save_dir")]
     pub save_dir: String,
+    #[serde(default)]
+    pub include_on_add: bool,
 }
 
 /// On by default.
@@ -437,6 +439,7 @@ impl Default for ScreenshotConfig {
         ScreenshotConfig {
             hotkey: default_screenshot_hotkey(),
             save_dir: default_screenshot_save_dir(),
+            include_on_add: false,
         }
     }
 }

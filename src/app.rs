@@ -1430,11 +1430,86 @@ pub fn run(
 
             if Hooks::take_add_hotkey() {
                 if let Some(s) = shown.as_mut() {
-                    start_add_to_anki(
-                        s, &mut renderer, &theme,
-                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
-                        &add_tx, main_tid, live.side_panel,
-                    );
+                    if live.include_screenshot {
+                        let _ = popup.hide();
+                        if let Some(b) = &anki_button {
+                            b.hide();
+                        }
+                        let rect = region_selection.run();
+                        if let Some(rect) = rect {
+                            if let Ok(cap) =
+                                crate::text::capture::capture_upscaled_by(rect, 1)
+                            {
+                                let (expr, fields) = s
+                                    .presentation
+                                    .top
+                                    .as_ref()
+                                    .map(|card| {
+                                        let expr = card
+                                            .written
+                                            .as_deref()
+                                            .or(card.reading.as_deref())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let mut fields =
+                                            anki::fields_from_card(card, &card.blocks);
+                                        if let Some(sentence) = &s.presentation.sentence {
+                                            fields.insert(
+                                                "sentence".to_string(),
+                                                sentence.clone(),
+                                            );
+                                        }
+                                        (expr, fields)
+                                    })
+                                    .unwrap_or_default();
+                                let word =
+                                    crate::action::screenshot::sanitize_filename(&expr);
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let filename = format!("{word}_{now}.png");
+                                let ss_cfg = &cfg.actions.screenshot;
+                                let save_dir =
+                                    if Path::new(&ss_cfg.save_dir).is_absolute() {
+                                        PathBuf::from(&ss_cfg.save_dir)
+                                    } else {
+                                        exe_dir.join(&ss_cfg.save_dir)
+                                    };
+                                let save_path = save_dir.join(filename);
+                                let cmd = crate::action::ScreenshotCommand {
+                                    bgra_buf: cap.buf,
+                                    width: cap.w,
+                                    height: cap.h,
+                                    save_path,
+                                    expr,
+                                    fields,
+                                    field_map: live.anki_field_map.clone(),
+                                    anki_url: live.anki_url.clone(),
+                                    anki_deck: live.anki_deck.clone(),
+                                    anki_model: live.anki_model.clone(),
+                                    anki_connected: s.anki.connected,
+                                };
+                                let _ = screenshot_tx.send(cmd);
+                            }
+                        } else {
+                            start_add_to_anki(
+                                s, &mut renderer, &theme,
+                                &live.anki_url, &live.anki_deck, &live.anki_model,
+                                &live.anki_field_map, &add_tx, main_tid, live.side_panel,
+                            );
+                        }
+                        let _ = popup.show_without_activating();
+                        if let Some(b) = &anki_button {
+                            b.show_without_activating();
+                        }
+                    } else {
+                        start_add_to_anki(
+                            s, &mut renderer, &theme,
+                            &live.anki_url, &live.anki_deck, &live.anki_model,
+                            &live.anki_field_map, &add_tx, main_tid, live.side_panel,
+                        );
+                    }
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
             }
@@ -2864,6 +2939,7 @@ struct LiveSettings {
     notify_on_add: bool,
     per_character_lookup: bool,
     actions_screenshot_hotkey: String,
+    include_screenshot: bool,
 }
 
 /// Rebuilt on each change.
@@ -2902,6 +2978,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         notify_on_add: cfg.anki.notify_on_add,
         per_character_lookup: cfg.trigger.per_character_lookup,
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
+        include_screenshot: cfg.actions.screenshot.include_on_add,
     }
 }
 

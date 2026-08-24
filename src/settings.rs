@@ -59,7 +59,7 @@ pub struct SettingsForm {
     pub anki_add_key: String,
     pub field_map: Vec<FieldMapping>,
     pub notify_on_add: bool,
-    pub screenshot_hotkey: String,
+    pub include_screenshot: bool,
     /// Plugin names allowed to run.
     pub enabled_plugins: Vec<String>,
 }
@@ -324,7 +324,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
         notify_on_add: cfg.anki.notify_on_add,
-        screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
+        include_screenshot: cfg.actions.screenshot.include_on_add,
         enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
@@ -383,7 +383,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
-    out.actions.screenshot.hotkey = form.screenshot_hotkey.clone();
+    out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
         form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
@@ -746,11 +746,39 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_hotkey_round_trips() {
+    fn include_screenshot_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.include_on_add = true;
+        let form = from_config(&cfg, &dicts());
+        assert!(form.include_screenshot);
+        let out = apply_to(&form, &cfg);
+        assert!(out.actions.screenshot.include_on_add);
+    }
+
+    #[test]
+    fn include_on_add_defaults_to_false() {
+        let cfg = Config::default();
+        assert!(!cfg.actions.screenshot.include_on_add);
+        let form = from_config(&cfg, &dicts());
+        assert!(!form.include_screenshot);
+    }
+
+    #[test]
+    fn include_screenshot_false_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.include_on_add = false;
+        let form = from_config(&cfg, &dicts());
+        assert!(!form.include_screenshot);
+        let out = apply_to(&form, &cfg);
+        assert!(!out.actions.screenshot.include_on_add);
+    }
+
+    #[test]
+    fn include_screenshot_does_not_touch_hotkey() {
         let mut cfg = cfg_with(&[]);
         cfg.actions.screenshot.hotkey = "f10".into();
+        cfg.actions.screenshot.include_on_add = true;
         let form = from_config(&cfg, &dicts());
-        assert_eq!("f10", form.screenshot_hotkey);
         let out = apply_to(&form, &cfg);
         assert_eq!("f10", out.actions.screenshot.hotkey);
     }
