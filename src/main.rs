@@ -289,7 +289,7 @@ fn main() -> Result<()> {
 
             let mut tiled_scan: Option<Vec<chibipop::geom::ScanRect>> = None;
             if region_was_default && tiles > 1 {
-                let (tiled, scan) = source.resolve_at_tiled_scanned(cursor, show_region.is_some())?;
+                let (tiled, scan, _) = source.resolve_at_tiled_scanned(cursor, show_region.is_some())?;
                 match tiled {
                     None => println!("\ntiled:   nothing resolved"),
                     Some(r) => println!("\ntiled:   {:?}  ({} chars)", r.span.text, r.span.text.chars().count()),
