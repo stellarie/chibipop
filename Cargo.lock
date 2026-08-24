@@ -109,16 +109,26 @@ name = "chibipop"
 version = "0.8.2"
 dependencies = [
  "anyhow",
- "clap",
  "rusqlite",
  "serde",
  "serde_json",
  "toml",
  "ureq",
+ "zip",
+]
+
+[[package]]
+name = "chibipop-windows"
+version = "0.8.2"
+dependencies = [
+ "anyhow",
+ "chibipop",
+ "clap",
+ "rusqlite",
+ "serde_json",
  "windows",
  "windows-future",
  "windows-numerics",
- "zip",
 ]
 
 [[package]]

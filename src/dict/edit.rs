@@ -491,7 +491,10 @@ mod tests {
     #[test]
     fn a_full_archive_path_matches_the_recorded_file_name() {
         let (mut conn, _guard) = fixture_db("full_path_still_matches");
-        let path = Path::new("C:\\Users\\Stella\\chibipop\\library\\terms.zip");
+        // Forward slashes on purpose: `Path` parses them as separators on
+        // both Windows and Linux, so this exercises the same contract on the
+        // platform-neutral core's whole build matrix.
+        let path = Path::new("C:/Users/Stella/chibipop/library/terms.zip");
 
         let gone = remove_dictionary(&mut conn, 1, path).unwrap();
 

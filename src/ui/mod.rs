@@ -1,9 +1,4 @@
-//! The popup and its content.
+//! The popup's platform-neutral parts. Painting is per-platform and lives
+//! in the bin crates (ADR-0001).
 
-pub mod console;
-pub mod overlay;
-pub mod render;
-pub mod settings_window;
 pub mod theme;
-pub mod tray;
-pub mod window;

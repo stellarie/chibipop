@@ -54,7 +54,7 @@ fn default_trigger_key() -> String {
     "shift".to_string()
 }
 
-pub(crate) fn default_ocr_language() -> String {
+pub fn default_ocr_language() -> String {
     "ja".to_string()
 }
 

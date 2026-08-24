@@ -221,18 +221,26 @@ owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that
 `LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
 before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
 
-**The three accepted clippy errors — unchanged since 2026-08-09, sites re-confirmed 2026-08-11:**
+**The three accepted clippy errors — count unchanged since 2026-08-09, sites re-confirmed
+2026-08-24 (ticket 24 workspace split moved the render.rs site into the Windows bin crate):**
 
 | Lint | Site |
 |---|---|
 | `useless_conversion` — explicit `.into_iter()` in an `IntoIterator` argument | `src/lookup/deconj.rs:78` |
-| `too_many_arguments` (8/7) | `src/lookup/model.rs:78` |
-| `too_many_arguments` (10/7) | `src/ui/render.rs:699` |
+| `too_many_arguments` (8/7) | `src/lookup/model.rs:86` |
+| `too_many_arguments` (10/7) | `crates/chibipop-windows/src/ui/render.rs:794` |
 
 It was **4** until 2026-08-09. The fourth was `while_let_loop`, on `worker_main`'s trigger drain;
 the hot-reload branch replaced that loop with an explicit `drain` (a `Reload` message must never be
 swallowed by newest-wins coalescing), so the lint went with it. That is a legitimate 4 → 3, not a
 suppression — the count went **down** because the code did.
+
+Since the 2026-08-24 workspace split the CI gate counts rendered **warnings from a plain clippy
+run** (no `-D warnings`) instead of error lines: denying warnings turns core's accepted findings
+into hard errors, the core lib produces no rmeta, and the dependent `chibipop-windows` crate never
+gets linted — its accepted finding would silently vanish from the count. Left as warnings, every
+target lints, cargo deduplicates repeat diagnostics across targets, and one workspace-wide run
+renders each finding exactly once. Same baseline, same number: **3**.
 
 > [!warning] The clippy line changed on 2026-07-29, because the old one could not fail
 > It used to be `grep -cE "^error: (doc list|explicit call|this function|this loop)"` —

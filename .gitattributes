@@ -2,4 +2,4 @@
 # capture's own serialization, which emits LF. GitHub's hosted Windows
 # runners set core.autocrlf=true machine-wide, so without this a checkout
 # rewrites them to CRLF and every golden reds on line endings alone.
-tests/goldens/geometry/*.json -text
+crates/chibipop-windows/tests/goldens/geometry/*.json -text

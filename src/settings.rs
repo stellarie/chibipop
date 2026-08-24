@@ -139,7 +139,7 @@ pub fn shown_name(source: &Path) -> Option<String> {
 }
 
 /// Split still trustworthy?
-pub(crate) fn is_scoped(form: &SettingsForm) -> bool {
+pub fn is_scoped(form: &SettingsForm) -> bool {
     form.dict_list_language == form.ocr_language
         && (form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty())
 }
@@ -324,7 +324,7 @@ fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> 
 }
 
 /// `None`: leave the entry be.
-pub(crate) fn scoped_entry(
+pub fn scoped_entry(
     names: &[String],
     unreadable: &[String],
     existing: &[String],

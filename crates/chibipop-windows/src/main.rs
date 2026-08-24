@@ -9,7 +9,7 @@ use chibipop::lookup::engine::LookupEngine;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
-use chibipop::text::capture::UPSCALE;
+use chibipop_windows::text::capture::UPSCALE;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -97,7 +97,7 @@ enum Command {
 
 fn main() -> Result<()> {
     chibipop::update::cleanup_old();
-    chibipop::ui::console::hide();
+    chibipop_windows::ui::console::hide();
     let cli = Cli::parse();
     // A double-click passes none.
     let command = cli.command.unwrap_or(Command::Run {
@@ -137,7 +137,7 @@ fn main() -> Result<()> {
 
             let capture = probe_capture_size();
             let source =
-                chibipop::text::ocr::OcrTextSource::new(tiles, false, capture, true, "ja")?;
+                chibipop_windows::text::ocr::OcrTextSource::new(tiles, false, capture, true, "ja")?;
             let region_was_default = region.is_none();
             let region = match region {
                 None => chibipop::text::layout::region_around(cursor, false, capture),
@@ -285,7 +285,7 @@ fn main() -> Result<()> {
                 if scan.is_empty() {
                     println!("\nshow-region: nothing was captured");
                 } else {
-                    match chibipop::ui::overlay::Overlay::create(false) {
+                    match chibipop_windows::ui::overlay::Overlay::create(false) {
                         Err(e) => eprintln!("chibipop: creating the scan overlay failed: {e:#}"),
                         Ok(overlay) => {
                             if let Err(e) = overlay.show_rects(&scan, &chibipop::ui::theme::Theme::dark()) {
@@ -303,7 +303,7 @@ fn main() -> Result<()> {
         Command::Watch { dict, rules, tiles } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
-            let source = chibipop::text::ocr::OcrTextSource::new(
+            let source = chibipop_windows::text::ocr::OcrTextSource::new(
                 tiles,
                 false,
                 chibipop::text::layout::CaptureSize::default(),
@@ -372,7 +372,7 @@ fn main() -> Result<()> {
                 })?;
                 dictionary.dicts().context("reading dictionary identities")?
             };
-            chibipop::app::settings_only(cfg, &dicts, &config_path, &dict)
+            chibipop_windows::app::settings_only(cfg, &dicts, &config_path, &dict)
         }
         Command::Run { dict, rules, config } => {
             let dict = dict_path(dict);
@@ -380,7 +380,7 @@ fn main() -> Result<()> {
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
-            chibipop::app::run(cfg, &dict, &rules, &config_path)
+            chibipop_windows::app::run(cfg, &dict, &rules, &config_path)
         }
         Command::BuildDict { library, out } => {
             let mut archives = Vec::new();

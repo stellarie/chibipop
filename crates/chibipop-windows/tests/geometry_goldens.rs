@@ -15,7 +15,7 @@
 //! compiles to zero tests.
 #![cfg(windows)]
 
-use chibipop::ui::render::geometry::{fixtures, snapshot, to_json_text};
+use chibipop_windows::ui::render::geometry::{fixtures, snapshot, to_json_text};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;

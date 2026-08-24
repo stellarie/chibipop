@@ -2,7 +2,7 @@
 
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
-use chibipop::rebuild::{friendly, spawn_with, Progress};
+use chibipop_windows::rebuild::{friendly, spawn_with, Progress};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
@@ -18,7 +18,7 @@ impl Drop for TempDirGuard {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/yomitan").join(name)
 }
 
 fn scratch(test_name: &str) -> (PathBuf, TempDirGuard) {

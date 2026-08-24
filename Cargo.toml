@@ -1,5 +1,17 @@
-[package]
-name = "chibipop"
+[workspace]
+# ADR-0001: core lib `chibipop` (this package, at the repo root so
+# `use chibipop::…` and the `data/` + `tests/fixtures/` paths it resolves
+# against are untouched by the split) plus one bin crate per platform.
+# `chibipop-linux` joins as a sibling.
+members = ["crates/chibipop-windows"]
+# Without this a hybrid root builds only the root package, so a bare
+# `cargo test` would silently stop covering the Windows crate - exactly the
+# "whole target not running" failure tier0's test floor exists to catch.
+# On Linux the Windows member fails to compile, loudly; use `-p chibipop`.
+default-members = [".", "crates/chibipop-windows"]
+resolver = "2"
+
+[workspace.package]
 # 0.7.2 is deliberately never tagged: its headline feature was the
 # rebuild-and-promote path, and that path deadlocks on JoinHandle::join.
 # 0.8.0 deletes it. See docs/REGRESSION.md and docs/BACKLOG.md.
@@ -7,15 +19,9 @@ version = "0.8.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
-[lib]
-name = "chibipop"
-path = "src/lib.rs"
-
-[[bin]]
-name = "chibipop"
-path = "src/main.rs"
-
-[dependencies]
+# One pin per dependency for the whole workspace: two crates disagreeing on
+# a version is how a "pure move" stops being one.
+[workspace.dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.4", features = ["derive"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
@@ -23,39 +29,25 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.3"
 ureq = { version = "3", features = ["json"] }
-windows = { version = "0.62.2", features = [
-  "Win32_Graphics_Gdi",
-  "Win32_UI_HiDpi",
-  "Win32_System_WinRT",
-  "Media_Ocr",
-  "Graphics_Imaging",
-  "Globalization",
-  "Storage_Streams",
-  "Security_Cryptography",
-  "Win32_Foundation",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_UI_Input_KeyboardAndMouse",
-  "Win32_UI_Shell",
-  "Win32_UI_Controls",
-  "Win32_UI_Controls_Dialogs",
-  "Win32_Graphics_Direct3D",
-  "Win32_Graphics_Direct3D11",
-  "Win32_Graphics_Direct2D",
-  "Win32_Graphics_Direct2D_Common",
-  "Win32_Graphics_Dxgi",
-  "Win32_Graphics_Dxgi_Common",
-  "Win32_Graphics_DirectWrite",
-  "Win32_System_LibraryLoader",
-  # CreateMutexW takes SECURITY_ATTRIBUTES.
-  "Win32_Security",
-  "Win32_System_Threading",
-  "Win32_System_Console",
-] }
-windows-future = "0.3.2"
-# Only for `Vector2`, the origin type `ID2D1RenderTarget::DrawTextLayout`
-# requires (render.rs, M3 Task 5). Already resolved at this exact version as
-# a transitive dependency of `windows` itself (see Cargo.lock) - naming it
-# directly here does not change what gets built, only what render.rs is
-# allowed to import by name.
-windows-numerics = "0.3.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
+[package]
+name = "chibipop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "chibipop"
+path = "src/lib.rs"
+
+# No `windows` here, and none arriving by cfg either: the platform crates
+# are named only by the bins (ADR-0001). This crate builds on stable Linux.
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+ureq.workspace = true
+zip.workspace = true

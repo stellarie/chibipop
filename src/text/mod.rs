@@ -1,8 +1,7 @@
-//! Screen text acquisition.
+//! Screen text: shared vocabulary and layout/hit-scan logic. Acquisition
+//! backends (capture, OCR) are platform code and live in the bin crates.
 
 pub mod layout;
-pub mod capture;
-pub mod ocr;
 
 use crate::geom::{PhysPoint, PhysRect};
 use crate::text::layout::TextGeom;
