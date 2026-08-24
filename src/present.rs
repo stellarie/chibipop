@@ -12,6 +12,8 @@ pub struct Presentation {
     pub collapsed: Vec<CollapsedRow>,
     /// Every group as a full card.
     pub all_cards: Vec<Card>,
+    /// The OCR line; set by app.rs.
+    pub sentence: Option<String>,
 }
 
 /// The top group, in full.
@@ -102,7 +104,7 @@ pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentat
         .map(|c| collapsed_from_card(c, cfg.summary_chars))
         .collect();
 
-    Presentation { top, collapsed, all_cards }
+    Presentation { top, collapsed, all_cards, sentence: None }
 }
 
 /// Ink-to-outline pad, in px.
@@ -596,5 +598,25 @@ mod tests {
         assert_ne!(original_top, p.top);
         swap_top(&mut p, 0, 40);
         assert_eq!(original_top, p.top);
+    }
+
+    #[test]
+    fn build_leaves_sentence_unset() {
+        let p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg());
+        assert!(p.sentence.is_none());
+    }
+
+    #[test]
+    fn sentence_source_appears_in_fields_when_set() {
+        let mut p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg());
+        p.sentence = Some("その猫はかわいい。".to_string());
+        let card = p.top.as_ref().unwrap();
+
+        let mut fields = crate::anki::fields_from_card(card, &card.blocks);
+        if let Some(sentence) = &p.sentence {
+            fields.insert("sentence".to_string(), sentence.clone());
+        }
+
+        assert_eq!(Some(&"その猫はかわいい。".to_string()), fields.get("sentence"));
     }
 }
