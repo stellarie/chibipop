@@ -19,6 +19,11 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows_numerics::Vector2;
 
+/// Measure-only geometry capture.
+///
+/// The layout goldens' capture side.
+pub mod geometry;
+
 /// Gap within a block.
 const LINE_GAP: f32 = 4.0;
 /// Gap before a new block.
@@ -52,6 +57,57 @@ pub enum HitAction {
     DrillDown(String),
     /// Navigate back in history.
     Back,
+}
+
+/// One element's measured box.
+///
+/// Pure observation: `layout_pass`
+/// fills these only when a caller
+/// asks, and nothing reads them
+/// back into the walk.
+#[derive(Debug, Clone)]
+pub struct ElemGeometry {
+    /// The `Elem` variant it came from.
+    pub kind: &'static str,
+    pub text: String,
+    pub font_size: f32,
+    /// Gap added above this element.
+    pub top_gap: f32,
+    /// Wrap width the text was given.
+    pub wrap_w: f32,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// Wrapped line count.
+    pub lines: u32,
+    /// What the walk's y advanced by.
+    pub advance: f32,
+}
+
+/// One "See also" row's box.
+///
+/// `y` is column-local, the same y
+/// `side_paint` draws the row at.
+#[derive(Debug, Clone)]
+pub struct SideRowGeometry {
+    /// `None` for the heading.
+    pub idx: Option<usize>,
+    pub text: String,
+    pub y: f32,
+    pub h: f32,
+}
+
+/// What the layout walk reports.
+///
+/// Paint wants hit rects; the golden
+/// capture wants geometry. Both are
+/// write-only: neither changes what
+/// the walk computes.
+#[derive(Default)]
+pub struct LayoutSinks<'a> {
+    pub hits: Option<&'a RefCell<Vec<HitRect>>>,
+    pub geom: Option<&'a RefCell<Vec<ElemGeometry>>>,
 }
 
 /// CJK ideograph check.
@@ -269,55 +325,17 @@ impl Renderer {
         show_back: bool,
         side_panel: bool,
     ) -> Result<(i32, i32, i32)> {
-        let scale = self.dpi_scale();
-        let dip_w = max_w as f32 / scale;
-        let dip_h = max_h as f32 / scale;
-        let (elems, side) = build_elements(p, theme, show_back, side_panel);
-        let has_side = !side.is_empty();
-        let side_extra = if has_side {
-            SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
-        } else {
-            0.0
-        };
-        let content_w = (dip_w - 2.0 * theme.padding as f32 - side_extra).max(0.0);
-        let used_h = layout_pass(
+        measure_layout(
             &self.dwrite_factory,
             &self.formats,
-            None,
-            &elems,
+            p,
             theme,
-            0.0,
-            0.0,
-            content_w,
-            0.0,
-            None,
+            self.dpi_scale(),
+            max_w,
+            max_h,
+            show_back,
+            side_panel,
         )
-        .context("measuring popup content")?;
-        let side_h = if has_side {
-            side_measure(
-                &self.dwrite_factory,
-                &self.formats,
-                &theme.font_name,
-                theme.collapsed_size,
-                &side,
-                SIDE_PANEL_W,
-            )?
-        } else {
-            0.0
-        };
-        let body_h = used_h.max(side_h);
-        let content_h = body_h.ceil() + 2.0 * theme.padding as f32;
-        let view_h = content_h.min(dip_h);
-        let total_w = if has_side {
-            ((content_w + side_extra + 2.0 * theme.padding as f32) * scale).ceil() as i32
-        } else {
-            max_w
-        };
-        Ok((
-            total_w,
-            (view_h * scale).ceil() as i32,
-            (content_h * scale).ceil() as i32,
-        ))
     }
 
     /// Paints into the client rect.
@@ -453,7 +471,7 @@ impl Renderer {
                 origin,
                 main_w,
                 scroll as f32,
-                Some(&self.hit_rects),
+                &LayoutSinks { hits: Some(&self.hit_rects), geom: None },
             )?;
 
             if has_side {
@@ -693,6 +711,83 @@ pub(crate) fn anki_button_label(
     Some((text.to_string(), color))
 }
 
+/// `measure`, without the window.
+///
+/// Takes the DPI scale rather than
+/// asking an HWND for it, so the
+/// measure-only walk runs with no
+/// window at all - which is what
+/// the geometry goldens capture.
+///
+/// Module-private on purpose: it
+/// names `FormatCache`, so any
+/// wider visibility would trip
+/// `private_interfaces`. The
+/// `geometry` child module reaches
+/// it as a descendant.
+#[allow(clippy::too_many_arguments)]
+fn measure_layout(
+    dwrite: &IDWriteFactory,
+    formats: &RefCell<FormatCache>,
+    p: &Presentation,
+    theme: &Theme,
+    scale: f32,
+    max_w: i32,
+    max_h: i32,
+    show_back: bool,
+    side_panel: bool,
+) -> Result<(i32, i32, i32)> {
+    let dip_w = max_w as f32 / scale;
+    let dip_h = max_h as f32 / scale;
+    let (elems, side) = build_elements(p, theme, show_back, side_panel);
+    let has_side = !side.is_empty();
+    let side_extra = if has_side {
+        SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
+    } else {
+        0.0
+    };
+    let content_w = (dip_w - 2.0 * theme.padding as f32 - side_extra).max(0.0);
+    let used_h = layout_pass(
+        dwrite,
+        formats,
+        None,
+        &elems,
+        theme,
+        0.0,
+        0.0,
+        content_w,
+        0.0,
+        &LayoutSinks::default(),
+    )
+    .context("measuring popup content")?;
+    let side_h = if has_side {
+        side_measure(
+            dwrite,
+            formats,
+            &theme.font_name,
+            theme.collapsed_size,
+            &side,
+            SIDE_PANEL_W,
+            None,
+        )?
+    } else {
+        0.0
+    };
+    let body_h = used_h.max(side_h);
+    let content_h = body_h.ceil() + 2.0 * theme.padding as f32;
+    let view_h = content_h.min(dip_h);
+    let total_w = if has_side {
+        ((content_w + side_extra + 2.0 * theme.padding as f32) * scale).ceil() as i32
+    } else {
+        max_w
+    };
+    Ok((
+        total_w,
+        (view_h * scale).ceil() as i32,
+        (content_h * scale).ceil() as i32,
+    ))
+}
+
 /// The shared layout walk.
 ///
 /// Returns the content height.
@@ -706,7 +801,7 @@ fn layout_pass(
     origin_y: f32,
     content_w: f32,
     scroll: f32,
-    hit_out: Option<&RefCell<Vec<HitRect>>>,
+    sinks: &LayoutSinks<'_>,
 ) -> windows::core::Result<f32> {
     let mut y = 0.0f32;
     let mut reserved_w = 0.0f32;
@@ -716,6 +811,21 @@ fn layout_pass(
             Elem::Separator { top_gap } => {
                 let h = SEPARATOR_THICKNESS;
                 y += top_gap;
+                if let Some(geom) = sinks.geom {
+                    geom.borrow_mut().push(ElemGeometry {
+                        kind: "Separator",
+                        text: String::new(),
+                        font_size: 0.0,
+                        top_gap: *top_gap,
+                        wrap_w: content_w,
+                        x: origin_x,
+                        y: origin_y + y,
+                        w: content_w,
+                        h,
+                        lines: 0,
+                        advance: h,
+                    });
+                }
                 if let Some(t) = target {
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(theme.separator), None) }?;
                     let rect = D2D_RECT_F {
@@ -732,6 +842,25 @@ fn layout_pass(
                 let (layout, m) =
                     build_text_layout(dwrite, formats, &theme.font_name, line, content_w)?;
                 unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
+                if let Some(geom) = sinks.geom {
+                    // Trailing-aligned: the box
+                    // hugs the right edge. m is
+                    // measured pre-alignment, so
+                    // derive x from the width.
+                    geom.borrow_mut().push(ElemGeometry {
+                        kind: "Corner",
+                        text: line.text.clone(),
+                        font_size: line.size,
+                        top_gap: line.top_gap,
+                        wrap_w: content_w,
+                        x: origin_x + content_w - m.width,
+                        y: origin_y + y,
+                        w: m.width,
+                        h: m.height,
+                        lines: m.lineCount,
+                        advance: 0.0,
+                    });
+                }
                 if let Some(t) = target {
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
@@ -753,6 +882,21 @@ fn layout_pass(
                     build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
                 let h = m.height;
                 y += line.top_gap;
+                if let Some(geom) = sinks.geom {
+                    geom.borrow_mut().push(ElemGeometry {
+                        kind: "Text",
+                        text: line.text.clone(),
+                        font_size: line.size,
+                        top_gap: line.top_gap,
+                        wrap_w: avail_w,
+                        x: origin_x,
+                        y: origin_y + y,
+                        w: m.width,
+                        h,
+                        lines: m.lineCount,
+                        advance: h,
+                    });
+                }
                 if let Some(t) = target {
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(line.color), None) }?;
                     unsafe {
@@ -773,7 +917,22 @@ fn layout_pass(
                     build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
                 let h = m.height;
                 y += line.top_gap;
-                if let Some(hits) = hit_out {
+                if let Some(geom) = sinks.geom {
+                    geom.borrow_mut().push(ElemGeometry {
+                        kind: "Collapsed",
+                        text: line.text.clone(),
+                        font_size: line.size,
+                        top_gap: line.top_gap,
+                        wrap_w: avail_w,
+                        x: origin_x,
+                        y: origin_y + y,
+                        w: m.width,
+                        h,
+                        lines: m.lineCount,
+                        advance: h,
+                    });
+                }
+                if let Some(hits) = sinks.hits {
                     hits.borrow_mut().push(HitRect {
                         x: None,
                         y: origin_y + y,
@@ -802,7 +961,22 @@ fn layout_pass(
                     build_text_layout(dwrite, formats, &theme.font_name, line, avail_w)?;
                 let h = m.height;
                 y += line.top_gap;
-                if let Some(hits) = hit_out {
+                if let Some(geom) = sinks.geom {
+                    geom.borrow_mut().push(ElemGeometry {
+                        kind: "Headword",
+                        text: line.text.clone(),
+                        font_size: line.size,
+                        top_gap: line.top_gap,
+                        wrap_w: avail_w,
+                        x: origin_x,
+                        y: origin_y + y,
+                        w: m.width,
+                        h,
+                        lines: m.lineCount,
+                        advance: h,
+                    });
+                }
+                if let Some(hits) = sinks.hits {
                     let mut u16_pos = *prefix_u16 as u32;
                     for ch in headword.chars() {
                         if is_kanji(ch) {
@@ -852,7 +1026,22 @@ fn layout_pass(
                     build_text_layout(dwrite, formats, &theme.font_name, line, content_w)?;
                 let h = m.height;
                 y += line.top_gap;
-                if let Some(hits) = hit_out {
+                if let Some(geom) = sinks.geom {
+                    geom.borrow_mut().push(ElemGeometry {
+                        kind: "BackButton",
+                        text: line.text.clone(),
+                        font_size: line.size,
+                        top_gap: line.top_gap,
+                        wrap_w: content_w,
+                        x: origin_x,
+                        y: origin_y + y,
+                        w: m.width,
+                        h,
+                        lines: m.lineCount,
+                        advance: h,
+                    });
+                }
+                if let Some(hits) = sinks.hits {
                     hits.borrow_mut().push(HitRect {
                         x: None,
                         y: origin_y + y,
@@ -898,6 +1087,10 @@ fn build_text_layout(
 }
 
 /// Height of the side column.
+///
+/// `rows` mirrors what `side_paint`
+/// would draw: the same y walk, the
+/// same heights, no target needed.
 fn side_measure(
     dwrite: &IDWriteFactory,
     formats: &RefCell<FormatCache>,
@@ -905,6 +1098,7 @@ fn side_measure(
     size: f32,
     entries: &[SideEntry],
     col_w: f32,
+    rows: Option<&RefCell<Vec<SideRowGeometry>>>,
 ) -> windows::core::Result<f32> {
     let format = text_format(dwrite, formats, font, size)?;
     let heading: Vec<u16> = "See also".encode_utf16().collect();
@@ -913,6 +1107,14 @@ fn side_measure(
     }?;
     let mut m = DWRITE_TEXT_METRICS::default();
     unsafe { layout.GetMetrics(&mut m) }?;
+    if let Some(rows) = rows {
+        rows.borrow_mut().push(SideRowGeometry {
+            idx: None,
+            text: "See also".to_string(),
+            y: 0.0,
+            h: m.height,
+        });
+    }
     let mut y = m.height + LINE_GAP;
 
     for entry in entries {
@@ -922,6 +1124,14 @@ fn side_measure(
         }?;
         let mut em = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut em) }?;
+        if let Some(rows) = rows {
+            rows.borrow_mut().push(SideRowGeometry {
+                idx: Some(entry.idx),
+                text: entry.text.clone(),
+                y,
+                h: em.height,
+            });
+        }
         y += LINE_GAP + em.height;
     }
     Ok(y)

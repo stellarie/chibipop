@@ -5,17 +5,36 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      bless:
+        description: >-
+          Rewrite the geometry goldens (CHIBIPOP_BLESS=1) and upload them as
+          an artifact for review instead of running the tier 0 gate. Never
+          commits anything (ADR-0011).
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   tier0:
-    # docs/REGRESSION.md tier 0, lifted as-is. windows-latest is not a
-    # preference: the crate is Win32, WinRT OCR and Direct2D throughout and
-    # does not build anywhere else.
+    # docs/REGRESSION.md tier 0, lifted as-is. Windows is not a preference:
+    # the crate is Win32, WinRT OCR and Direct2D throughout and does not
+    # build anywhere else.
+    #
+    # Pinned to windows-2025, not windows-latest, per ADR-0011: the geometry
+    # goldens assert exact DirectWrite metrics, so the runner image (its font
+    # files) is part of tier0's baseline, like the clippy count and the test
+    # floor. A label migration changing fonts would red the gate for no code
+    # change. Image EOL is one scheduled re-baseline: bless on the new image,
+    # review, and commit stating re-baseline vs finding.
     name: Tier 0 gate
-    runs-on: windows-latest
+    runs-on: windows-2025
+    # A bless dispatch replaces the gate run: blessing exists precisely
+    # because the goldens (or the image) changed, so verifying against the
+    # old ones in the same run would only red for the reason being fixed.
+    if: github.event.inputs.bless != 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -102,4 +121,35 @@ jobs:
         with:
           name: chibipop-dev-windows-x64
           path: target/release/chibipop.exe
+          if-no-files-found: error
+
+  # ADR-0011 bless mechanics: workflow_dispatch with bless=true reruns the
+  # golden tests with CHIBIPOP_BLESS=1, which rewrites the goldens instead of
+  # comparing, and uploads the result for a human to review and commit. CI
+  # holds no push credentials and this job must never gain any: the artifact
+  # is the only output. Same image pin as tier0 — a golden blessed on a
+  # different image would be wrong by construction.
+  bless-geometry-goldens:
+    name: Bless geometry goldens
+    runs-on: windows-2025
+    if: github.event.inputs.bless == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rewrite goldens
+        shell: bash
+        env:
+          CHIBIPOP_BLESS: "1"
+        run: cargo test --test geometry_goldens -- --nocapture
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geometry-goldens
+          path: tests/goldens/geometry
           if-no-files-found: error
