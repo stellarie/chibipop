@@ -50,12 +50,20 @@ jobs:
       # one process, and the wheel accumulator's process-global statics
       # produced an intermittent red once that a single run missed
       # (docs/REGRESSION.md tier 0).
+      #
+      # --exclude chibipop-linux: both bin crates deliberately produce a
+      # binary named `chibipop` (ADR-0001), and cargo uplifts every bin to
+      # target/debug/chibipop - one link-producing invocation spanning both
+      # bin crates races two linkers over one output path. Check-shaped
+      # commands (clippy below) are collision-free and stay --workspace;
+      # test/build exclude the foreign bin crate instead. The Linux crate's
+      # own gates are the `linux` job's. See the workspace Cargo.toml.
       - name: Tests, three times
         shell: bash
         run: |
           for i in 1 2 3; do
             echo "--- run $i ---"
-            cargo test --workspace 2>&1 | tee "test-$i.log"
+            cargo test --workspace --exclude chibipop-linux 2>&1 | tee "test-$i.log"
           done
           n=$(awk '/^test result: ok\./ {s+=$4} END {print s+0}' test-3.log)
           echo "passing tests: $n"
@@ -124,13 +132,100 @@ jobs:
           fi
 
       - name: Release build
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --exclude chibipop-linux
 
       # A build anyone can download without cutting a tag.
       - uses: actions/upload-artifact@v4
         with:
           name: chibipop-dev-windows-x64
           path: target/release/chibipop.exe
+          if-no-files-found: error
+
+  # ADR-0007: the second native job, mirrored gates, no cross-compilation.
+  # Pinned to ubuntu-24.04, not ubuntu-latest, per the rolling
+  # oldest-supported-runner policy (the runner's glibc is the release
+  # binary's floor; ubuntu-22.04 left the runner fleet in 2026). The gate is
+  # compositor-free: the runner has no WAYLAND_DISPLAY, and every
+  # integration test that needs one skips without it (ADR-0007) - a
+  # headless-sway smoke job stays a later, non-blocking addition.
+  linux:
+    name: Linux gate
+    runs-on: ubuntu-24.04
+    if: github.event.inputs.bless != 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Three runs and a floor for the same reasons as tier0; --exclude
+      # chibipop-windows for the same bin-name-collision reason tier0
+      # excludes chibipop-linux (see the workspace Cargo.toml). The floor
+      # is 600: core alone passes ~596, so losing the Linux crate's targets
+      # (or core) still reds the gate, while merely adding tests never does.
+      - name: Tests, three times
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            echo "--- run $i ---"
+            cargo test --workspace --exclude chibipop-windows 2>&1 | tee "test-$i.log"
+          done
+          n=$(awk '/^test result: ok\./ {s+=$4} END {print s+0}' test-3.log)
+          echo "passing tests: $n"
+          if [ "$n" -lt 600 ]; then
+            echo "::error::expected at least 600 passing tests, got $n"
+            exit 1
+          fi
+
+      # Same warning-count mechanics as tier0 (see the long comment there;
+      # --color never is load-bearing). The count is per-platform after the
+      # workspace split (ADR-0007): on Linux the windows crate cfg-stubs to
+      # nothing, so its render.rs finding does not exist here and the
+      # baseline is core's two - lookup/deconj.rs useless_conversion and
+      # lookup/model.rs too_many_arguments. The Linux crate's accepted
+      # count is zero and must stay zero.
+      - name: Clippy - exactly two accepted findings
+        shell: bash
+        run: |
+          raw=$(cargo clippy --workspace --color never --all-targets --all-features 2>&1)
+          n=$(printf '%s\n' "$raw" | grep -E "^warning" | grep -vcE "generated [0-9]+ warning" || true)
+          echo "accepted clippy findings: $n"
+          if [ "$n" -ne 2 ]; then
+            printf '%s\n' "$raw"
+            echo "::error::expected exactly 2 accepted clippy findings, got $n"
+            exit 1
+          fi
+
+      - name: Clippy - nothing else, with those suppressed
+        shell: bash
+        run: |
+          set +e
+          raw=$(cargo clippy --workspace --color never --all-targets --all-features -- -D warnings \
+            -A clippy::while_let_loop -A clippy::doc_lazy_continuation \
+            -A clippy::useless_conversion -A clippy::too_many_arguments \
+            -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1)
+          set -e
+          n=$(printf '%s\n' "$raw" | grep -cE "^(error|warning)" || true)
+          echo "other clippy findings: $n"
+          if [ "$n" -ne 0 ]; then
+            printf '%s\n' "$raw"
+            echo "::error::expected 0, got $n"
+            exit 1
+          fi
+
+      - name: Release build
+        run: cargo build --release --workspace --exclude chibipop-windows
+
+      # A build anyone can download without cutting a tag.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chibipop-dev-linux-x64
+          path: target/release/chibipop
           if-no-files-found: error
 
   # ADR-0011 bless mechanics: workflow_dispatch with bless=true reruns the
