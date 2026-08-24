@@ -120,6 +120,16 @@ const ID_INCLUDE_SCREENSHOT: i32 = 150;
 const ID_NOTIFY_ON_ADD: i32 = 151;
 /// Customize CSS button.
 const ID_CSS_EDITOR: i32 = 152;
+/// Sentence combo, Anki tab.
+const ID_SENTENCE_MODE: i32 = 156;
+/// Static region key button.
+const ID_STATIC_REGION_KEY: i32 = 157;
+/// "Region hotkey" label.
+const ID_STATIC_REGION_LABEL: i32 = 158;
+/// Overlay outline checkbox.
+const ID_SHOW_STATIC_OVERLAY: i32 = 159;
+/// Capture-exclusion hint text.
+const ID_STATIC_CAPTURE_HINT: i32 = 160;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -486,6 +496,9 @@ thread_local! {
     // Anki add-key vk, by `HWND`.
     static ANKI_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
+    // Static region key vk.
+    static SR_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+
     // Field-map toggle click, by `HWND`.
     static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
 
@@ -668,9 +681,10 @@ fn record_language_change(hwnd: HWND) {
 
 /// Starts capture mode.
 unsafe fn begin_capture(hwnd: HWND, id: i32) {
-    // SAFETY: `id` is one of {ID_TRIGGER_KEY, ID_ANKI_ADD_KEY},
-    // all live descendants of `hwnd`, created in `build`;
-    // `window_text` and `SetWindowTextW` state their own contracts.
+    // SAFETY: `id` is a key-capture button
+    // id, a live descendant of `hwnd`;
+    // `window_text` / `SetWindowTextW`
+    // state their own contracts.
     unsafe {
         let Ok(btn) = dlg_item(hwnd, id) else { return };
         let prev = window_text(btn);
@@ -727,6 +741,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 unsafe { update_engine_controls(hwnd) };
                 return LRESULT(0);
             }
+            if id == ID_SENTENCE_MODE && notify == CBN_SELCHANGE as u16 {
+                unsafe { update_static_controls(hwnd) };
+                return LRESULT(0);
+            }
             if let Some(idx) = plugin_configure_idx(id) {
                 unsafe { open_plugin_dir(hwnd, idx) };
                 return LRESULT(0);
@@ -758,6 +776,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 },
                 ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
                 ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
+                ID_STATIC_REGION_KEY => unsafe { begin_capture(hwnd, ID_STATIC_REGION_KEY) },
                 _ => {}
             }
             LRESULT(0)
@@ -1254,6 +1273,30 @@ unsafe fn update_engine_controls(hwnd: HWND) {
     }
 }
 
+/// Show/hide static-mode controls.
+unsafe fn update_static_controls(hwnd: HWND) {
+    // SAFETY: each id is a live descendant
+    // of `hwnd`, created in `build`.
+    unsafe {
+        let is_static = dlg_item(hwnd, ID_SENTENCE_MODE)
+            .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0 == 2)
+            .unwrap_or(false);
+        let cmd = if is_static { SW_SHOW } else { SW_HIDE };
+        if let Ok(c) = dlg_item(hwnd, ID_STATIC_REGION_LABEL) {
+            let _ = ShowWindow(c, cmd);
+        }
+        if let Ok(c) = dlg_item(hwnd, ID_STATIC_REGION_KEY) {
+            let _ = ShowWindow(c, cmd);
+        }
+        if let Ok(c) = dlg_item(hwnd, ID_SHOW_STATIC_OVERLAY) {
+            let _ = ShowWindow(c, cmd);
+        }
+        if let Ok(c) = dlg_item(hwnd, ID_STATIC_CAPTURE_HINT) {
+            let _ = ShowWindow(c, cmd);
+        }
+    }
+}
+
 /// One row's text.
 unsafe fn list_row(list: HWND, index: isize) -> Option<String> {
     // SAFETY: `list` is a live listbox owned by the caller; the buffer is
@@ -1555,6 +1598,7 @@ fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     CAPTURING.with(|c| c.set(None));
     let cell = match id {
         ID_TRIGGER_KEY => &CAPTURED_VK,
+        ID_STATIC_REGION_KEY => &SR_CAPTURED_VK,
         _ => &ANKI_CAPTURED_VK,
     };
     cell.with(|c| c.set(Some((mine, vk))));
@@ -1581,6 +1625,11 @@ fn resolved_trigger_key(hwnd: HWND, template: &str) -> String {
 /// Same, for the Anki add key.
 fn resolved_anki_add_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&ANKI_CAPTURED_VK, hwnd, template)
+}
+
+/// Same, for the static key.
+fn resolved_sr_key(hwnd: HWND, template: &str) -> String {
+    resolved_captured_key(&SR_CAPTURED_VK, hwnd, template)
 }
 
 /// Parseable form of `vk`.
@@ -2922,7 +2971,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 7 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 8 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
@@ -2964,6 +3013,59 @@ impl SettingsWindow {
             y += ROW_H;
             ank.push(check("Include screenshot when adding",
                 ID_INCLUDE_SCREENSHOT, form.include_screenshot, y)?);
+            y += ROW_H;
+            ank.push(label("Sentence capture", y)?);
+            let sentence_combo = child(page, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_SENTENCE_MODE, f)?;
+            ank.push(sentence_combo);
+            let modes = [
+                ("line", "Current line"),
+                ("all", "All lines"),
+                ("static", "Static region"),
+            ];
+            for (i, (val, text)) in modes.iter().enumerate() {
+                SendMessageW(sentence_combo, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)));
+                if form.sentence_mode == *val {
+                    SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(sentence_combo, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            y += ROW_H;
+            let is_static = form.sentence_mode == "static";
+            ank.push(child(page, w!("STATIC"), "Region hotkey",
+                WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H,
+                ID_STATIC_REGION_LABEL, f)?);
+            let sr_vk = crate::config::parse_trigger_key(&form.static_region_key);
+            let sr_label = sr_vk
+                .map(crate::config::trigger_key_name)
+                .unwrap_or_else(|| form.static_region_key.clone());
+            SR_CAPTURED_VK.with(|c| {
+                if let Some(vk) = sr_vk {
+                    c.set(Some((h.0 as isize, vk)));
+                }
+            });
+            ank.push(child(page, w!("BUTTON"), &sr_label, WS_TABSTOP,
+                FIELD_X, y, FIELD_W, ROW_H, ID_STATIC_REGION_KEY, f)?);
+            y += ROW_H;
+            ank.push(check("Show capture region outline",
+                ID_SHOW_STATIC_OVERLAY, form.show_static_overlay, y)?);
+            y += ROW_H;
+            ank.push(child(page, w!("STATIC"),
+                "Tip: enable capture exclusion in General for best results",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD, ROW_H,
+                ID_STATIC_CAPTURE_HINT, f)?);
+            if !is_static {
+                for &id in &[ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY,
+                             ID_SHOW_STATIC_OVERLAY, ID_STATIC_CAPTURE_HINT] {
+                    if let Ok(c) = dlg_item(h, id) {
+                        let _ = ShowWindow(c, SW_HIDE);
+                    }
+                }
+            }
             y += ROW_H;
             ank.push(child(page, w!("BUTTON"), "Refresh", WS_TABSTOP,
                   PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
@@ -3121,6 +3223,11 @@ impl SettingsWindow {
             let staged = self.staged.borrow();
 
             let theme = if combo_index(ID_THEME) == 1 { "light" } else { "dark" };
+            let sentence_mode = match combo_index(ID_SENTENCE_MODE) {
+                1 => "all",
+                2 => "static",
+                _ => "line",
+            };
             let font = {
                 let i = combo_index(ID_FONT);
                 if i < 0 {
@@ -3217,6 +3324,9 @@ impl SettingsWindow {
                 anki_add_key,
                 field_map,
                 notify_on_add: checked(ID_NOTIFY_ON_ADD),
+                sentence_mode: sentence_mode.to_string(),
+                static_region_key: resolved_sr_key(h, &template.static_region_key),
+                show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
                 include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
                 enabled_plugins: self
                     .plugin_names
@@ -3290,6 +3400,11 @@ impl Drop for SettingsWindow {
             }
         });
         ANKI_CAPTURED_VK.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        SR_CAPTURED_VK.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }

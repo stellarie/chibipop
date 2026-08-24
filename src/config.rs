@@ -330,6 +330,18 @@ pub struct AnkiConfig {
     /// Which fields go where.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
+    /// "line", "all", or "static".
+    #[serde(default = "default_sentence_mode")]
+    pub sentence_mode: String,
+    /// Set the static region.
+    #[serde(default = "default_static_region_key")]
+    pub static_region_key: String,
+    /// [x, y, w, h] if set.
+    #[serde(default)]
+    pub static_region: Option<[i32; 4]>,
+    /// Teal border visible.
+    #[serde(default = "default_show_static_overlay")]
+    pub show_static_overlay: bool,
 }
 
 /// Default Anki URL.
@@ -357,6 +369,21 @@ fn default_notify_on_add() -> bool {
     true
 }
 
+/// Default sentence mode.
+fn default_sentence_mode() -> String {
+    "line".to_string()
+}
+
+/// Default static region key.
+fn default_static_region_key() -> String {
+    "r".to_string()
+}
+
+/// Overlay on by default.
+fn default_show_static_overlay() -> bool {
+    true
+}
+
 /// The Lapis field mapping.
 fn default_field_map() -> Vec<FieldMapping> {
     vec![
@@ -378,6 +405,10 @@ impl Default for AnkiConfig {
             add_key: default_anki_add_key(),
             notify_on_add: default_notify_on_add(),
             field_map: default_field_map(),
+            sentence_mode: default_sentence_mode(),
+            static_region_key: default_static_region_key(),
+            static_region: None,
+            show_static_overlay: default_show_static_overlay(),
         }
     }
 }
@@ -1007,6 +1038,62 @@ mod tests {
     #[test]
     fn notify_on_add_defaults_to_true() {
         assert!(Config::default().anki.notify_on_add);
+    }
+
+    #[test]
+    fn sentence_mode_defaults_to_line() {
+        assert_eq!("line", Config::default().anki.sentence_mode);
+    }
+
+    #[test]
+    fn static_region_key_defaults_to_r() {
+        assert_eq!("r", Config::default().anki.static_region_key);
+    }
+
+    #[test]
+    fn show_static_overlay_defaults_to_true() {
+        assert!(Config::default().anki.show_static_overlay);
+    }
+
+    #[test]
+    fn static_region_defaults_to_none() {
+        assert_eq!(None, Config::default().anki.static_region);
+    }
+
+    #[test]
+    fn static_region_round_trips() {
+        let p = tmp("static_region_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.static_region = Some([100, 800, 1200, 200]);
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(Some([100, 800, 1200, 200]), back.anki.static_region);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn static_region_key_round_trips() {
+        let p = tmp("static_key_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.static_region_key = "alt+r".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!("alt+r", back.anki.static_region_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn sentence_mode_static_round_trips() {
+        let p = tmp("sentence_static_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.sentence_mode = "static".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!("static", back.anki.sentence_mode);
+        let _ = std::fs::remove_file(&p);
     }
 
     /// Guards the shipped default.
