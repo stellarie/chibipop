@@ -442,8 +442,8 @@ fn match_highlight_fixture() -> Fixture {
 }
 
 /// 5. Every `HitAction`'s rect: back
-/// button, drill-down kanji, expand
-/// rows, plus corner and Anki label.
+///    button, drill-down kanji, expand
+///    rows, plus corner and Anki label.
 fn full_chrome() -> Fixture {
     let top = card(
         Some("雑談"),
