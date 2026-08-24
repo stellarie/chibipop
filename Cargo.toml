@@ -3,12 +3,22 @@
 # `use chibipop::…` and the `data/` + `tests/fixtures/` paths it resolves
 # against are untouched by the split) plus one bin crate per platform.
 # `chibipop-linux` joins as a sibling.
-members = ["crates/chibipop-windows"]
-# Without this a hybrid root builds only the root package, so a bare
-# `cargo test` would silently stop covering the Windows crate - exactly the
-# "whole target not running" failure tier0's test floor exists to catch.
-# On Linux the Windows member fails to compile, loudly; use `-p chibipop`.
-default-members = [".", "crates/chibipop-windows"]
+members = ["crates/chibipop-windows", "crates/chibipop-linux"]
+# Both bins are deliberately named `chibipop` (ADR-0001), and cargo uplifts
+# every bin to target/<profile>/chibipop - so any single link-producing
+# invocation (test/build/run) that spans BOTH bin crates races two linkers
+# over one output path and fails. Check-shaped commands (`cargo check`,
+# `cargo clippy`) link nothing and are collision-free, which is why each bin
+# still cfg-stubs to a refusal `main` on foreign targets (see the bins'
+# main.rs, platform deps under [target.'cfg(...)'.dependencies]): one
+# `cargo clippy --workspace` lints every member on both CI runners.
+# Test/build therefore exclude the foreign bin crate instead:
+#   Windows tier0:  cargo test --workspace --exclude chibipop-linux
+#   Linux job:      cargo test --workspace --exclude chibipop-windows
+# default-members makes the bare commands serve the dev box: this project
+# is developed on Linux and Windows is CI-verified (tier0), so bare
+# `cargo test` covers core + the Linux bin; per-crate work uses `-p`.
+default-members = [".", "crates/chibipop-linux"]
 resolver = "2"
 
 [workspace.package]
@@ -30,6 +40,10 @@ serde_json = "1.0.151"
 toml = "1.1.3"
 ureq = { version = "3", features = ["json"] }
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# Linux bin only (ADR-0006/0007); listed here to keep the one-pin rule.
+calloop = "0.14.4"
+calloop-wayland-source = "0.4.1"
+wayland-client = "0.31.15"
 
 [package]
 name = "chibipop"

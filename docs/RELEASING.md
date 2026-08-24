@@ -62,9 +62,12 @@ first real exercise of a release build is a human doing it.
 ## What CI enforces
 
 `.github/workflows/ci.yml` runs [`REGRESSION.md`](REGRESSION.md) tier 0 on
-every push to `main` and every pull request:
+every push to `main` and every pull request, plus a mirrored Linux gate on
+ubuntu (ticket 29; both bins are named `chibipop`, so link-producing steps
+exclude the foreign bin crate — see the workspace `Cargo.toml`):
 
-- `cargo test` **three times** — the wheel accumulator's process-global
+- `cargo test --workspace --exclude chibipop-linux` **three times** — the
+  wheel accumulator's process-global
   statics produced an intermittent red once that a single run missed.
 - Clippy, asserting the accepted-error **count is exactly 3**. The repo
   carries three accepted errors on purpose, so `-D warnings` always exits
@@ -74,7 +77,7 @@ every push to `main` and every pull request:
   does, `REGRESSION.md`'s tier 0 table and `ci.yml` move with it, in the
   same commit.)
 - Clippy again with those suppressed, asserting **zero** other findings.
-- `cargo build --release`.
+- `cargo build --release --workspace --exclude chibipop-linux`.
 
 The release workflow additionally refuses to build if the tag disagrees with
 `Cargo.toml`.

@@ -66,10 +66,16 @@ those are explained in the callouts below, and neither is optional there.
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
 powershell -NoProfile -Command "Stop-Process -Name chibipop -Force -ErrorAction SilentlyContinue"
-cargo test 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
-cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
-cargo build --release 2>&1 | grep -E "^error|Finished"
+cargo test --workspace --exclude chibipop-linux 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
+cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
+cargo build --release --workspace --exclude chibipop-linux 2>&1 | grep -E "^error|Finished"
 ```
+
+The `--workspace --exclude chibipop-linux` flags arrived with ticket 29: `default-members`
+serves the Linux dev box since then, so a bare `cargo test` here would silently skip the
+Windows crate — the exact under-coverage this tier exists to catch. Both bins are named
+`chibipop`, so link-producing commands must exclude the foreign bin crate (collision);
+check-shaped clippy spans the whole workspace unexcluded.
 
 | Check | Expected |
 |---|---|
@@ -300,7 +306,7 @@ the next, which is why a task that adds a field must be the task that reads it.
 The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
 
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings \
+cargo clippy --workspace --all-targets --all-features -- -D warnings \
   -A clippy::while_let_loop -A clippy::doc_lazy_continuation -A clippy::useless_conversion \
   -A clippy::too_many_arguments -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1 | grep -cE "^(error|warning)"
 ```

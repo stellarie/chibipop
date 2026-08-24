@@ -138,6 +138,21 @@ the binary in `target/release/` and the data at the repository root.
 only. It is created when absent, so a fallback would write a first run's
 settings to whichever directory happened to launch it.
 
+On Linux the config is discovered in a fixed order, **first match wins, never
+dual-read**: the `--config` flag → **portable mode** (a `chibipop.toml` beside
+the executable puts data, log, and cache beside it too) → XDG
+(`~/.config/chibipop/chibipop.toml`, data in `~/.local/share/chibipop`, the log
+in `~/.local/state/chibipop`, cache in `~/.cache/chibipop`). The instance lock
+and control socket always live under `$XDG_RUNTIME_DIR/chibipop`, keyed per
+`$WAYLAND_DISPLAY`, in every mode.
+
+**Migrating between the portable and XDG layouts is a manual copy** — chibipop
+never moves your files itself. To go portable → XDG: stop the daemon, copy
+`chibipop.toml` to `~/.config/chibipop/` and the `data/` folder's contents to
+`~/.local/share/chibipop/`, then remove (or rename) the `chibipop.toml` beside
+the executable so portable mode stops winning. The reverse direction is the
+same copy the other way. The log and cache are disposable; don't bother.
+
 ### The latest-build copy
 
 `C:\Users\Stella\Documents\chibipop-latest` holds the latest build. Refresh it

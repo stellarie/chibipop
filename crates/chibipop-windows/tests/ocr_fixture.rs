@@ -3,6 +3,10 @@
 //!
 //! Skips when the engine is unavailable, so a fresh clone still passes
 //! `cargo test` — the same approved pattern the M1 golden corpus uses.
+//!
+//! Windows-only: it drives WinRT OCR. Elsewhere this file compiles to
+//! zero tests.
+#![cfg(windows)]
 
 use chibipop::text::layout::{resolve, CaptureSize};
 

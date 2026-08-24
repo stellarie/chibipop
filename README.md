@@ -172,9 +172,11 @@ GNOME is **best-effort**, and today that means something concrete:
 
 ## For developers
 
-**Building from source** needs [Rust](https://rustup.rs) (stable, MSVC) and
-nothing else — `cargo build --release`. The executable's icon is a committed
-resource, so no Windows SDK is required.
+**Building from source** needs [Rust](https://rustup.rs) (stable; MSVC on
+Windows) and nothing else — `cargo build --release -p chibipop-windows` on
+Windows, `cargo build --release -p chibipop-linux` on Linux (both produce a
+binary named `chibipop`). The executable's icon is a committed resource, so
+no Windows SDK is required.
 
 The configuration file reference, the diagnostic subcommands, how to run the
 tests, and the measured limits all live in
