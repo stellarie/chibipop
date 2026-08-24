@@ -398,18 +398,18 @@ impl OcrTextSource {
 
     /// Tiled, scan rects dropped.
     pub fn resolve_at_tiled(&self, cursor: PhysPoint) -> Result<Option<Resolved>> {
-        self.resolve_at_tiled_scanned(cursor, false).map(|(r, _)| r)
+        self.resolve_at_tiled_scanned(cursor, false).map(|(r, _, _)| r)
     }
 
-    /// Tiled read + scan rects.
+    /// Tiled read; rects + lines.
     pub fn resolve_at_tiled_scanned(
         &self,
         cursor: PhysPoint,
         collect: bool,
-    ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
+    ) -> Result<(Option<Resolved>, Vec<ScanRect>, Vec<OcrLine>)> {
         let (lines, resolved) = self.resolve_at_verbose(cursor)?;
         let mut scan = Vec::new();
-        let Some(first) = resolved else { return Ok((None, scan)) };
+        let Some(first) = resolved else { return Ok((None, scan, lines)) };
         if collect {
             scan.push(ScanRect {
                 rect: region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
@@ -420,7 +420,7 @@ impl OcrTextSource {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan));
+            return Ok((Some(first), scan, lines));
         }
 
         // Pass 1's own kept tail; no re-read.
@@ -431,7 +431,7 @@ impl OcrTextSource {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan));
+            return Ok((Some(first), scan, lines));
         };
         let head_chars = head.chars().count();
 
@@ -478,7 +478,7 @@ impl OcrTextSource {
 
         let text = normalise(&format!("{head}{tail}"));
         if text.is_empty() {
-            return Ok((Some(first), scan));
+            return Ok((Some(first), scan, lines));
         }
         Ok((
             Some(Resolved {
@@ -492,6 +492,7 @@ impl OcrTextSource {
                 orientation,
             }),
             scan,
+            lines,
         ))
     }
 

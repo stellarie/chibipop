@@ -17,7 +17,7 @@ use crate::plugin::{discover, host};
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
-use crate::text::layout::{CaptureSize, Orientation};
+use crate::text::layout::{CaptureSize, OcrLine, Orientation};
 use crate::text::ocr::{recogniser_available, OcrTextSource};
 use crate::text::recogniser::Recogniser;
 use crate::ui::overlay::Overlay;
@@ -2407,6 +2407,15 @@ fn extract_sentence_line(text: &str, cursor_offset: usize) -> &str {
     text
 }
 
+/// OCR lines, newline-joined.
+fn join_all_lines(lines: &[OcrLine]) -> String {
+    lines
+        .iter()
+        .map(|l| l.words.iter().map(|w| w.text.as_str()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One hover: OCR to present.
 #[allow(clippy::too_many_arguments)]
 fn resolve_trigger(
@@ -2429,9 +2438,9 @@ fn resolve_trigger(
         }
         None => ocr.resolve_at_tiled_scanned(cursor, scan_display.captures),
     };
-    let (resolved, mut scan) = match raw {
-        Ok((Some(r), scan)) => (r, scan),
-        Ok((None, _)) => return WorkerOutcome::Hide,
+    let (resolved, mut scan, ocr_lines) = match raw {
+        Ok((Some(r), scan, lines)) => (r, scan, lines),
+        Ok((None, _, _)) => return WorkerOutcome::Hide,
         Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
     };
 
@@ -2446,7 +2455,7 @@ fn resolve_trigger(
 
     let mut presentation = present::build(&hits, dicts, present_cfg);
     let sentence = match sentence_mode {
-        "all" => resolved.span.text.clone(),
+        "all" => join_all_lines(&ocr_lines),
         _ => extract_sentence_line(&resolved.span.text, resolved.span.cursor_byte_offset)
             .to_string(),
     };
@@ -3195,6 +3204,7 @@ mod tests {
     use super::*;
     use crate::config::PopupConfig;
     use crate::present::Card;
+    use crate::text::layout::OcrWord;
 
     #[test]
     fn extract_sentence_line_single_line_returns_it_all() {
@@ -3218,6 +3228,31 @@ mod tests {
     fn extract_sentence_line_past_the_end_falls_back_to_all() {
         let text = "abc\ndef";
         assert_eq!(text, extract_sentence_line(text, 999));
+    }
+
+    fn ocr_word(text: &str) -> OcrWord {
+        OcrWord { text: text.to_string(), rect: PhysRect { x: 0, y: 0, w: 0, h: 0 } }
+    }
+
+    #[test]
+    fn join_all_lines_joins_multiple_lines_with_newlines() {
+        let lines = vec![
+            OcrLine { words: vec![ocr_word("これは"), ocr_word("テスト")] },
+            OcrLine { words: vec![ocr_word("二行目")] },
+            OcrLine { words: vec![ocr_word("三"), ocr_word("行目")] },
+        ];
+        assert_eq!("これはテスト\n二行目\n三行目", join_all_lines(&lines));
+    }
+
+    #[test]
+    fn join_all_lines_single_line_has_no_newline() {
+        let lines = vec![OcrLine { words: vec![ocr_word("only")] }];
+        assert_eq!("only", join_all_lines(&lines));
+    }
+
+    #[test]
+    fn join_all_lines_empty_input_is_empty_string() {
+        assert_eq!("", join_all_lines(&[]));
     }
 
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
