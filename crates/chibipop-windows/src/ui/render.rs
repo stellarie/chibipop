@@ -4,11 +4,11 @@
 //! One walk: measure and paint.
 //! Caller paints; wndproc won't.
 
-use crate::present::Presentation;
+use crate::present::{AnkiPopupState, Presentation};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB, SCROLLBAR_W};
 use anyhow::{Context, Result};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -48,16 +48,7 @@ pub struct HitRect {
     pub action: HitAction,
 }
 
-/// What a click on a region does.
-#[derive(Debug, Clone)]
-pub enum HitAction {
-    /// Expand collapsed row `i`.
-    ExpandEntry(usize),
-    /// Look up a single character.
-    DrillDown(String),
-    /// Navigate back in history.
-    Back,
-}
+pub use crate::controller::HitAction;
 
 /// One element's measured box.
 ///
@@ -119,35 +110,6 @@ fn is_kanji(c: char) -> bool {
     )
 }
 
-/// Anki state for this popup.
-#[derive(Clone)]
-pub struct AnkiPopupState {
-    pub dupes: HashSet<String>,
-    pub added: HashSet<String>,
-    pub enabled: bool,
-    pub adding: bool,
-    /// Dupe check in flight.
-    pub checking: bool,
-    /// AnkiConnect reachable.
-    pub connected: bool,
-    /// Last add-note failed.
-    pub failed: bool,
-}
-
-impl AnkiPopupState {
-    /// Disabled, no markers.
-    pub fn disabled() -> Self {
-        Self {
-            dupes: HashSet::new(),
-            added: HashSet::new(),
-            enabled: false,
-            adding: false,
-            checking: false,
-            connected: false,
-            failed: false,
-        }
-    }
-}
 
 /// One line to lay out or draw.
 ///

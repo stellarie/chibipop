@@ -2,7 +2,10 @@
 
 use crate::anki;
 use crate::config::Config;
-use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
+use crate::controller::{
+    Command, Controller, ControllerConfig, Event, LookupOutcome, PopupView, RequestId, TrayAction,
+};
+use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
 use crate::library::{Library, Pending};
 use crate::lock::LibraryLock;
@@ -14,10 +17,10 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
-use crate::text::layout::{CaptureSize, Orientation};
+use crate::text::layout::CaptureSize;
 use crate::text::ocr::{recogniser_available, OcrTextSource};
 use crate::ui::overlay::Overlay;
-use crate::ui::render::{anki_button_label, max_scroll, AnkiPopupState, HitAction, Renderer};
+use crate::ui::render::{anki_button_label, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
@@ -75,14 +78,6 @@ const DISPATCH_TICK_MS: u32 = 20;
 /// Anchor-to-popup gap.
 const POPUP_GAP: i32 = 40;
 
-/// Not slop: UPSCALE 2 rounds.
-const ANCHOR_JITTER_PX: i32 = 4;
-
-/// Pixels per wheel notch.
-const SCROLL_STEP_PX: i32 = 48;
-
-/// Armed ticks before warning.
-const ARM_WARN_TICKS: u32 = 250;
 
 /// Rebuild progress poll, ms.
 const REBUILD_TICK_MS: u32 = 100;
@@ -90,10 +85,6 @@ const REBUILD_TICK_MS: u32 = 100;
 /// Over this, hooks stall.
 const APPLY_BUDGET_MS: u128 = 50;
 
-
-/// Staleness by id, no sentinel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct RequestId(u64);
 
 /// Hover, drill-down, reload.
 pub enum TriggerKind {
@@ -124,26 +115,7 @@ struct Trigger {
 /// One answer, carrying its id.
 struct WorkerResult {
     id: RequestId,
-    outcome: WorkerOutcome,
-}
-
-enum WorkerOutcome {
-    /// No text, or no hits.
-    Hide,
-    /// Logged; never fatal.
-    Failed(String),
-    /// `scan` empty without debug.
-    Ready {
-        presentation: Box<Presentation>,
-        anchor: PhysRect,
-        /// Which axis the hold may grow.
-        orientation: Orientation,
-        /// What the top card matched.
-        matched: Option<PhysRect>,
-        scan: Vec<ScanRect>,
-    },
-    /// Kanji drill-down result.
-    DrillDown(Box<Presentation>),
+    outcome: LookupOutcome,
 }
 
 /// One dupe check's answer.
@@ -1057,18 +1029,11 @@ pub fn run(
     println!("chibipop: running - hover Japanese text anywhere on screen.");
     println!("chibipop: right-click the tray icon to change mode or quit.");
 
-    let mut next_id: u64 = 0;
     // Spawned before dicts existed.
     let (order, restrict) =
         resolve_dict_filter(&cfg, &dicts, || configured_recogniser_runs(&cfg));
     live.present_cfg.dict_order = order;
     live.present_cfg.restrict_to_order = restrict;
-    next_id += 1;
-    let mut latest_dispatched = RequestId(next_id);
-    let _ = trigger_tx.send(Trigger {
-        kind: TriggerKind::Reload(Box::new(worker_settings(&live, &dicts))),
-        id: latest_dispatched,
-    });
     // Visible just before the Hide.
     //
     // Cleared by hides elsewhere.
@@ -1077,8 +1042,12 @@ pub fn run(
     let overlay_prev_visible = std::cell::Cell::new(false);
     // Anki button visibility.
     let btn_prev_visible = std::cell::Cell::new(false);
-    // What is on screen now.
-    let mut shown: Option<Shown> = None;
+    // Event in, Command out.
+    let mut controller = Controller::new(controller_config(&live));
+    // OpenSettings, loop-deferred.
+    let mut want_settings = false;
+    // Rising/falling key edges.
+    let mut trigger_was_held = false;
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
@@ -1087,7 +1056,6 @@ pub fn run(
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
     // One writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
-    let mut popup_gen: u64 = 0;
     // BACKLOG 7: no way in but this.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
         &form_with_library(&cfg, &dicts, &library),
@@ -1104,8 +1072,6 @@ pub fn run(
             Some(w)
         }
     };
-    // Consecutive armed ticks.
-    let mut armed_ticks: u32 = 0;
     // An in-place edit in flight.
     let mut edit: Option<EditFlight> = None;
     let mut edit_cfg: Option<Config> = None;
@@ -1158,6 +1124,36 @@ pub fn run(
         }
     };
 
+    // One Event through the state
+    // machine, every Command done;
+    // ShowPopup answers in place.
+    macro_rules! drive {
+        ($event:expr) => {
+            drive(
+                &mut controller,
+                $event,
+                &mut Exec {
+                    popup: &popup,
+                    renderer: &mut renderer,
+                    theme: &theme,
+                    live: &live,
+                    overlay: overlay.as_ref(),
+                    anki_button: anki_button.as_ref(),
+                    trigger_tx: &trigger_tx,
+                    dicts: &dicts,
+                    anki_tx: &anki_tx,
+                    add_tx: &add_tx,
+                    main_tid,
+                    want_settings: &mut want_settings,
+                },
+            )
+        };
+    }
+
+    // The worker spawned before the
+    // dictionaries were known.
+    drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
+
     let mut msg = MSG::default();
 
     loop {
@@ -1209,159 +1205,43 @@ pub fn run(
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
             // Spec D7: the popup's own rect.
             let cursor_pos = cursor_now();
-            let over_popup = shown.as_ref().is_some_and(|s| {
-                s.popup.contains(cursor_pos)
-            });
-            let over_popup_or_btn = shown.as_ref().is_some_and(|s| {
-                let btn_h = anki_button.as_ref()
-                    .filter(|b| b.is_visible())
-                    .map_or(0, |b| b.height_phys());
-                let full = PhysRect { h: s.popup.h + btn_h, ..s.popup };
-                full.contains(cursor_pos)
-            });
-            let armed = live.scroll_popup
-                && over_popup
-                && shown.as_ref().is_some_and(|s| s.content_h > s.view_h);
-            Hooks::set_scroll_armed(armed);
-            Hooks::set_click_armed(over_popup_or_btn);
-            Hooks::set_add_armed(shown.is_some() && live.anki_enabled);
-
-            if over_popup {
-                if let Some(s) = shown.as_ref() {
-                    let lx = cursor_pos.x - s.popup.x;
-                    let ly = cursor_pos.y - s.popup.y;
-                    let clickable = renderer.hit_test(lx, ly, s.scroll).is_some();
-                    if clickable {
-                        if let Ok(cur) = unsafe { LoadCursorW(None, IDC_HAND) } {
-                            unsafe { SetCursor(Some(cur)) };
-                        }
-                    }
-                }
-            }
-
-            armed_ticks = if armed { armed_ticks + 1 } else { 0 };
-            if armed_ticks == ARM_WARN_TICKS {
-                eprintln!(
-                    "chibipop: the wheel has been captured for {}s (SCROLL_ARMED). If your \
-                     scroll wheel is not working elsewhere, this is why - move the cursor off \
-                     the popup, or set scroll_popup = false.",
-                    (ARM_WARN_TICKS * DISPATCH_TICK_MS) / 1000
-                );
-            }
+            let button_h = anki_button
+                .as_ref()
+                .filter(|b| b.is_visible())
+                .map_or(0, |b| b.height_phys());
+            drive!(Event::Tick { cursor: cursor_pos, button_h });
 
             let notches = Hooks::take_whole_notches();
             if notches != 0 {
-                if let Some(s) = shown.as_mut() {
-                    let span = max_scroll(s.content_h, s.view_h);
-                    // Wheel-up is positive.
-                    let step = notches.saturating_mul(SCROLL_STEP_PX);
-                    let next = s.scroll.saturating_sub(step).clamp(0, span);
-                    if next != s.scroll {
-                        s.scroll = next;
-                        let back = !s.history.is_empty();
-                        let painted = renderer
-                            .paint(&s.presentation, &theme, s.scroll, back, live.side_panel);
-                        if let Err(e) = painted {
-                            eprintln!("chibipop: repainting for scroll failed: {e:#}");
-                        }
-                    }
-                }
+                drive!(Event::Scrolled { notches });
             }
 
             if let Some(click) = Hooks::take_click() {
-                if let Some(s) = shown.as_mut() {
-                    let click_x = click.x - s.popup.x;
-                    let click_y = click.y - s.popup.y;
-                    let has_history = !s.history.is_empty();
-                    if let Some(action) = renderer.hit_test(click_x, click_y, s.scroll) {
-                        match action {
-                            HitAction::ExpandEntry(i) => {
-                                present::swap_top(&mut s.presentation, i, live.summary_chars);
-                                match show_presentation(
-                                    &popup,
-                                    &mut renderer,
-                                    &theme,
-                                    live.max_height_percent,
-                                    live.max_width_percent,
-                                    &s.presentation,
-                                    s.anchor,
-                                    0,
-                                    has_history,
-                                    live.side_panel,
-                                ) {
-                                    Ok((rect, content_h, view_h)) => {
-                                        s.popup = rect;
-                                        s.scroll = 0;
-                                        s.content_h = content_h;
-                                        s.view_h = view_h;
-                                        sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                                    }
-                                    Err(e) => {
-                                        eprintln!("chibipop: repaint after swap failed: {e:#}");
-                                    }
-                                }
-                            }
-                            HitAction::DrillDown(ch) => {
-                                next_id += 1;
-                                latest_dispatched = RequestId(next_id);
-                                let _ = trigger_tx.send(Trigger {
-                                    kind: TriggerKind::DrillDown(ch),
-                                    id: latest_dispatched,
-                                });
-                            }
-                            HitAction::Back => {
-                                pop_history(
-                                    s, &popup, &mut renderer, &theme,
-                                    live.max_height_percent, live.max_width_percent,
-                                    anki_button.as_ref(), live.side_panel,
-                                );
-                            }
-                        }
-                    } else if click_y >= s.popup.h && live.anki_enabled {
-                        // Below popup = button area.
-                        start_add_to_anki(
-                            s, &mut renderer, &theme,
-                            &live.anki_url, &live.anki_deck, &live.anki_model,
-                            &live.anki_field_map, &add_tx, main_tid, live.side_panel,
-                        );
-                        sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                    }
+                // The bin hit-tests: it
+                // owns the painted layout.
+                let local_hit = controller.popup().map(|view| {
+                    let local = PhysPoint {
+                        x: click.x - view.popup.x,
+                        y: click.y - view.popup.y,
+                    };
+                    (local, renderer.hit_test(local.x, local.y, view.scroll))
+                });
+                if let Some((local, hit)) = local_hit {
+                    drive!(Event::Clicked { local, hit });
                 }
             }
 
             // Fallback: direct WM_LBUTTONDOWN.
             if anki_button.as_ref().is_some_and(|b| b.take_click()) {
-                if let Some(s) = shown.as_mut() {
-                    start_add_to_anki(
-                        s, &mut renderer, &theme,
-                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
-                        &add_tx, main_tid, live.side_panel,
-                    );
-                    sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                }
+                drive!(Event::AddRequested);
             }
 
             if Hooks::take_add_hotkey() {
-                if let Some(s) = shown.as_mut() {
-                    start_add_to_anki(
-                        s, &mut renderer, &theme,
-                        &live.anki_url, &live.anki_deck, &live.anki_model, &live.anki_field_map,
-                        &add_tx, main_tid, live.side_panel,
-                    );
-                    sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                }
+                drive!(Event::AddRequested);
             }
 
-            let has_hist = shown.as_ref().is_some_and(|s| !s.history.is_empty());
-            Hooks::set_back_armed(has_hist);
             if Hooks::take_back() {
-                if let Some(s) = shown.as_mut() {
-                    pop_history(
-                        s, &popup, &mut renderer, &theme,
-                        live.max_height_percent, live.max_width_percent,
-                        anki_button.as_ref(), live.side_panel,
-                    );
-                }
+                drive!(Event::BackRequested);
             }
 
             if let Some(w) = &settings {
@@ -1403,13 +1283,9 @@ pub fn run(
                                            anki_button.as_ref(), &mut theme,
                                            &capture_guard_active);
                                 // Kills stale results.
-                                next_id += 1;
-                                latest_dispatched = RequestId(next_id);
-                                let _ = trigger_tx.send(Trigger {
-                                    kind: TriggerKind::Reload(
-                                        Box::new(worker_settings(&live, &dicts))),
-                                    id: latest_dispatched,
-                                });
+                                drive!(Event::ConfigReloaded(Box::new(
+                                    controller_config(&live),
+                                )));
                                 save_in_background(&mut save_job, updated,
                                                    config_path.to_path_buf(),
                                                    save_tx.clone(), main_tid);
@@ -1422,7 +1298,7 @@ pub fn run(
                         // Tray remains; just hide.
                         Some(SettingsOutcome::Cancel) => settings = None,
                         // Already on the main thread.
-                        Some(SettingsOutcome::Quit) => unsafe { PostQuitMessage(0) },
+                        Some(SettingsOutcome::Quit) => drive!(Event::Quit),
                         Some(SettingsOutcome::Apply) => {
                             let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
@@ -1464,13 +1340,9 @@ pub fn run(
                                 apply_live(&live, &popup, overlay.as_ref(),
                                            anki_button.as_ref(), &mut theme,
                                            &capture_guard_active);
-                                next_id += 1;
-                                latest_dispatched = RequestId(next_id);
-                                let _ = trigger_tx.send(Trigger {
-                                    kind: TriggerKind::Reload(
-                                        Box::new(worker_settings(&live, &dicts))),
-                                    id: latest_dispatched,
-                                });
+                                drive!(Event::ConfigReloaded(Box::new(
+                                    controller_config(&live),
+                                )));
                                 let clamped = settings::clamp_notice(&edited, &updated);
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
@@ -1498,23 +1370,19 @@ pub fn run(
             }
 
             // Shift up retracts it.
-            if Hooks::take_hide() {
-                // An in-flight hit re-shows it.
-                next_id += 1;
-                latest_dispatched = RequestId(next_id);
-                // Restore would re-show it.
-                capture_guard_prev_visible.set(false);
-                overlay_prev_visible.set(false);
-                btn_prev_visible.set(false);
-                if shown.is_some() {
-                    let _ = popup.hide();
-                    if let Some(b) = &anki_button {
-                        b.hide();
+            let held = Hooks::trigger_held();
+            if held != trigger_was_held {
+                trigger_was_held = held;
+                if held {
+                    drive!(Event::TriggerDown);
+                } else {
+                    if !matches!(live.trigger_mode, crate::config::TriggerMode::Live) {
+                        // Restore would re-show it.
+                        capture_guard_prev_visible.set(false);
+                        overlay_prev_visible.set(false);
+                        btn_prev_visible.set(false);
                     }
-                    if let Some(ov) = overlay.as_ref() {
-                        ov.hide();
-                    }
-                    shown = None;
+                    drive!(Event::TriggerUp);
                 }
             }
 
@@ -1528,26 +1396,7 @@ pub fn run(
                 }
             });
             if cursor.x != i32::MIN {
-                // Spec D3: hold, do not resolve.
-                let frozen = shown.as_ref().is_some_and(|s| {
-                    let btn_h = anki_button.as_ref()
-                        .filter(|b| b.is_visible())
-                        .map_or(0, |b| b.height_phys());
-                    let sticky_rect = PhysRect {
-                        h: s.popup.h + btn_h,
-                        ..s.popup
-                    };
-                    let freeze = freeze_rect(s, live.per_character_lookup, live.trigger_mode);
-                    in_sticky(cursor, freeze, s.hold, sticky_rect)
-                });
-                if !frozen {
-                    next_id += 1;
-                    latest_dispatched = RequestId(next_id);
-                    let _ = trigger_tx.send(Trigger {
-                        kind: TriggerKind::Hover(cursor),
-                        id: latest_dispatched,
-                    });
-                }
+                drive!(Event::CursorMoved { pos: cursor });
             }
         } else if msg.message == WM_APP_RESULT {
             // Only the freshest queued.
@@ -1556,187 +1405,19 @@ pub fn run(
                 freshest = Some(r);
             }
             if let Some(result) = freshest {
-                if result.id < latest_dispatched {
-                    // Superseded, not an error.
-                } else if let WorkerOutcome::DrillDown(pres) = result.outcome {
-                    if let Some(s) = shown.as_mut() {
-                        push_drilldown(
-                            s, *pres, &popup, &mut renderer, &theme,
-                            live.max_height_percent, live.max_width_percent,
-                            live.anki_enabled, live.side_panel,
-                        );
-                        sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                        if live.anki_enabled {
-                            popup_gen = popup_gen.wrapping_add(1);
-                            s.gen = popup_gen;
-                            let mut exprs: Vec<String> = Vec::new();
-                            if let Some(card) = &s.presentation.top {
-                                if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
-                                    exprs.push(e.to_string());
-                                }
-                            }
-                            if !exprs.is_empty() {
-                                let url = live.anki_url.clone();
-                                let deck = live.anki_deck.clone();
-                                let model = live.anki_model.clone();
-                                let gen = popup_gen;
-                                let tx = anki_tx.clone();
-                                thread::spawn(move || {
-                                    let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                    let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
-                                        Ok(d) => Some(d),
-                                        Err(e) => {
-                                            eprintln!("chibipop: dupe check failed: {e:#}");
-                                            None
-                                        }
-                                    };
-                                    let _ = tx.send(AnkiDupeResult { gen, dupes });
-                                    // SAFETY: wakes the pump.
-                                    unsafe {
-                                        let _ = PostThreadMessageW(
-                                            main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
-                                        );
-                                    }
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    let new_popup = handle_worker_outcome(
-                        &popup,
-                        &mut renderer,
-                        &theme,
-                        live.max_height_percent,
-                        live.max_width_percent,
-                        overlay.as_ref(),
-                        &mut shown,
-                        result.outcome,
-                        live.show_lookup_log,
-                        live.anki_enabled,
-                        live.side_panel,
-                    );
-                    sync_anki_button(anki_button.as_ref(), shown.as_ref(), &theme);
-                    if new_popup && live.anki_enabled {
-                        popup_gen = popup_gen.wrapping_add(1);
-                        let mut exprs: Vec<String> = Vec::new();
-                        if let Some(s) = shown.as_mut() {
-                            s.gen = popup_gen;
-                            if let Some(card) = &s.presentation.top {
-                                if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
-                                    exprs.push(e.to_string());
-                                }
-                            }
-                            for row in &s.presentation.collapsed {
-                                if let Some(e) = row.written.as_deref().or(row.reading.as_deref()) {
-                                    exprs.push(e.to_string());
-                                }
-                            }
-                        }
-                        if !exprs.is_empty() {
-                            let url = live.anki_url.clone();
-                            let deck = live.anki_deck.clone();
-                            let model = live.anki_model.clone();
-                            let gen = popup_gen;
-                            let tx = anki_tx.clone();
-                            thread::spawn(move || {
-                                let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-                                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
-                                    Ok(d) => Some(d),
-                                    Err(e) => {
-                                        eprintln!("chibipop: dupe check failed: {e:#}");
-                                        None
-                                    }
-                                };
-                                let _ = tx.send(AnkiDupeResult { gen, dupes });
-                                // SAFETY: wakes the pump.
-                                unsafe {
-                                    let _ = PostThreadMessageW(
-                                        main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0),
-                                    );
-                                }
-                            });
-                        }
-                    }
-                }
+                drive!(Event::LookupResult { id: result.id, outcome: result.outcome });
             }
         } else if msg.message == WM_APP_ANKI {
             while let Ok(result) = anki_rx.try_recv() {
-                if let Some(s) = shown.as_mut() {
-                    if s.gen == result.gen {
-                        s.anki.checking = false;
-                        match result.dupes {
-                            Some(dupes) => {
-                                s.anki.connected = true;
-                                s.anki.dupes = dupes;
-                            }
-                            None => {
-                                s.anki.connected = false;
-                            }
-                        }
-                        let back = !s.history.is_empty();
-                        match show_presentation(
-                            &popup,
-                            &mut renderer,
-                            &theme,
-                            live.max_height_percent,
-                            live.max_width_percent,
-                            &s.presentation,
-                            s.anchor,
-                            s.scroll,
-                            back,
-                            live.side_panel,
-                        ) {
-                            Ok((rect, content_h, view_h)) => {
-                                s.popup = rect;
-                                s.content_h = content_h;
-                                s.view_h = view_h;
-                                let m = max_scroll(s.content_h, s.view_h);
-                                if s.scroll > m { s.scroll = m; }
-                                sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                            }
-                            Err(e) => {
-                                eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
-                            }
-                        }
-                    }
-                }
+                drive!(Event::DupesChecked { generation: result.gen, dupes: result.dupes });
             }
         } else if msg.message == WM_APP_ADD_NOTE {
             while let Ok(result) = add_rx.try_recv() {
-                if let Some(s) = shown.as_mut() {
-                    s.anki.adding = false;
-                    if let Some(e) = result.err {
-                        eprintln!("chibipop: add to Anki failed: {e}");
-                        s.anki.failed = true;
-                    } else {
-                        s.anki.added.insert(result.expr);
-                    }
-                    let back = !s.history.is_empty();
-                    match show_presentation(
-                        &popup,
-                        &mut renderer,
-                        &theme,
-                        live.max_height_percent,
-                        live.max_width_percent,
-                        &s.presentation,
-                        s.anchor,
-                        s.scroll,
-                        back,
-                        live.side_panel,
-                    ) {
-                        Ok((rect, content_h, view_h)) => {
-                            s.popup = rect;
-                            s.content_h = content_h;
-                            s.view_h = view_h;
-                            let m = max_scroll(s.content_h, s.view_h);
-                            if s.scroll > m { s.scroll = m; }
-                            sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                        }
-                        Err(e) => {
-                            eprintln!("chibipop: repaint after add failed: {e:#}");
-                        }
-                    }
+                if let Some(e) = &result.err {
+                    eprintln!("chibipop: add to Anki failed: {e}");
                 }
+                let failed = result.err.is_some();
+                drive!(Event::NoteAdded { expr: result.expr, failed });
             }
         } else if msg.message == WM_APP_SETTINGS {
             while let Ok(status) = settings_rx.try_recv() {
@@ -1773,26 +1454,24 @@ pub fn run(
             drain_capture_guard();
         }) {
             match cmd {
-                TrayCommand::OpenSettings => {
-                    if let Some(w) = &settings {
-                        w.focus();
-                    } else {
-                        let form = form_with_library(&cfg, &dicts, &library);
-                        let stale = settings::stale_order_entries(&cfg, &dicts);
-                        match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
-                            // Never fatal.
-                            Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
-                            Ok(w) => {
-                                notice_drift(&w, &library, &db_path);
-                                settings = Some(w);
-                            }
+                TrayCommand::OpenSettings => drive!(Event::TrayAction(TrayAction::OpenSettings)),
+                TrayCommand::Quit => drive!(Event::TrayAction(TrayAction::Quit)),
+            }
+            if std::mem::take(&mut want_settings) {
+                if let Some(w) = &settings {
+                    w.focus();
+                } else {
+                    let form = form_with_library(&cfg, &dicts, &library);
+                    let stale = settings::stale_order_entries(&cfg, &dicts);
+                    match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
+                        // Never fatal.
+                        Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
+                        Ok(w) => {
+                            notice_drift(&w, &library, &db_path);
+                            settings = Some(w);
                         }
                     }
                 }
-                TrayCommand::Quit => unsafe {
-                    // Already on the main thread.
-                    PostQuitMessage(0);
-                },
             }
         } else {
             unsafe {
@@ -1963,11 +1642,11 @@ fn worker_main(
                     text,
                 ),
                 TriggerKind::Reload(_) => {
-                    WorkerOutcome::Failed("a reload reached the hover path".to_string())
+                    LookupOutcome::Failed("a reload reached the hover path".to_string())
                 }
             }
         }))
-        .unwrap_or_else(|_| WorkerOutcome::Failed("a hover lookup panicked".to_string()));
+        .unwrap_or_else(|_| LookupOutcome::Failed("a hover lookup panicked".to_string()));
 
         if result_tx.send(WorkerResult { id: trigger.id, outcome }).is_err() {
             break; // main thread gone
@@ -1989,7 +1668,7 @@ fn resolve_trigger(
     cursor: PhysPoint,
     capture_guard: Option<&CaptureGuard>,
     scan_display: ScanDisplay,
-) -> WorkerOutcome {
+) -> LookupOutcome {
     let raw = match capture_guard {
         Some(guard) => {
             guard.hide_for_capture();
@@ -2001,17 +1680,17 @@ fn resolve_trigger(
     };
     let (resolved, mut scan) = match raw {
         Ok((Some(r), scan)) => (r, scan),
-        Ok((None, _)) => return WorkerOutcome::Hide,
-        Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
+        Ok((None, _)) => return LookupOutcome::Hide,
+        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
     };
 
     let text = &resolved.span.text[resolved.span.cursor_byte_offset..];
     let hits = match engine.run(dict, text) {
         Ok(h) => h,
-        Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
+        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
     };
     if hits.is_empty() {
-        return WorkerOutcome::Hide;
+        return LookupOutcome::Hide;
     }
 
     let presentation = present::build(&hits, dicts, present_cfg);
@@ -2021,7 +1700,7 @@ fn resolve_trigger(
             scan.push(ScanRect { rect, kind: ScanKind::Match });
         }
     }
-    WorkerOutcome::Ready {
+    LookupOutcome::Ready {
         presentation: Box::new(presentation),
         anchor: resolved.span.anchor,
         orientation: resolved.orientation,
@@ -2037,155 +1716,16 @@ fn resolve_drilldown(
     dicts: &[DictInfo],
     present_cfg: &PresentConfig,
     text: &str,
-) -> WorkerOutcome {
+) -> LookupOutcome {
     let hits = match engine.run(dict, text) {
         Ok(h) => h,
-        Err(e) => return WorkerOutcome::Failed(format!("{e:#}")),
+        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
     };
     if hits.is_empty() {
-        return WorkerOutcome::Hide;
+        return LookupOutcome::Hide;
     }
     let p = present::build(&hits, dicts, present_cfg);
-    WorkerOutcome::DrillDown(Box::new(p))
-}
-
-
-/// Saved for back navigation.
-struct HistoryEntry {
-    presentation: Presentation,
-    anki: AnkiPopupState,
-}
-
-/// On screen. Never outlive it.
-struct Shown {
-    /// The hovered glyph's box.
-    anchor: PhysRect,
-    /// Stored, never re-derived.
-    popup: PhysRect,
-    /// Where the cursor may roam.
-    hold: PhysRect,
-    /// One character's hold.
-    hold_char: PhysRect,
-    presentation: Presentation,
-    /// Content offset; 0 is the top.
-    scroll: i32,
-    /// Natural height, unclamped.
-    content_h: i32,
-    /// The window's own height.
-    view_h: i32,
-    /// Stale-result guard.
-    gen: u64,
-    anki: AnkiPopupState,
-    /// Drill-down stack.
-    history: Vec<HistoryEntry>,
-}
-
-/// True if a new popup was shown.
-#[allow(clippy::too_many_arguments)]
-fn handle_worker_outcome(
-    popup: &Popup,
-    renderer: &mut Renderer,
-    theme: &Theme,
-    max_height_percent: i32,
-    max_width_percent: i32,
-    overlay: Option<&Overlay>,
-    shown: &mut Option<Shown>,
-    outcome: WorkerOutcome,
-    log: bool,
-    anki_enabled: bool,
-    side_panel: bool,
-) -> bool {
-    match outcome {
-        WorkerOutcome::Hide => {
-            let _ = popup.hide();
-            if let Some(ov) = overlay {
-                ov.hide();
-            }
-            *shown = None;
-            false
-        }
-        WorkerOutcome::Failed(msg) => {
-            eprintln!("chibipop: hover lookup failed: {msg}");
-            let _ = popup.hide();
-            if let Some(ov) = overlay {
-                ov.hide();
-            }
-            *shown = None;
-            false
-        }
-        WorkerOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
-            if shown.as_ref().is_some_and(|prev| same_content(prev, &presentation, anchor)) {
-                return false;
-            }
-            if log {
-                if let Some(card) = &presentation.top {
-                    let head = card.written.clone()
-                        .or_else(|| card.reading.clone())
-                        .unwrap_or_default();
-                    println!("{head}  match={}", card.match_len);
-                }
-            }
-            let anki = AnkiPopupState {
-                dupes: HashSet::new(),
-                added: HashSet::new(),
-                enabled: anki_enabled,
-                adding: false,
-                checking: anki_enabled,
-                connected: anki_enabled,
-                failed: false,
-            };
-            match show_presentation(
-                popup,
-                renderer,
-                theme,
-                max_height_percent,
-                max_width_percent,
-                &presentation,
-                anchor,
-                0,
-                false,
-                side_panel,
-            ) {
-                Err(e) => {
-                    eprintln!("chibipop: showing the popup failed: {e:#}");
-                    let _ = popup.hide();
-                    if let Some(ov) = overlay {
-                        ov.hide();
-                    }
-                    *shown = None;
-                    Hooks::set_scroll_armed(false);
-                    Hooks::set_click_armed(false);
-                    false
-                }
-                Ok((rect, content_h, view_h)) => {
-                    Hooks::discard_scroll();
-                    let HoldRects { hold, hold_char } =
-                        hold_regions(anchor, matched, orientation);
-                    let s = Shown {
-                        anchor,
-                        popup: rect,
-                        hold,
-                        hold_char,
-                        presentation: *presentation,
-                        scroll: 0,
-                        content_h,
-                        view_h,
-                        gen: 0,
-                        anki,
-                        history: Vec::new(),
-                    };
-                    *shown = Some(s);
-                    if let Some(ov) = overlay {
-                        if let Err(e) = ov.show_rects(&scan, theme) {
-                            eprintln!("chibipop: showing the scan overlay failed: {e:#}");
-                        }
-                    }
-                    true
-                }
-            }
-        }
-        WorkerOutcome::DrillDown(_) => false,
-    }
+    LookupOutcome::DrillDown(Box::new(p))
 }
 
 /// Measure, place, show, paint.
@@ -2216,98 +1756,6 @@ fn show_presentation(
     renderer.paint(presentation, theme, scroll, show_back, side_panel)
         .context("painting the popup")?;
     Ok((rect, content_h, view_h))
-}
-
-/// Same guard as the click path.
-#[allow(clippy::too_many_arguments)]
-fn start_add_to_anki(
-    s: &mut Shown,
-    renderer: &mut Renderer,
-    theme: &Theme,
-    anki_url: &str,
-    anki_deck: &str,
-    anki_model: &str,
-    anki_field_map: &[crate::config::FieldMapping],
-    add_tx: &mpsc::Sender<AddNoteResult>,
-    main_tid: u32,
-    side_panel: bool,
-) {
-    let info = s.presentation.top.as_ref().map(|card| {
-        let expr = card.written.as_deref()
-            .or(card.reading.as_deref())
-            .unwrap_or("")
-            .to_string();
-        let fields = anki::fields_from_card(card, &card.blocks);
-        (expr, fields)
-    });
-    let Some((expr, fields)) = info else { return };
-    if s.anki.adding || s.anki.added.contains(&expr) {
-        return;
-    }
-    s.anki.adding = true;
-    s.anki.failed = false;
-    let back = !s.history.is_empty();
-    if let Err(e) = renderer.paint(&s.presentation, theme, s.scroll, back, side_panel) {
-        eprintln!("chibipop: repaint for adding failed: {e:#}");
-    }
-    let url = anki_url.to_string();
-    let deck = anki_deck.to_string();
-    let model = anki_model.to_string();
-    let field_map = anki_field_map.to_vec();
-    let tx = add_tx.clone();
-    thread::spawn(move || {
-        let err = anki::add_note(&url, &deck, &model, &fields, &field_map)
-            .err()
-            .map(|e| format!("{e:#}"));
-        let _ = tx.send(AddNoteResult { expr, err });
-        // SAFETY: wakes the pump.
-        unsafe {
-            let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
-        }
-    });
-}
-
-/// Would it redraw the same?
-fn same_content(prev: &Shown, new: &Presentation, anchor: PhysRect) -> bool {
-    prev.presentation == *new
-        && (prev.anchor.x - anchor.x).abs() <= ANCHOR_JITTER_PX
-        && (prev.anchor.y - anchor.y).abs() <= ANCHOR_JITTER_PX
-}
-
-/// The span hold and the char.
-struct HoldRects {
-    hold: PhysRect,
-    hold_char: PhysRect,
-}
-
-fn hold_regions(
-    anchor: PhysRect,
-    matched: Option<PhysRect>,
-    orientation: Orientation,
-) -> HoldRects {
-    HoldRects {
-        hold: hold_region(anchor, matched, orientation),
-        hold_char: hold_region(anchor, None, orientation),
-    }
-}
-
-/// Match one axis, slack other.
-fn hold_region(anchor: PhysRect, matched: Option<PhysRect>, orientation: Orientation) -> PhysRect {
-    let span = matched.unwrap_or(anchor);
-    match orientation {
-        Orientation::Horizontal => PhysRect {
-            x: span.x,
-            y: anchor.y - anchor.h / 2,
-            w: span.w,
-            h: anchor.h * 2,
-        },
-        Orientation::Vertical => PhysRect {
-            x: anchor.x - anchor.w / 2,
-            y: span.y,
-            w: anchor.w * 2,
-            h: span.h,
-        },
-    }
 }
 
 /// Relaunch with this argv.
@@ -2360,20 +1808,20 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
 ///
 /// Sits below the popup, flush
 /// with its left/right edges.
-fn sync_anki_button(btn: Option<&AnkiButton>, shown: Option<&Shown>, theme: &Theme) {
+fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme: &Theme) {
     let Some(btn) = btn else { return };
-    let Some(s) = shown else {
+    let Some(v) = view else {
         btn.hide();
         return;
     };
-    let Some((text, color)) = anki_button_label(&s.presentation, theme, &s.anki) else {
+    let Some((text, color)) = anki_button_label(v.presentation, theme, v.anki) else {
         btn.hide();
         return;
     };
     let r = PhysRect {
-        x: s.popup.x,
-        y: s.popup.y + s.popup.h,
-        w: s.popup.w,
+        x: v.popup.x,
+        y: v.popup.y + v.popup.h,
+        w: v.popup.w,
         h: btn.height_phys(),
     };
     if let Err(e) = btn.show_at(r) {
@@ -2383,82 +1831,225 @@ fn sync_anki_button(btn: Option<&AnkiButton>, shown: Option<&Shown>, theme: &The
     btn.render(&text, color, theme);
 }
 
-/// Pushes current, replaces.
-#[allow(clippy::too_many_arguments)]
-fn push_drilldown(
-    s: &mut Shown,
-    presentation: Presentation,
-    popup: &Popup,
-    renderer: &mut Renderer,
-    theme: &Theme,
-    max_h_pct: i32,
-    max_w_pct: i32,
-    anki_enabled: bool,
-    side_panel: bool,
-) {
-    s.history.push(HistoryEntry {
-        presentation: s.presentation.clone(),
-        anki: s.anki.clone(),
-    });
-    s.presentation = presentation;
-    s.anki = AnkiPopupState {
-        dupes: HashSet::new(),
-        added: HashSet::new(),
-        enabled: anki_enabled,
-        adding: false,
-        checking: anki_enabled,
-        connected: anki_enabled,
-        failed: false,
-    };
-    s.scroll = 0;
-    match show_presentation(
-        popup, renderer, theme,
-        max_h_pct, max_w_pct,
-        &s.presentation, s.anchor,
-        0, true, side_panel,
-    ) {
-        Ok((rect, content_h, view_h)) => {
-            s.popup = rect;
-            s.content_h = content_h;
-            s.view_h = view_h;
-        }
-        Err(e) => {
-            eprintln!("chibipop: drill-down repaint failed: {e:#}");
+/// What the Controller reads.
+fn controller_config(live: &LiveSettings) -> ControllerConfig {
+    ControllerConfig {
+        trigger_mode: live.trigger_mode,
+        per_character_lookup: live.per_character_lookup,
+        scroll_popup: live.scroll_popup,
+        anki_enabled: live.anki_enabled,
+        summary_chars: live.summary_chars,
+        log_lookups: live.show_lookup_log,
+        tick_ms: DISPATCH_TICK_MS,
+    }
+}
+
+/// What executing Commands needs.
+struct Exec<'a> {
+    popup: &'a Popup,
+    renderer: &'a mut Renderer,
+    theme: &'a Theme,
+    live: &'a LiveSettings,
+    overlay: Option<&'a Overlay>,
+    anki_button: Option<&'a AnkiButton>,
+    trigger_tx: &'a mpsc::Sender<Trigger>,
+    dicts: &'a [DictInfo],
+    anki_tx: &'a mpsc::Sender<AnkiDupeResult>,
+    add_tx: &'a mpsc::Sender<AddNoteResult>,
+    main_tid: u32,
+    /// OpenSettings, loop-handled.
+    want_settings: &'a mut bool,
+}
+
+/// One Event, to quiescence.
+///
+/// `ShowPopup` is executed right
+/// here, so its `PopupPlaced` (or
+/// failure) feeds straight back.
+fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(event);
+    while let Some(ev) = queue.pop_front() {
+        for cmd in controller.handle(ev) {
+            if let Some(feedback) = execute(controller, cmd, x) {
+                queue.push_back(feedback);
+            }
         }
     }
 }
 
-/// Pops the history stack.
-#[allow(clippy::too_many_arguments)]
-fn pop_history(
-    s: &mut Shown,
-    popup: &Popup,
-    renderer: &mut Renderer,
-    theme: &Theme,
-    max_h_pct: i32,
-    max_w_pct: i32,
-    anki_button: Option<&AnkiButton>,
-    side_panel: bool,
-) {
-    let Some(entry) = s.history.pop() else { return };
-    s.presentation = entry.presentation;
-    s.anki = entry.anki;
-    s.scroll = 0;
-    let back = !s.history.is_empty();
-    match show_presentation(
-        popup, renderer, theme,
-        max_h_pct, max_w_pct,
-        &s.presentation, s.anchor,
-        0, back, side_panel,
-    ) {
-        Ok((rect, content_h, view_h)) => {
-            s.popup = rect;
-            s.content_h = content_h;
-            s.view_h = view_h;
-            sync_anki_button(anki_button, Some(s), theme);
+/// One Command, one effect.
+fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Event> {
+    match cmd {
+        Command::RequestLookup { id, point } => {
+            let _ = x.trigger_tx.send(Trigger { kind: TriggerKind::Hover(point), id });
+            None
         }
-        Err(e) => {
-            eprintln!("chibipop: back repaint failed: {e:#}");
+        Command::RequestDrillDown { id, text } => {
+            let _ = x.trigger_tx.send(Trigger { kind: TriggerKind::DrillDown(text), id });
+            None
+        }
+        Command::RequestReload { id } => {
+            let _ = x.trigger_tx.send(Trigger {
+                kind: TriggerKind::Reload(Box::new(worker_settings(x.live, x.dicts))),
+                id,
+            });
+            None
+        }
+        Command::ShowPopup { presentation, anchor, scroll, show_back } => {
+            match show_presentation(
+                x.popup,
+                x.renderer,
+                x.theme,
+                x.live.max_height_percent,
+                x.live.max_width_percent,
+                &presentation,
+                anchor,
+                scroll,
+                show_back,
+                x.live.side_panel,
+            ) {
+                Ok((rect, content_h, view_h)) => {
+                    Some(Event::PopupPlaced { rect, content_h, view_h })
+                }
+                Err(e) => {
+                    eprintln!("chibipop: showing the popup failed: {e:#}");
+                    Some(Event::PopupPlaceFailed)
+                }
+            }
+        }
+        Command::RepaintPopup { scroll, show_back } => {
+            if let Some(view) = controller.popup() {
+                let painted = x.renderer.paint(
+                    view.presentation,
+                    x.theme,
+                    scroll,
+                    show_back,
+                    x.live.side_panel,
+                );
+                if let Err(e) = painted {
+                    eprintln!("chibipop: repainting the popup failed: {e:#}");
+                }
+            }
+            None
+        }
+        Command::HidePopup => {
+            let _ = x.popup.hide();
+            if let Some(b) = x.anki_button {
+                b.hide();
+            }
+            if let Some(ov) = x.overlay {
+                ov.hide();
+            }
+            None
+        }
+        Command::ShowScanOverlay { rects } => {
+            if let Some(ov) = x.overlay {
+                if let Err(e) = ov.show_rects(&rects, x.theme) {
+                    eprintln!("chibipop: showing the scan overlay failed: {e:#}");
+                }
+            }
+            None
+        }
+        Command::SyncAnkiButton => {
+            sync_anki_button(x.anki_button, controller.popup(), x.theme);
+            None
+        }
+        Command::SetScrollArmed(armed) => {
+            Hooks::set_scroll_armed(armed);
+            None
+        }
+        Command::SetClickArmed(armed) => {
+            Hooks::set_click_armed(armed);
+            None
+        }
+        Command::SetAddArmed(armed) => {
+            Hooks::set_add_armed(armed);
+            None
+        }
+        Command::SetBackArmed(armed) => {
+            Hooks::set_back_armed(armed);
+            None
+        }
+        Command::DiscardScroll => {
+            Hooks::discard_scroll();
+            None
+        }
+        Command::SetCursorShape { local, scroll } => {
+            let clickable = x.renderer.hit_test(local.x, local.y, scroll).is_some();
+            if clickable {
+                if let Ok(cur) = unsafe { LoadCursorW(None, IDC_HAND) } {
+                    unsafe { SetCursor(Some(cur)) };
+                }
+            }
+            None
+        }
+        Command::CheckDupes { generation, exprs } => {
+            let url = x.live.anki_url.clone();
+            let deck = x.live.anki_deck.clone();
+            let model = x.live.anki_model.clone();
+            let tx = x.anki_tx.clone();
+            let main_tid = x.main_tid;
+            thread::spawn(move || {
+                let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
+                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        eprintln!("chibipop: dupe check failed: {e:#}");
+                        None
+                    }
+                };
+                let _ = tx.send(AnkiDupeResult { gen: generation, dupes });
+                // SAFETY: wakes the pump.
+                unsafe {
+                    let _ = PostThreadMessageW(main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
+                }
+            });
+            None
+        }
+        Command::AddNote { expr, fields } => {
+            let url = x.live.anki_url.clone();
+            let deck = x.live.anki_deck.clone();
+            let model = x.live.anki_model.clone();
+            let field_map = x.live.anki_field_map.clone();
+            let tx = x.add_tx.clone();
+            let main_tid = x.main_tid;
+            thread::spawn(move || {
+                let err = anki::add_note(&url, &deck, &model, &fields, &field_map)
+                    .err()
+                    .map(|e| format!("{e:#}"));
+                let _ = tx.send(AddNoteResult { expr, err });
+                // SAFETY: wakes the pump.
+                unsafe {
+                    let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
+                }
+            });
+            None
+        }
+        Command::LogLookup { headword, match_len } => {
+            println!("{headword}  match={match_len}");
+            None
+        }
+        Command::WarnLookupFailed(msg) => {
+            eprintln!("chibipop: hover lookup failed: {msg}");
+            None
+        }
+        Command::WarnScrollCaptured { seconds } => {
+            eprintln!(
+                "chibipop: the wheel has been captured for {seconds}s (SCROLL_ARMED). If your \
+                 scroll wheel is not working elsewhere, this is why - move the cursor off \
+                 the popup, or set scroll_popup = false."
+            );
+            None
+        }
+        Command::OpenSettings => {
+            *x.want_settings = true;
+            None
+        }
+        Command::Exit => {
+            // Already on the main thread.
+            unsafe { PostQuitMessage(0) };
+            None
         }
     }
 }
@@ -2632,19 +2223,6 @@ fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
     }
 }
 
-/// Live mode only, by design.
-fn per_char_freeze(on: bool, mode: crate::config::TriggerMode) -> bool {
-    on && matches!(mode, crate::config::TriggerMode::Live)
-}
-
-fn freeze_rect(s: &Shown, on: bool, mode: crate::config::TriggerMode) -> PhysRect {
-    if per_char_freeze(on, mode) {
-        s.hold_char
-    } else {
-        s.hold
-    }
-}
-
 /// Some = substitute it.
 fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -> bool)
     -> Option<String> {
@@ -2684,7 +2262,6 @@ fn resolve_dict_filter(
 mod tests {
     use super::*;
     use crate::config::PopupConfig;
-    use crate::present::Card;
 
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
         PopupConfig {
@@ -2711,137 +2288,6 @@ mod tests {
     fn theme_selection_by_name_is_unaffected_by_the_font_field() {
         assert_eq!(Theme::light().background, theme_from_config(&popup_config("light", "X")).background);
         assert_eq!(Theme::dark().background, theme_from_config(&popup_config("anything-else", "X")).background);
-    }
-
-    fn presentation_of(written: &str) -> Presentation {
-        let card = Card {
-            written: Some(written.to_string()),
-            reading: None,
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 2,
-        };
-        Presentation {
-            top: Some(card.clone()),
-            collapsed: vec![],
-            all_cards: vec![card],
-        }
-    }
-
-    fn shown_of(written: &str, anchor: PhysRect) -> Shown {
-        Shown {
-            anchor,
-            popup: PhysRect { x: anchor.x, y: anchor.y + anchor.h + POPUP_GAP, w: 420, h: 300 },
-            hold: anchor,
-            hold_char: anchor,
-            presentation: presentation_of(written),
-            scroll: 0,
-            content_h: 300,
-            view_h: 300,
-            gen: 0,
-            anki: AnkiPopupState::disabled(),
-            history: Vec::new(),
-        }
-    }
-
-    /// UPSCALE 2 jitters each edge.
-    #[test]
-    fn an_equal_card_with_a_jittered_anchor_is_the_same_content() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
-        let prev = shown_of("宿舎", a);
-        let jittered = PhysRect { x: 101, y: 199, w: 26, h: 27 };
-        assert!(same_content(&prev, &presentation_of("宿舎"), jittered));
-    }
-
-    /// One word twice; it must move.
-    #[test]
-    fn an_equal_card_that_moved_is_not_the_same_content() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
-        let prev = shown_of("猫", a);
-        let elsewhere = PhysRect { x: 700, y: 900, w: 26, h: 27 };
-        assert!(!same_content(&prev, &presentation_of("猫"), elsewhere));
-    }
-
-    #[test]
-    fn a_different_card_at_the_same_anchor_is_not_the_same_content() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
-        let prev = shown_of("宿舎", a);
-        assert!(!same_content(&prev, &presentation_of("駅長"), a));
-    }
-
-    /// One word, one popup.
-    #[test]
-    fn the_hold_region_covers_the_whole_matched_word() {
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
-        // 通ってる matched 4 characters.
-        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        let popup = PhysRect { x: 3007, y: 300, w: 420, h: 300 };
-
-        // Same word, later glyphs.
-        assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, matched, popup));
-        assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, matched, popup));
-        // Past the match: re-resolve.
-        assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, matched, popup));
-        // The anchor alone releases.
-        assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, anchor, popup));
-    }
-
-    /// A 22px は resolves over 34px.
-    #[test]
-    fn the_hold_covers_the_vertical_slack_hit_scan_allows() {
-        let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
-        let matched = Some(PhysRect { x: 2701, y: 257, w: 30, h: 28 });
-        let hold = hold_region(anchor, matched, Orientation::Horizontal);
-
-        assert!(hold.y <= 254, "must reach the measured top of the region, got {}", hold.y);
-        assert!(hold.y + hold.h >= 288, "must reach the measured bottom");
-        // The line above starts at 248.
-        assert!(hold.y > 248, "reaching the line above would hold a stale popup");
-    }
-
-    /// 宿 resolves 8px past は's box.
-    #[test]
-    fn the_hold_never_widens_along_the_reading_axis() {
-        let anchor = PhysRect { x: 2704, y: 260, w: 24, h: 22 };
-        let matched = PhysRect { x: 2701, y: 257, w: 30, h: 28 };
-        let hold = hold_region(anchor, Some(matched), Orientation::Horizontal);
-        assert_eq!(matched.x, hold.x);
-        assert_eq!(matched.w, hold.w);
-        assert!(!hold.contains(PhysPoint { x: 2736, y: 271 }), "2736 resolves 宿");
-    }
-
-    /// Vertical: slack on x.
-    #[test]
-    fn the_hold_mirrors_for_vertical_text() {
-        let anchor = PhysRect { x: 2860, y: 1650, w: 28, h: 25 };
-        let matched = PhysRect { x: 2857, y: 1647, w: 34, h: 90 };
-        let hold = hold_region(anchor, Some(matched), Orientation::Vertical);
-        assert_eq!(matched.y, hold.y, "the reading axis keeps the match span");
-        assert_eq!(matched.h, hold.h);
-        assert_eq!(anchor.x - anchor.w / 2, hold.x, "slack goes across the column");
-        assert_eq!(anchor.w * 2, hold.w);
-    }
-
-    /// No match still gets slack.
-    #[test]
-    fn the_hold_without_a_match_still_carries_its_slack() {
-        let anchor = PhysRect { x: 100, y: 200, w: 26, h: 27 };
-        let hold = hold_region(anchor, None, Orientation::Horizontal);
-        assert_eq!(anchor.x, hold.x);
-        assert_eq!(anchor.w, hold.w);
-        assert!(hold.h > anchor.h, "must still tolerate perpendicular drift");
-    }
-
-    /// At tolerance yes, past it no.
-    #[test]
-    fn the_jitter_tolerance_is_inclusive_and_bounded() {
-        let a = PhysRect { x: 100, y: 200, w: 26, h: 27 };
-        let prev = shown_of("宿舎", a);
-        let at = PhysRect { x: 100 + ANCHOR_JITTER_PX, y: 200, w: 26, h: 27 };
-        let past = PhysRect { x: 100 + ANCHOR_JITTER_PX + 1, y: 200, w: 26, h: 27 };
-        assert!(same_content(&prev, &presentation_of("宿舎"), at));
-        assert!(!same_content(&prev, &presentation_of("宿舎"), past));
     }
 
     fn ws(passes: u8) -> WorkerSettings {
@@ -3038,60 +2484,6 @@ mod tests {
         });
         assert_eq!(None, got);
         assert!(!asked);
-    }
-
-    /// The arms are same-typed.
-    #[test]
-    fn the_freeze_rect_is_the_char_hold_only_when_per_character_is_live() {
-        use crate::config::TriggerMode;
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
-        let mut s = shown_of("字", anchor);
-        s.hold = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        s.hold_char = PhysRect { x: 3010, y: 254, w: 27, h: 32 };
-        assert_eq!(s.hold, freeze_rect(&s, false, TriggerMode::Live), "default off");
-        assert_eq!(s.hold_char, freeze_rect(&s, true, TriggerMode::Live));
-        assert_eq!(s.hold, freeze_rect(&s, true, TriggerMode::HoldKey));
-    }
-
-    /// Hold-key stays unchanged.
-    #[test]
-    fn the_char_freeze_applies_only_in_live_mode() {
-        use crate::config::TriggerMode;
-        assert!(per_char_freeze(true, TriggerMode::Live));
-        assert!(!per_char_freeze(true, TriggerMode::HoldKey));
-        assert!(!per_char_freeze(true, TriggerMode::HoldShift));
-        assert!(!per_char_freeze(false, TriggerMode::Live));
-    }
-
-    /// What `Shown` really gets.
-    #[test]
-    fn the_char_hold_ignores_the_matched_span() {
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
-        // 通ってる matched 4 characters.
-        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        let HoldRects { hold, hold_char } =
-            hold_regions(anchor, Some(matched), Orientation::Horizontal);
-        let next_glyph = PhysPoint { x: 3100, y: 270 };
-        assert_ne!(hold, hold_char, "the char hold must not be the span hold");
-        assert!(hold.contains(next_glyph), "the span hold still reaches");
-        assert!(!hold_char.contains(next_glyph), "one character stops short");
-    }
-
-    /// The freeze/reach seam.
-    #[test]
-    fn a_char_freeze_still_reaches_the_popup() {
-        let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
-        let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
-        let HoldRects { hold, hold_char } =
-            hold_regions(anchor, Some(matched), Orientation::Horizontal);
-        let popup = PhysRect { x: 3007, y: hold.y + hold.h + POPUP_GAP, w: 420, h: 300 };
-        let x = anchor.x + anchor.w / 2;
-        for y in hold_char.y..(popup.y + popup.h) {
-            assert!(
-                in_sticky(PhysPoint { x, y }, hold_char, hold, popup),
-                "row {y} escaped the sticky region",
-            );
-        }
     }
 
     fn di(id: i64, name: &str) -> crate::present::DictInfo {
