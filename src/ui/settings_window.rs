@@ -122,8 +122,16 @@ const ID_NOTIFY_ON_ADD: i32 = 151;
 const ID_FIELD_MAP_BASE: i32 = 200;
 
 /// Field-map combo choices.
-const FIELD_MAP_SOURCES: [&str; 7] =
-    ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html", "screenshot"];
+const FIELD_MAP_SOURCES: [&str; 8] = [
+    "(none)",
+    "expression",
+    "reading",
+    "glossary",
+    "frequency",
+    "glossary_html",
+    "screenshot",
+    "sentence",
+];
 
 /// First plugin-enable id.
 const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
@@ -3456,6 +3464,11 @@ mod tests {
     #[test]
     fn default_source_falls_back_to_none_with_no_config_at_all() {
         assert_eq!("(none)", default_source(&[], "Expression"));
+    }
+
+    #[test]
+    fn field_map_sources_offers_sentence() {
+        assert!(FIELD_MAP_SOURCES.contains(&"sentence"));
     }
 
     #[test]

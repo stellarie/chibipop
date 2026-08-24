@@ -1015,6 +1015,7 @@ mod tests {
             top: Some(card.clone()),
             collapsed: vec![],
             all_cards: vec![card],
+            sentence: None,
         }
     }
 
@@ -1317,6 +1318,7 @@ mod tests {
                 },
             ],
             all_cards: vec![card],
+            sentence: None,
         }
     }
 

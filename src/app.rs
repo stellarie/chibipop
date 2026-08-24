@@ -1488,8 +1488,11 @@ pub fn run(
                                         .or(card.reading.as_deref())
                                         .unwrap_or("")
                                         .to_string();
-                                    let fields =
+                                    let mut fields =
                                         anki::fields_from_card(card, &card.blocks);
+                                    if let Some(sentence) = &s.presentation.sentence {
+                                        fields.insert("sentence".to_string(), sentence.clone());
+                                    }
                                     (expr, fields)
                                 })
                                 .unwrap_or_default();
@@ -2318,7 +2321,8 @@ fn resolve_trigger(
         return WorkerOutcome::Hide;
     }
 
-    let presentation = present::build(&hits, dicts, present_cfg);
+    let mut presentation = present::build(&hits, dicts, present_cfg);
+    presentation.sentence = Some(resolved.span.text.clone());
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if scan_display.highlight {
         if let Some(rect) = matched {
@@ -2541,7 +2545,10 @@ fn start_add_to_anki(
             .or(card.reading.as_deref())
             .unwrap_or("")
             .to_string();
-        let fields = anki::fields_from_card(card, &card.blocks);
+        let mut fields = anki::fields_from_card(card, &card.blocks);
+        if let Some(sentence) = &s.presentation.sentence {
+            fields.insert("sentence".to_string(), sentence.clone());
+        }
         (expr, fields)
     });
     let Some((expr, fields)) = info else { return };
@@ -3089,6 +3096,7 @@ mod tests {
             top: Some(card.clone()),
             collapsed: vec![],
             all_cards: vec![card],
+            sentence: None,
         }
     }
 
