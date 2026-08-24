@@ -28,4 +28,6 @@ pub mod ui;
 // Core modules, imported at the root so the platform modules above keep
 // addressing them as `crate::…`, unchanged by the workspace split.
 #[cfg(windows)]
-use chibipop::{anki, config, dict, geom, library, lookup, paths, present, settings, update};
+use chibipop::{
+    anki, config, controller, dict, geom, library, lookup, paths, present, settings, update,
+};

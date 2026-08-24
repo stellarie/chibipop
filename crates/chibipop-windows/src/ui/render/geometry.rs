@@ -13,7 +13,7 @@
 
 use super::*;
 use crate::geom::PhysRect;
-use crate::present::{Card, CollapsedRow, GlossBlock};
+use crate::present::{AnkiPopupState, Card, CollapsedRow, GlossBlock};
 use crate::text::layout::TextGeom;
 use crate::text::TextSpan;
 use serde_json::{json, Value};

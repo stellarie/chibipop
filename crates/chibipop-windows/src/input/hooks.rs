@@ -33,9 +33,6 @@ static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x10);
 /// Whether the trigger key is held.
 static KEY_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// Key went up: drop the popup.
-static HIDE_PENDING: AtomicBool = AtomicBool::new(false);
-
 /// Stuck true kills every wheel.
 ///
 /// Reset each main-thread tick.
@@ -200,7 +197,6 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
             if hold {
                 LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
                 PENDING.store(NO_POINT, Ordering::SeqCst);
-                HIDE_PENDING.store(true, Ordering::SeqCst);
             }
         }
     }
@@ -312,12 +308,14 @@ impl Hooks {
         SCROLL_ARMED.load(Ordering::SeqCst)
     }
 
-    /// Did the trigger key come up?
+    /// Whether the key is down now.
     ///
     /// Hold mode gates moves off, so
-    /// no move can retract the popup.
-    pub fn take_hide() -> bool {
-        HIDE_PENDING.swap(false, Ordering::SeqCst)
+    /// no move can retract the popup;
+    /// the Controller hides on the
+    /// falling edge.
+    pub fn trigger_held() -> bool {
+        KEY_DOWN.load(Ordering::SeqCst)
     }
 
     /// Sets the trigger vkcode.

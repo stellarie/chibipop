@@ -5,6 +5,7 @@
 
 pub mod anki;
 pub mod config;
+pub mod controller;
 pub mod dict;
 pub mod geom;
 pub mod library;

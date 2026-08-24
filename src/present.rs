@@ -1,5 +1,7 @@
 //! What the popup shows.
 
+use std::collections::HashSet;
+
 use crate::geom::PhysRect;
 use crate::lookup::model::Hit;
 use crate::text::layout::union_chars;
@@ -50,6 +52,47 @@ pub struct CollapsedRow {
 pub struct DictInfo {
     pub dict_id: i64,
     pub name: String,
+}
+
+/// Anki state for this popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnkiPopupState {
+    pub dupes: HashSet<String>,
+    pub added: HashSet<String>,
+    pub enabled: bool,
+    pub adding: bool,
+    /// Dupe check in flight.
+    pub checking: bool,
+    /// AnkiConnect reachable.
+    pub connected: bool,
+    /// Last add-note failed.
+    pub failed: bool,
+}
+
+impl AnkiPopupState {
+    /// Disabled, no markers.
+    pub fn disabled() -> Self {
+        Self {
+            dupes: HashSet::new(),
+            added: HashSet::new(),
+            enabled: false,
+            adding: false,
+            checking: false,
+            connected: false,
+            failed: false,
+        }
+    }
+
+    /// A brand-new popup's state:
+    /// checking iff Anki is on.
+    pub fn fresh(enabled: bool) -> Self {
+        Self {
+            enabled,
+            checking: enabled,
+            connected: enabled,
+            ..Self::disabled()
+        }
+    }
 }
 
 /// Presentation knobs.
