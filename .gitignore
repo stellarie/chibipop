@@ -10,3 +10,11 @@ __pycache__/
 # Design specs, plans and findings - local only.
 /docs/superpowers/
 /.superpowers/
+
+# Domain docs, ADRs, research, agent docs, and issue tracker - local only.
+/AGENTS.md
+/CONTEXT.md
+/docs/research/
+/docs/adr/
+/docs/agents/
+/.scratch/

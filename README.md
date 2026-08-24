@@ -125,6 +125,49 @@ The build these instructions were written against used:
 Any Yomitan-format dictionary should work. Frequency lists are detected
 automatically.
 
+## Linux
+
+Linux support is **in development** and not yet in any release. It targets
+Wayland compositors that speak the wlroots protocol family — **Hyprland is the
+reference compositor**, with Sway and friends first-class alongside it. KDE
+Plasma works through the desktop portals. X11 is not a target.
+
+### GNOME
+
+GNOME is **best-effort**, and today that means something concrete:
+
+- **The popup cannot appear on stock GNOME.** chibipop draws its popup on the
+  `wlr-layer-shell` protocol, which GNOME's compositor (Mutter) does not
+  implement. On GNOME, chibipop starts up, tells you exactly that — a clear
+  message naming the missing `zwlr_layer_shell_v1` capability, not a crash —
+  and stops there. The settings window still opens (it is an ordinary window),
+  but the hover-and-read loop does not run. If GNOME ever gains a way to place
+  an overlay surface, the rest below is what its support looks like.
+- **Screen capture asks once.** GNOME has no promptless capture protocol, so
+  chibipop uses the ScreenCast portal: one consent dialog on first launch
+  covering all monitors, then a restore token keeps later launches silent. If
+  you deny it, chibipop shows an error state with a retry — it never loops the
+  dialog and never exits over it.
+- **Cursor tracking rides that same capture stream** (portal cursor metadata),
+  so it costs no extra prompt — but it also means a denied capture portal takes
+  cursor tracking down with it, and chibipop reports itself unsupported, naming
+  the missing capability.
+- **The trigger key needs GNOME 48 or newer.** Trigger keys register through
+  the GlobalShortcuts portal, which GNOME ships usably from version 48. On
+  older GNOME there is no trigger channel at all — chibipop's per-channel
+  status names it as down. Note that while bound, GNOME swallows the shortcut
+  (default `Alt+F`) globally; you can edit the binding in GNOME's portal
+  dialog.
+- **No tray icon on stock GNOME.** GNOME removed tray (StatusNotifier) support;
+  an extension such as *AppIndicator and KStatusNotifierItem Support* restores
+  it. chibipop is fully operable without the tray — everything the tray offers
+  (channel status, settings, quit) is reachable from the settings window and
+  the command line.
+- **The popup cannot hide itself from screen sharing.** Hyprland and KDE offer
+  ways to exclude chibipop's popup from third-party capture (chibipop shows
+  you the snippet); GNOME has no equivalent, so on GNOME the popup would be
+  visible in recordings and calls.
+
 ---
 
 ## For developers
