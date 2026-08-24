@@ -1511,7 +1511,6 @@ pub fn run(
                                 anki_url: live.anki_url.clone(),
                                 anki_deck: live.anki_deck.clone(),
                                 anki_model: live.anki_model.clone(),
-                                anki_field: cfg.actions.screenshot.anki_field.clone(),
                                 anki_connected: s.anki.connected,
                             };
                             let _ = screenshot_tx.send(cmd);
@@ -2583,26 +2582,31 @@ fn handle_screenshot_save(
         )?;
         std::fs::write(&cmd.save_path, &png)?;
         if cmd.anki_connected && !cmd.expr.is_empty() {
-            use base64::Engine;
-            let pic = crate::anki::NotePicture {
-                data_base64: base64::engine::general_purpose::STANDARD
-                    .encode(&png),
-                filename: format!(
-                    "chibipop-screenshot-{}.png",
-                    cmd.save_path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                ),
-                fields: vec![cmd.anki_field.clone()],
-            };
+            let screenshot_field = cmd.field_map.iter()
+                .find(|m| m.source == "screenshot")
+                .map(|m| m.anki_field.clone());
+            let pic = screenshot_field.map(|field| {
+                use base64::Engine;
+                crate::anki::NotePicture {
+                    data_base64: base64::engine::general_purpose::STANDARD
+                        .encode(&png),
+                    filename: format!(
+                        "chibipop-screenshot-{}.png",
+                        cmd.save_path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ),
+                    fields: vec![field],
+                }
+            });
             crate::anki::add_note_with_picture(
                 &cmd.anki_url,
                 &cmd.anki_deck,
                 &cmd.anki_model,
                 &cmd.fields,
                 &cmd.field_map,
-                Some(&pic),
+                pic.as_ref(),
             )?;
         }
         Ok(())

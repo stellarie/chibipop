@@ -396,8 +396,6 @@ pub struct ScreenshotConfig {
     pub hotkey: String,
     #[serde(default = "default_screenshot_save_dir")]
     pub save_dir: String,
-    #[serde(default = "default_screenshot_anki_field")]
-    pub anki_field: String,
 }
 
 /// On by default.
@@ -415,10 +413,6 @@ fn default_screenshot_save_dir() -> String {
     "screenshots".to_string()
 }
 
-/// Default Anki field name.
-fn default_screenshot_anki_field() -> String {
-    "Context".to_string()
-}
 
 impl Default for ActionsConfig {
     fn default() -> ActionsConfig {
@@ -434,7 +428,6 @@ impl Default for ScreenshotConfig {
         ScreenshotConfig {
             hotkey: default_screenshot_hotkey(),
             save_dir: default_screenshot_save_dir(),
-            anki_field: default_screenshot_anki_field(),
         }
     }
 }
@@ -1513,7 +1506,6 @@ mod tests {
         assert!(cfg.actions.enabled);
         assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
         assert_eq!("screenshots", cfg.actions.screenshot.save_dir);
-        assert_eq!("Context", cfg.actions.screenshot.anki_field);
     }
 
     /// No `[actions]` section.
@@ -1528,5 +1520,29 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(cfg.actions.enabled);
         assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn field_map_screenshot_source_resolves() {
+        let map = vec![
+            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
+            FieldMapping { anki_field: "Context".into(), source: "screenshot".into() },
+        ];
+        let found = map.iter()
+            .find(|m| m.source == "screenshot")
+            .map(|m| m.anki_field.clone());
+        assert_eq!(Some("Context".to_string()), found);
+    }
+
+    #[test]
+    fn field_map_without_screenshot_returns_none() {
+        let map = vec![
+            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
+            FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
+        ];
+        let found = map.iter()
+            .find(|m| m.source == "screenshot")
+            .map(|m| m.anki_field.clone());
+        assert_eq!(None, found);
     }
 }

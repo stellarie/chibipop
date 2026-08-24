@@ -77,7 +77,6 @@ pub struct ScreenshotCommand {
     pub anki_url: String,
     pub anki_deck: String,
     pub anki_model: String,
-    pub anki_field: String,
     pub anki_connected: bool,
 }
 

@@ -118,8 +118,8 @@ const ID_ADAPTER_LOG: i32 = 149;
 const ID_FIELD_MAP_BASE: i32 = 200;
 
 /// Field-map combo choices.
-const FIELD_MAP_SOURCES: [&str; 6] =
-    ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html"];
+const FIELD_MAP_SOURCES: [&str; 7] =
+    ["(none)", "expression", "reading", "glossary", "frequency", "glossary_html", "screenshot"];
 
 /// First plugin-enable id.
 const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
