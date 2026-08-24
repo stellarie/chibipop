@@ -141,7 +141,12 @@ The **field map** controls what goes on each card. Available sources:
 | `screenshot` | Context image from the mining screenshot. |
 | `sentence` | The sentence around the word, from OCR. |
 
-Each dictionary's definitions are separated by a header and a blank line.
+Each dictionary's definitions are separated by a header and a horizontal
+rule. HTML glosses use numbered lists.
+
+**First dictionary only** — check this on the Anki tab to send only the
+top-priority dictionary's definitions. Keeps cards clean when multiple
+dictionaries match.
 
 A balloon notification confirms each card. Toggle it with **Show
 notification when a card is added** on the Anki tab.

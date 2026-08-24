@@ -63,6 +63,8 @@ pub struct SettingsForm {
     pub static_region_key: String,
     pub show_static_overlay: bool,
     pub include_screenshot: bool,
+    /// Only the top dict's entry.
+    pub first_dict_only: bool,
     /// Plugin names allowed to run.
     pub enabled_plugins: Vec<String>,
 }
@@ -331,6 +333,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         static_region_key: cfg.anki.static_region_key.clone(),
         show_static_overlay: cfg.anki.show_static_overlay,
         include_screenshot: cfg.actions.screenshot.include_on_add,
+        first_dict_only: cfg.anki.first_dict_only,
         enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
@@ -392,6 +395,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.sentence_mode = form.sentence_mode.clone();
     out.anki.static_region_key = form.static_region_key.clone();
     out.anki.show_static_overlay = form.show_static_overlay;
+    out.anki.first_dict_only = form.first_dict_only;
     out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
@@ -790,6 +794,23 @@ mod tests {
         let form = from_config(&cfg, &dicts());
         let out = apply_to(&form, &cfg);
         assert_eq!("f10", out.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn first_dict_only_defaults_to_false() {
+        let cfg = Config::default();
+        let form = from_config(&cfg, &dicts());
+        assert!(!form.first_dict_only);
+    }
+
+    #[test]
+    fn first_dict_only_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.first_dict_only = true;
+        let form = from_config(&cfg, &dicts());
+        assert!(form.first_dict_only);
+        let out = apply_to(&form, &cfg);
+        assert!(out.anki.first_dict_only);
     }
 
     #[test]

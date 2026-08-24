@@ -1494,6 +1494,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             &add_tx,
                             main_tid,
                             live.side_panel,
+                            live.first_dict_only,
                         );
                         sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                     }
@@ -1514,6 +1515,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         &add_tx,
                         main_tid,
                         live.side_panel,
+                        live.first_dict_only,
                     );
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
                 }
@@ -1540,7 +1542,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                             .or(card.reading.as_deref())
                                             .unwrap_or("")
                                             .to_string();
-                                        let mut fields = anki::fields_from_card(card, &card.blocks);
+                                        let blocks_to_send = if live.first_dict_only {
+                                            &card.blocks[..1.min(card.blocks.len())]
+                                        } else {
+                                            &card.blocks
+                                        };
+                                        let mut fields =
+                                            anki::fields_from_card(card, blocks_to_send);
                                         if let Some(sentence) = &s.presentation.sentence {
                                             fields.insert("sentence".to_string(), sentence.clone());
                                         }
@@ -1587,6 +1595,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 &add_tx,
                                 main_tid,
                                 live.side_panel,
+                                live.first_dict_only,
                             );
                         }
                         let _ = popup.show_without_activating();
@@ -1605,6 +1614,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             &add_tx,
                             main_tid,
                             live.side_panel,
+                            live.first_dict_only,
                         );
                     }
                     sync_anki_button(anki_button.as_ref(), Some(s), &theme);
@@ -1714,7 +1724,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                         .or(card.reading.as_deref())
                                         .unwrap_or("")
                                         .to_string();
-                                    let mut fields = anki::fields_from_card(card, &card.blocks);
+                                    let blocks_to_send = if live.first_dict_only {
+                                        &card.blocks[..1.min(card.blocks.len())]
+                                    } else {
+                                        &card.blocks
+                                    };
+                                    let mut fields =
+                                        anki::fields_from_card(card, blocks_to_send);
                                     if let Some(sentence) = &s.presentation.sentence {
                                         fields.insert("sentence".to_string(), sentence.clone());
                                     }
@@ -2966,6 +2982,7 @@ fn start_add_to_anki(
     add_tx: &mpsc::Sender<AddNoteResult>,
     main_tid: u32,
     side_panel: bool,
+    first_dict_only: bool,
 ) {
     let info = s.presentation.top.as_ref().map(|card| {
         let expr = card
@@ -2974,7 +2991,12 @@ fn start_add_to_anki(
             .or(card.reading.as_deref())
             .unwrap_or("")
             .to_string();
-        let mut fields = anki::fields_from_card(card, &card.blocks);
+        let blocks_to_send = if first_dict_only {
+            &card.blocks[..1.min(card.blocks.len())]
+        } else {
+            &card.blocks
+        };
+        let mut fields = anki::fields_from_card(card, blocks_to_send);
         if let Some(sentence) = &s.presentation.sentence {
             fields.insert("sentence".to_string(), sentence.clone());
         }
@@ -3323,6 +3345,7 @@ struct LiveSettings {
     per_character_lookup: bool,
     actions_screenshot_hotkey: String,
     include_screenshot: bool,
+    first_dict_only: bool,
 }
 
 /// Rebuilt on each change.
@@ -3371,6 +3394,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         per_character_lookup: cfg.trigger.per_character_lookup,
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
         include_screenshot: cfg.actions.screenshot.include_on_add,
+        first_dict_only: cfg.anki.first_dict_only,
     }
 }
 
