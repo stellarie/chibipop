@@ -252,6 +252,16 @@ fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// One dict's glosses, numbered.
+fn plain_dict_group(b: &crate::present::GlossBlock) -> String {
+    let numbered = b.glosses.iter()
+        .enumerate()
+        .map(|(i, g)| format!("{}. {g}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("[{}]\n{numbered}", b.dict_name)
+}
+
 /// Fields from a card.
 pub fn fields_from_card(
     card: &crate::present::Card,
@@ -265,24 +275,17 @@ pub fn fields_from_card(
         .unwrap_or("")
         .to_string();
     let glossary = blocks.iter()
-        .map(|b| {
-            let joined = b.glosses.join("; ");
-            format!("{}: {joined}", b.dict_name)
-        })
+        .map(plain_dict_group)
         .collect::<Vec<_>>()
-        .join("\n");
-    // HTML-formatted counterpart of `glossary`, for a field mapped to a
-    // rich-text Anki field. `\n` is a no-op in most Anki field CSS, so
-    // blocks are joined with `<br>` here instead - the one place this
-    // rendering has to differ from the plain-text one to actually display
-    // right, rather than just carrying markup through.
+        .join("\n\n");
+    // \n is a no-op; use <br>.
     let glossary_html = blocks.iter()
         .map(|b| {
             let joined = b.glosses_html.join("; ");
-            format!("{}: {joined}", escape_html(&b.dict_name))
+            format!("<b>{}</b><br>{joined}", escape_html(&b.dict_name))
         })
         .collect::<Vec<_>>()
-        .join("<br>");
+        .join("<br><br>");
     let mut fields = HashMap::from([
         ("expression".to_string(), expression),
         ("reading".to_string(), reading),
@@ -325,11 +328,11 @@ mod tests {
         assert_eq!(Some(&"猫".to_string()), f.get("expression"));
         assert_eq!(Some(&"ねこ".to_string()), f.get("reading"));
         assert_eq!(
-            Some(&"大辞林: ネコ科の哺乳類。\nJitendex: cat; feline".to_string()),
+            Some(&"[大辞林]\n1. ネコ科の哺乳類。\n\n[Jitendex]\n1. cat\n2. feline".to_string()),
             f.get("glossary"),
         );
         assert_eq!(
-            Some(&"大辞林: ネコ科の<b>哺乳類</b>。<br>Jitendex: cat; <i>feline</i>".to_string()),
+            Some(&"<b>大辞林</b><br>ネコ科の<b>哺乳類</b>。<br><br><b>Jitendex</b><br>cat; <i>feline</i>".to_string()),
             f.get("glossary_html"),
         );
         assert_eq!(Some(&"42".to_string()), f.get("frequency"));
@@ -352,9 +355,44 @@ mod tests {
         }];
         let f = fields_from_card(&card, &blocks);
         assert_eq!(
-            Some(&"A &amp; B &lt;dict&gt;: cat".to_string()),
+            Some(&"<b>A &amp; B &lt;dict&gt;</b><br>cat".to_string()),
             f.get("glossary_html"),
         );
+    }
+
+    #[test]
+    fn glossary_separates_dictionaries_with_headers_and_blank_lines() {
+        let card = crate::present::Card {
+            written: Some("犬".into()),
+            reading: Some("いぬ".into()),
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 1,
+        };
+        let blocks = vec![
+            crate::present::GlossBlock {
+                dict_name: "大辞林".into(),
+                glosses: vec!["イヌ科の哺乳類。".into()],
+                glosses_html: vec!["イヌ科の哺乳類。".into()],
+            },
+            crate::present::GlossBlock {
+                dict_name: "Jitendex".into(),
+                glosses: vec!["dog".into()],
+                glosses_html: vec!["dog".into()],
+            },
+        ];
+        let f = fields_from_card(&card, &blocks);
+
+        let glossary = f.get("glossary").unwrap();
+        assert!(glossary.contains("[大辞林]"));
+        assert!(glossary.contains("[Jitendex]"));
+        assert!(glossary.contains("\n\n"), "blank line between groups");
+
+        let html = f.get("glossary_html").unwrap();
+        assert!(html.contains("<b>大辞林</b>"));
+        assert!(html.contains("<b>Jitendex</b>"));
+        assert!(html.contains("<br><br>"), "visual break between groups");
     }
 
     #[test]
