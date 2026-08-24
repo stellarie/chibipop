@@ -61,6 +61,93 @@ Settings live in `chibipop.toml` beside the executable.
 
 ---
 
+## Mining screenshot
+
+Take a screenshot while mining a word. The screenshot saves to disk and
+attaches to the Anki card as a context image.
+
+1. **Enable it.** Settings > *Anki* tab > check **Include screenshot when
+   adding**.
+2. **Mine a word.** Hover Japanese text until the popup appears.
+3. **Press the Anki add key.** The screen dims. Drag a rectangle around the
+   area you want to capture. Release to confirm.
+4. chibipop saves the PNG to `screenshots/` beside the executable. If Anki
+   is connected, it creates a card with the word and the screenshot.
+
+Press **Esc** during selection to skip the screenshot. The card is still
+created without an image.
+
+Map the screenshot to an Anki field with `source = "screenshot"` in
+your field map. The Settings dropdown shows it.
+
+---
+
+## Sentence capture
+
+chibipop can send the sentence around the mined word to Anki. Add
+`source = "sentence"` to your field map. The Settings dropdown shows it.
+
+Three capture modes are on the *Anki* tab:
+
+- **Current line** — the OCR line that contains the hovered word. Default.
+- **All lines** — every line the OCR captured around the cursor.
+- **Static region** — a fixed screen area you define once. Best for visual
+  novels and games with a fixed text box.
+
+### Static region
+
+Visual novels show text in the same place every time. Set a static region
+and chibipop reads from that area instead of following the cursor.
+
+1. Set the sentence mode to **Static region** in Settings.
+2. Press **R** (configurable). The screen dims.
+3. Drag a rectangle around the text box. Release.
+4. A teal outline marks the active region. Toggle it with **Show capture
+   region outline** in Settings.
+
+The region saves to `chibipop.toml` and survives restarts. Press the
+hotkey again to redraw it.
+
+---
+
+## CSS theming
+
+Style the popup with a CSS file. Four themes ship in the `themes/` folder:
+midnight-purple, ocean-breeze, sakura-light, and warm-paper.
+
+1. Settings > click **Customize CSS...** in the Popup group.
+2. Edit the CSS. Click **Save & Apply**.
+3. The popup repaints immediately.
+
+The file is `popup.css` beside the executable. Delete it to revert.
+See [`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) for the selector reference.
+
+---
+
+## Anki integration
+
+chibipop creates cards through [AnkiConnect](https://ankiweb.net/shared/info/2055492159).
+Enable it on the *Anki* tab in Settings.
+
+The **field map** controls what goes on each card. Available sources:
+
+| Source | Content |
+|---|---|
+| `expression` | The looked-up word. |
+| `reading` | The word's reading. |
+| `glossary` | Definitions, plain text. |
+| `glossary_html` | Definitions, HTML-formatted. |
+| `frequency` | Word frequency rank. |
+| `screenshot` | Context image from the mining screenshot. |
+| `sentence` | The sentence around the word, from OCR. |
+
+Each dictionary's definitions are separated by a header and a blank line.
+
+A balloon notification confirms each card. Toggle it with **Show
+notification when a card is added** on the Anki tab.
+
+---
+
 ## OCR plugins
 
 chibipop uses Windows OCR by default. You can replace it with a different
