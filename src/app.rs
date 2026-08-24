@@ -1075,7 +1075,7 @@ pub fn run(
         }
     };
     if let (Some(ref ov), Some(region)) = (&static_overlay, live.static_region) {
-        if live.sentence_mode == "static" {
+        if live.sentence_mode == "static" && live.show_static_overlay {
             if let Err(e) = ov.show(region) {
                 eprintln!("chibipop: showing static region overlay failed: {e:#}");
             }
@@ -1132,8 +1132,8 @@ pub fn run(
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
     }
-    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.static_region_key) {
-        Hooks::set_action_hotkey(1, vk, mods);
+    if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
+        Hooks::set_action_hotkey(1, vk, 0);
     }
 
     // No tray means no control.
@@ -3184,6 +3184,7 @@ struct LiveSettings {
     sentence_mode: String,
     static_region: Option<PhysRect>,
     static_region_key: String,
+    show_static_overlay: bool,
     trigger_mode: crate::config::TriggerMode,
     trigger_key: String,
     anki_add_key: String,
@@ -3228,6 +3229,7 @@ fn derive(cfg: &Config) -> LiveSettings {
             x: a[0], y: a[1], w: a[2], h: a[3],
         }),
         static_region_key: cfg.anki.static_region_key.clone(),
+        show_static_overlay: cfg.anki.show_static_overlay,
         trigger_mode: cfg.trigger.mode,
         trigger_key: cfg.trigger.trigger_key.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
@@ -3290,7 +3292,7 @@ fn apply_live(
     }
     if let Some(sr) = sr_overlay {
         sr.set_capture_exclusion(live.exclude_from_capture);
-        if live.sentence_mode == "static" {
+        if live.sentence_mode == "static" && live.show_static_overlay {
             if let Some(region) = live.static_region {
                 if let Err(e) = sr.show(region) {
                     eprintln!("chibipop: static overlay: {e:#}");
@@ -3324,8 +3326,8 @@ fn apply_live(
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
     }
-    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.static_region_key) {
-        Hooks::set_action_hotkey(1, vk, mods);
+    if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
+        Hooks::set_action_hotkey(1, vk, 0);
     }
 }
 

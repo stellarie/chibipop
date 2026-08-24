@@ -339,6 +339,9 @@ pub struct AnkiConfig {
     /// [x, y, w, h] if set.
     #[serde(default)]
     pub static_region: Option<[i32; 4]>,
+    /// Teal border visible.
+    #[serde(default = "default_show_static_overlay")]
+    pub show_static_overlay: bool,
 }
 
 /// Default Anki URL.
@@ -373,7 +376,12 @@ fn default_sentence_mode() -> String {
 
 /// Default static region key.
 fn default_static_region_key() -> String {
-    "ctrl+r".to_string()
+    "r".to_string()
+}
+
+/// Overlay on by default.
+fn default_show_static_overlay() -> bool {
+    true
 }
 
 /// The Lapis field mapping.
@@ -400,6 +408,7 @@ impl Default for AnkiConfig {
             sentence_mode: default_sentence_mode(),
             static_region_key: default_static_region_key(),
             static_region: None,
+            show_static_overlay: default_show_static_overlay(),
         }
     }
 }
@@ -1037,8 +1046,13 @@ mod tests {
     }
 
     #[test]
-    fn static_region_key_defaults_to_ctrl_r() {
-        assert_eq!("ctrl+r", Config::default().anki.static_region_key);
+    fn static_region_key_defaults_to_r() {
+        assert_eq!("r", Config::default().anki.static_region_key);
+    }
+
+    #[test]
+    fn show_static_overlay_defaults_to_true() {
+        assert!(Config::default().anki.show_static_overlay);
     }
 
     #[test]
