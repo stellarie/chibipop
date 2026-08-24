@@ -226,6 +226,7 @@ pub fn settings_only(
     let mut rebuild: Option<InFlight> = None;
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
+    let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
     let (detect_tx, detect_rx) =
         mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
@@ -264,7 +265,7 @@ pub fn settings_only(
                 DispatchMessageW(&msg);
             }
         }
-        service_settings_click(&window, &settings_tx, &detect_tx, tid);
+        service_settings_click(&window, &settings_tx, &detect_tx, tid, &mut css_editor_so);
 
         // Tab switch -> detect.
         if let Some(tab) = window.take_tab_change() {
@@ -812,11 +813,15 @@ fn spawn_detect(
 }
 
 /// Spawns the Anki/update op.
+///
+/// Returns true when a CSS editor
+/// was opened (caller must reload).
 fn service_settings_click(
     w: &SettingsWindow,
     tx: &mpsc::Sender<String>,
     detect_tx: &mpsc::Sender<(Vec<String>, Vec<String>, Vec<String>)>,
     tid: u32,
+    css_editor: &mut Option<crate::ui::editor::CssEditor>,
 ) {
     match w.take_click() {
         Some(SettingsClick::AnkiTest) => {
@@ -883,6 +888,15 @@ fn service_settings_click(
                     );
                 }
             });
+        }
+        Some(SettingsClick::CssEditor) => {
+            let css_path = crate::paths::beside_exe("popup.css");
+            let theme_name = w.read_theme_name();
+            let font = w.read_font_name();
+            match crate::ui::editor::CssEditor::open(&css_path, &theme_name, &font) {
+                Ok(ed) => *css_editor = Some(ed),
+                Err(e) => eprintln!("chibipop: CSS editor: {e:#}"),
+            }
         }
         None => {}
     }
@@ -1135,6 +1149,7 @@ pub fn run(
     let (detect_tx, detect_rx) =
         mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
+    let mut css_editor: Option<crate::ui::editor::CssEditor> = None;
     let (screenshot_tx, screenshot_rx) = mpsc::channel::<crate::action::ScreenshotCommand>();
     let (screenshot_done_tx, screenshot_done_rx) =
         mpsc::channel::<crate::action::ScreenshotResult>();
@@ -1272,7 +1287,7 @@ pub fn run(
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
             let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
-            service_settings_click(w, &settings_tx, &detect_tx, main_tid);
+            service_settings_click(w, &settings_tx, &detect_tx, main_tid, &mut css_editor);
 
             // Tab switch -> detect.
             if let Some(tab) = w.take_tab_change() {
@@ -1621,6 +1636,19 @@ pub fn run(
                         live.max_height_percent, live.max_width_percent,
                         anki_button.as_ref(), live.side_panel,
                     );
+                }
+            }
+
+            if let Some(ed) = &css_editor {
+                if let Some(crate::ui::editor::EditorOutcome::Applied) = ed.take_outcome() {
+                    theme = theme_from_config(&live.popup);
+                    if let Some(s) = shown.as_ref() {
+                        let back = !s.history.is_empty();
+                        let _ = renderer.paint(&s.presentation, &theme, s.scroll, back, live.side_panel);
+                    }
+                }
+                if !ed.is_visible() {
+                    css_editor = None;
                 }
             }
 
@@ -2908,6 +2936,13 @@ fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
         _ => Theme::dark(),
     };
     theme.font_name = popup.font.clone();
+    let css_path = crate::paths::beside_exe("popup.css");
+    if let Ok(css) = std::fs::read_to_string(&css_path) {
+        let errors = crate::ui::css::parse(&css, &mut theme);
+        for e in &errors {
+            eprintln!("chibipop: popup.css:{}: {}", e.line, e.message);
+        }
+    }
     theme
 }
 

@@ -35,15 +35,23 @@ pub struct Theme {
     pub font_name: String,
     /// The top card's headword.
     pub headword_size: f32,
+    /// Kana reading line.
+    pub reading_size: f32,
     /// Reading and glosses.
     pub body_size: f32,
+    /// Dictionary name label.
+    pub dict_label_size: f32,
     /// Collapsed rows and metadata.
     pub collapsed_size: f32,
+    /// Frequency, POS tags.
+    pub dimmed_size: f32,
 
     /// Inner panel padding, px.
     pub padding: i32,
     /// Match window::CORNER_RADIUS.
     pub corner_radius: i32,
+    /// Horizontal rule thickness.
+    pub separator_height: f32,
 
     /// Overlay: pass-1 capture box.
     pub scan_pass1: (u8, u8, u8),
@@ -70,10 +78,14 @@ impl Theme {
             dimmed_text: (110, 112, 120),
             font_name: "Yu Gothic UI".to_string(),
             headword_size: 20.0,
+            reading_size: 15.0,
             body_size: 15.0,
+            dict_label_size: 13.0,
             collapsed_size: 13.0,
+            dimmed_size: 13.0,
             padding: 12,
             corner_radius: 12,
+            separator_height: 1.0,
             scan_pass1: (110, 150, 200),
             scan_tile: (240, 160, 50),
             scan_anchor: (255, 240, 120),
@@ -95,10 +107,14 @@ impl Theme {
             dimmed_text: (150, 152, 158),
             font_name: "Yu Gothic UI".to_string(),
             headword_size: 20.0,
+            reading_size: 15.0,
             body_size: 15.0,
+            dict_label_size: 13.0,
             collapsed_size: 13.0,
+            dimmed_size: 13.0,
             padding: 12,
             corner_radius: 12,
+            separator_height: 1.0,
             scan_pass1: (70, 100, 150),
             scan_tile: (210, 110, 20),
             scan_anchor: (200, 20, 20),
@@ -134,7 +150,11 @@ mod tests {
     fn the_match_highlight_is_brighter_than_the_pass1_box_in_dark_theme() {
         let t = Theme::dark();
         let sum = |c: (u8, u8, u8)| u32::from(c.0) + u32::from(c.1) + u32::from(c.2);
-        assert!(sum(t.scan_match) > sum(t.scan_pass1),
-                "scan_match {:?} must outshine scan_pass1 {:?}", t.scan_match, t.scan_pass1);
+        assert!(
+            sum(t.scan_match) > sum(t.scan_pass1),
+            "scan_match {:?} must outshine scan_pass1 {:?}",
+            t.scan_match,
+            t.scan_pass1
+        );
     }
 }

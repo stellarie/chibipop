@@ -565,7 +565,7 @@ fn build_elements(
             out.push(Elem::Corner(Line {
                 text: format!("freq {freq}"),
                 color: theme.dimmed_text,
-                size: theme.collapsed_size,
+                size: theme.dimmed_size,
                 top_gap: 0.0,
             }));
         }
@@ -592,7 +592,7 @@ fn build_elements(
                 out.push(Elem::Text(Line {
                     text: reading.to_string(),
                     color: theme.reading_text,
-                    size: theme.body_size,
+                    size: theme.reading_size,
                     top_gap: LINE_GAP,
                 }));
             }
@@ -602,7 +602,7 @@ fn build_elements(
             out.push(Elem::Text(Line {
                 text: card.pos.join(" · "),
                 color: theme.dimmed_text,
-                size: theme.collapsed_size,
+                size: theme.dimmed_size,
                 top_gap: LINE_GAP,
             }));
         }
@@ -611,7 +611,7 @@ fn build_elements(
             out.push(Elem::Text(Line {
                 text: block.dict_name.clone(),
                 color: theme.dict_label_text,
-                size: theme.collapsed_size,
+                size: theme.dict_label_size,
                 top_gap: SECTION_GAP,
             }));
             if !block.glosses.is_empty() {
@@ -714,7 +714,7 @@ fn layout_pass(
     for elem in elems {
         let drawn_height = match elem {
             Elem::Separator { top_gap } => {
-                let h = SEPARATOR_THICKNESS;
+                let h = theme.separator_height;
                 y += top_gap;
                 if let Some(t) = target {
                     let brush = unsafe { t.CreateSolidColorBrush(&color_f(theme.separator), None) }?;

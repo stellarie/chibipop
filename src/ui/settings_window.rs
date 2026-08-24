@@ -44,6 +44,7 @@ pub enum SettingsOutcome {
 pub enum SettingsClick {
     AnkiTest,
     CheckUpdate,
+    CssEditor,
 }
 
 /// Who owns the window.
@@ -117,6 +118,8 @@ const ID_ADAPTER_LOG: i32 = 149;
 const ID_INCLUDE_SCREENSHOT: i32 = 150;
 /// Notify-on-add checkbox.
 const ID_NOTIFY_ON_ADD: i32 = 151;
+/// Customize CSS button.
+const ID_CSS_EDITOR: i32 = 152;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -743,6 +746,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_ENGINE_CONFIGURE => record_action(hwnd, Action::ConfigureEngine),
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
+                ID_CSS_EDITOR => record_click(hwnd, SettingsClick::CssEditor),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
                 ID_MODE_LIVE | ID_MODE_HOLD => unsafe {
                     if let Ok(c) = dlg_item(hwnd, ID_TRIGGER_KEY) {
@@ -1799,6 +1803,31 @@ impl SettingsWindow {
         }
     }
 
+    /// The selected theme name.
+    pub fn read_theme_name(&self) -> String {
+        // SAFETY: `ID_THEME` created in `build`.
+        unsafe {
+            let idx = dlg_item(self.hwnd, ID_THEME)
+                .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
+                .unwrap_or(0);
+            if idx == 1 { "light".into() } else { "dark".into() }
+        }
+    }
+
+    /// The selected font name.
+    pub fn read_font_name(&self) -> String {
+        // SAFETY: `ID_FONT` created in `build`.
+        unsafe {
+            let idx = dlg_item(self.hwnd, ID_FONT)
+                .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
+                .unwrap_or(-1);
+            if idx < 0 {
+                return String::new();
+            }
+            self.fonts.get(idx as usize).cloned().unwrap_or_default()
+        }
+    }
+
     /// Run a pending button.
     ///
     /// Callback precedes a picker.
@@ -2586,7 +2615,7 @@ impl SettingsWindow {
             // WS_GROUP terminates the radio group above. Without it the group
             // runs to the end of the window and arrow keys walk straight out
             // of Live/Hold Shift into the combos.
-            gen.push(group_start("Popup", y, 5 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30)?);
+            gen.push(group_start("Popup", y, 6 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30)?);
             y += 20;
 
             gen.push(label("Theme", y)?);
@@ -2627,6 +2656,11 @@ impl SettingsWindow {
                 }
             }
             self.fonts = families;
+            y += ROW_H + ROW_GAP;
+
+            gen.push(child(page, w!("BUTTON"), "Customize CSS\u{2026}",
+                WS_TABSTOP,
+                FIELD_X, y, FIELD_W, ROW_H, ID_CSS_EDITOR, f)?);
             y += ROW_H + ROW_GAP;
 
             self.widths = numeric_choices(
