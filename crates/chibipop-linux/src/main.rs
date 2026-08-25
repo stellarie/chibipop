@@ -25,6 +25,8 @@ mod logging;
 #[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
+mod settings;
+#[cfg(target_os = "linux")]
 mod wayland;
 
 #[cfg(target_os = "linux")]

@@ -165,8 +165,15 @@ fn serve_one(stream: UnixStream) -> Option<(String, Option<Verb>)> {
 
 /// Client side: send one verb, return the daemon's reply line.
 pub fn send(runtime_dir: &Path, display: &str, verb: Verb) -> std::io::Result<String> {
-    let path = runtime_dir.join(file_name(display));
-    let mut stream = UnixStream::connect(&path)?;
+    send_to(&runtime_dir.join(file_name(display)), verb)
+}
+
+/// The same exchange against a socket path already in hand.
+///
+/// The settings process holds the path (it is the ApplyMode: connectable
+/// means live-apply, absent means config-only) and must not re-derive it.
+pub fn send_to(path: &Path, verb: Verb) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.write_all(format!("{}\n", verb.as_str()).as_bytes())?;

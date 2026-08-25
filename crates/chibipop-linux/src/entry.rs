@@ -4,7 +4,7 @@
 
 use crate::control::{self, Verb};
 use crate::paths::{self, Paths};
-use crate::{daemon, wayland};
+use crate::{daemon, settings, wayland};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -31,6 +31,9 @@ enum Command {
     /// Bind these in your compositor, e.g. sway:
     ///   bindsym --no-repeat Mod4+j exec chibipop ctl trigger-down
     Ctl { verb: String },
+    /// Open the settings window: its own process (ADR-0005), so a
+    /// settings crash can never take live-hover down.
+    Settings,
     /// Connect to the Wayland display, print the capability report, exit.
     Probe,
 }
@@ -42,6 +45,7 @@ pub fn run() -> ExitCode {
     let result = match cli.command.unwrap_or(Command::Run) {
         Command::Run => daemon::run(paths),
         Command::Ctl { verb } => ctl(&paths, &verb),
+        Command::Settings => settings::run(paths),
         Command::Probe => probe(),
     };
     match result {

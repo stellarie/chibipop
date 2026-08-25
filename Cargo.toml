@@ -45,6 +45,12 @@ calloop = "0.14.4"
 calloop-wayland-source = "0.4.1"
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging", "unstable"] }
+# The settings window's toolkit (ADR-0005): a separate `chibipop settings`
+# process, so none of this is resident in the daemon.
+iced = "0.14.0"
+# Font-family enumeration for the settings font combo; the same fontdb
+# iced already carries via cosmic-text, so no second font stack.
+fontdb = "0.23"
 
 [package]
 name = "chibipop"
