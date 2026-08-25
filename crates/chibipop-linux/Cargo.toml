@@ -31,6 +31,22 @@ default = ["bundled-onnxruntime"]
 bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
 system-onnxruntime = ["ort/load-dynamic"]
 
+# ADR-0009's OCR quality gate: 152 corpus crops through three ONNX
+# sessions. `test = false` keeps it out of the default `cargo test` sweep
+# and, more to the point, out of the Linux CI job's deliberate x3 loop -
+# that loop exists to catch process-global state racing between parallel
+# tests, and this target has none: it reads committed files and committed
+# models and answers the same thing every time. It is named explicitly
+# instead, by CI and by anyone touching `src/ocr/`:
+#
+#     cargo test -p chibipop-linux --test ocr_gate -- --nocapture
+#
+# `cargo clippy --all-targets` still lints it.
+[[test]]
+name = "ocr_gate"
+path = "tests/ocr_gate.rs"
+test = false
+
 [dependencies]
 chibipop = { path = "../.." }
 anyhow.workspace = true
