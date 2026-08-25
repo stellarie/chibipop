@@ -136,12 +136,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// What every step of the search order asks. Not the order itself:
+    /// that turns on `current_exe` and the process environment, which
+    /// tests share and must not fight over.
     #[test]
-    fn the_env_override_wins_when_it_holds_the_models() {
-        // Deliberately not touching the process environment (tests share
-        // it): the search order is asserted through its predicate instead.
+    fn a_directory_counts_only_when_it_holds_all_three_models() {
         assert!(has_models(&bundled()));
         assert!(!has_models(Path::new("/nonexistent/meiki")));
+        assert!(!has_models(&bundled().join("..")), "the parent holds none of them directly");
     }
 
     #[test]

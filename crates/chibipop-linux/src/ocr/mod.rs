@@ -160,14 +160,14 @@ impl MeikiOcr {
         let mut session = cell.borrow_mut();
 
         for chunk in crops.chunks(MAX_BATCH) {
-            let mut batch: Vec<f32> = Vec::with_capacity(chunk.len() * 3 * w * h);
+            let mut pixels: Vec<f32> = Vec::with_capacity(chunk.len() * 3 * w * h);
             for crop in chunk {
-                batch.extend_from_slice(&crop.tensor);
+                pixels.extend_from_slice(&crop.tensor);
             }
             let shape = [chunk.len() as i64, 3, h as i64, w as i64];
             let outputs = session
                 .run(ort::inputs![
-                    "images" => Tensor::from_array((shape, batch))?,
+                    "images" => Tensor::from_array((shape, pixels))?,
                     "orig_target_sizes" => Tensor::from_array(([1i64, 2], vec![w as i64, h as i64]))?,
                 ])
                 .context("running character recognition")?;

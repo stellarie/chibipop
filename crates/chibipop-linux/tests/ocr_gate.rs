@@ -68,11 +68,12 @@ const HORIZONTAL_CER_CEILING: f64 = 0.05;
 const HORIZONTAL_HIT_FLOOR: f64 = 0.90;
 const VERTICAL_CER_CEILING: f64 = 0.20;
 const VERTICAL_HIT_FLOOR: f64 = 0.75;
-/// Generous on purpose. This catches a pathological regression, not a
-/// slow runner: measured 20.8 ms release and 37 ms debug on developer
-/// hardware, and 88.0 then 129.3 ms across two debug runs on ubuntu-24.04
-/// - the runner class alone swings by half again, which is exactly why the
-/// product bar (warm p50 <= 100 ms) is not asserted here.
+/// Generous on purpose. This catches a pathological regression, not a slow
+/// runner: measured 20.8 ms release and 37 ms debug on developer hardware,
+/// then 88.0, 129.3 and 132.5 ms across three debug runs on ubuntu-24.04.
+/// The runner class alone swings by half again between runs, which is
+/// exactly why the product bar (warm p50 <= 100 ms on developer hardware)
+/// is not asserted here.
 const LATENCY_P50_CEILING_MS: f64 = 250.0;
 
 /// Slices that are not the vertical one. ADR-0009 gates them together.
