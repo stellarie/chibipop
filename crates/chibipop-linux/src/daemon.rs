@@ -9,6 +9,8 @@ use crate::settings::child::{self, SettingsChild, SpawnOutcome};
 use crate::lock::{self, LockError};
 use crate::logging::Log;
 use crate::paths::Paths;
+use crate::tray::status::{ChannelId, ChannelState, ChannelStatuses};
+use crate::tray::{self, TrayHandle, TrayRequest};
 use crate::wayland;
 use anyhow::{bail, Context, Result};
 use calloop::generic::Generic;
@@ -56,10 +58,13 @@ struct App {
     last_poll: Option<(i32, i32)>,
     /// When the hyprctl rung last saw the cursor move.
     last_move: Instant,
-    /// At most one settings child (ADR-0005). Nothing spawns it yet -
-    /// the tray/socket trigger is the tray ticket's - but the guard and
-    /// its discipline live here now.
+    /// At most one settings child (ADR-0005), spawned from the tray's
+    /// Settings item; the settings-scoped flock is the cross-process
+    /// guard, this is the daemon's own.
     settings: SettingsChild,
+    /// Channel health plus the SNI tray mirroring it (ADR-0006). Also
+    /// the daemon's own view: it works unchanged when there is no tray.
+    tray: TrayHandle,
 }
 
 impl App {
@@ -80,10 +85,32 @@ impl App {
         }
     }
 
+    /// One message from the tray thread, executed here on the daemon
+    /// thread where the log, the settings guard and the loop signal
+    /// live (ADR-0006).
+    fn handle_tray(&mut self, request: TrayRequest) {
+        match request {
+            TrayRequest::OpenSettings => self.spawn_settings(),
+            TrayRequest::Quit => {
+                self.log.diag("tray: quit requested - shutting down");
+                self.signal.stop();
+            }
+            TrayRequest::Diagnostic(line) => self.log.diag(&line),
+        }
+    }
+
+    /// Record a channel transition: the registry, the tray's rows and
+    /// SNI status, and one log line — only when something moved.
+    fn note_channel(&mut self, id: ChannelId, state: ChannelState) {
+        if self.tray.set_channel(id, state) {
+            let row = self.tray.statuses().row(id);
+            self.log.diag(&format!("channel: {row}"));
+        }
+    }
+
     /// Spawn the settings window unless one child already runs. The
-    /// tray ticket calls this; the guard is daemon-side discipline,
-    /// the settings-scoped flock the cross-process one.
-    #[allow(dead_code)] // wired to the tray/socket trigger by the tray ticket
+    /// tray's Settings item calls this; the guard is daemon-side
+    /// discipline, the settings-scoped flock the cross-process one.
     fn spawn_settings(&mut self) {
         let outcome = child::settings_command().and_then(|mut c| self.settings.spawn_if_absent(&mut c));
         match outcome {
@@ -125,15 +152,31 @@ impl App {
 
     /// One `hyprctl cursorpos` poll tick: sample, feed the seam on
     /// change, re-arm at the adaptive cadence (ADR-0010).
+    ///
+    /// A sample that stops answering is the one channel failure this
+    /// daemon can observe live (the compositor went away, or `hyprctl`
+    /// did), so it is reported to the status registry either way — this
+    /// is what the tray's Cursor row and NeedsAttention track at
+    /// runtime.
     fn poll_hyprctl(&mut self) -> TimeoutAction {
-        if let Some((lx, ly)) = hyprctl::sample() {
-            if self.last_poll != Some((lx, ly)) {
-                self.last_poll = Some((lx, ly));
-                self.last_move = Instant::now();
-                if let Some(pos) = self.cursor.logical_to_global(f64::from(lx), f64::from(ly)) {
-                    self.on_cursor_position(pos);
+        match hyprctl::sample() {
+            Some((lx, ly)) => {
+                self.note_channel(
+                    ChannelId::Cursor,
+                    ChannelState::up(tray::status::rung_detail(cursor::Rung::HyprctlPoll)),
+                );
+                if self.last_poll != Some((lx, ly)) {
+                    self.last_poll = Some((lx, ly));
+                    self.last_move = Instant::now();
+                    if let Some(pos) = self.cursor.logical_to_global(f64::from(lx), f64::from(ly)) {
+                        self.on_cursor_position(pos);
+                    }
                 }
             }
+            None => self.note_channel(
+                ChannelId::Cursor,
+                ChannelState::down("hyprctl cursorpos is not answering"),
+            ),
         }
         let interval = hyprctl::next_interval(self.last_move.elapsed());
         if self.trace {
@@ -279,6 +322,21 @@ pub fn run(paths: Paths) -> Result<()> {
         .with_context(|| format!("binding the control socket in {}", runtime_dir.display()))?;
     log.diag(&format!("control: listening on {}", socket.path().display()));
 
+    // The SNI tray (ADR-0006). It runs its own D-Bus thread and its
+    // activations arrive here as `TrayRequest`s, so the pump stays sync.
+    // Non-fatal by construction: `spawn` hands back diagnostics instead
+    // of an error, because a trayless session is normal (stock GNOME,
+    // bare Hyprland) and must cost nothing. The registry it carries is
+    // the daemon's own view of channel health, tray or no tray.
+    let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
+    let (tray_handle, tray_diagnostics) = tray::spawn(ChannelStatuses::startup(&selection), tray_tx);
+    for line in tray_diagnostics {
+        log.diag(&line);
+    }
+    for row in tray_handle.statuses().rows() {
+        log.diag(&format!("channel: {row}"));
+    }
+
     let mut event_loop: EventLoop<App> = EventLoop::try_new().context("creating the event loop")?;
 
     // The long-lived Wayland queue; its own registry so future tickets
@@ -297,6 +355,7 @@ pub fn run(paths: Paths) -> Result<()> {
         last_poll: None,
         last_move: Instant::now(),
         settings: SettingsChild::new(),
+        tray: tray_handle,
     };
 
     // Bind what the selected rung needs and settle it before the pump
@@ -348,6 +407,18 @@ pub fn run(paths: Paths) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering the control socket: {e}"))?;
 
+    // Menu activations and the tray thread's own diagnostics, executed
+    // on this thread. `Event::Closed` needs no handling: the tray
+    // thread going away is exactly the trayless case, which is fine.
+    event_loop
+        .handle()
+        .insert_source(tray_rx, |event, _, app: &mut App| {
+            if let calloop::channel::Event::Msg(request) = event {
+                app.handle_tray(request);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering the tray channel: {e}"))?;
+
     event_loop
         .handle()
         .insert_source(
@@ -359,7 +430,10 @@ pub fn run(paths: Paths) -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("registering the signal source: {e}"))?;
 
-    app.log.diag("ready: pump running (cursor channel wired; no capture/OCR/popup yet)");
+    app.log.diag(&format!(
+        "ready: pump running (cursor channel wired; tray {}; no capture/OCR/popup yet)",
+        if app.tray.is_connected() { "published" } else { "trayless" }
+    ));
 
     event_loop.run(None, &mut app, |_| {}).context("running the event loop")?;
 
@@ -400,6 +474,9 @@ mod tests {
             trace: false,
             last_poll: None,
             last_move: Instant::now(),
+            tray: TrayHandle::trayless(ChannelStatuses::startup(&cursor::Selection::Rung(
+                cursor::Rung::HyprctlPoll,
+            ))),
         };
 
         cfg.debug.show_lookup_log = true;
@@ -412,5 +489,106 @@ mod tests {
         app.handle_request("reload", Some(Verb::Reload));
         assert!(!app.log.show_lookup(), "and follow it back down");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The tray thread owns no log, so its diagnostics travel as
+    /// requests and are written here. A trayless run relies on this
+    /// path for its one "no tray host" line.
+    #[test]
+    fn a_tray_diagnostic_reaches_the_daemon_log() {
+        let dir =
+            std::env::temp_dir().join(format!("chibipop_daemon_traydiag_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_file = dir.join("chibipop.log");
+
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        app.handle_tray(TrayRequest::Diagnostic("tray: no StatusNotifier host".to_string()));
+
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert!(written.contains("tray: no StatusNotifier host"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Quit stops the pump, through the same calloop channel the tray
+    /// thread uses. `run` resets and then watches the loop signal, so
+    /// "the pump made no further pass" is the observable contract; the
+    /// escape hatch keeps a regression a failure instead of a hang.
+    #[test]
+    fn tray_quit_stops_the_pump() {
+        let dir =
+            std::env::temp_dir().join(format!("chibipop_daemon_trayquit_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
+        event_loop
+            .handle()
+            .insert_source(tray_rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(request) = event {
+                    app.handle_tray(request);
+                }
+            })
+            .unwrap();
+        tray_tx.send(TrayRequest::Quit).unwrap();
+
+        let escape = event_loop.get_signal();
+        let mut passes = 0;
+        event_loop
+            .run(Some(std::time::Duration::from_millis(20)), &mut app, |_| {
+                passes += 1;
+                if passes >= 4 {
+                    escape.stop();
+                }
+            })
+            .unwrap();
+        assert_eq!(1, passes, "Quit must stop the pump on the pass that delivered it");
+
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("tray: quit requested"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A channel transition is logged once and only once, so a failing
+    /// poll cannot flood the log at the poll cadence.
+    #[test]
+    fn a_channel_transition_is_logged_once() {
+        let dir =
+            std::env::temp_dir().join(format!("chibipop_daemon_channel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_file = dir.join("chibipop.log");
+
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        for _ in 0..3 {
+            app.note_channel(ChannelId::Cursor, ChannelState::down("hyprctl is gone"));
+        }
+
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(1, written.matches("channel: Cursor: hyprctl is gone").count(), "log was: {written}");
+        assert_eq!(ksni::Status::NeedsAttention, app.tray.statuses().sni_status());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_app(dir: &std::path::Path, log_file: &std::path::Path, event_loop: &EventLoop<App>) -> App {
+        App {
+            log: Log::open(log_file, false),
+            stub: StubState::default(),
+            config_file: dir.join("chibipop.toml"),
+            signal: event_loop.get_signal(),
+            settings: SettingsChild::new(),
+            cursor: CursorState::default(),
+            controller: Controller::new(controller_config(&chibipop::config::Config::default())),
+            trace: false,
+            last_poll: None,
+            last_move: Instant::now(),
+            tray: TrayHandle::trayless(ChannelStatuses::startup(&cursor::Selection::Rung(
+                cursor::Rung::HyprctlPoll,
+            ))),
+        }
     }
 }

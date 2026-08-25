@@ -51,6 +51,15 @@ iced = "0.14.0"
 # Font-family enumeration for the settings font combo; the same fontdb
 # iced already carries via cosmic-text, so no second font stack.
 fontdb = "0.23"
+# The SNI tray (ADR-0006): ksni runs its own D-Bus thread. `async-io`, not
+# the default `tokio` feature — ADR-0001's sync/calloop daemon must not
+# import a second async runtime, and ksni's feature unification would.
+# `blocking` is only a sync wrapper over that runtime: the daemon thread
+# gets a Handle it can update without hosting an executor.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
+# Decodes the embedded tray PNGs into the ARGB32 pixmaps SNI asks for; the
+# `.ico` frame parser stays Windows-only (ADR-0006).
+png = "0.18.1"
 
 [package]
 name = "chibipop"

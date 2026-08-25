@@ -28,3 +28,6 @@ wayland-protocols.workspace = true
 # xdg_toplevel, in this transient process only — the daemon never links it.
 iced.workspace = true
 fontdb.workspace = true
+# The SNI tray (ADR-0006) and the ARGB32 decode for its embedded icon.
+ksni.workspace = true
+png.workspace = true
