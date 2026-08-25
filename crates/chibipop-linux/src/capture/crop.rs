@@ -100,7 +100,8 @@ pub fn blit(
             d.copy_from_slice(s);
             continue;
         }
-        for (px_out, px_in) in d.chunks_exact_mut(4).zip(s.chunks_exact(bpp as usize)) {
+        let (out_px, _) = d.as_chunks_mut::<4>();
+        for (px_out, px_in) in out_px.iter_mut().zip(s.chunks_exact(bpp as usize)) {
             px_out[0] = px_in[b];
             px_out[1] = px_in[g];
             px_out[2] = px_in[r];

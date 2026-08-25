@@ -175,7 +175,8 @@ fn mean(buf: &[u8]) -> String {
         return "none".to_string();
     }
     let mut sums = [0u64; 3];
-    for p in buf.chunks_exact(4) {
+    let (pixels, _) = buf.as_chunks::<4>();
+    for p in pixels {
         sums[0] += u64::from(p[0]);
         sums[1] += u64::from(p[1]);
         sums[2] += u64::from(p[2]);
