@@ -30,7 +30,8 @@ impl Bgr {
     /// same way; alpha is junk in both.
     pub fn from_bgra(bgra: &[u8], w: usize, h: usize) -> Self {
         let mut px = Vec::with_capacity(w * h * 3);
-        for p in bgra.chunks_exact(4).take(w * h) {
+        let (pixels, _) = bgra.as_chunks::<4>();
+        for p in pixels.iter().take(w * h) {
             px.extend_from_slice(&p[..3]);
         }
         Bgr { w, h, px }

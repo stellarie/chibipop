@@ -121,7 +121,8 @@ fn load_bgra(path: &Path) -> (Vec<u8>, i32, i32) {
 
     let (w, h) = (info.width as usize, info.height as usize);
     let mut bgra = Vec::with_capacity(w * h * 4);
-    for p in rgb[..w * h * 3].chunks_exact(3) {
+    let (pixels, _) = rgb[..w * h * 3].as_chunks::<3>();
+    for p in pixels {
         bgra.extend_from_slice(&[p[2], p[1], p[0], 255]);
     }
     (bgra, w as i32, h as i32)

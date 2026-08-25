@@ -40,8 +40,11 @@ system-onnxruntime = ["ort/load-dynamic"]
 # instead, by CI and by anyone touching `src/ocr/`:
 #
 #     cargo test -p chibipop-linux --test ocr_gate -- --nocapture
+#     cargo clippy -p chibipop-linux --test ocr_gate
 #
-# `cargo clippy --all-targets` still lints it.
+# The second line is not optional bookkeeping: `--all-targets` selects only
+# targets with `test = true`, so the workspace clippy gate does not see this
+# file. Run it when you touch the gate.
 [[test]]
 name = "ocr_gate"
 path = "tests/ocr_gate.rs"
