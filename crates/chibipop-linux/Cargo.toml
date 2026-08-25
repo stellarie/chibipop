@@ -74,9 +74,12 @@ fontdb.workspace = true
 ort.workspace = true
 sha2.workspace = true
 
-# The OCR fixture gate reads the committed corpus; nothing in the shipped
-# adapter decodes PNG or needs a Unicode normalisation table.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The SNI tray (ADR-0006) and the ARGB32 decode for its embedded icon.
+ksni.workspace = true
 png.workspace = true
+
+# The OCR fixture gate reads the committed corpus manifest and mirrors the
+# harness's NFKC normalisation; nothing in the shipped adapter needs them.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 serde_json.workspace = true
 unicode-normalization.workspace = true

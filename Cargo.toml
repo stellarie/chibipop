@@ -70,10 +70,18 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 # Verifies the bundled model files against their committed digests before
 # a session is built (ADR-0009 "hash-pinned, no first-run download").
 sha2 = "0.10.9"
-# Test-only, both: the OCR fixture gate decodes the committed corpus PNGs,
-# and mirrors the benchmark harness's NFKC step when it scores a
-# prediction (tools/ocr-bench/bench/common.py normalise()).
-png = "0.18.0"
+# The SNI tray (ADR-0006): ksni runs its own D-Bus thread. `async-io`, not
+# the default `tokio` feature — ADR-0001's sync/calloop daemon must not
+# import a second async runtime, and ksni's feature unification would.
+# `blocking` is only a sync wrapper over that runtime: the daemon thread
+# gets a Handle it can update without hosting an executor.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
+# Decodes the embedded tray PNGs into the ARGB32 pixmaps SNI asks for (the
+# `.ico` frame parser stays Windows-only, ADR-0006); the OCR fixture gate
+# also decodes the committed corpus PNGs in tests.
+png = "0.18.1"
+# Test-only: the OCR gate mirrors the benchmark harness's NFKC step when it
+# scores a prediction (tools/ocr-bench/bench/common.py normalise()).
 unicode-normalization = "0.1.24"
 
 [package]
