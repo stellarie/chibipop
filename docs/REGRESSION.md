@@ -1801,58 +1801,54 @@ corpus page (Japanese text) ready to hover.
    must reset when a lookup succeeds. Do not re-enable the plugin during this step — that is a
    separate case.
 
-### 1.28 Fresh install without meikiocr (pre-plugin behavior) — added 2026-08-19, not run
+### 1.28 Fresh install with discovered meikiocr — added 2026-08-19, not run
 
-**Why this exists.** `scripts/blank-copy.ps1` now seeds the whole `plugins/` tree on every fresh
-install (this round's deploy fix, §1 of the same plan). `plugins/meikiocr` therefore ships even to
-installs that never asked for a plugin. This item is the proof that shipping it changes nothing for
-them: no extra output, no dropdown entry, no dictionary miss, unless a plugin is actually enabled.
+**Why this exists.** `scripts/blank-copy.ps1` now seeds the whole `plugins/`
+tree on every fresh install (this round's deploy fix, §1 of the same plan).
+`plugins/meikiocr` therefore ships even to installs that never asked for a
+plugin. This item verifies that discovery makes it available and checks its
+Enable box without starting it while the built-in engine remains selected.
 
 **Setup.** Seed a **scratch** folder — never `Documents\chibipop-latest` or `chibipop-nightly` —
-with `pwsh -File scripts/blank-copy.ps1 -Destination <empty folder>`. Do not create or hand-edit
-`chibipop.toml` first: the point is the true first-run path, before any config exists.
-`plugins/meikiocr` will be on disk (seeded) but not enabled.
+with `pwsh -File scripts/blank-copy.ps1 -Destination <empty folder>`. Do not
+create or hand-edit `chibipop.toml` first: the point is the true first-run
+path, before any config exists. `plugins/meikiocr` will be on disk (seeded).
 
-1. `<folder>\chibipop.exe run` starts with no errors and no plugin warnings. `resolve_engine
-   ("builtin", [])` (`src/config.rs:274-283`) returns `EngineChoice::Builtin` before any plugin code
-   runs, so neither fallback message (`src/app.rs:1943`, `:1950`) can fire. The stderr startup line
-   reads `chibipop: OCR engine: windows-ocr` (`src/app.rs:1999`; `WindowsOcr::name()` at
+1. `<folder>\chibipop.exe run` starts with no errors or plugin warnings. The
+   built-in engine remains selected, so discovery extends the in-memory enabled
+   list without spawning a plugin. The stderr startup line reads
+   `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
 2. `chibipop.exe settings` opens with **five tabs**: General, Dictionaries, OCR / Debug, Anki,
    Plugins (`src/ui/settings_window.rs:2484-2508`).
-3. The **OCR engine** dropdown on OCR / Debug lists only **"Built-in (Windows OCR)"**. The list is
-   `["builtin"]` extended by `enabled_text_providers(found, enabled)`
-   (`src/ui/settings_window.rs:1428-1441`), which keeps only plugins whose name is in the enabled
-   list — empty here regardless of what is discovered on disk.
-4. The **Plugins** tab does **not** say "No plugins found" here — `plugins/meikiocr` is on disk, so
-   `discover()` finds it and the tab lists one row: **"meikiocr 0.1.0"**, status **"Disabled"**, the
-   **Enable** checkbox unchecked (`plugin_row`, `src/ui/settings_window.rs:1444-1468`). "No plugins
-   found in `<path>`." (`:2934-2936`) is the other valid outcome the task description allows for, but
-   it now means `plugins/` is empty or missing entirely — an install refreshed *before* this round's
-   `blank-copy.ps1` fix, or the folder deleted by hand. Confirm which state this install is actually
-   in and record it; don't assume.
+3. The **OCR engine** dropdown on OCR / Debug lists **"Built-in (Windows OCR)"**
+   and **"meikiocr"**. The list is `["builtin"]` extended by
+   `discovered_text_providers(found)` (`src/ui/settings_window.rs`), which
+   includes every successfully parsed discovered text-provider.
+4. The **Plugins** tab does not say "No plugins found" here. `discover()` finds
+   `plugins/meikiocr` and lists one row: **"meikiocr 0.1.0"**, status
+   **"Enabled"**, with the **Enable** checkbox checked. The state comes from the
+   in-memory config extended before `settings_only`; it is not read from disk.
+   "No plugins found in `<path>`." remains valid only when `plugins/` is empty
+   or missing.
 5. OCR works normally: hover Japanese text on screen and confirm it resolves through the popup, same
    as any pre-plugin build.
-6. No `[meikiocr-adapter]` line appears anywhere in stderr. That prefix is printed only by the
-   adapter's own Python process (`plugins/meikiocr/adapter.py:90-92`), and nothing spawns it unless
-   `resolve_recogniser` takes the `EngineChoice::Plugin` arm (`src/app.rs:1936-1955`) — unreachable
-   with `engine = "builtin"` and nothing enabled.
-7. `[plugins]` absent from config defaults to an empty enabled list. On the very first launch, before
-   any `chibipop.toml` exists, this is `Config::default()`'s `plugins: PluginsConfig::default()`
-   (`src/config.rs:398`, struct at `:191-197`). `load_or_create` (`:496-516`) then **saves** that
-   default immediately — so after step 1 runs once, `chibipop.toml` exists and, being an unremarkable
-   empty `Vec`, is written back out as an explicit `[plugins]\nenabled = []`, not an absent section.
-   Both states resolve identically; the "default" is what matters, not whether the section is
-   literally missing. Already covered as a unit test: `plugins_enabled_defaults_to_empty`
-   (`src/config.rs:1328-1330`).
+6. No `[meikiocr-adapter]` line appears anywhere in stderr. The built-in engine
+   is still selected, so discovery has not spawned the adapter process.
+7. The first-run TOML may still contain an empty `enabled` list because the
+   discovery extension is in memory. Applying the checked plugin row saves its
+   name; reopening settings then reads the saved list. Both states resolve the
+   same way at startup because discovery extends the loaded config again.
 
-**Pass** when all seven hold with `plugins/meikiocr` sitting unenabled on disk. The plugin system is
-invisible unless a plugin is actually turned on — that invisibility is the acceptance criterion.
+**Pass** when all seven hold with `plugins/meikiocr` discovered on disk: the
+provider is visible in the dropdown, its checkbox is checked, the built-in
+engine still runs until selected, and no adapter starts prematurely.
 
 ### 1.29 Per-engine live regression — added 2026-08-19, not run
 
-**Why this exists.** 1.28 proves the plugin system is invisible when off. This is the opposite
-proof: with meikiocr actually enabled, do the two OCR engines agree on the same fixture, and does
+**Why this exists.** 1.28 proves discovery surfaces the plugin while the
+built-in engine remains selected. This is the opposite proof: with meikiocr
+selected, do the two OCR engines agree on the same fixture, and does
 naming a broken engine string fail safely instead of hanging or crashing. The engine is picked once,
 at worker-thread startup (`resolve_recogniser`, `src/app.rs:1936-1955`; "Resolved once, never saved"
 — hot-swap is not wired, see 1.27), so every engine change below needs a real restart of

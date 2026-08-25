@@ -1486,26 +1486,22 @@ struct PluginRow {
     can_enable: bool,
 }
 
-/// Config's enabled plugin list.
-fn enabled_plugin_names() -> Vec<String> {
-    let path = crate::paths::beside_exe("chibipop.toml");
-    crate::config::load_or_create(&path).map(|c| c.plugins.enabled).unwrap_or_default()
-}
-
-/// Enabled text-provider names.
-fn enabled_text_providers(
+/// Discovered text-provider names.
+fn discovered_text_providers(
     found: &[(PathBuf, Result<crate::plugin::manifest::Manifest>)],
-    enabled: &[String],
 ) -> Vec<String> {
-    found
-        .iter()
-        .filter_map(|(_, parsed)| parsed.as_ref().ok())
-        .filter(|m| {
-            enabled.iter().any(|e| e == &m.name)
-                && m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
-        })
-        .map(|m| m.name.clone())
-        .collect()
+    let mut names = Vec::new();
+    for (_, parsed) in found {
+        let Ok(m) = parsed else {
+            continue;
+        };
+        if m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+            && !names.contains(&m.name)
+        {
+            names.push(m.name.clone());
+        }
+    }
+    names
 }
 
 /// Renders one plugin's row.
@@ -2892,9 +2888,8 @@ impl SettingsWindow {
             y += 20;
             let plugins_root = crate::paths::beside_exe("plugins");
             let found = crate::plugin::discover::discover(&plugins_root);
-            let enabled_plugins = enabled_plugin_names();
             let mut engine_names = vec!["builtin".to_string()];
-            engine_names.extend(enabled_text_providers(&found, &enabled_plugins));
+            engine_names.extend(discovered_text_providers(&found));
             // Spec D4: keep it offered.
             if form.engine != "builtin" && !engine_names.contains(&form.engine) {
                 engine_names.push(form.engine.clone());
@@ -2915,8 +2910,8 @@ impl SettingsWindow {
             let mut engine_dirs = HashMap::new();
             for (dir, parsed) in &found {
                 if let Ok(m) = parsed {
-                    if enabled_plugins.contains(&m.name)
-                        && m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+                    if m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+                        && !engine_dirs.contains_key(&m.name)
                     {
                         engine_dirs.insert(m.name.clone(), dir.clone());
                     }
@@ -3131,7 +3126,7 @@ impl SettingsWindow {
             y = 0;
             let plugins_root = crate::paths::beside_exe("plugins");
             let found = crate::plugin::discover::discover(&plugins_root);
-            let enabled_plugins = enabled_plugin_names();
+            let enabled_plugins = form.enabled_plugins.clone();
             plug.push(group("Plugins", y, plugins_group_h(found.len()))?);
             y += 20;
             if found.is_empty() {
@@ -4584,33 +4579,26 @@ mod tests {
     }
 
     #[test]
-    fn enabled_text_providers_includes_an_enabled_provider() {
+    fn discovered_text_providers_includes_a_provider() {
         let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
         let found = vec![(PathBuf::from("meikiocr"), Ok(m))];
-        let names = enabled_text_providers(&found, &["meikiocr".to_string()]);
+        let names = discovered_text_providers(&found);
         assert_eq!(vec!["meikiocr".to_string()], names);
     }
 
     #[test]
-    fn enabled_text_providers_excludes_a_disabled_provider() {
-        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
-        let found = vec![(PathBuf::from("meikiocr"), Ok(m))];
-        assert!(enabled_text_providers(&found, &[]).is_empty());
-    }
-
-    #[test]
-    fn enabled_text_providers_excludes_a_non_provider_role() {
+    fn discovered_text_providers_excludes_a_non_provider_role() {
         let m = manifest_stub("scorer", vec![crate::plugin::manifest::Role::FieldContributor]);
         let found = vec![(PathBuf::from("scorer"), Ok(m))];
-        let names = enabled_text_providers(&found, &["scorer".to_string()]);
+        let names = discovered_text_providers(&found);
         assert!(names.is_empty());
     }
 
     #[test]
-    fn enabled_text_providers_excludes_a_refused_manifest() {
+    fn discovered_text_providers_excludes_a_refused_manifest() {
         let err = anyhow::anyhow!("plugin \"beta\" declares no roles");
         let found = vec![(PathBuf::from("beta"), Err(err))];
-        let names = enabled_text_providers(&found, &["beta".to_string()]);
+        let names = discovered_text_providers(&found);
         assert!(names.is_empty());
     }
 

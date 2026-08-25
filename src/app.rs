@@ -1010,6 +1010,14 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
 
 /// Run until the user quits.
 pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
+    let plugins_root = crate::paths::beside_exe("plugins");
+    let found = crate::plugin::discover::discover(&plugins_root);
+    for name in crate::plugin::discover::text_provider_names(&found) {
+        if !cfg.plugins.enabled.contains(&name) {
+            cfg.plugins.enabled.push(name);
+        }
+    }
+
     // Nothing built yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
