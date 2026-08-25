@@ -10,6 +10,8 @@ use wayland_client::{Connection, Dispatch, QueueHandle};
 /// One advertised registry global.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advertised {
+    /// The registry name, needed to `bind` the global later.
+    pub name: u32,
     pub interface: String,
     pub version: u32,
 }
@@ -57,8 +59,8 @@ pub fn collect_globals(conn: &Connection) -> anyhow::Result<Vec<Advertised>> {
             _: &Connection,
             _: &QueueHandle<Snapshot>,
         ) {
-            if let wl_registry::Event::Global { interface, version, .. } = event {
-                state.0.push(Advertised { interface, version });
+            if let wl_registry::Event::Global { name, interface, version } = event {
+                state.0.push(Advertised { name, interface, version });
             }
         }
     }
@@ -106,7 +108,11 @@ mod tests {
     use super::*;
 
     fn advertised(names: &[&str]) -> Vec<Advertised> {
-        names.iter().map(|n| Advertised { interface: n.to_string(), version: 1 }).collect()
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| Advertised { name: i as u32 + 1, interface: n.to_string(), version: 1 })
+            .collect()
     }
 
     const FULL: &[&str] = &[
