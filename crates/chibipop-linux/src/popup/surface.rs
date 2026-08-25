@@ -647,7 +647,8 @@ impl Popup {
 /// over the buffer we just painted, in place - the alternative is
 /// painting into a second pixmap and copying.
 fn to_argb(data: &mut [u8]) {
-    for px in data.chunks_exact_mut(4) {
+    let (pixels, _) = data.as_chunks_mut::<4>();
+    for px in pixels {
         px.swap(0, 2);
     }
 }
