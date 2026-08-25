@@ -23,3 +23,4 @@ clap.workspace = true
 calloop = { workspace = true, features = ["signals"] }
 calloop-wayland-source.workspace = true
 wayland-client.workspace = true
+wayland-protocols.workspace = true

@@ -13,6 +13,8 @@
 #[cfg(target_os = "linux")]
 mod control;
 #[cfg(target_os = "linux")]
+mod cursor;
+#[cfg(target_os = "linux")]
 mod daemon;
 #[cfg(target_os = "linux")]
 mod entry;
