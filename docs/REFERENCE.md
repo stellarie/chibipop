@@ -461,6 +461,19 @@ cheapest-first checklist: the automated gate, then what can be verified
 against real pixels with `probe`, then the dozen things only a human at the
 keyboard can check. It also lists the traps that have bitten more than once.
 
+One target is deliberately **not** in that sweep:
+
+```bash
+cargo test -p chibipop-linux --test ocr_gate -- --nocapture
+```
+
+the Linux OCR quality gate (ADR-0009), which runs the committed 152-crop
+benchmark corpus through the three bundled ONNX models and prints a
+measured-vs-reference table. It is deterministic and it is the slowest single
+target in the tree, so CI runs it once in its own step rather than three times
+inside the loop above. Run it after any change under
+`crates/chibipop-linux/src/ocr/`.
+
 Three allow-by-default lints are enabled at both crate roots
 (`missing_unsafe_on_extern`, `unsafe_attr_outside_unsafe`,
 `unsafe_op_in_unsafe_fn`), so every unsafe operation is written inside a
@@ -492,6 +505,18 @@ already selectable) and **M5** (DPI and Magpie polish) are not started.
   non-interactive environment with no screen to hover.
 - **Text clipped by a window edge cannot be read** at any capture shape. The
   glyphs are physically incomplete on screen; a ceiling, not a bug.
+- **Vertical text is beta on Linux.** The Linux OCR engine (meikiocr, ADR-0009)
+  reads horizontal text at **1.8 % CER with 95.1 % hit-scan** and vertical text
+  at **12.5 % CER with 81.3 % hit-scan** over the 152-crop benchmark corpus.
+  Both are enforced as a CI gate — horizontal CER ≤ 5 % / hit-scan ≥ 90 %,
+  vertical CER ≤ 20 % / hit-scan ≥ 75 % — so vertical is degraded, not broken:
+  expect a dropped first glyph or trailing `。` on a column. The known
+  mitigations are all unmeasured, so none ship, and **the UI says nothing about
+  it**: a hover that reads is worth more than a warning. Re-run
+  `cargo test -p chibipop-linux --test ocr_gate` after any model update. The
+  Linux adapter never upscales a capture in any orientation — meikiocr measured
+  1× better than 2× on every slice, because its fixed 960×544 detector
+  letterbox undoes an upscale.
 - **Right-clicking the tray icon does not open its menu.** A real bug with two
   unproven suspects and a one-click diagnosis, written up in
   [`BACKLOG.md`](BACKLOG.md) §7. Everything the menu offered is reachable

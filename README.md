@@ -197,3 +197,9 @@ The bundled deconjugation rules (`data/deconjugator.json`) are public domain.
 Dictionaries are not included and are not ours to give: you supply your own
 Yomitan archives.
 
+The Linux build bundles the [meikiocr](https://github.com/rtr46/meikiocr) text
+recognition models (`crates/chibipop-linux/models/meiki/`). Their weights are
+**LGPL-3.0**, redistributed unmodified as data files, and ONNX Runtime is MIT —
+both compatible with the GPL. Details and upstream links are in
+[`models/meiki/LICENSE.md`](crates/chibipop-linux/models/meiki/LICENSE.md).
+

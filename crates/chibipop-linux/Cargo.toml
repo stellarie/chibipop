@@ -10,6 +10,46 @@ license.workspace = true
 name = "chibipop"
 path = "src/main.rs"
 
+# The OCR engine is the one piece of this adapter with a standing fixture
+# gate (ADR-0009), and cargo cannot link an integration test against a bin
+# target - so the adapter grows a thin lib face carrying exactly that
+# module. The bin stays the product; the lib exists for `tests/`.
+[lib]
+name = "chibipop_linux"
+path = "src/lib.rs"
+
+# ADR-0009's two distribution paths, one feature each. The default fetches
+# a pinned ONNX Runtime at build time and ships it beside the binary, which
+# is what the release tarball and `chibipop-bin` want and what lets CI run
+# with no apt package. `--no-default-features --features system-onnxruntime`
+# is the source-AUR path: `ort` dlopens the distro's `libonnxruntime.so` at
+# runtime and nothing is downloaded or linked at build time. Enabling both
+# (as `--all-features` does) is harmless - dynamic loading wins and the
+# download is skipped.
+[features]
+default = ["bundled-onnxruntime"]
+bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
+system-onnxruntime = ["ort/load-dynamic"]
+
+# ADR-0009's OCR quality gate: 152 corpus crops through three ONNX
+# sessions. `test = false` keeps it out of the default `cargo test` sweep
+# and, more to the point, out of the Linux CI job's deliberate x3 loop -
+# that loop exists to catch process-global state racing between parallel
+# tests, and this target has none: it reads committed files and committed
+# models and answers the same thing every time. It is named explicitly
+# instead, by CI and by anyone touching `src/ocr/`:
+#
+#     cargo test -p chibipop-linux --test ocr_gate -- --nocapture
+#     cargo clippy -p chibipop-linux --test ocr_gate
+#
+# The second line is not optional bookkeeping: `--all-targets` selects only
+# targets with `test = true`, so the workspace clippy gate does not see this
+# file. Run it when you touch the gate.
+[[test]]
+name = "ocr_gate"
+path = "tests/ocr_gate.rs"
+test = false
+
 [dependencies]
 chibipop = { path = "../.." }
 anyhow.workspace = true
@@ -29,3 +69,14 @@ wayland-protocols-wlr.workspace = true
 # xdg_toplevel, in this transient process only — the daemon never links it.
 iced.workspace = true
 fontdb.workspace = true
+# The meikiocr port (ADR-0009): three ONNX sessions, plus the digest check
+# over their bundled files.
+ort.workspace = true
+sha2.workspace = true
+
+# The OCR fixture gate reads the committed corpus; nothing in the shipped
+# adapter decodes PNG or needs a Unicode normalisation table.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+png.workspace = true
+serde_json.workspace = true
+unicode-normalization.workspace = true
