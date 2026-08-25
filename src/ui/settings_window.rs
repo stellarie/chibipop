@@ -1576,8 +1576,8 @@ fn field_map_toggle_label(collapsed: bool) -> &'static str {
 }
 
 /// `&&` renders one `&`.
-fn apply_caption(mode: ApplyMode, freq: bool) -> &'static str {
-    if mode == ApplyMode::Live && !freq {
+fn apply_caption(mode: ApplyMode) -> &'static str {
+    if mode == ApplyMode::Live {
         "Apply"
     } else {
         "Apply && Restart"
@@ -1585,18 +1585,14 @@ fn apply_caption(mode: ApplyMode, freq: bool) -> &'static str {
 }
 
 /// What that button will do.
-fn apply_hint(mode: ApplyMode, staged: bool, freq: bool) -> &'static str {
-    match (mode, staged, freq) {
-        (ApplyMode::Live, true, true) => concat!(
-            "Frequency changes need a full rebuild. This saves, ",
-            "rebuilds, and restarts chibipop."
-        ),
-        (ApplyMode::Live, false, _) => "Applying saves your settings and uses them right away.",
-        (ApplyMode::Live, true, false) => {
+fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
+    match (mode, staged) {
+        (ApplyMode::Live, false) => "Applying saves your settings and uses them right away.",
+        (ApplyMode::Live, true) => {
             "Applying saves your settings and updates your \
              dictionaries in place."
         }
-        (ApplyMode::Standalone, _, _) => "Applying saves your settings and restarts chibipop.",
+        (ApplyMode::Standalone, _) => "Applying saves your settings and restarts chibipop.",
     }
 }
 
@@ -1975,17 +1971,16 @@ impl SettingsWindow {
     fn refresh_apply(&self) {
         let staged = self.staged.borrow();
         let has_staged = staged.has_staged();
-        let freq = staged.freq_changed && has_staged;
         // SAFETY: `ID_APPLY` and `ID_STATUS` are live children of `self.hwnd`,
         // created in `build`; `SetWindowTextW` copies each string during the
         // call, so the temporaries below outlive every use.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
-                let caption = wide(apply_caption(self.apply_mode, freq));
+                let caption = wide(apply_caption(self.apply_mode));
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
             if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
-                let hint = wide(apply_hint(self.apply_mode, has_staged, freq));
+                let hint = wide(apply_hint(self.apply_mode, has_staged));
                 let _ = SetWindowTextW(c, PCWSTR(hint.as_ptr()));
             }
         }
@@ -3196,13 +3191,12 @@ impl SettingsWindow {
             // ---- Apply / Cancel ----
             // Also the progress line.
             let staged = form.has_staged();
-            let freq = form.freq_changed && staged;
             child(h, w!("EDIT"),
-                apply_hint(self.apply_mode, staged, freq),
+                apply_hint(self.apply_mode, staged),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
                 PAD, bottom_y0 + BOTTOM_STATUS_DY, WIN_W - 2 * PAD - 16, STATUS_H,
                 ID_STATUS, f)?;
-            child(h, w!("BUTTON"), apply_caption(self.apply_mode, freq),
+            child(h, w!("BUTTON"), apply_caption(self.apply_mode),
                   WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                   BOTTOM_APPLY_X, bottom_y0 + BOTTOM_BTN_DY, 136, ROW_H + 4, ID_APPLY, f)?;
             // Far left: not beside Apply.
@@ -4061,36 +4055,26 @@ mod tests {
     /// Only `run` applies live.
     #[test]
     fn a_live_window_with_nothing_staged_just_applies() {
-        assert_eq!("Apply", apply_caption(ApplyMode::Live, false));
-        assert!(apply_hint(ApplyMode::Live, false, false).contains("right away"));
+        assert_eq!("Apply", apply_caption(ApplyMode::Live));
+        assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
     }
 
     /// No rebuild, no restart.
     #[test]
     fn a_staged_dictionary_promises_an_in_place_update() {
-        assert_eq!("Apply", apply_caption(ApplyMode::Live, false));
-        let hint = apply_hint(ApplyMode::Live, true, false);
+        assert_eq!("Apply", apply_caption(ApplyMode::Live));
+        let hint = apply_hint(ApplyMode::Live, true);
         assert!(hint.contains("in place"), "{hint}");
         assert!(!hint.contains("rebuild"), "{hint}");
         assert!(!hint.contains("restart"), "{hint}");
     }
 
-    #[test]
-    fn a_staged_frequency_promises_a_rebuild_restart() {
-        assert_eq!("Apply && Restart", apply_caption(ApplyMode::Live, true));
-        let hint = apply_hint(ApplyMode::Live, true, true);
-        assert!(hint.contains("rebuild"), "{hint}");
-        assert!(hint.contains("restart"), "{hint}");
-    }
-
     /// It reloads no other process.
     #[test]
     fn a_standalone_window_never_promises_a_live_apply() {
-        assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone, false));
+        assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone));
         for staged in [false, true] {
-            assert!(
-                apply_hint(ApplyMode::Standalone, staged, false).contains("restarts chibipop")
-            );
+            assert!(apply_hint(ApplyMode::Standalone, staged).contains("restarts chibipop"));
         }
     }
 
