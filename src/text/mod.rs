@@ -34,6 +34,16 @@ pub struct Frame {
     pub source: &'static str,
     /// Why the preferred path was not used, if it was not.
     pub fallback: Option<String>,
+    /// These pixels are the ones the previous grab of *this same
+    /// region* returned.
+    ///
+    /// An optimisation hint, never a data-absence marker: `buf` is
+    /// always the region's real content. A damage-paced backend
+    /// (wlr-screencopy, ADR-0002) learns this for free from the race
+    /// it already runs, so the pipeline can reuse the OCR it already
+    /// paid for; a backend that cannot tell says `false`, which is
+    /// always correct and merely costs a pass.
+    pub unchanged: bool,
 }
 
 /// Pixels of a screen region, on demand.

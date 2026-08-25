@@ -77,6 +77,18 @@ pub struct RegionRead {
     pub source: &'static str,
     /// Why the preferred path was not used, if it was not.
     pub fallback: Option<String>,
+    /// The pixels were the previous grab's, so the OCR was reused.
+    pub unchanged: bool,
+}
+
+/// One region's words, kept for an unchanged re-grab.
+///
+/// Word rects are already mapped to physical, so a reuse is a clone
+/// and nothing else.
+struct Recognised {
+    region: PhysRect,
+    factor: i32,
+    lines: Vec<OcrLine>,
 }
 
 /// The OCR knobs, reloadable.
@@ -93,6 +105,14 @@ pub struct TextSource {
     capture: Box<dyn RegionCapture>,
     ocr: Box<dyn OcrEngine>,
     settings: SettingsSnapshot,
+    /// What this read has recognised.
+    recognised: Vec<Recognised>,
+    /// What the previous read did, for a dwell re-check to reuse
+    /// (ADR-0010): a damage-paced backend answers an unchanged region
+    /// with the same pixels, and OCR of the same pixels is the same
+    /// answer. Two generations, so one read's tiles cannot evict each
+    /// other; both are bounded by the passes one read makes.
+    previous: Vec<Recognised>,
 }
 
 impl TextSource {
@@ -101,13 +121,22 @@ impl TextSource {
         ocr: Box<dyn OcrEngine>,
         settings: SettingsSnapshot,
     ) -> Self {
-        TextSource { capture, ocr, settings }
+        TextSource {
+            capture,
+            ocr,
+            settings,
+            recognised: Vec::new(),
+            previous: Vec::new(),
+        }
     }
 
     /// Swap in new OCR settings.
     pub fn apply_settings(&mut self, settings: SettingsSnapshot, language: &str) {
         self.ocr.set_language(language);
         self.settings = settings;
+        // Another language or capture size is another answer.
+        self.recognised.clear();
+        self.previous.clear();
     }
 
     /// Lines plus the outcome.
@@ -139,19 +168,28 @@ impl TextSource {
             resolved,
             source: frame.source,
             fallback: frame.fallback,
+            unchanged: frame.unchanged,
         })
     }
 
     /// Capture + recognise at `factor`, mapped to physical.
+    ///
+    /// A backend that says the pixels are unchanged (ADR-0002's damage
+    /// race) skips the recogniser entirely: same pixels, same words.
     pub fn recognise_at_capture(
         &mut self,
         region: PhysRect,
         factor: i32,
     ) -> Result<(Vec<OcrLine>, Frame)> {
         let frame = grab_upscaled(self.capture.as_mut(), region, factor)?;
+        if frame.unchanged {
+            if let Some(lines) = self.reuse(region, factor) {
+                return Ok((lines, frame));
+            }
+        }
         let raw = self.ocr.recognise(&frame.buf, frame.w, frame.h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
-        let lines = raw
+        let lines: Vec<OcrLine> = raw
             .into_iter()
             .map(|l| OcrLine {
                 words: l
@@ -164,7 +202,32 @@ impl TextSource {
                     .collect(),
             })
             .collect();
+        self.remember(region, factor, &lines);
         Ok((lines, frame))
+    }
+
+    /// This region's words from an earlier pass, if any pass had it.
+    ///
+    /// A hit is promoted into this read's generation, so a dwell that
+    /// never re-OCRs never forgets either.
+    fn reuse(&mut self, region: PhysRect, factor: i32) -> Option<Vec<OcrLine>> {
+        let same = |r: &&Recognised| r.region == region && r.factor == factor;
+        if let Some(hit) = self.recognised.iter().find(same) {
+            return Some(hit.lines.clone());
+        }
+        let hit = self.previous.iter().find(same)?;
+        let lines = hit.lines.clone();
+        self.recognised.push(Recognised { region, factor, lines: lines.clone() });
+        Some(lines)
+    }
+
+    /// Keep this pass's words for the next read.
+    fn remember(&mut self, region: PhysRect, factor: i32, lines: &[OcrLine]) {
+        let entry = Recognised { region, factor, lines: lines.to_vec() };
+        match self.recognised.iter_mut().find(|r| r.region == region && r.factor == factor) {
+            Some(slot) => *slot = entry,
+            None => self.recognised.push(entry),
+        }
     }
 
     /// Tiled, scan rects dropped.
@@ -180,6 +243,9 @@ impl TextSource {
         collect: bool,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
         self.capture.begin_read();
+        // One read, one generation: the previous read's passes stay
+        // reusable, older ones go.
+        self.previous = std::mem::take(&mut self.recognised);
         let out = self.resolve_tiled_inner(cursor, collect);
         self.capture.end_read();
         out
@@ -287,23 +353,7 @@ impl TextSource {
         orientation: Orientation,
         tolerance: i32,
     ) -> Result<Vec<OcrWord>> {
-        let frame = grab_upscaled(self.capture.as_mut(), tile, UPSCALE)?;
-        let origin = PhysPoint { x: tile.x, y: tile.y };
-        let lines: Vec<OcrLine> = self
-            .ocr
-            .recognise(&frame.buf, frame.w, frame.h)?
-            .into_iter()
-            .map(|l| OcrLine {
-                words: l
-                    .words
-                    .into_iter()
-                    .map(|word| OcrWord {
-                        rect: map_from_upscaled(word.rect, origin, UPSCALE),
-                        text: word.text,
-                    })
-                    .collect(),
-            })
-            .collect();
+        let (lines, _) = self.recognise_at_capture(tile, UPSCALE)?;
         Ok(nearest_line(&lines, perpendicular_centre, orientation, tolerance)
             .map(|line| line.words.clone())
             .unwrap_or_default())
@@ -431,5 +481,147 @@ mod tests {
             line(vec![word("大", 40)]),
         ];
         assert!(!glyphs_look_small(&lines));
+    }
+
+    /// A capture whose `unchanged` flag the test drives, so the reuse
+    /// path can be exercised without a compositor.
+    struct Paced {
+        unchanged: bool,
+        grabs: std::cell::Cell<u32>,
+    }
+
+    impl RegionCapture for Paced {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            self.grabs.set(self.grabs.get() + 1);
+            Ok(Frame {
+                buf: vec![0u8; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "paced",
+                fallback: None,
+                unchanged: self.unchanged,
+            })
+        }
+
+        fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
+            PhysRect { x: p.x - 1000, y: p.y - 1000, w: 2000, h: 2000 }
+        }
+    }
+
+    /// Counts how often the recogniser actually ran.
+    #[derive(Default)]
+    struct Counting {
+        runs: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl OcrEngine for Counting {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> Result<Vec<OcrLine>> {
+            self.runs.set(self.runs.get() + 1);
+            Ok(vec![OcrLine {
+                words: vec![OcrWord {
+                    text: "本".to_string(),
+                    rect: PhysRect { x: 0, y: 0, w: 40, h: 40 },
+                }],
+            }])
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+    }
+
+    fn paced(unchanged: bool) -> (TextSource, std::rc::Rc<std::cell::Cell<u32>>) {
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = TextSource::new(
+            Box::new(Paced { unchanged, grabs: std::cell::Cell::new(0) }),
+            Box::new(Counting { runs: runs.clone() }),
+            SettingsSnapshot {
+                max_passes: 1,
+                prefer_vertical: false,
+                capture: CaptureSize::default(),
+                scan_alphanumeric: false,
+            },
+        );
+        (source, runs)
+    }
+
+    const BOX: PhysRect = PhysRect { x: 100, y: 100, w: 80, h: 40 };
+    const OTHER: PhysRect = PhysRect { x: 400, y: 100, w: 80, h: 40 };
+    const AT: PhysPoint = PhysPoint { x: 120, y: 110 };
+
+    /// The whole point of the damage race: unchanged pixels must not be
+    /// recognised twice (ADR-0002).
+    #[test]
+    fn unchanged_pixels_reuse_the_words_already_recognised() {
+        let (mut source, runs) = paced(true);
+        let first = source.resolve_in_region(AT, BOX).expect("first read");
+        assert_eq!(runs.get(), 1, "the first read must recognise");
+        assert!(!first.lines.is_empty());
+
+        let again = source.resolve_in_region(AT, BOX).expect("second read");
+        assert_eq!(runs.get(), 1, "an unchanged region must not be recognised again");
+        assert_eq!(again.lines, first.lines, "and must answer the same words");
+        assert!(again.unchanged, "the signal must reach the caller");
+    }
+
+    #[test]
+    fn changed_pixels_are_always_recognised() {
+        let (mut source, runs) = paced(false);
+        source.resolve_in_region(AT, BOX).expect("first read");
+        let again = source.resolve_in_region(AT, BOX).expect("second read");
+        assert_eq!(runs.get(), 2);
+        assert!(!again.unchanged);
+    }
+
+    /// `unchanged` is a hint, never a promise that words are held: a
+    /// region never recognised must still be recognised.
+    #[test]
+    fn an_unchanged_region_with_nothing_held_is_still_recognised() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX).expect("first read");
+        source.resolve_in_region(AT, OTHER).expect("a different box");
+        assert_eq!(runs.get(), 2, "a box never read cannot be reused");
+    }
+
+    /// A dwell through the real read bracket: last read's words must
+    /// survive into this one, or a static screen re-OCRs every period
+    /// (ADR-0010's dwell re-check would cost what it saves).
+    #[test]
+    fn a_dwell_through_the_read_bracket_reuses_the_previous_read() {
+        let (mut source, runs) = paced(true);
+        source.resolve_at_tiled(AT).expect("first read");
+        assert_eq!(runs.get(), 1, "the first read must recognise");
+        for _ in 0..4 {
+            source.resolve_at_tiled(AT).expect("dwell read");
+        }
+        assert_eq!(runs.get(), 1, "a static dwell must never recognise again");
+    }
+
+    /// Several passes in one read must not evict each other: a tiled
+    /// read asks for a handful of boxes, and all of them dwell.
+    #[test]
+    fn two_regions_in_one_read_are_both_kept() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX).expect("pass 1");
+        source.resolve_in_region(AT, OTHER).expect("tile");
+        assert_eq!(runs.get(), 2);
+        source.resolve_in_region(AT, BOX).expect("pass 1 again");
+        source.resolve_in_region(AT, OTHER).expect("tile again");
+        assert_eq!(runs.get(), 2, "neither region may evict the other");
+    }
+
+    /// New settings mean new answers: nothing held may survive them.
+    #[test]
+    fn new_settings_drop_everything_held() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX).expect("first read");
+        assert_eq!(runs.get(), 1);
+        let settings = SettingsSnapshot {
+            max_passes: 2,
+            prefer_vertical: true,
+            capture: CaptureSize::default(),
+            scan_alphanumeric: true,
+        };
+        source.apply_settings(settings, "ja");
+        source.resolve_in_region(AT, BOX).expect("read after reload");
+        assert_eq!(runs.get(), 2, "a reload must re-recognise");
     }
 }

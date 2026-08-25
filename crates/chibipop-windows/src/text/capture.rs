@@ -220,6 +220,9 @@ fn capture_region(region: PhysRect) -> Result<Frame> {
             h: region.h,
             source: "dxgi",
             fallback: None,
+            // DXGI's AcquireNextFrame does report "no new frame", but
+            // this backend never holds a previous one to compare with.
+            unchanged: false,
         }),
         Ok(_) => bitblt_after(region, "DXGI frame was one flat colour".to_string()),
         Err(e) => bitblt_after(region, format!("{e:#}")),
@@ -239,6 +242,7 @@ fn bitblt_after(region: PhysRect, why: String) -> Result<Frame> {
         h: region.h,
         source: "bitblt",
         fallback: Some(why),
+        unchanged: false,
     })
 }
 
