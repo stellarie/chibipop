@@ -6,12 +6,18 @@
 //! grouping (`crates/chibipop-windows/src/ui/settings_window.rs`) with
 //! iced-native controls; per ADR-0012 `ocr.language` is hidden, the key
 //! fields are the Linux ones, and capture exclusion is a snippet, not a
-//! checkbox. Dictionary add/remove/rebuild lands with ticket 41 - here
-//! the lists reorder and scope only, which is pure config.
+//! checkbox.
+//!
+//! The dictionary controls stage into core's `SettingsForm` and only
+//! [`super::rebuild`] ever touches the library on disk; the window's one
+//! piece of state about it is `rebuild_progress`, which is both the
+//! busy gate and the line the status area shows.
 
 use super::apply::{self, LinuxFields};
 use super::channel::{HotkeyChannel, HotkeyControl};
+use super::rebuild;
 use super::snippets::{self, Compositor};
+use crate::lock::{self, LockError};
 use anyhow::Context;
 use chibipop::config::{
     PopupLayer, TriggerMode, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
@@ -34,6 +40,12 @@ pub struct Init {
     pub log_path: PathBuf,
     pub compositor: Compositor,
     pub channel: HotkeyChannel,
+    /// Where the dictionary archives live; a rebuild edits it.
+    pub library_dir: PathBuf,
+    /// The database a rebuild renames over.
+    pub db_path: PathBuf,
+    /// Where the library flock file goes.
+    pub runtime_dir: PathBuf,
 }
 
 pub fn run(init: Init) -> anyhow::Result<()> {
@@ -59,12 +71,23 @@ struct App {
     log_path: PathBuf,
     compositor: Compositor,
     channel: HotkeyChannel,
+    library_dir: PathBuf,
+    db_path: PathBuf,
+    runtime_dir: PathBuf,
     /// System font families for the font combo.
     fonts: Vec<String>,
     /// Text-edited numbers stay text until Apply parses them.
     capture_w: String,
     capture_h: String,
     selected_dict: Option<String>,
+    /// The path typed into the Add row; there is no portal file dialog
+    /// on this window's dependency budget, and a path entry never lies
+    /// about which file it took.
+    add_path: String,
+    /// The live rebuild's last rendered progress line; empty when idle.
+    /// Its presence *is* the busy flag - Rebuild and Apply are refused
+    /// while it is set.
+    rebuild_progress: Option<String>,
     status: String,
 }
 
@@ -86,8 +109,13 @@ impl App {
             log_path: init.log_path,
             compositor: init.compositor,
             channel: init.channel,
+            library_dir: init.library_dir,
+            db_path: init.db_path,
+            runtime_dir: init.runtime_dir,
             fonts,
             selected_dict: None,
+            add_path: String::new(),
+            rebuild_progress: None,
             status: String::new(),
         }
     }
@@ -118,6 +146,101 @@ impl App {
             Err(e) => self.status = format!("Apply failed: {e:#}"),
         }
     }
+
+    /// A rebuild is writing the library; edits to it would race.
+    fn busy(&self) -> bool {
+        self.rebuild_progress.is_some()
+    }
+
+    /// Stage the typed path for import.
+    fn add_dictionary(&mut self) {
+        let typed = self.add_path.trim();
+        if typed.is_empty() {
+            return;
+        }
+        let source = PathBuf::from(typed);
+        match self.form.stage_add(&source) {
+            Some(_) => {
+                self.status = format!(
+                    "{} is staged; press Rebuild to build it in.",
+                    source.display()
+                );
+                self.add_path.clear();
+            }
+            // stage_add refuses an unreadable archive and a source it
+            // already holds; the file itself is the only thing to say.
+            None => {
+                self.status = format!(
+                    "{} is not a readable dictionary archive, or is already staged.",
+                    source.display()
+                );
+            }
+        }
+    }
+
+    /// Stage the selected row for removal.
+    fn remove_dictionary(&mut self) {
+        let Some(name) = self.selected_dict.take() else {
+            self.status = "Select a dictionary to remove first.".to_string();
+            return;
+        };
+        self.form.stage_remove(&name);
+        self.status = format!("{name} is staged for removal; press Rebuild to apply it.");
+    }
+
+    /// Take the library and start building.
+    fn start_rebuild(&mut self) -> Task<Message> {
+        let plan = rebuild::Plan {
+            library_dir: self.library_dir.clone(),
+            out: self.db_path.clone(),
+            runtime_dir: self.runtime_dir.clone(),
+            socket: self.socket_path.clone(),
+        };
+        // Bounded by the builder's own line rate; the window drains it
+        // every frame, so an unbounded channel never grows.
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        match rebuild::spawn(&self.form, plan, move |p| {
+            let _ = tx.unbounded_send(p);
+        }) {
+            Ok(()) => {
+                self.rebuild_progress = Some("Starting the rebuild…".to_string());
+                self.status = "Rebuilding your dictionary. This can take a few minutes.".to_string();
+                Task::run(rx, Message::RebuildProgress)
+            }
+            Err(LockError::AlreadyRunning { path, pid }) => {
+                self.status = lock::rebuild_refusal(&self.library_dir, &path, pid);
+                Task::none()
+            }
+            Err(LockError::Io(e)) => {
+                self.status = format!("Could not claim the library lock: {e}");
+                Task::none()
+            }
+        }
+    }
+
+    /// One message from the rebuild thread.
+    fn took_progress(&mut self, progress: rebuild::Progress) {
+        match &progress {
+            // Only lines the shared renderer has words for; the rest are
+            // builder chatter the user never asked about.
+            rebuild::Progress::Line(line) => {
+                if let Some(text) = chibipop::dict::progress::friendly(line) {
+                    self.rebuild_progress = Some(text);
+                }
+                return;
+            }
+            rebuild::Progress::Done { .. } => {
+                // The library on disk now matches the form.
+                self.form.clear_staged();
+                self.selected_dict = None;
+            }
+            // The archives went back; the form still describes what the
+            // user asked for, so the staged edits stay staged.
+            rebuild::Progress::Failed(_) => {}
+        }
+        self.rebuild_progress = None;
+        self.status = rebuild::describe(&progress);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +262,11 @@ enum Message {
     DictDown,
     DictExclude,
     DictInclude,
+    AddPath(String),
+    DictAdd,
+    DictRemove,
+    Rebuild,
+    RebuildProgress(rebuild::Progress),
     Passes(u8),
     PreferVertical(bool),
     ScanAlnum(bool),
@@ -187,6 +315,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.selected_dict = Some(name);
             }
         }
+        Message::AddPath(v) => app.add_path = v,
+        Message::DictAdd => app.add_dictionary(),
+        Message::DictRemove => app.remove_dictionary(),
+        Message::Rebuild => return app.start_rebuild(),
+        Message::RebuildProgress(p) => app.took_progress(p),
         Message::Passes(v) => app.form.max_ocr_passes = v,
         Message::PreferVertical(on) => app.form.prefer_vertical = on,
         Message::ScanAlnum(on) => app.form.scan_alphanumeric = on,
@@ -452,22 +585,63 @@ fn dictionaries_section(app: &App) -> Element<'_, Message> {
             button("Move down").on_press(Message::DictDown).width(Length::Fill),
             button("Exclude").on_press(Message::DictExclude).width(Length::Fill),
             button("Include").on_press(Message::DictInclude).width(Length::Fill),
+            // Only these two touch the library, so only these two are
+            // refused while a rebuild owns it.
+            button("Remove")
+                .on_press_maybe((!app.busy()).then_some(Message::DictRemove))
+                .width(Length::Fill),
         ]
         .spacing(6)
         .width(140),
     ]
     .spacing(16);
 
+    let add = row![
+        text_input("path to a Yomitan .zip", &app.add_path)
+            .on_input_maybe((!app.busy()).then_some(Message::AddPath))
+            .width(Length::Fill),
+        button("Add").on_press_maybe((!app.busy()).then_some(Message::DictAdd)),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
     let mut body = column![
         lists,
-        text("Order is matched by dictionary name. Adding and removing dictionaries lands with the rebuild ticket.")
-            .size(13),
+        add,
+        text(
+            "Order is matched by dictionary name. Adds and removals are staged: \
+             Rebuild imports them and rebuilds the database."
+        )
+        .size(13),
     ]
     .spacing(8);
     if !app.form.freq_names.is_empty() {
         body = body.push(text(format!("Frequency lists: {}", app.form.freq_names.join(", "))).size(13));
     }
+    body = body.push(rebuild_row(app));
     section("Dictionaries", body)
+}
+
+/// The Rebuild button and whatever the running build last said.
+///
+/// One live rebuild at a time: `rebuild_progress` is both the button's
+/// gate and the line it replaces itself with.
+fn rebuild_row(app: &App) -> Element<'_, Message> {
+    let note = match &app.rebuild_progress {
+        Some(line) => line.clone(),
+        None if app.form.has_staged() => {
+            "Staged changes are not in the database yet.".to_string()
+        }
+        None => "Rebuild reads every archive again; the popup keeps working meanwhile."
+            .to_string(),
+    };
+    row![
+        text(note).size(13).width(Length::Fill),
+        button("Rebuild").on_press_maybe((!app.busy()).then_some(Message::Rebuild)),
+    ]
+    .spacing(16)
+    .align_y(iced::Center)
+    .into()
 }
 
 fn ocr_section(app: &App) -> Element<'_, Message> {
@@ -594,4 +768,191 @@ fn system_families() -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// The dictionary controls, driven the way iced drives them: one
+/// `Message` at a time through [`update`]. No window is opened - the
+/// widgetry is one `view` call over this same state, and what matters
+/// here is which state a press leaves behind.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/yomitan")
+            .join(name)
+    }
+
+    /// The window's state without touching fontdb or the filesystem.
+    fn app(dir: &Path) -> App {
+        let cfg = chibipop::config::Config::default();
+        App {
+            form: chibipop::settings::from_config(&cfg, &[]),
+            linux: LinuxFields::from_config(&cfg),
+            config_path: dir.join("chibipop.toml"),
+            socket_path: dir.join("run/absent.sock"),
+            log_path: dir.join("chibipop.log"),
+            compositor: Compositor::Hyprland,
+            channel: HotkeyChannel::Native,
+            library_dir: dir.join("library"),
+            db_path: dir.join("chibipop.sqlite"),
+            runtime_dir: dir.join("run"),
+            fonts: vec!["Noto Sans".to_string()],
+            capture_w: "480".to_string(),
+            capture_h: "160".to_string(),
+            selected_dict: None,
+            add_path: String::new(),
+            rebuild_progress: None,
+            status: String::new(),
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("chibipop_settings_app_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn adding_a_readable_archive_stages_it_under_its_own_title() {
+        let dir = scratch("add");
+        let mut app = app(&dir);
+        let _ = update(&mut app, Message::AddPath(fixture("terms.zip").display().to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+
+        assert!(app.form.dict_names.iter().any(|n| n == "FixtureTerms"), "{:?}", app.form.dict_names);
+        assert!(app.form.has_staged(), "the add must wait for a rebuild");
+        assert!(app.add_path.is_empty(), "the entry clears once the path is taken");
+        assert!(app.status.contains("Rebuild"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path that is not a dictionary is refused, not silently ignored.
+    #[test]
+    fn adding_an_unreadable_path_says_so_and_stages_nothing() {
+        let dir = scratch("add_bad");
+        let mut app = app(&dir);
+        let before = app.form.dict_names.clone();
+        let _ = update(&mut app, Message::AddPath(dir.join("nope.zip").display().to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+
+        assert_eq!(before, app.form.dict_names);
+        assert!(!app.form.has_staged());
+        assert!(app.status.contains("not a readable dictionary archive"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_without_a_selection_asks_for_one() {
+        let dir = scratch("remove_none");
+        let mut app = app(&dir);
+        let _ = update(&mut app, Message::DictRemove);
+        assert!(!app.form.has_staged());
+        assert!(app.status.contains("Select a dictionary"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_the_selected_row_stages_it_and_drops_the_selection() {
+        let dir = scratch("remove");
+        let mut app = app(&dir);
+        app.form.dict_names = vec!["Jitendex".to_string(), "Daijirin".to_string()];
+
+        let _ = update(&mut app, Message::DictSelected("Jitendex".to_string()));
+        let _ = update(&mut app, Message::DictRemove);
+
+        assert_eq!(vec!["Daijirin".to_string()], app.form.dict_names);
+        assert!(app.form.has_staged());
+        assert_eq!(None, app.selected_dict);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Builder lines reach the user through the shared renderer, and the
+    /// raw ones stay out of sight.
+    #[test]
+    fn progress_lines_render_through_the_shared_renderer() {
+        let dir = scratch("progress");
+        let mut app = app(&dir);
+        let line = |l: &str| Message::RebuildProgress(rebuild::Progress::Line(l.to_string()));
+
+        let _ = update(&mut app, line("progress  12500 / 768636"));
+        assert_eq!(Some("12,500 of 768,636 entries…".to_string()), app.rebuild_progress);
+        assert!(app.busy(), "a live rebuild keeps the library controls shut");
+
+        // Nothing to say about it: the last line must not replace the one
+        // the user can read.
+        let _ = update(&mut app, line("wrote /tmp/x.sqlite.building: 3 entries"));
+        assert_eq!(Some("12,500 of 768,636 entries…".to_string()), app.rebuild_progress);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_finished_rebuild_clears_the_staged_edits_and_reopens_the_controls() {
+        let dir = scratch("done");
+        let mut app = app(&dir);
+        app.form.dict_names = vec!["Jitendex".to_string()];
+        let _ = update(&mut app, Message::DictSelected("Jitendex".to_string()));
+        let _ = update(&mut app, Message::DictRemove);
+        app.rebuild_progress = Some("Creating search index…".to_string());
+
+        let _ = update(
+            &mut app,
+            Message::RebuildProgress(rebuild::Progress::Done {
+                entries: 3,
+                terms: 5,
+                reload: rebuild::Reload::Sent("OK reload".to_string()),
+            }),
+        );
+
+        assert!(!app.busy(), "the controls reopen when the build ends");
+        assert!(!app.form.has_staged(), "the library on disk now matches the form");
+        assert!(app.status.contains("daemon reloaded"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The archives went back, so the request must survive for a retry.
+    #[test]
+    fn a_failed_rebuild_keeps_the_staged_edits() {
+        let dir = scratch("failed");
+        let mut app = app(&dir);
+        app.form.dict_names = vec!["Jitendex".to_string()];
+        let _ = update(&mut app, Message::DictSelected("Jitendex".to_string()));
+        let _ = update(&mut app, Message::DictRemove);
+        app.rebuild_progress = Some("Creating search index…".to_string());
+
+        let _ = update(
+            &mut app,
+            Message::RebuildProgress(rebuild::Progress::Failed("invalid Zip archive".to_string())),
+        );
+
+        assert!(!app.busy());
+        assert!(app.form.has_staged(), "a failed rebuild must not forget the request");
+        assert!(app.status.contains("unchanged"), "{}", app.status);
+        assert!(app.status.contains("invalid Zip archive"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pressing Rebuild while another process holds the library says who
+    /// holds it, and starts nothing.
+    #[test]
+    fn a_rebuild_refused_by_the_flock_reports_the_holder() {
+        let dir = scratch("contend");
+        let mut app = app(&dir);
+        let held = lock::acquire_at(&app.runtime_dir, &lock::library_file_name(&app.library_dir))
+            .expect("standing in for the first settings process");
+
+        let _ = update(&mut app, Message::Rebuild);
+
+        assert!(!app.busy(), "a refused rebuild is not in flight");
+        assert!(app.status.contains("Another rebuild"), "{}", app.status);
+        assert!(app.status.contains(&std::process::id().to_string()), "{}", app.status);
+        assert!(!app.db_path.exists(), "a refused rebuild writes nothing");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
