@@ -9,6 +9,7 @@
 
 use std::fs::{File, TryLockError};
 use std::io::{Read, Seek, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// Held for the daemon's whole life.
@@ -46,6 +47,32 @@ pub fn file_name(display: &str) -> String {
 /// daemon (ADR-0005).
 pub fn settings_file_name(display: &str) -> String {
     format!("settings-{}.lock", sanitize(display))
+}
+
+/// The library's own lock, keyed by the library path rather than by
+/// display: a rebuild rewrites files on disk, so what must never overlap
+/// is two writers of the *same library*, whichever session they belong
+/// to. Windows guards this with a named mutex; on Linux it is one more
+/// flock in the same per-user runtime dir (ADR-0005).
+pub fn library_file_name(library: &Path) -> String {
+    format!("library-{:016x}.lock", fnv1a(library))
+}
+
+/// FNV-1a over the library path's bytes.
+///
+/// Hand-rolled on purpose: `DefaultHasher` is explicitly not stable
+/// across releases, and a lock name that moves with the toolchain guards
+/// nothing. Trailing separators are dropped so `…/library` and
+/// `…/library/` name one lock.
+fn fnv1a(library: &Path) -> u64 {
+    let bytes = library.as_os_str().as_bytes();
+    let end = bytes.iter().rposition(|b| *b != b'/').map_or(0, |i| i + 1);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in &bytes[..end] {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// `$WAYLAND_DISPLAY` may be an absolute path; keep it one filename.
@@ -100,6 +127,20 @@ pub fn refusal(display: &str, path: &Path, pid: Option<u32>) -> String {
     format!(
         "already running for WAYLAND_DISPLAY={display} ({holder} holds {}); \
          use `chibipop ctl` to talk to it",
+        path.display()
+    )
+}
+
+/// The one line a refused rebuild shows in the status area.
+pub fn rebuild_refusal(library: &Path, path: &Path, pid: Option<u32>) -> String {
+    let holder = match pid {
+        Some(pid) => format!("pid {pid}"),
+        None => "another chibipop".to_string(),
+    };
+    format!(
+        "Another rebuild of {} is already running ({holder} holds {}); \
+         wait for it to finish.",
+        library.display(),
         path.display()
     )
 }
@@ -180,5 +221,52 @@ mod tests {
         assert!(msg.contains("wayland-1"), "{msg}");
         assert!(msg.contains("4242"), "{msg}");
         assert!(msg.contains("run-wayland-1.lock"), "{msg}");
+    }
+
+    /// Two libraries never share a lock, and one library always names the
+    /// same lock file — a rebuild guard keyed by a hash that drifts would
+    /// guard nothing.
+    #[test]
+    fn the_library_lock_is_keyed_by_path_and_stable() {
+        let a = library_file_name(Path::new("/home/x/.local/share/chibipop/library"));
+        assert_eq!(a, library_file_name(Path::new("/home/x/.local/share/chibipop/library")));
+        assert_eq!(a, library_file_name(Path::new("/home/x/.local/share/chibipop/library/")));
+        assert_ne!(a, library_file_name(Path::new("/home/y/.local/share/chibipop/library")));
+        assert_eq!("library-7938d952a0e0914d.lock", a);
+    }
+
+    /// One library, two settings processes: the second rebuild is
+    /// refused, not queued.
+    #[test]
+    fn a_second_rebuild_of_one_library_is_refused() {
+        let dir = tmp("library_contend");
+        let library = Path::new("/home/x/.local/share/chibipop/library");
+        let name = library_file_name(library);
+        let first = acquire_at(&dir, &name).expect("first library lock");
+        match acquire_at(&dir, &name) {
+            Err(LockError::AlreadyRunning { path, pid }) => {
+                assert_eq!(first.path(), path);
+                assert_eq!(Some(std::process::id()), pid);
+                let msg = rebuild_refusal(library, &path, pid);
+                assert!(msg.contains("library"), "{msg}");
+                assert!(msg.contains(&std::process::id().to_string()), "{msg}");
+            }
+            Err(LockError::Io(e)) => panic!("io error instead of refusal: {e}"),
+            Ok(_) => panic!("two rebuilds of one library must not overlap"),
+        }
+        drop(first);
+        acquire_at(&dir, &name).expect("freed by the first rebuild finishing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rebuild never blocks the daemon or the settings window itself.
+    #[test]
+    fn the_library_lock_is_scoped_apart_from_the_instance_locks() {
+        let dir = tmp("library_scope");
+        let _daemon = acquire(&dir, "wayland-5").expect("daemon lock");
+        let _settings = acquire_at(&dir, &settings_file_name("wayland-5")).expect("settings lock");
+        let _library = acquire_at(&dir, &library_file_name(Path::new("/tmp/lib")))
+            .expect("the library lock must not contend with the instance locks");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -323,7 +323,7 @@ fn pump_rebuild(rx: &mpsc::Receiver<Progress>, w: &SettingsWindow) -> Option<Res
             Ok(Progress::Line(line)) => {
                 println!("chibipop: {line}");
                 // Never the raw .tmp line.
-                if let Some(text) = rebuild::friendly(&line) {
+                if let Some(text) = crate::dict::progress::friendly(&line) {
                     w.set_status(&text);
                 }
             }
@@ -602,7 +602,7 @@ fn add_one(
     let path = dir.join(&entry.file);
     let base = crate::dict::edit::next_entry_id(conn)?;
     let on_progress = |line: &str| {
-        if let Some(text) = rebuild::friendly(&rebased(line, base)) {
+        if let Some(text) = crate::dict::progress::friendly(&rebased(line, base)) {
             let _ = tx.send(EditMsg::Status(text));
         }
     };
@@ -2305,7 +2305,7 @@ mod tests {
         assert_eq!("progress  4997 / ?", rebased("progress  365000 / ?", 360004));
         assert_eq!(
             Some("4,997 entries\u{2026}".to_string()),
-            rebuild::friendly(&rebased("progress  365000 / ?", 360004))
+            crate::dict::progress::friendly(&rebased("progress  365000 / ?", 360004))
         );
     }
 

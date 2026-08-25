@@ -4,9 +4,10 @@
 //! lives behind cfg(windows). Elsewhere this file compiles to zero tests.
 #![cfg(windows)]
 
+use chibipop::dict::progress::friendly;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
-use chibipop_windows::rebuild::{friendly, spawn_with, Progress};
+use chibipop_windows::rebuild::{spawn_with, Progress};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 

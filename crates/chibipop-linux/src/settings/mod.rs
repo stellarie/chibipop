@@ -11,6 +11,7 @@
 mod app;
 mod apply;
 pub mod child;
+mod rebuild;
 mod snippets;
 
 mod channel;
@@ -61,9 +62,11 @@ pub fn run(paths: Paths) -> Result<()> {
     }
     let cfg = chibipop::config::load_or_create(&paths.config_file)?;
 
-    let dicts = read_dicts(&paths.data_dir.join("chibipop.sqlite"));
+    let db_path = paths.data_dir.join("chibipop.sqlite");
+    let library_dir = paths.data_dir.join("library");
+    let dicts = read_dicts(&db_path);
     let form = chibipop::settings::from_config(&cfg, &dicts);
-    let form = match Library::load(&paths.data_dir.join("library")) {
+    let form = match Library::load(&library_dir) {
         Ok(lib) => chibipop::settings::with_library(form, &lib),
         // No library yet is the common fresh-install case; the lists
         // just come from the config's order.
@@ -78,6 +81,9 @@ pub fn run(paths: Paths) -> Result<()> {
         log_path: paths.log_file(),
         compositor: snippets::Compositor::detect(),
         channel: channel::HotkeyChannel::Native,
+        library_dir,
+        db_path,
+        runtime_dir: runtime_dir.to_path_buf(),
     };
     app::run(init)?;
 
@@ -85,8 +91,9 @@ pub fn run(paths: Paths) -> Result<()> {
     Ok(())
 }
 
-/// The built DB's dictionary names, read-only; absent or unreadable is
-/// simply an empty list (rebuilds are ticket 41's).
+/// The built DB's dictionary names, read-only: what the daemon would see
+/// right now. Absent or unreadable is simply an empty list — a fresh
+/// install has no database until the first rebuild.
 fn read_dicts(db: &Path) -> Vec<DictInfo> {
     let Ok(dictionary) = SqliteDictionary::open(db) else {
         return Vec::new();
