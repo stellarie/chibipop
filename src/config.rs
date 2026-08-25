@@ -431,6 +431,8 @@ pub struct ActionsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub screenshot: ScreenshotConfig,
+    #[serde(default)]
+    pub ocr_clipboard: Option<OcrClipboardConfig>,
 }
 
 /// `[actions.screenshot]`.
@@ -442,6 +444,14 @@ pub struct ScreenshotConfig {
     pub save_dir: String,
     #[serde(default)]
     pub include_on_add: bool,
+}
+
+/// `[actions.ocr_clipboard]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct OcrClipboardConfig {
+    /// Empty or absent disables the action.
+    #[serde(default)]
+    pub hotkey: Option<String>,
 }
 
 /// On by default.
@@ -465,6 +475,7 @@ impl Default for ActionsConfig {
         ActionsConfig {
             enabled: default_actions_enabled(),
             screenshot: ScreenshotConfig::default(),
+            ocr_clipboard: None,
         }
     }
 }
@@ -1646,6 +1657,23 @@ mod tests {
         assert!(cfg.actions.enabled);
         assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
         assert_eq!("screenshots", cfg.actions.screenshot.save_dir);
+        assert_eq!(None, cfg.actions.ocr_clipboard);
+    }
+
+    #[test]
+    fn ocr_clipboard_hotkey_round_trips() {
+        let mut cfg = Config::default();
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("ctrl+shift+o".into()),
+        });
+        let text = toml::to_string(&cfg).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            Some(OcrClipboardConfig {
+                hotkey: Some("ctrl+shift+o".to_string()),
+            }),
+            loaded.actions.ocr_clipboard
+        );
     }
 
     /// No `[actions]` section.

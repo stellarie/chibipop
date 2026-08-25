@@ -13,3 +13,6 @@ __pycache__/
 
 # Local-only scripts.
 /scripts/
+
+# Project memory - local only.
+/MEMORY.md
