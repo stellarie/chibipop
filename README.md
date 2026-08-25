@@ -168,6 +168,16 @@ GNOME is **best-effort**, and today that means something concrete:
   you the snippet); GNOME has no equivalent, so on GNOME the popup would be
   visible in recordings and calls.
 
+### Starting at login
+
+The settings window has an autostart checkbox that writes (or removes)
+`~/.config/autostart/chibipop.desktop` directly — the file is the whole
+state, there is no config field to drift from it. GNOME, KDE, and
+uwsm-managed sessions honour that entry. Bare Hyprland/sway sessions
+don't read XDG autostart; [`extras/`](extras/) ships a systemd user unit
+and a Hyprland `exec-once` + trigger-bind snippet for those, each with
+its install line in [`extras/README.md`](extras/README.md).
+
 ---
 
 ## For developers

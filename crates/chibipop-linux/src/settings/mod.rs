@@ -10,13 +10,14 @@
 
 mod app;
 mod apply;
+mod autostart;
 pub mod child;
 mod snippets;
 
 mod channel;
 
 use crate::lock::{self, LockError};
-use crate::paths::Paths;
+use crate::paths::{self, Paths};
 use crate::{control, wayland};
 use anyhow::{Context, Result};
 use chibipop::library::Library;
@@ -78,6 +79,7 @@ pub fn run(paths: Paths) -> Result<()> {
         log_path: paths.log_file(),
         compositor: snippets::Compositor::detect(),
         channel: channel::HotkeyChannel::Native,
+        autostart: autostart::Target::resolve(&paths::Env::from_process()),
     };
     app::run(init)?;
 

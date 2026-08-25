@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=chibipop
+GenericName=Japanese lookup
+Comment=Hover-to-read Japanese lookup
+Exec=chibipop run
+TryExec=chibipop
+Icon=chibipop
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+Keywords=japanese;dictionary;ocr;yomitan;

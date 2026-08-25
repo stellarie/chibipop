@@ -150,6 +150,15 @@ fn xdg_paths(env: &Env, runtime_dir: Option<PathBuf>) -> Paths {
     }
 }
 
+/// The XDG config *root* itself (`$XDG_CONFIG_HOME` or `~/.config`, no
+/// `chibipop/` suffix): where spec-owned directories such as
+/// `autostart/` live. `None` when neither variable can supply one.
+pub fn config_home(env: &Env) -> Option<PathBuf> {
+    xdg(env.xdg_config_home.as_deref())
+        .map(Path::to_path_buf)
+        .or_else(|| env.home.as_deref().map(|h| h.join(".config")))
+}
+
 /// Per the basedir spec, a relative `$XDG_*` value is invalid: ignore it.
 fn xdg(value: Option<&Path>) -> Option<&Path> {
     value.filter(|p| p.is_absolute())

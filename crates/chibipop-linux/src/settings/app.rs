@@ -10,6 +10,7 @@
 //! the lists reorder and scope only, which is pure config.
 
 use super::apply::{self, LinuxFields};
+use super::autostart;
 use super::channel::{HotkeyChannel, HotkeyControl};
 use super::snippets::{self, Compositor};
 use anyhow::Context;
@@ -34,6 +35,8 @@ pub struct Init {
     pub log_path: PathBuf,
     pub compositor: Compositor,
     pub channel: HotkeyChannel,
+    /// `None` when no XDG config root resolves; the row says so.
+    pub autostart: Option<autostart::Target>,
 }
 
 pub fn run(init: Init) -> anyhow::Result<()> {
@@ -59,6 +62,9 @@ struct App {
     log_path: PathBuf,
     compositor: Compositor,
     channel: HotkeyChannel,
+    autostart: Option<autostart::Target>,
+    /// Mirrors the `.desktop` file, re-read after every toggle.
+    autostart_on: bool,
     /// System font families for the font combo.
     fonts: Vec<String>,
     /// Text-edited numbers stay text until Apply parses them.
@@ -86,6 +92,8 @@ impl App {
             log_path: init.log_path,
             compositor: init.compositor,
             channel: init.channel,
+            autostart_on: init.autostart.as_ref().is_some_and(autostart::Target::is_enabled),
+            autostart: init.autostart,
             fonts,
             selected_dict: None,
             status: String::new(),
@@ -155,6 +163,7 @@ enum Message {
     FieldMapSource(usize, String),
     CopyBind,
     CopyRule,
+    Autostart(bool),
     Apply,
 }
 
@@ -215,6 +224,23 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 return iced::clipboard::write(rule);
             }
         }
+        Message::Autostart(on) => {
+            // Write or remove, then re-read: the file is the state, so
+            // the widget shows what the filesystem has, not the click.
+            let Some(target) = &app.autostart else {
+                app.status = "Autostart needs an XDG config directory \
+                              (set XDG_CONFIG_HOME or HOME)."
+                    .to_string();
+                return Task::none();
+            };
+            if let Err(e) = target.set(on) {
+                app.status =
+                    format!("Autostart update failed for {}: {e}", target.file().display());
+            } else {
+                app.status = String::new();
+            }
+            app.autostart_on = target.is_enabled();
+        }
         Message::Apply => app.apply(),
     }
     Task::none()
@@ -257,6 +283,7 @@ fn view(app: &App) -> Element<'_, Message> {
         dictionaries_section(app),
         ocr_section(app),
         anki_section(app),
+        startup_section(app),
         debug_section(app),
         status_row(app),
     ]
@@ -555,6 +582,33 @@ fn anki_section(app: &App) -> Element<'_, Message> {
     section("Anki", body)
 }
 
+/// The autostart row: stateless per ADR-0012 — the checkbox *is* the
+/// XDG autostart `.desktop` file, applied on toggle, no Apply needed
+/// and no TOML field anywhere.
+fn startup_section(app: &App) -> Element<'_, Message> {
+    let body: Element<'_, Message> = match &app.autostart {
+        Some(target) => column![
+            checkbox(app.autostart_on)
+                .label("Start chibipop at login")
+                .on_toggle(Message::Autostart),
+            text(format!(
+                "Writes {} on toggle - GNOME, KDE, and uwsm sessions read it. \
+                 Bare Hyprland/sway: see extras/ in the release.",
+                target.file().display()
+            ))
+            .size(13),
+        ]
+        .spacing(8)
+        .into(),
+        None => text(
+            "Autostart needs an XDG config directory (set XDG_CONFIG_HOME or HOME).",
+        )
+        .size(13)
+        .into(),
+    };
+    section("Startup", body)
+}
+
 fn debug_section(app: &App) -> Element<'_, Message> {
     section(
         "Debug",
@@ -594,4 +648,76 @@ fn system_families() -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Env;
+
+    fn init_at(config_home: &std::path::Path) -> Init {
+        let cfg = chibipop::config::Config::default();
+        let env = Env { xdg_config_home: Some(config_home.to_path_buf()), ..Env::default() };
+        Init {
+            form: chibipop::settings::from_config(&cfg, &[]),
+            linux: LinuxFields::from_config(&cfg),
+            config_path: config_home.join("chibipop/chibipop.toml"),
+            socket_path: config_home.join("sock"),
+            log_path: config_home.join("log"),
+            compositor: Compositor::Hyprland,
+            channel: HotkeyChannel::Native,
+            autostart: autostart::Target::resolve(&env),
+        }
+    }
+
+    /// What the checkbox click actually does, driven through the real
+    /// message handler: the `.desktop` file appears and disappears, a
+    /// reopened window reads its state back off the file, and no config
+    /// is written on the way (ADR-0012: the file is the whole state).
+    #[test]
+    fn toggling_autostart_writes_the_file_and_leaves_the_config_alone() {
+        let home = std::env::temp_dir().join(format!("chibipop_app_autostart_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let init = init_at(&home);
+        let entry = init.autostart.as_ref().expect("XDG_CONFIG_HOME resolves a target").file();
+        let mut app = App::new(init.clone());
+        let form_before = app.form.clone();
+        assert!(!app.autostart_on, "a fresh config home opens with the box clear");
+
+        // The toggle is applied in the handler; the returned task is a
+        // no-op here because nothing about it reaches the filesystem.
+        let _ = update(&mut app, Message::Autostart(true));
+        assert!(app.autostart_on);
+        assert!(entry.is_file(), "the click wrote {}", entry.display());
+        assert!(std::fs::read_to_string(&entry).unwrap().starts_with("[Desktop Entry]"));
+
+        // Reopening is a fresh App over the same paths: it must read the
+        // box's state off the file, not off anything it remembered.
+        assert!(App::new(init_at(&home)).autostart_on, "a reopened window sees the entry");
+
+        let _ = update(&mut app, Message::Autostart(false));
+        assert!(!app.autostart_on);
+        assert!(!entry.exists(), "the second click removed the entry");
+        assert!(!App::new(init_at(&home)).autostart_on);
+
+        assert_eq!(form_before, app.form, "autostart touches no config field");
+        assert!(!init.config_path.exists(), "autostart writes no config file");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Without a config root the row is inert rather than lying: the box
+    /// stays clear and the status line says why.
+    #[test]
+    fn autostart_without_a_config_root_reports_instead_of_toggling() {
+        let mut init = init_at(&std::env::temp_dir());
+        init.autostart = None;
+        let mut app = App::new(init);
+
+        let _ = update(&mut app, Message::Autostart(true));
+        assert!(!app.autostart_on);
+        assert!(app.status.contains("XDG config directory"), "{}", app.status);
+    }
 }
