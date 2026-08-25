@@ -1179,8 +1179,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
     }
-    if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
-        Hooks::set_action_hotkey(1, vk, 0);
+    match crate::config::parse_trigger_key(&live.static_region_key) {
+        Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
+        None => Hooks::set_action_hotkey(1, 0, 0),
     }
     if let Some(vk) = live
         .actions_ocr_clipboard_hotkey
@@ -3668,8 +3669,9 @@ fn apply_live(
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
     }
-    if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
-        Hooks::set_action_hotkey(1, vk, 0);
+    match crate::config::parse_trigger_key(&live.static_region_key) {
+        Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
+        None => Hooks::set_action_hotkey(1, 0, 0),
     }
     match live
         .actions_ocr_clipboard_hotkey

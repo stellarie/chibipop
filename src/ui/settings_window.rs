@@ -3083,11 +3083,15 @@ impl SettingsWindow {
             let sr_vk = crate::config::parse_trigger_key(&form.static_region_key);
             let sr_label = sr_vk
                 .map(crate::config::trigger_key_name)
-                .unwrap_or_else(|| form.static_region_key.clone());
+                .unwrap_or_else(|| {
+                    if form.static_region_key.is_empty() {
+                        "Not set".to_string()
+                    } else {
+                        form.static_region_key.clone()
+                    }
+                });
             SR_CAPTURED_VK.with(|c| {
-                if let Some(vk) = sr_vk {
-                    c.set(Some((h.0 as isize, vk)));
-                }
+                c.set(sr_vk.map(|vk| (h.0 as isize, vk)));
             });
             ank.push(child(page, w!("BUTTON"), &sr_label, WS_TABSTOP,
                 FIELD_X, y, FIELD_W, ROW_H, ID_STATIC_REGION_KEY, f)?);

@@ -100,7 +100,7 @@ Visual novels show text in the same place every time. Set a static region
 and chibipop reads from that area instead of following the cursor.
 
 1. Set the sentence mode to **Static region** in Settings.
-2. Press **R** (configurable). The screen dims.
+2. Press the **Region hotkey** you set in Settings. The screen dims.
 3. Drag a rectangle around the text box. Release.
 4. A teal outline marks the active region. Toggle it with **Show capture
    region outline** in Settings.
