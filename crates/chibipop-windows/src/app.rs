@@ -17,10 +17,9 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
-use crate::text::layout::CaptureSize;
 use crate::text::capture::{CaptureGuard, CaptureGuardMsg, WinCapture, WM_APP_CAPTURE_GUARD};
+use crate::text::layout::CaptureSize;
 use crate::text::ocr::{recogniser_available, WinrtOcr};
-use crate::worker::{Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings};
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
@@ -28,6 +27,7 @@ use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
+use crate::worker::{Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings};
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::HashSet;
@@ -52,7 +52,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Worker pushed a result.
 const WM_APP_RESULT: u32 = WM_APP + 1;
 
-
 /// Dupe check finished.
 const WM_APP_ANKI: u32 = WM_APP + 4;
 
@@ -68,7 +67,6 @@ const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 /// Background save finished.
 const WM_APP_SAVED: u32 = WM_APP + 9;
 
-
 /// Pending-cursor poll, ms.
 const DISPATCH_TICK_MS: u32 = 20;
 
@@ -82,8 +80,6 @@ const REBUILD_TICK_MS: u32 = 100;
 /// Over this, hooks stall.
 const APPLY_BUDGET_MS: u128 = 50;
 
-
-
 /// One dupe check's answer.
 struct AnkiDupeResult {
     gen: u64,
@@ -96,7 +92,6 @@ struct AddNoteResult {
     expr: String,
     err: Option<String>,
 }
-
 
 /// Settings alone, no tray.
 pub fn settings_only(
