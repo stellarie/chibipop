@@ -57,7 +57,15 @@ wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 # binds no second font stack. iced pulls an older cosmic-text of its
 # own; that copy serves the settings process only and this pin is the
 # one the daemon paints with.
-smithay-client-toolkit = "0.21.1"
+#
+# `default-features = false`: SCTK's default `xkbcommon` feature links
+# the system libxkbcommon through pkg-config, and this popup has no
+# keyboard by construction (`keyboard_interactivity: none`, ADR-0004),
+# so the dependency would buy nothing and cost a build-time system
+# package on every CI runner and packaging target. Its `calloop` feature
+# stays off with it: the daemon owns the loop and already drives the
+# Wayland queue through `calloop-wayland-source`.
+smithay-client-toolkit = { version = "0.21.1", default-features = false }
 tiny-skia = "0.12.0"
 cosmic-text = "0.19.0"
 # The settings window's toolkit (ADR-0005): a separate `chibipop settings`
