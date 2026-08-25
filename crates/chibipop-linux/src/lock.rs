@@ -41,6 +41,13 @@ pub fn file_name(display: &str) -> String {
     format!("run-{}.lock", sanitize(display))
 }
 
+/// The settings window's own lock, beside the daemon's: one settings
+/// process per compositor instance, without ever contending with the
+/// daemon (ADR-0005).
+pub fn settings_file_name(display: &str) -> String {
+    format!("settings-{}.lock", sanitize(display))
+}
+
 /// `$WAYLAND_DISPLAY` may be an absolute path; keep it one filename.
 pub fn sanitize(display: &str) -> String {
     display
@@ -51,8 +58,14 @@ pub fn sanitize(display: &str) -> String {
 
 /// Claim `display`, or refuse naming the holder.
 pub fn acquire(runtime_dir: &Path, display: &str) -> Result<InstanceLock, LockError> {
+    acquire_at(runtime_dir, &file_name(display))
+}
+
+/// The same claim on any lock file name (the settings lock differs only
+/// in name; flock semantics are shared).
+pub fn acquire_at(runtime_dir: &Path, file_name: &str) -> Result<InstanceLock, LockError> {
     std::fs::create_dir_all(runtime_dir)?;
-    let path = runtime_dir.join(file_name(display));
+    let path = runtime_dir.join(file_name);
     // truncate(false) is load-bearing: truncating on open would erase the
     // live holder's pid before we know whether we ARE the holder.
     let mut file =
@@ -130,6 +143,34 @@ mod tests {
         let dir = tmp("displays");
         let _a = acquire(&dir, "wayland-0").expect("first display");
         let _b = acquire(&dir, "wayland-1").expect("second display");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The settings window never contends with the daemon: two locks,
+    /// two names, one display.
+    #[test]
+    fn settings_lock_is_scoped_apart_from_the_daemon_lock() {
+        let dir = tmp("settings_scope");
+        let _daemon = acquire(&dir, "wayland-5").expect("daemon lock");
+        let _settings = acquire_at(&dir, &settings_file_name("wayland-5"))
+            .expect("the settings lock must not contend with the daemon's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second `chibipop settings` on the same display is refused.
+    #[test]
+    fn a_second_settings_lock_is_refused() {
+        let dir = tmp("settings_contend");
+        let name = settings_file_name("wayland-5");
+        let first = acquire_at(&dir, &name).expect("first settings lock");
+        match acquire_at(&dir, &name) {
+            Err(LockError::AlreadyRunning { path, pid }) => {
+                assert_eq!(first.path(), path);
+                assert_eq!(Some(std::process::id()), pid);
+            }
+            Err(LockError::Io(e)) => panic!("io error instead of refusal: {e}"),
+            Ok(_) => panic!("a second settings lock on one display must be refused"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

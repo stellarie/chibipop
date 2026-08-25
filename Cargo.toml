@@ -44,6 +44,12 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 calloop = "0.14.4"
 calloop-wayland-source = "0.4.1"
 wayland-client = "0.31.15"
+# The settings window's toolkit (ADR-0005): a separate `chibipop settings`
+# process, so none of this is resident in the daemon.
+iced = "0.14.0"
+# Font-family enumeration for the settings font combo; the same fontdb
+# iced already carries via cosmic-text, so no second font stack.
+fontdb = "0.23"
 
 [package]
 name = "chibipop"

@@ -3,6 +3,7 @@
 //! popup yet — those tickets plug into this loop.
 
 use crate::control::{ControlSocket, StubState, Verb};
+use crate::settings::child::{self, SettingsChild, SpawnOutcome};
 use crate::lock::{self, LockError};
 use crate::logging::Log;
 use crate::paths::Paths;
@@ -23,6 +24,10 @@ struct App {
     stub: StubState,
     config_file: PathBuf,
     signal: LoopSignal,
+    /// At most one settings child (ADR-0005). Nothing spawns it yet -
+    /// the tray/socket trigger is the tray ticket's - but the guard and
+    /// its discipline live here now.
+    settings: SettingsChild,
 }
 
 impl App {
@@ -43,21 +48,52 @@ impl App {
         }
     }
 
-    /// The one piece of state `reload` already really re-reads: the
-    /// lookup-log gate. Everything else waits for the core Controller.
+    /// Spawn the settings window unless one child already runs. The
+    /// tray ticket calls this; the guard is daemon-side discipline,
+    /// the settings-scoped flock the cross-process one.
+    #[allow(dead_code)] // wired to the tray/socket trigger by the tray ticket
+    fn spawn_settings(&mut self) {
+        let outcome = child::settings_command().and_then(|mut c| self.settings.spawn_if_absent(&mut c));
+        match outcome {
+            Ok(SpawnOutcome::Spawned(pid)) => self.log.diag(&format!("settings: spawned pid {pid}")),
+            Ok(SpawnOutcome::AlreadyRunning(pid)) => {
+                self.log.diag(&format!("settings: already running as pid {pid}"));
+            }
+            Err(e) => self.log.diag(&format!("settings: spawn failed: {e}")),
+        }
+    }
+
+    /// `reload` re-reads the file and re-applies everything the daemon
+    /// honors today: the lookup-log gate live, `popup.layer` logged for
+    /// the popup ticket. The config file is the sole source of truth
+    /// (ADR-0005); nothing structured crosses the socket.
     fn reload_config(&mut self) {
         match chibipop::config::load_or_create(&self.config_file) {
             Ok(config) => {
-                self.log.set_show_lookup(config.debug.show_lookup_log);
+                let was = self.log.show_lookup();
+                let now = config.debug.show_lookup_log;
+                self.log.set_show_lookup(now);
                 self.log.diag(&format!(
-                    "config: reloaded {}; lookup log {}",
+                    "config: reloaded {}; lookup log {} -> {}",
                     self.config_file.display(),
-                    if self.log.show_lookup() { "on" } else { "off" }
+                    on_off(was),
+                    on_off(now),
+                ));
+                self.log.diag(&format!(
+                    "config: popup.layer = {} (takes effect when the popup lands)",
+                    match config.popup_layer() {
+                        chibipop::config::PopupLayer::Overlay => "overlay",
+                        chibipop::config::PopupLayer::Top => "top",
+                    }
                 ));
             }
             Err(e) => self.log.diag(&format!("config: reload failed: {e:#}")),
         }
     }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
 }
 
 /// Registry events on the long-lived queue. The startup report already
@@ -169,6 +205,7 @@ pub fn run(paths: Paths) -> Result<()> {
         stub: StubState::default(),
         config_file: paths.config_file.clone(),
         signal: event_loop.get_signal(),
+        settings: SettingsChild::new(),
     };
     app.log.diag("ready: pump running (no capture/OCR/popup yet - bootstrap ticket 29)");
 
@@ -181,4 +218,42 @@ pub fn run(paths: Paths) -> Result<()> {
     app.log.diag("shutdown: control socket unlinked, instance lock released");
     drop(lock);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The concrete hot-reload contract: `reload` re-reads the file,
+    /// so the lookup-log gate follows the config without a restart.
+    #[test]
+    fn reload_rereads_the_config_and_flips_the_lookup_gate() {
+        let dir = std::env::temp_dir()
+            .join(format!("chibipop_daemon_reload_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("chibipop.toml");
+        let mut cfg = chibipop::config::load_or_create(&config_file).unwrap();
+        assert!(!cfg.debug.show_lookup_log, "the default must start off");
+
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = App {
+            log: Log::open(&dir.join("chibipop.log"), false),
+            stub: StubState::default(),
+            config_file: config_file.clone(),
+            signal: event_loop.get_signal(),
+            settings: SettingsChild::new(),
+        };
+
+        cfg.debug.show_lookup_log = true;
+        cfg.save(&config_file).unwrap();
+        app.handle_request("reload", Some(Verb::Reload));
+        assert!(app.log.show_lookup(), "reload must re-read the file");
+
+        cfg.debug.show_lookup_log = false;
+        cfg.save(&config_file).unwrap();
+        app.handle_request("reload", Some(Verb::Reload));
+        assert!(!app.log.show_lookup(), "and follow it back down");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
