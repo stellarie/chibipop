@@ -61,6 +61,24 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
+/// The ring just outside each rect.
+///
+/// The overlay draws its outlines **outset**: a stroke inside a scan rect
+/// would land in the very pixels the next grab reads, and captures must
+/// never contain chibipop's own furniture (ADR-0008). Inflating by the
+/// stroke thickness puts the whole frame in the band around the rect, so
+/// `inset(outset(r), FRAME_THICKNESS) == r` - the capture rect itself
+/// stays clear.
+fn outset(rects: &[ScanRect]) -> Vec<ScanRect> {
+    rects
+        .iter()
+        .map(|r| ScanRect {
+            rect: r.rect.inflated(FRAME_THICKNESS, FRAME_THICKNESS),
+            kind: r.kind,
+        })
+        .collect()
+}
+
 /// A rect's four border strips.
 ///
 /// Not bounds: rects overlap.
@@ -308,9 +326,11 @@ impl Overlay {
 
     /// Reshapes and shows the rects.
     ///
-    /// Empty hides it instead.
+    /// Empty hides it instead. The outlines land outside the rects handed
+    /// in, so a scan region shown here is never a scan region painted on
+    /// (ADR-0008).
     pub fn show_rects(&self, rects: &[ScanRect], theme: &Theme) -> Result<()> {
-        let Some((bounds, local)) = overlay_layout(rects) else {
+        let Some((bounds, local)) = overlay_layout(&outset(rects)) else {
             self.hide();
             return Ok(());
         };
@@ -448,6 +468,44 @@ mod tests {
     fn edge_strips_of_a_too_thin_rect_is_the_whole_rect() {
         let rect = PhysRect { x: 0, y: 0, w: 17, h: 3 };
         assert_eq!(vec![rect], edge_strips(rect, FRAME_THICKNESS));
+    }
+
+    /// ADR-0008: nothing the overlay paints may land in a capture rect.
+    #[test]
+    fn outset_strokes_never_touch_the_rect_they_outline() {
+        let scan = PhysRect { x: 100, y: 200, w: 60, h: 30 };
+        let out = outset(&[ScanRect { rect: scan, kind: ScanKind::Pass1 }]);
+        assert_eq!(1, out.len());
+        assert_eq!(ScanKind::Pass1, out[0].kind, "the kind, and so the colour, is kept");
+        assert_eq!(
+            Some(scan),
+            inset(out[0].rect, FRAME_THICKNESS),
+            "the ring's interior is exactly the scan rect"
+        );
+
+        for strip in edge_strips(out[0].rect, FRAME_THICKNESS) {
+            assert_eq!(
+                None,
+                strip.intersection(scan),
+                "strip {strip:?} would paint inside the capture rect"
+            );
+        }
+    }
+
+    /// The strokes still hug it: outset, not floating free.
+    #[test]
+    fn outset_strokes_sit_flush_against_the_rect() {
+        let scan = PhysRect { x: 0, y: 0, w: 20, h: 20 };
+        let ring = outset(&[ScanRect { rect: scan, kind: ScanKind::Tile }])[0].rect;
+        let t = FRAME_THICKNESS;
+        assert_eq!(PhysRect { x: -t, y: -t, w: 20 + 2 * t, h: 20 + 2 * t }, ring);
+        let left = edge_strips(ring, FRAME_THICKNESS)[2];
+        assert_eq!(scan.x, left.x + left.w, "the left stroke ends where the rect begins");
+    }
+
+    #[test]
+    fn outset_of_no_rects_is_no_rects() {
+        assert!(outset(&[]).is_empty());
     }
 
     /// Needs a real desktop session.

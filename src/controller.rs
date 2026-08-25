@@ -111,7 +111,12 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// Hover lookup at this point.
-    RequestLookup { id: RequestId, point: PhysPoint },
+    ///
+    /// `popup` is our own popup's on-screen rect while the lookup runs,
+    /// or `None` when nothing is shown: what a live grab must mask out of
+    /// its own OCR input where the platform cannot exclude the surface
+    /// (ADR-0008). A bin whose platform already excludes it ignores this.
+    RequestLookup { id: RequestId, point: PhysPoint, popup: Option<PhysRect> },
     /// Dictionary-only lookup.
     RequestDrillDown { id: RequestId, text: String },
     /// Push settings to the worker.
@@ -559,8 +564,17 @@ impl Controller {
         if self.frozen(pos) {
             return Vec::new();
         }
+        let popup = self.shown_popup();
         let id = self.next_request();
-        vec![Command::RequestLookup { id, point: pos }]
+        vec![Command::RequestLookup { id, point: pos, popup }]
+    }
+
+    /// Our own popup, if on screen.
+    ///
+    /// `None` until `PopupPlaced` says where it landed: an unplaced
+    /// surface occupies no pixels yet, so there is nothing to mask.
+    fn shown_popup(&self) -> Option<PhysRect> {
+        Some(self.surface.as_ref()?.placed?.popup)
     }
 
     fn frozen(&self, p: PhysPoint) -> bool {
@@ -975,6 +989,7 @@ mod tests {
             vec![Command::RequestLookup {
                 id: RequestId(1),
                 point: PhysPoint { x: 10, y: 10 },
+                popup: None,
             }]
         );
     }
@@ -992,6 +1007,7 @@ mod tests {
             vec![Command::RequestLookup {
                 id: RequestId(2),
                 point: PhysPoint { x: 5, y: 0 },
+                popup: None,
             }],
             c.handle(Event::CursorMoved { pos: PhysPoint { x: 5, y: 0 } })
         );
@@ -1025,6 +1041,7 @@ mod tests {
             vec![Command::RequestLookup {
                 id: RequestId(1),
                 point: PhysPoint { x: 10, y: 10 },
+                popup: None,
             }],
             c.handle(Event::CursorMoved { pos: PhysPoint { x: 10, y: 10 } })
         );
@@ -1107,7 +1124,13 @@ mod tests {
         c.handle(Event::Tick { cursor: PhysPoint { x: 110, y: 110 }, button_h: 0 });
         let away = PhysPoint { x: 900, y: 900 };
         assert_eq!(
-            vec![Command::RequestLookup { id: RequestId(2), point: away }],
+            vec![Command::RequestLookup {
+                id: RequestId(2),
+                point: away,
+                // The shown popup travels with the request: what the
+                // grab must mask out of its own OCR input (ADR-0008).
+                popup: Some(POPUP),
+            }],
             c.handle(Event::CursorMoved { pos: away })
         );
     }
@@ -1220,6 +1243,7 @@ mod tests {
         assert!(out.contains(&Command::RequestLookup {
             id: RequestId(2),
             point: PhysPoint { x: 900, y: 900 },
+            popup: Some(POPUP),
         }));
     }
 

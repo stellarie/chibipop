@@ -8,10 +8,15 @@ use chibipop::lookup::engine::LookupEngine;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
+use chibipop::text::mask::CaptureMask;
 use chibipop::text::source::UPSCALE;
 use chibipop::text::SettingsSnapshot;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+
+/// `probe` shows no popup of its own, so there is never anything of ours
+/// in its pixels to mask out (ADR-0008).
+const MASKLESS: CaptureMask = CaptureMask::NONE;
 
 #[derive(Parser)]
 #[command(name = "chibipop", version, about = "Japanese lookup engine")]
@@ -166,7 +171,7 @@ pub fn run() -> Result<()> {
             if let Some(n) = repeat {
                 for i in 1..=n {
                     let t = std::time::Instant::now();
-                    let read = source.resolve_in_region(cursor, region)?;
+                    let read = source.resolve_in_region(cursor, region, MASKLESS)?;
                     println!(
                         "read {i}: {:>4} ms  via {}  lines={}",
                         t.elapsed().as_millis(),
@@ -181,7 +186,7 @@ pub fn run() -> Result<()> {
             let single = upscale.or(dump.as_ref().map(|_| UPSCALE));
             let (lines, resolved, source_used, dxgi_error) = match single {
                 Some(factor) => {
-                    let (lines, cap) = source.recognise_at_capture(region, factor)?;
+                    let (lines, cap) = source.recognise_at_capture(region, factor, MASKLESS)?;
                     if let Some(path) = &dump {
                         dump_bmp(path, &cap.buf, cap.w, cap.h)?;
                         println!("dump:    wrote {}x{} to {}", cap.w, cap.h, path.display());
@@ -190,7 +195,7 @@ pub fn run() -> Result<()> {
                     (lines, resolved, cap.source, cap.fallback)
                 }
                 None => {
-                    let read = source.resolve_in_region(cursor, region)?;
+                    let read = source.resolve_in_region(cursor, region, MASKLESS)?;
                     (read.lines, read.resolved, read.source, read.fallback)
                 }
             };
@@ -258,7 +263,9 @@ pub fn run() -> Result<()> {
 
             let mut tiled_scan: Option<Vec<chibipop::geom::ScanRect>> = None;
             if region_was_default && tiles > 1 {
-                let (tiled, scan) = source.resolve_at_tiled_scanned(cursor, show_region.is_some())?;
+                // No popup on screen in `probe`: nothing to mask.
+                let (tiled, scan) =
+                    source.resolve_at_tiled_scanned(cursor, show_region.is_some(), MASKLESS)?;
                 match tiled {
                     None => println!("\ntiled:   nothing resolved"),
                     Some(r) => println!("\ntiled:   {:?}  ({} chars)", r.span.text, r.span.text.chars().count()),
@@ -344,7 +351,7 @@ pub fn run() -> Result<()> {
                 last_pos = Some(cursor);
 
                 // One bad frame is not fatal.
-                let resolved = match source.resolve_at_tiled(cursor) {
+                let resolved = match source.resolve_at_tiled(cursor, MASKLESS) {
                     Ok(r) => r,
                     Err(e) => { eprintln!("resolve: {e}"); continue; }
                 };

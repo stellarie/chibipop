@@ -8,6 +8,7 @@ use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
     tile_forward, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
 };
+use crate::text::mask::CaptureMask;
 use crate::text::{Frame, OcrEngine, RegionCapture, TextSpan};
 use anyhow::{Context, Result};
 
@@ -114,19 +115,26 @@ impl TextSource {
     fn resolve_at_verbose(
         &mut self,
         cursor: PhysPoint,
+        mask: CaptureMask,
     ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
         let read = self.resolve_in_region(
             cursor,
             region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
+            mask,
         )?;
         Ok((read.lines, read.resolved))
     }
 
     /// As above, explicit box.
-    pub fn resolve_in_region(&mut self, cursor: PhysPoint, region: PhysRect) -> Result<RegionRead> {
-        let (lines, frame) = self.recognise_at_capture(region, UPSCALE)?;
+    pub fn resolve_in_region(
+        &mut self,
+        cursor: PhysPoint,
+        region: PhysRect,
+        mask: CaptureMask,
+    ) -> Result<RegionRead> {
+        let (lines, frame) = self.recognise_at_capture(region, UPSCALE, mask)?;
         let (lines, frame) = if ADAPTIVE_RETRY && glyphs_look_small(&lines) {
-            match self.recognise_at_capture(region, RETRY_UPSCALE) {
+            match self.recognise_at_capture(region, RETRY_UPSCALE, mask) {
                 Ok((bigger, big_frame)) if !bigger.is_empty() => (bigger, big_frame),
                 _ => (lines, frame),
             }
@@ -143,44 +151,44 @@ impl TextSource {
     }
 
     /// Capture + recognise at `factor`, mapped to physical.
+    ///
+    /// `mask` is white-filled in the grabbed pixels before OCR sees them,
+    /// and words that touch it are dropped on the way back out
+    /// (ADR-0008).
     pub fn recognise_at_capture(
         &mut self,
         region: PhysRect,
         factor: i32,
+        mask: CaptureMask,
     ) -> Result<(Vec<OcrLine>, Frame)> {
-        let frame = grab_upscaled(self.capture.as_mut(), region, factor)?;
+        let frame = grab_upscaled(self.capture.as_mut(), region, factor, mask)?;
         let raw = self.ocr.recognise(&frame.buf, frame.w, frame.h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
-        let lines = raw
-            .into_iter()
-            .map(|l| OcrLine {
-                words: l
-                    .words
-                    .into_iter()
-                    .map(|word| OcrWord {
-                        rect: map_from_upscaled(word.rect, origin, factor),
-                        text: word.text,
-                    })
-                    .collect(),
-            })
-            .collect();
-        Ok((lines, frame))
+        Ok((to_desktop(raw, origin, factor, mask), frame))
     }
 
     /// Tiled, scan rects dropped.
-    pub fn resolve_at_tiled(&mut self, cursor: PhysPoint) -> Result<Option<Resolved>> {
-        self.resolve_at_tiled_scanned(cursor, false).map(|(r, _)| r)
+    pub fn resolve_at_tiled(
+        &mut self,
+        cursor: PhysPoint,
+        mask: CaptureMask,
+    ) -> Result<Option<Resolved>> {
+        self.resolve_at_tiled_scanned(cursor, false, mask).map(|(r, _)| r)
     }
 
     /// Tiled read + scan rects. One logical read: brackets the backend's
     /// `begin_read`/`end_read` around every pass.
+    ///
+    /// `mask` is what OCR must not read - our own popup, on a live grab
+    /// (ADR-0008) - and governs every pass of this one read.
     pub fn resolve_at_tiled_scanned(
         &mut self,
         cursor: PhysPoint,
         collect: bool,
+        mask: CaptureMask,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
         self.capture.begin_read();
-        let out = self.resolve_tiled_inner(cursor, collect);
+        let out = self.resolve_tiled_inner(cursor, collect, mask);
         self.capture.end_read();
         out
     }
@@ -189,8 +197,9 @@ impl TextSource {
         &mut self,
         cursor: PhysPoint,
         collect: bool,
+        mask: CaptureMask,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
-        let (lines, resolved) = self.resolve_at_verbose(cursor)?;
+        let (lines, resolved) = self.resolve_at_verbose(cursor, mask)?;
         let mut scan = Vec::new();
         let Some(first) = resolved else { return Ok((None, scan)) };
         if collect {
@@ -243,7 +252,8 @@ impl TextSource {
                 if collect {
                     scan.push(ScanRect { rect: tile, kind: ScanKind::Tile });
                 }
-                match self.words_in(tile, perpendicular_centre, orientation, line_tolerance) {
+                match self.words_in(tile, perpendicular_centre, orientation, line_tolerance, mask)
+                {
                     Ok(words) => words,
                     Err(e) => {
                         if !failed {
@@ -286,37 +296,61 @@ impl TextSource {
         perpendicular_centre: i32,
         orientation: Orientation,
         tolerance: i32,
+        mask: CaptureMask,
     ) -> Result<Vec<OcrWord>> {
-        let frame = grab_upscaled(self.capture.as_mut(), tile, UPSCALE)?;
+        let frame = grab_upscaled(self.capture.as_mut(), tile, UPSCALE, mask)?;
         let origin = PhysPoint { x: tile.x, y: tile.y };
-        let lines: Vec<OcrLine> = self
-            .ocr
-            .recognise(&frame.buf, frame.w, frame.h)?
-            .into_iter()
-            .map(|l| OcrLine {
-                words: l
-                    .words
-                    .into_iter()
-                    .map(|word| OcrWord {
-                        rect: map_from_upscaled(word.rect, origin, UPSCALE),
-                        text: word.text,
-                    })
-                    .collect(),
-            })
-            .collect();
+        let raw = self.ocr.recognise(&frame.buf, frame.w, frame.h)?;
+        let lines = to_desktop(raw, origin, UPSCALE, mask);
         Ok(nearest_line(&lines, perpendicular_centre, orientation, tolerance)
             .map(|line| line.words.clone())
             .unwrap_or_default())
     }
 }
 
-/// Grab + upscale by `factor`; BGRA.
+/// Image-pixel word boxes to desktop pixels, mask-touching words dropped.
+///
+/// The mask boundary is a capture edge (ADR-0008): the pixels under the
+/// mask are flat white, so a word overlapping it was read off half a
+/// glyph and goes the way of a word clipped at a tile edge - dropped,
+/// never half-recognised. Lines left with no words are dropped too, so
+/// [`OcrEngine`]'s "no words means nothing recognised" still holds.
+fn to_desktop(
+    raw: Vec<OcrLine>,
+    origin: PhysPoint,
+    factor: i32,
+    mask: CaptureMask,
+) -> Vec<OcrLine> {
+    raw.into_iter()
+        .map(|l| OcrLine {
+            words: l
+                .words
+                .into_iter()
+                .filter_map(|word| {
+                    let rect = map_from_upscaled(word.rect, origin, factor);
+                    if mask.hides(rect) {
+                        None
+                    } else {
+                        Some(OcrWord { rect, text: word.text })
+                    }
+                })
+                .collect(),
+        })
+        .filter(|l: &OcrLine| !l.words.is_empty())
+        .collect()
+}
+
+/// Grab, mask, upscale by `factor`; BGRA.
+///
+/// Masked before the upscale: a quarter of the pixels to write at 2x, and
+/// the nearest-neighbour blow-up carries the hard edge through exactly.
 fn grab_upscaled(
     capture: &mut dyn RegionCapture,
     region: PhysRect,
     factor: i32,
+    mask: CaptureMask,
 ) -> Result<Frame> {
-    let frame = capture.grab(region)?;
+    let mut frame = capture.grab(region)?;
     if frame.w != region.w || frame.h != region.h {
         anyhow::bail!(
             "capture is {}x{}, wanted {}x{}",
@@ -333,6 +367,7 @@ fn grab_upscaled(
     if frame.buf.len() < need {
         anyhow::bail!("capture is short: {} < {need}", frame.buf.len());
     }
+    mask.apply(&mut frame.buf, region.w, region.h, region);
     let (buf, w, h) = upscale_by(&frame.buf, region.w, region.h, factor);
     Ok(Frame { buf, w, h, ..frame })
 }
@@ -359,6 +394,9 @@ fn upscale_by(src: &[u8], w: i32, h: i32, factor: i32) -> (Vec<u8>, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::mask::CaptureMode;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[test]
     fn upscale_by_doubles_a_2x2_pixel() {
@@ -431,5 +469,190 @@ mod tests {
             line(vec![word("大", 40)]),
         ];
         assert!(!glyphs_look_small(&lines));
+    }
+
+    // -- the capture mask at the seam (ADR-0008) --
+
+    /// Every byte of every grab, so a mask is visible as a change.
+    const DESK: u8 = 0x20;
+
+    /// Region-sized frames of flat [`DESK`].
+    struct SolidCapture;
+
+    impl RegionCapture for SolidCapture {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            Ok(Frame {
+                buf: vec![DESK; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "solid",
+                fallback: None,
+            })
+        }
+
+        fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
+            PhysRect { x: p.x - 1000, y: p.y - 1000, w: 2000, h: 2000 }
+        }
+    }
+
+    /// The last image handed to OCR: its pixels, width, height.
+    type SeenImage = Rc<RefCell<Option<(Vec<u8>, i32, i32)>>>;
+
+    /// Keeps the pixels it was handed; reports fixed boxes.
+    struct RecordingOcr {
+        seen: SeenImage,
+        /// Image-pixel word boxes to report, one per line.
+        words: Vec<PhysRect>,
+    }
+
+    impl OcrEngine for RecordingOcr {
+        fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+            *self.seen.borrow_mut() = Some((bgra.to_vec(), w, h));
+            Ok(self
+                .words
+                .iter()
+                .enumerate()
+                .map(|(i, rect)| OcrLine {
+                    words: vec![OcrWord { text: format!("w{i}"), rect: *rect }],
+                })
+                .collect())
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+    }
+
+    fn snap() -> SettingsSnapshot {
+        SettingsSnapshot {
+            max_passes: 1,
+            prefer_vertical: false,
+            capture: CaptureSize::default(),
+            scan_alphanumeric: true,
+        }
+    }
+
+    /// A source over the fakes, plus the handle on what OCR saw.
+    fn recording(words: Vec<PhysRect>) -> (TextSource, SeenImage) {
+        let seen = Rc::new(RefCell::new(None));
+        let ocr = RecordingOcr { seen: Rc::clone(&seen), words };
+        (TextSource::new(Box::new(SolidCapture), Box::new(ocr), snap()), seen)
+    }
+
+    fn live(popup: PhysRect) -> CaptureMask {
+        CaptureMask::for_mode(CaptureMode::Live, Some(popup))
+    }
+
+    /// One pixel of what OCR was handed, as BGRA.
+    fn px(buf: &[u8], w: i32, x: i32, y: i32) -> [u8; 4] {
+        let i = ((y * w + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    }
+
+    /// White fill, hard edge, exactly over the popup - and nowhere else.
+    #[test]
+    fn the_popup_reaches_ocr_as_flat_white() {
+        let region = PhysRect { x: 100, y: 200, w: 8, h: 6 };
+        // Overlaps the region's columns 2..5, rows 1..3.
+        let popup = PhysRect { x: 102, y: 201, w: 3, h: 2 };
+        let (mut source, seen) = recording(Vec::new());
+
+        source.recognise_at_capture(region, 1, live(popup)).unwrap();
+
+        let (buf, w, h) = seen.borrow_mut().take().expect("OCR must have been called");
+        assert_eq!((8, 6), (w, h));
+        for y in 0..h {
+            for x in 0..w {
+                let masked = (2..5).contains(&x) && (1..3).contains(&y);
+                let want = if masked { [0xFF; 4] } else { [DESK, DESK, DESK, 0xFF] };
+                assert_eq!(want, px(&buf, w, x, y), "pixel ({x},{y})");
+            }
+        }
+    }
+
+    /// The mask lands in the frame, not on the desktop: a region whose
+    /// origin is far from zero must still be masked in the right place.
+    #[test]
+    fn the_fill_is_placed_in_frame_local_pixels() {
+        let region = PhysRect { x: 1000, y: 900, w: 4, h: 4 };
+        let popup = PhysRect { x: 1000, y: 900, w: 1, h: 1 };
+        let (mut source, seen) = recording(Vec::new());
+
+        source.recognise_at_capture(region, 1, live(popup)).unwrap();
+
+        let (buf, w, _) = seen.borrow_mut().take().unwrap();
+        assert_eq!([0xFF; 4], px(&buf, w, 0, 0), "the region's own top-left is the mask");
+        assert_eq!([DESK, DESK, DESK, 0xFF], px(&buf, w, 1, 0), "one pixel over is not");
+    }
+
+    /// Maskless: the pixels reach OCR exactly as grabbed.
+    #[test]
+    fn a_maskless_read_hands_ocr_the_untouched_grab() {
+        let region = PhysRect { x: 0, y: 0, w: 4, h: 4 };
+        let popup = PhysRect { x: 1, y: 1, w: 2, h: 2 };
+        let (mut source, seen) = recording(Vec::new());
+
+        // Frozen: the grab predates the popup, so the rect masks nothing.
+        let frozen = CaptureMask::for_mode(CaptureMode::Frozen, Some(popup));
+        source.recognise_at_capture(region, 1, frozen).unwrap();
+
+        let (buf, _, _) = seen.borrow_mut().take().unwrap();
+        let untouched: Vec<u8> = (0..4 * 4).flat_map(|_| [DESK, DESK, DESK, 0xFF]).collect();
+        assert_eq!(untouched, buf, "a frozen grab is handed over as it came");
+    }
+
+    /// The mask boundary is a capture edge: touching words are dropped.
+    #[test]
+    fn words_touching_the_mask_are_dropped_and_the_rest_survive() {
+        let region = PhysRect { x: 0, y: 0, w: 40, h: 20 };
+        let popup = PhysRect { x: 10, y: 0, w: 10, h: 20 };
+        let words = vec![
+            PhysRect { x: 0, y: 0, w: 8, h: 10 },  // clear of the mask
+            PhysRect { x: 12, y: 0, w: 4, h: 10 }, // wholly inside it
+            PhysRect { x: 8, y: 0, w: 6, h: 10 },  // straddling its edge
+            PhysRect { x: 20, y: 0, w: 8, h: 10 }, // flush against it
+        ];
+        let (mut source, _seen) = recording(words);
+
+        let (lines, _) = source.recognise_at_capture(region, 1, live(popup)).unwrap();
+
+        let kept: Vec<&str> =
+            lines.iter().flat_map(|l| l.words.iter().map(|w| w.text.as_str())).collect();
+        assert_eq!(
+            vec!["w0", "w3"],
+            kept,
+            "only the words with no mask overlap survive; a shared edge is no overlap"
+        );
+        assert_eq!(2, lines.len(), "lines emptied by the mask are dropped, not returned empty");
+    }
+
+    /// The same words, maskless: nothing is dropped.
+    #[test]
+    fn a_maskless_read_drops_no_words() {
+        let region = PhysRect { x: 0, y: 0, w: 40, h: 20 };
+        let words = vec![
+            PhysRect { x: 0, y: 0, w: 8, h: 10 },
+            PhysRect { x: 12, y: 0, w: 4, h: 10 },
+        ];
+        let (mut source, _seen) = recording(words);
+
+        let (lines, _) = source.recognise_at_capture(region, 1, CaptureMask::NONE).unwrap();
+
+        assert_eq!(2, lines.len());
+    }
+
+    /// Masked before the upscale, so the hard edge lands on the 2x grid.
+    #[test]
+    fn the_fill_survives_the_upscale_as_a_hard_edge() {
+        let region = PhysRect { x: 0, y: 0, w: 4, h: 2 };
+        let popup = PhysRect { x: 2, y: 0, w: 2, h: 2 };
+        let (mut source, seen) = recording(Vec::new());
+
+        source.recognise_at_capture(region, 2, live(popup)).unwrap();
+
+        let (buf, w, h) = seen.borrow_mut().take().unwrap();
+        assert_eq!((8, 4), (w, h), "OCR sees the upscaled image");
+        for y in 0..h {
+            assert_eq!([DESK, DESK, DESK, 0xFF], px(&buf, w, 3, y), "just left of the mask");
+            assert_eq!([0xFF; 4], px(&buf, w, 4, y), "first upscaled masked column");
+        }
     }
 }
