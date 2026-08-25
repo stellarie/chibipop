@@ -84,6 +84,22 @@ png = "0.18.1"
 # scores a prediction (tools/ocr-bench/bench/common.py normalise()).
 unicode-normalization = "0.1.24"
 
+# --- ticket 34 (portal ScreenCast capture backend, ADR-0002 rung 2) ---
+# The portal handshake is D-Bus, and zbus is already in this tree: ksni's
+# `async-io` feature resolves exactly this version, so the one-pin rule
+# costs nothing new and the daemon still hosts no executor of its own -
+# `zbus::blocking` (the default `blocking-api`) is called from the portal's
+# own thread. Default features deliberately: they are `async-io` +
+# `blocking-api`, the same pair ksni already unifies to. Naming `tokio`
+# here would pull a second runtime into the daemon, which ADR-0001 forbids.
+zbus = "5.19.0"
+# PipeWire is dlopened, never linked: `libpipewire-0.3.so.0` at runtime, no
+# `libpipewire-0.3-dev` at build time. Same bargain ADR-0009 already struck
+# for `ort`'s system path, and it is what keeps one `cargo test --workspace`
+# green on a runner with no PipeWire pkg-config file. `ort` already resolves
+# this exact version, so the lockfile gains no package.
+libloading = "0.9.0"
+
 [package]
 name = "chibipop"
 version.workspace = true

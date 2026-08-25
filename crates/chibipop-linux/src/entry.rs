@@ -39,8 +39,10 @@ enum Command {
     Probe,
     /// Grab screen regions with the capture backend and write PNGs.
     ///
-    /// A diagnostic for the wlr-screencopy rung (ADR-0002), like
-    /// `probe`: lock-free, socket-free, safe beside a live daemon.
+    /// A diagnostic for whichever ADR-0002 rung this session selects,
+    /// like `probe`: lock-free, socket-free, safe beside a live daemon.
+    /// `CHIBIPOP_CAPTURE_BACKEND=portal` forces the fallback rung (and
+    /// its consent dialog) on a compositor that advertises screencopy.
     /// Without `--region` it samples every output.
     CaptureDump {
         /// One box in global physical pixels: `x,y,w,h`.
@@ -69,7 +71,7 @@ pub fn run() -> ExitCode {
         Command::Settings => settings::run(paths),
         Command::Probe => probe(),
         Command::CaptureDump { region, out, dwell, full } => {
-            capture_dump(region.as_deref(), out, dwell, full)
+            capture_dump(&paths, region.as_deref(), out, dwell, full)
         }
     };
     match result {
@@ -116,11 +118,18 @@ fn probe() -> Result<()> {
 
 /// The capture backend's diagnostic dump, also lock-free.
 fn capture_dump(
+    paths: &Paths,
     region: Option<&str>,
     out: PathBuf,
     dwell: u32,
     full: bool,
 ) -> Result<()> {
     let region = region.map(capture::dump::parse_region).transpose()?;
-    capture::dump::run(capture::dump::Args { region, out, dwell, full })
+    capture::dump::run(capture::dump::Args {
+        region,
+        out,
+        dwell,
+        full,
+        state_dir: paths.state_dir.clone(),
+    })
 }

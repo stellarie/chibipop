@@ -26,12 +26,19 @@
 //! [`pacing`] decides plain-copy versus race, [`session`] owns the
 //! Wayland plumbing, [`shm`] the buffers. Only this file needs all
 //! five, and only this file blocks.
+//!
+//! **The other rung.** [`backend`] is the ladder itself: which of
+//! ADR-0002's two backends this session gets, by advertised
+//! capability. [`portal`] is rung 2, the xdg-desktop-portal ScreenCast
+//! + PipeWire fallback for the compositors with no screencopy at all.
 
+pub mod backend;
 pub mod crop;
 pub mod dump;
 pub mod geometry;
 pub mod pacing;
 pub mod png;
+pub mod portal;
 pub mod session;
 pub mod shm;
 

@@ -223,12 +223,19 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::backend::{Backend, Selection as CaptureSelection};
     use crate::cursor::{Rung, Selection};
     use ksni::Tray;
 
+    /// The startup registry a wlr session produces: the promptless
+    /// capture backend plus whichever cursor rung was selected.
     fn tray(selection: &Selection) -> (ChibipopTray, calloop::channel::Channel<TrayRequest>) {
         let (tx, rx) = calloop::channel::channel();
-        (ChibipopTray { statuses: ChannelStatuses::startup(selection), requests: tx }, rx)
+        let statuses = ChannelStatuses::startup(
+            status::capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy)),
+            selection,
+        );
+        (ChibipopTray { statuses, requests: tx }, rx)
     }
 
     /// Every menu label in order, paired with whether it is clickable.
@@ -266,7 +273,7 @@ mod tests {
             vec![
                 ("Settings".to_string(), true),
                 ("-".to_string(), false),
-                ("Capture: not built yet".to_string(), false),
+                ("Capture: wlr-screencopy region capture".to_string(), false),
                 ("Cursor: ext-image-copy-capture cursor session".to_string(), false),
                 ("Trigger: control socket".to_string(), false),
                 ("-".to_string(), false),
@@ -333,9 +340,10 @@ mod tests {
     /// never panics on a push that has nowhere to go.
     #[test]
     fn a_trayless_handle_still_tracks_channels() {
-        let mut handle = TrayHandle::trayless(ChannelStatuses::startup(&Selection::Rung(
-            Rung::HyprctlPoll,
-        )));
+        let mut handle = TrayHandle::trayless(ChannelStatuses::startup(
+            status::capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy)),
+            &Selection::Rung(Rung::HyprctlPoll),
+        ));
         assert!(!handle.is_connected());
 
         assert!(handle.set_channel(ChannelId::Cursor, ChannelState::down("hyprctl gone")));
@@ -359,9 +367,10 @@ mod tests {
     #[test]
     fn a_pushed_snapshot_renders_the_new_rows() {
         let (mut tray, _rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
-        let mut handle = TrayHandle::trayless(ChannelStatuses::startup(&Selection::Rung(
-            Rung::HyprctlPoll,
-        )));
+        let mut handle = TrayHandle::trayless(ChannelStatuses::startup(
+            status::capture_state(&CaptureSelection::Backend(Backend::Portal)),
+            &Selection::Rung(Rung::HyprctlPoll),
+        ));
         handle.set_channel(ChannelId::Capture, ChannelState::up("wlr-screencopy"));
 
         tray.statuses = handle.statuses().clone();

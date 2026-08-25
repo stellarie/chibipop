@@ -1,9 +1,14 @@
 //! The daemon: calloop pump + instance lock + control socket + logging
-//! (ADR-0001: all sync, calloop as the Linux pump). No capture, OCR, or
-//! popup yet — those tickets plug into this loop.
+//! (ADR-0001: all sync, calloop as the Linux pump), plus the capture
+//! channel's startup half — the ADR-0002 backend ladder and, when it
+//! picks the portal rung, the eager consent that has to finish before
+//! anything reports a channel state. OCR and the popup are still later
+//! tickets plugging into this loop.
 
+use crate::capture::backend::{self as capture_backend, Backend};
+use crate::capture::portal::{self, PortalCapture, PortalSession};
 use crate::control::{ControlSocket, StubState, Verb};
-use crate::cursor::{self, budget, hyprctl};
+use crate::cursor::{self, budget, hyprctl, image_copy};
 use crate::cursor::image_copy::{CursorHandler, CursorState};
 use crate::settings::child::{self, SettingsChild, SpawnOutcome};
 use crate::lock::{self, LockError};
@@ -65,6 +70,67 @@ struct App {
     /// Channel health plus the SNI tray mirroring it (ADR-0006). Also
     /// the daemon's own view: it works unchanged when there is no tray.
     tray: TrayHandle,
+    /// The portal capture backend, once consent was granted (ADR-0002
+    /// rung 2). `None` on a screencopy session, and also on a portal
+    /// session whose dialog was refused - which is a status row and a
+    /// retry, never an exit.
+    capture: Option<PortalCapture>,
+    /// What the ladder picked, so `reload` knows whether a retry is
+    /// even meaningful.
+    capture_selection: capture_backend::Selection,
+    /// Everything the portal retry needs to run again from here.
+    portal_retry: Option<PortalRetry>,
+}
+
+/// What a second consent attempt needs, kept so the retry is the same
+/// code path as the startup one.
+struct PortalRetry {
+    state_dir: PathBuf,
+    globals: Vec<wayland::Advertised>,
+    /// `Some` only when the cursor ladder actually selected rung 2;
+    /// a rung that was never chosen must not be resurrected by a retry.
+    cursor: Option<portal::CursorSink>,
+}
+
+/// ADR-0002's eager consent, start to finish.
+///
+/// Answers the backend when the portal said yes, and the capture
+/// channel's row either way: a refusal is a status with a retry in it,
+/// never an exit and never a panic.
+fn open_portal(retry: &PortalRetry, log: &mut Log) -> (Option<PortalCapture>, ChannelState) {
+    // The monitors have to be anchorable before the tray is published,
+    // and the pump does not exist yet - hence the throwaway probe.
+    let outputs = image_copy::probe_geometry(&retry.globals);
+    // The layout origin, until the first grab moves us: the connected
+    // stream follows the region being read (`PortalCapture::grab`), so
+    // the startup guess only decides which monitor warms up first.
+    let at = PhysPoint { x: 0, y: 0 };
+    let opened = PortalSession::open(
+        &retry.state_dir,
+        &outputs,
+        at,
+        retry.cursor.clone(),
+        |line| log.diag(&line),
+    );
+    match opened {
+        Ok(session) => {
+            let detail = format!(
+                "portal ScreenCast + PipeWire, {} monitor(s) approved",
+                session.monitors().len()
+            );
+            log.diag(&format!(
+                "capture: {detail}; session {}, node {}, stream {:?}",
+                session.session_path(),
+                session.node_id(),
+                session.health()
+            ));
+            (Some(PortalCapture::new(session)), ChannelState::up(detail))
+        }
+        Err(e) => {
+            log.diag(&format!("capture: portal consent failed - {e}"));
+            (None, ChannelState::down(e.detail()))
+        }
+    }
 }
 
 impl App {
@@ -124,9 +190,12 @@ impl App {
 
     /// `reload` re-reads the file and re-applies everything the daemon
     /// honors today: the lookup-log gate live, `popup.layer` logged for
-    /// the popup ticket. The config file is the sole source of truth
-    /// (ADR-0005); nothing structured crosses the socket.
+    /// the popup ticket, and - ADR-0002's "denial never exits, hover
+    /// shows one actionable error state with in-app retry" - a second
+    /// go at the portal consent. The config file is the sole source of
+    /// truth (ADR-0005); nothing structured crosses the socket.
     fn reload_config(&mut self) {
+        self.retry_portal_capture();
         match chibipop::config::load_or_create(&self.config_file) {
             Ok(config) => {
                 let was = self.log.show_lookup();
@@ -148,6 +217,26 @@ impl App {
             }
             Err(e) => self.log.diag(&format!("config: reload failed: {e:#}")),
         }
+    }
+
+    /// The in-app retry ADR-0002 requires: ask the portal again.
+    ///
+    /// Only when the ladder picked the portal rung and the backend is
+    /// not already serving - a granted session must not be torn down
+    /// and re-prompted just because someone edited the config file.
+    /// The verb is `reload` on purpose: the tray's Settings window and
+    /// a shell one-liner reach the same hook, and the trigger channel
+    /// stays the minimal verb set ADR-0003 argues for.
+    fn retry_portal_capture(&mut self) {
+        if self.capture.is_some() || self.capture_selection.backend() != Some(Backend::Portal) {
+            return;
+        }
+        let Some(retry) = self.portal_retry.take() else { return };
+        self.log.diag("capture: retrying the portal consent (reload)");
+        let (capture, state) = open_portal(&retry, &mut self.log);
+        self.capture = capture;
+        self.portal_retry = Some(retry);
+        self.note_channel(ChannelId::Capture, state);
     }
 
     /// One `hyprctl cursorpos` poll tick: sample, feed the seam on
@@ -300,6 +389,25 @@ pub fn run(paths: Paths) -> Result<()> {
         log.diag(&line);
     }
 
+    // The capture backend (ADR-0002's ladder, ticket 34). Decided
+    // first, because ADR-0003's rung 2 only exists when the portal
+    // rung is the one serving pixels - it rides that same stream.
+    let (capture_override, capture_warning) = capture_backend::BackendOverride::from_env();
+    if let Some(w) = &capture_warning {
+        log.diag(w);
+    }
+    if capture_override != capture_backend::BackendOverride::Auto {
+        log.diag(&format!(
+            "capture: {}={capture_override:?} override active (test hook)",
+            capture_backend::BackendOverride::ENV
+        ));
+    }
+    let capture_caps = capture_backend::Capabilities::scan(&globals, portal::available());
+    let capture_selection = capture_backend::select(&capture_caps, capture_override);
+    log.diag(&capture_selection.startup_line());
+    let portal_metadata = capture_selection.backend() == Some(Backend::Portal)
+        && portal::cursor_metadata_available();
+
     // The cursor channel (ticket 33): one rung by advertised
     // capability (ADR-0003), or a diagnostic naming exactly what is
     // missing — and the daemon stays up either way.
@@ -313,10 +421,41 @@ pub fn run(paths: Paths) -> Result<()> {
             cursor::LadderOverride::ENV
         ));
     }
-    let caps = cursor::Capabilities::scan(&globals, hyprctl::available());
+    let caps = cursor::Capabilities::scan(&globals, portal_metadata, hyprctl::available());
     let selection = cursor::select(&caps, ladder_override);
     log.diag(&selection.startup_line());
     let trace = std::env::var("CHIBIPOP_CURSOR_TRACE").is_ok_and(|v| v == "1");
+
+    // Rung 2's samples arrive on PipeWire's thread and must reach the
+    // pump like every other event: a bounded calloop channel, so a
+    // burst of cursor metadata can never grow without limit and the
+    // daemon stays sync (ADR-0001).
+    let (cursor_tx, cursor_rx) = calloop::channel::sync_channel::<PhysPoint>(64);
+    let cursor_sink: Option<portal::CursorSink> =
+        if selection == cursor::Selection::Rung(cursor::Rung::PortalMetadata) {
+            let tx = cursor_tx.clone();
+            Some(std::sync::Arc::new(move |p: PhysPoint| {
+                // A full queue means the pump is already behind on
+                // cursor news; dropping the sample is right, blocking
+                // the stream thread is not.
+                let _ = tx.send(p);
+            }))
+        } else {
+            None
+        };
+
+    // ADR-0002's eager consent: the dialog belongs in the launch
+    // context, not in the middle of a hover, and the channel row has
+    // to be true before the tray is ever published.
+    let portal_retry = (capture_selection.backend() == Some(Backend::Portal)).then(|| PortalRetry {
+        state_dir: paths.state_dir.clone(),
+        globals: globals.clone(),
+        cursor: cursor_sink,
+    });
+    let (capture, capture_state) = match &portal_retry {
+        Some(retry) => open_portal(retry, &mut log),
+        None => (None, tray::status::capture_state(&capture_selection)),
+    };
 
     let socket = ControlSocket::bind(runtime_dir, &display)
         .with_context(|| format!("binding the control socket in {}", runtime_dir.display()))?;
@@ -329,7 +468,8 @@ pub fn run(paths: Paths) -> Result<()> {
     // bare Hyprland) and must cost nothing. The registry it carries is
     // the daemon's own view of channel health, tray or no tray.
     let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
-    let (tray_handle, tray_diagnostics) = tray::spawn(ChannelStatuses::startup(&selection), tray_tx);
+    let (tray_handle, tray_diagnostics) =
+        tray::spawn(ChannelStatuses::startup(capture_state, &selection), tray_tx);
     for line in tray_diagnostics {
         log.diag(&line);
     }
@@ -356,6 +496,9 @@ pub fn run(paths: Paths) -> Result<()> {
         last_move: Instant::now(),
         settings: SettingsChild::new(),
         tray: tray_handle,
+        capture,
+        capture_selection,
+        portal_retry,
     };
 
     // Bind what the selected rung needs and settle it before the pump
@@ -367,6 +510,12 @@ pub fn run(paths: Paths) -> Result<()> {
         cursor::Selection::Rung(cursor::Rung::ImageCopyCapture) => {
             app.cursor.bind_outputs(&registry, &globals, &qh);
             app.cursor.bind_capture(&registry, &globals, &qh);
+        }
+        // Rung 2 needs the same layout facts and nothing Wayland-side
+        // beyond them: its samples come off the PipeWire stream the
+        // portal backend already opened.
+        cursor::Selection::Rung(cursor::Rung::PortalMetadata) => {
+            app.cursor.bind_outputs(&registry, &globals, &qh);
         }
         cursor::Selection::Rung(cursor::Rung::HyprctlPoll) => {
             app.cursor.bind_outputs(&registry, &globals, &qh);
@@ -406,6 +555,27 @@ pub fn run(paths: Paths) -> Result<()> {
             Ok(PostAction::Continue)
         })
         .map_err(|e| anyhow::anyhow!("registering the control socket: {e}"))?;
+
+    // Rung 2's samples, already in global physical pixels, arriving
+    // from the portal stream's thread.
+    if selection == cursor::Selection::Rung(cursor::Rung::PortalMetadata) {
+        event_loop
+            .handle()
+            .insert_source(cursor_rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(pos) = event {
+                    app.note_channel(
+                        ChannelId::Cursor,
+                        ChannelState::up(tray::status::rung_detail(cursor::Rung::PortalMetadata)),
+                    );
+                    app.on_cursor_position(pos);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("registering the portal cursor channel: {e}"))?;
+    } else {
+        // Nothing will ever send; dropping the receiver keeps a stray
+        // sample a cheap error instead of an unbounded queue.
+        drop(cursor_rx);
+    }
 
     // Menu activations and the tray thread's own diagnostics, executed
     // on this thread. `Event::Closed` needs no handling: the tray
@@ -463,21 +633,7 @@ mod tests {
         assert!(!cfg.debug.show_lookup_log, "the default must start off");
 
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-        let mut app = App {
-            log: Log::open(&dir.join("chibipop.log"), false),
-            stub: StubState::default(),
-            config_file: config_file.clone(),
-            signal: event_loop.get_signal(),
-            settings: SettingsChild::new(),
-            cursor: CursorState::default(),
-            controller: Controller::new(controller_config(&chibipop::config::Config::default())),
-            trace: false,
-            last_poll: None,
-            last_move: Instant::now(),
-            tray: TrayHandle::trayless(ChannelStatuses::startup(&cursor::Selection::Rung(
-                cursor::Rung::HyprctlPoll,
-            ))),
-        };
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
 
         cfg.debug.show_lookup_log = true;
         cfg.save(&config_file).unwrap();
@@ -574,7 +730,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A screencopy session, which is what every test here wants: the
+    /// promptless rung, so no test can wander into a portal dialog.
     fn test_app(dir: &std::path::Path, log_file: &std::path::Path, event_loop: &EventLoop<App>) -> App {
+        let capture = capture_backend::Selection::Backend(Backend::WlrScreencopy);
         App {
             log: Log::open(log_file, false),
             stub: StubState::default(),
@@ -586,9 +745,36 @@ mod tests {
             trace: false,
             last_poll: None,
             last_move: Instant::now(),
-            tray: TrayHandle::trayless(ChannelStatuses::startup(&cursor::Selection::Rung(
-                cursor::Rung::HyprctlPoll,
-            ))),
+            tray: TrayHandle::trayless(ChannelStatuses::startup(
+                tray::status::capture_state(&capture),
+                &cursor::Selection::Rung(cursor::Rung::HyprctlPoll),
+            )),
+            capture: None,
+            capture_selection: capture,
+            portal_retry: None,
         }
+    }
+
+    /// The retry hook is portal-only and one-shot-guarded: `reload` on
+    /// a screencopy session must never reach the portal, and must never
+    /// touch the capture row (ADR-0002 - the promptless rung is exactly
+    /// the one that has nothing to ask for).
+    #[test]
+    fn reload_does_not_prompt_a_screencopy_session() {
+        let dir =
+            std::env::temp_dir().join(format!("chibipop_daemon_noretry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_file = dir.join("chibipop.log");
+
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let before = app.tray.statuses().row(ChannelId::Capture);
+        app.handle_request("reload", Some(Verb::Reload));
+
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert!(!written.contains("retrying the portal consent"), "log was: {written}");
+        assert_eq!(before, app.tray.statuses().row(ChannelId::Capture));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

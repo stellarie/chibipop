@@ -149,6 +149,15 @@ impl CursorState {
     pub fn session_count(&self) -> usize {
         self.outputs.values().filter(|e| e.session.is_some()).count()
     }
+
+    /// Every output's layout facts, in registry order.
+    ///
+    /// The portal capture rung anchors its monitors against these
+    /// (ADR-0002 rung 2), and both seams must use the same numbers or
+    /// a hover on the second monitor lands on the first.
+    pub fn geometries(&self) -> Vec<OutputGeometry> {
+        self.outputs.values().map(|e| e.geo).collect()
+    }
 }
 
 /// Sessions for every sessionless output, once managers + pointer
@@ -319,3 +328,68 @@ ignore_events!(
     ExtImageCaptureSourceV1,
     ExtImageCopyCaptureManagerV1,
 );
+
+/// A throwaway `CursorHandler` that only settles output geometry.
+struct Probe(CursorState);
+
+impl CursorHandler for Probe {
+    fn cursor(&mut self) -> &mut CursorState {
+        &mut self.0
+    }
+
+    /// No sessions are created, so no position can arrive.
+    fn on_cursor_position(&mut self, _: PhysPoint) {}
+}
+
+wayland_client::delegate_dispatch!(Probe: [WlOutput: u32] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [ZxdgOutputV1: u32] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [ZxdgOutputManagerV1: ()] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [WlSeat: ()] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [WlPointer: ()] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [ExtOutputImageCaptureSourceManagerV1: ()] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [ExtImageCaptureSourceV1: ()] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [ExtImageCopyCaptureManagerV1: ()] => CursorState);
+wayland_client::delegate_dispatch!(Probe: [ExtImageCopyCaptureCursorSessionV1: u32] => CursorState);
+
+impl Dispatch<WlRegistry, ()> for Probe {
+    fn event(
+        _: &mut Probe,
+        _: &WlRegistry,
+        _: <WlRegistry as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Probe>,
+    ) {
+    }
+}
+
+/// Settle output geometry on a connection nobody else holds.
+///
+/// The portal capture rung's consent is *eager* (ADR-0002): it runs
+/// before the pump exists, and the channel-status row it produces has
+/// to be right the first time the tray is published - which means the
+/// monitors it approves must be anchorable before `App` and its queue
+/// are built. Two roundtrips on a throwaway connection is a smaller
+/// price than reordering the whole startup around a dialog, and it is
+/// only paid on the sessions that select that rung.
+///
+/// An empty answer is normal, not an error: the caller degrades to an
+/// unanchored stream rather than refusing to start.
+pub fn probe_geometry(globals: &[Advertised]) -> Vec<OutputGeometry> {
+    let Ok(conn) = Connection::connect_to_env() else {
+        return Vec::new();
+    };
+    let mut queue = conn.new_event_queue::<Probe>();
+    let qh = queue.handle();
+    let registry = conn.display().get_registry(&qh, ());
+    let mut probe = Probe(CursorState::default());
+    probe.0.bind_outputs(&registry, globals, &qh);
+    // Geometry lands across two rounds: the binds, then the events
+    // those binds provoke.
+    for _ in 0..2 {
+        if queue.roundtrip(&mut probe).is_err() {
+            break;
+        }
+    }
+    probe.0.geometries()
+}

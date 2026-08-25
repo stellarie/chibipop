@@ -78,6 +78,14 @@ sha2.workspace = true
 ksni.workspace = true
 png.workspace = true
 
+# --- ticket 34 (portal ScreenCast capture backend + METADATA cursor rung) ---
+# ADR-0002's fallback capture rung. Two deps, both deliberate: `zbus` speaks
+# the portal handshake (blocking API, on the portal's own thread - ADR-0001
+# keeps the daemon sync), and `libloading` dlopens `libpipewire-0.3.so.0` so
+# nothing here needs a build-time PipeWire.
+zbus.workspace = true
+libloading.workspace = true
+
 # The OCR fixture gate reads the committed corpus manifest and mirrors the
 # harness's NFKC normalisation; nothing in the shipped adapter needs them.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

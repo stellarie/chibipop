@@ -5,7 +5,7 @@
 //! unchanged, no evdev anywhere.
 //!
 //! Test hooks (documented, used by the ticket-33 smoke tests):
-//! - `CHIBIPOP_CURSOR_CHANNEL=auto|image-copy|hyprctl|none` forces a
+//! - `CHIBIPOP_CURSOR_CHANNEL=auto|image-copy|portal|hyprctl|none` forces a
 //!   rung (or the empty ladder, to exercise the unsupported
 //!   diagnostic) instead of the capability-selected one.
 //! - `CHIBIPOP_CURSOR_TRACE=1` logs every position sample and poll
@@ -50,8 +50,10 @@ pub enum Rung {
     /// Rung 1: ext-image-copy-capture pointer cursor session.
     /// Event-driven — zero idle wakeups.
     ImageCopyCapture,
-    // Rung 2: portal ScreenCast `cursor_mode=METADATA` — ticket 34
-    // slots in here; not built in this ticket (ADR-0003).
+    /// Rung 2: portal ScreenCast `cursor_mode=METADATA`, riding the
+    /// PipeWire stream the portal capture backend already opened, so
+    /// cursor tracking costs no extra consent (ADR-0003).
+    PortalMetadata,
     /// Rung 3: `hyprctl cursorpos` adaptive polling, gated on
     /// HYPRLAND_INSTANCE_SIGNATURE — ADR-0003's one deliberate
     /// identity-based exception to "never compositor identity".
@@ -63,16 +65,21 @@ pub enum Rung {
 pub struct Capabilities {
     pub image_copy_capture: bool,
     pub output_capture_source: bool,
+    /// The portal capture backend is the selected one AND its
+    /// `AvailableCursorModes` advertises METADATA — the rung rides that
+    /// stream, so it cannot exist without it.
+    pub portal_metadata: bool,
     /// HYPRLAND_INSTANCE_SIGNATURE is set and non-empty.
     pub hyprland: bool,
 }
 
 impl Capabilities {
-    pub fn scan(globals: &[Advertised], hyprland: bool) -> Capabilities {
+    pub fn scan(globals: &[Advertised], portal_metadata: bool, hyprland: bool) -> Capabilities {
         let has = |name: &str| globals.iter().any(|g| g.interface == name);
         Capabilities {
             image_copy_capture: has(IMAGE_COPY_CAPTURE_GLOBAL),
             output_capture_source: has(OUTPUT_CAPTURE_SOURCE_GLOBAL),
+            portal_metadata,
             hyprland,
         }
     }
@@ -84,6 +91,8 @@ pub enum LadderOverride {
     Auto,
     /// Force rung 1 (fail rather than fall through).
     ImageCopy,
+    /// Force rung 2, pretending rung 1 is absent.
+    Portal,
     /// Force rung 3, pretending rung 1 is absent.
     Hyprctl,
     /// Pretend the ladder is empty: exercise the unsupported path.
@@ -91,12 +100,15 @@ pub enum LadderOverride {
 }
 
 impl LadderOverride {
+    /// The environment variable this hook reads:
+    /// `auto|image-copy|portal|hyprctl|none`.
     pub const ENV: &'static str = "CHIBIPOP_CURSOR_CHANNEL";
 
     pub fn parse(value: &str) -> Option<LadderOverride> {
         match value {
             "auto" => Some(LadderOverride::Auto),
             "image-copy" => Some(LadderOverride::ImageCopy),
+            "portal" => Some(LadderOverride::Portal),
             "hyprctl" => Some(LadderOverride::Hyprctl),
             "none" => Some(LadderOverride::None),
             _ => Option::None,
@@ -112,7 +124,7 @@ impl LadderOverride {
                 Option::None => (
                     LadderOverride::Auto,
                     Some(format!(
-                        "cursor: ignoring {}={v:?}; expected auto|image-copy|hyprctl|none",
+                        "cursor: ignoring {}={v:?}; expected auto|image-copy|portal|hyprctl|none",
                         Self::ENV
                     )),
                 ),
@@ -136,6 +148,10 @@ impl Selection {
         match self {
             Selection::Rung(Rung::ImageCopyCapture) => format!(
                 "cursor: rung 1 ext-image-copy-capture cursor session (event-driven, {} idle wakeups/s - ADR-0010)",
+                budget::IDLE_WAKEUPS_PER_SEC
+            ),
+            Selection::Rung(Rung::PortalMetadata) => format!(
+                "cursor: rung 2 portal ScreenCast cursor_mode=METADATA on the capture stream (event-driven, {} idle wakeups/s - ADR-0010; no extra consent - ADR-0003)",
                 budget::IDLE_WAKEUPS_PER_SEC
             ),
             Selection::Rung(Rung::HyprctlPoll) => format!(
@@ -172,8 +188,9 @@ pub fn select(caps: &Capabilities, ov: LadderOverride) -> Selection {
             if caps.image_copy_capture && caps.output_capture_source {
                 return Selection::Rung(Rung::ImageCopyCapture);
             }
-            // Rung 2 (portal ScreenCast METADATA) slots in here with
-            // ticket 34.
+            if caps.portal_metadata {
+                return Selection::Rung(Rung::PortalMetadata);
+            }
             if caps.hyprland {
                 return Selection::Rung(Rung::HyprctlPoll);
             }
@@ -184,6 +201,17 @@ pub fn select(caps: &Capabilities, ov: LadderOverride) -> Selection {
                 Selection::Rung(Rung::ImageCopyCapture)
             } else {
                 Selection::Unsupported { missing: missing_globals(caps) }
+            }
+        }
+        LadderOverride::Portal => {
+            if caps.portal_metadata {
+                Selection::Rung(Rung::PortalMetadata)
+            } else {
+                Selection::Unsupported {
+                    missing: vec![
+                        "org.freedesktop.portal.ScreenCast cursor_mode=METADATA (portal capture backend not selected or METADATA unavailable)".to_string(),
+                    ],
+                }
             }
         }
         LadderOverride::Hyprctl => {
@@ -210,12 +238,30 @@ pub fn select(caps: &Capabilities, ov: LadderOverride) -> Selection {
 mod tests {
     use super::*;
 
-    const ALL: Capabilities =
-        Capabilities { image_copy_capture: true, output_capture_source: true, hyprland: true };
-    const HYPR_ONLY: Capabilities =
-        Capabilities { image_copy_capture: false, output_capture_source: false, hyprland: true };
-    const NOTHING: Capabilities =
-        Capabilities { image_copy_capture: false, output_capture_source: false, hyprland: false };
+    const ALL: Capabilities = Capabilities {
+        image_copy_capture: true,
+        output_capture_source: true,
+        portal_metadata: true,
+        hyprland: true,
+    };
+    const PORTAL_ONLY: Capabilities = Capabilities {
+        image_copy_capture: false,
+        output_capture_source: false,
+        portal_metadata: true,
+        hyprland: false,
+    };
+    const HYPR_ONLY: Capabilities = Capabilities {
+        image_copy_capture: false,
+        output_capture_source: false,
+        portal_metadata: false,
+        hyprland: true,
+    };
+    const NOTHING: Capabilities = Capabilities {
+        image_copy_capture: false,
+        output_capture_source: false,
+        portal_metadata: false,
+        hyprland: false,
+    };
 
     #[test]
     fn the_budget_is_the_adr_0010_one() {
@@ -236,6 +282,29 @@ mod tests {
         assert_eq!(Selection::Rung(Rung::HyprctlPoll), select(&HYPR_ONLY, LadderOverride::Auto));
     }
 
+    /// A portal-only session (GNOME): no capture globals, no Hyprland,
+    /// but the portal capture backend is up with METADATA.
+    #[test]
+    fn a_portal_metadata_stream_is_rung_two() {
+        assert_eq!(
+            Selection::Rung(Rung::PortalMetadata),
+            select(&PORTAL_ONLY, LadderOverride::Auto)
+        );
+    }
+
+    /// Ladder order, both seams of the new rung: the promptless
+    /// capture session still outranks it, and it still outranks
+    /// polling.
+    #[test]
+    fn rung_two_sits_between_the_capture_session_and_polling() {
+        // Every rung available at once: rung 1 is still the answer.
+        assert_eq!(Selection::Rung(Rung::ImageCopyCapture), select(&ALL, LadderOverride::Auto));
+
+        // Portal METADATA on Hyprland: rung 2 beats the polling rung.
+        let caps = Capabilities { portal_metadata: true, ..HYPR_ONLY };
+        assert_eq!(Selection::Rung(Rung::PortalMetadata), select(&caps, LadderOverride::Auto));
+    }
+
     /// The diagnostic names the exact missing globals so an upgrade
     /// self-heals.
     #[test]
@@ -251,6 +320,7 @@ mod tests {
         let caps = Capabilities {
             image_copy_capture: true,
             output_capture_source: false,
+            portal_metadata: false,
             hyprland: false,
         };
         let Selection::Unsupported { missing } = select(&caps, LadderOverride::Auto) else {
@@ -271,6 +341,35 @@ mod tests {
             select(&NOTHING, LadderOverride::ImageCopy),
             Selection::Unsupported { .. }
         ));
+        assert_eq!(Selection::Rung(Rung::PortalMetadata), select(&ALL, LadderOverride::Portal));
+    }
+
+    /// The forced portal rung fails honestly rather than falling
+    /// through: the METADATA stream is the rung, so without it there is
+    /// nothing to pin.
+    #[test]
+    fn the_portal_override_names_the_absent_metadata_stream() {
+        let Selection::Unsupported { missing } = select(&HYPR_ONLY, LadderOverride::Portal) else {
+            panic!("expected Unsupported");
+        };
+        assert_eq!(
+            vec![
+                "org.freedesktop.portal.ScreenCast cursor_mode=METADATA (portal capture backend not selected or METADATA unavailable)"
+            ],
+            missing
+        );
+    }
+
+    /// The rung-2 line names its mechanism, its zero idle cost and the
+    /// ADR, on one greppable line.
+    #[test]
+    fn the_rung_two_line_stays_greppable() {
+        let line = select(&PORTAL_ONLY, LadderOverride::Auto).startup_line();
+        assert!(line.contains("rung 2"), "{line}");
+        assert!(line.contains("cursor_mode=METADATA"), "{line}");
+        assert!(line.contains("0 idle wakeups/s"), "{line}");
+        assert!(line.contains("ADR-0003"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
     }
 
     #[test]
@@ -285,6 +384,7 @@ mod tests {
         assert_eq!(Some(LadderOverride::Auto), LadderOverride::parse("auto"));
         assert_eq!(Some(LadderOverride::ImageCopy), LadderOverride::parse("image-copy"));
         assert_eq!(Some(LadderOverride::Hyprctl), LadderOverride::parse("hyprctl"));
+        assert_eq!(Some(LadderOverride::Portal), LadderOverride::parse("portal"));
         assert_eq!(Some(LadderOverride::None), LadderOverride::parse("none"));
         assert_eq!(Option::None, LadderOverride::parse("evdev"));
     }
@@ -295,8 +395,10 @@ mod tests {
             Advertised { name: 1, interface: IMAGE_COPY_CAPTURE_GLOBAL.into(), version: 1 },
             Advertised { name: 2, interface: OUTPUT_CAPTURE_SOURCE_GLOBAL.into(), version: 1 },
         ];
-        let caps = Capabilities::scan(&globals, false);
+        let caps = Capabilities::scan(&globals, false, false);
         assert!(caps.image_copy_capture && caps.output_capture_source);
-        assert!(!Capabilities::scan(&[], true).image_copy_capture);
+        assert!(!caps.portal_metadata, "rung 2 is not a registry global");
+        assert!(!Capabilities::scan(&[], false, true).image_copy_capture);
+        assert!(Capabilities::scan(&[], true, false).portal_metadata);
     }
 }

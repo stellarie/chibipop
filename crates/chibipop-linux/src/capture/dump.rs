@@ -1,19 +1,32 @@
-//! `chibipop capture-dump`: the capture backend's own eyes.
+//! `chibipop capture-dump`: the capture backends' own eyes.
 //!
 //! A diagnostic, like `probe`, and no part of the product: it opens the
-//! real backend on this thread, grabs real boxes, writes PNGs, and
-//! prints what the pacing decided per grab - so a dwell on a static
-//! screen can be *watched* answering without copying, and damage can be
-//! watched arriving. Without it the only proof of a capture backend is
-//! a hover, which is a slow and indirect way to see one pixel.
+//! real backend the ADR-0002 ladder picks for this session, grabs real
+//! boxes, writes PNGs, and prints what each grab decided - so a dwell
+//! on a static screen can be *watched* answering without copying, and
+//! damage can be watched arriving. Without it the only proof of a
+//! capture backend is a hover, which is a slow and indirect way to see
+//! one pixel.
+//!
+//! Both rungs are drivable here, and which one runs obeys the same
+//! `CHIBIPOP_CAPTURE_BACKEND` hook the daemon reads - so
+//! `CHIBIPOP_CAPTURE_BACKEND=portal chibipop capture-dump` is how the
+//! portal fallback gets exercised on a compositor that would otherwise
+//! always take the promptless path. The portal rung shows its consent
+//! dialog exactly as the daemon would; the restore token it writes is
+//! the same one the daemon reads, which is what makes "second launch
+//! is silent" observable from a shell.
 //!
 //! It takes the lock-free path on purpose: no instance lock, no control
 //! socket, safe to run beside a live daemon.
 
+use super::backend::{self, Backend};
+use super::portal::{PortalCapture, PortalSession};
 use super::{geometry, png, WlrScreencopy};
+use crate::cursor::{image_copy, outputs::OutputGeometry};
 use crate::wayland;
 use anyhow::{Context, Result};
-use chibipop::geom::PhysRect;
+use chibipop::geom::{PhysPoint, PhysRect};
 use chibipop::text::RegionCapture;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -28,6 +41,9 @@ pub struct Args {
     pub dwell: u32,
     /// Grab each output whole instead of a centred sample.
     pub full: bool,
+    /// Where the portal rung's restore token lives, so the dump and
+    /// the daemon share one grant (ADR-0002).
+    pub state_dir: PathBuf,
 }
 
 /// `x,y,w,h` in global physical pixels.
@@ -57,13 +73,45 @@ pub fn run(args: Args) -> Result<()> {
         .context("connecting to the Wayland display")?;
     let globals = wayland::collect_globals(&conn)?;
     println!("WAYLAND_DISPLAY={display}");
-    if !super::available(&globals) {
-        // ADR-0002: an absent rung is a rung the ladder skips.
-        println!("capture: wlr-screencopy unavailable (the ladder would fall through)");
-        anyhow::bail!("{} is not advertised", super::session::MANAGER_GLOBAL);
+
+    let (ov, warning) = backend::BackendOverride::from_env();
+    if let Some(w) = warning {
+        println!("{w}");
     }
-    let mut backend = WlrScreencopy::open(&globals)?;
-    let outputs = backend.outputs();
+    let caps = backend::Capabilities::scan(&globals, super::portal::available());
+    let selection = backend::select(&caps, ov);
+    println!("{}", selection.startup_line());
+
+    let (mut backend, outputs): (Box<dyn RegionCapture>, Vec<OutputGeometry>) = match selection
+        .backend()
+    {
+        Some(Backend::WlrScreencopy) => {
+            let backend = WlrScreencopy::open(&globals)?;
+            let outputs = backend.outputs();
+            (Box::new(backend), outputs)
+        }
+        Some(Backend::Portal) => {
+            let outputs = image_copy::probe_geometry(&globals);
+            println!("capture: portal consent follows - a dialog may appear on your screen");
+            let session = PortalSession::open(
+                &args.state_dir,
+                &outputs,
+                PhysPoint { x: 0, y: 0 },
+                None,
+                |line| println!("{line}"),
+            )?;
+            println!(
+                "capture: portal session {} node {} health {:?}",
+                session.session_path(),
+                session.node_id(),
+                session.health()
+            );
+            (Box::new(PortalCapture::new(session)), outputs)
+        }
+        // ADR-0002: an absent rung is a rung the ladder skips.
+        None => anyhow::bail!("no capture backend on this session"),
+    };
+
     for (i, g) in outputs.iter().enumerate() {
         let b = geometry::physical_box(g);
         println!(
@@ -95,12 +143,12 @@ pub fn run(args: Args) -> Result<()> {
             b.y
         );
         let path = args.out.join(format!("chibipop-capture-{i}.png"));
-        grab_once(&mut backend, *region, Some(&path))?;
+        grab_once(backend.as_mut(), *region, Some(&path))?;
     }
 
     for i in 0..args.dwell {
         println!("capture: dwell {} of {}", i + 1, args.dwell);
-        grab_once(&mut backend, regions[0], None)?;
+        grab_once(backend.as_mut(), regions[0], None)?;
     }
     Ok(())
 }
@@ -108,7 +156,7 @@ pub fn run(args: Args) -> Result<()> {
 /// One whole read - bracket included, exactly as the Worker reads - so
 /// the pacing seen here is the pacing a hover gets.
 fn grab_once(
-    backend: &mut WlrScreencopy,
+    backend: &mut dyn RegionCapture,
     region: PhysRect,
     write_to: Option<&Path>,
 ) -> Result<()> {

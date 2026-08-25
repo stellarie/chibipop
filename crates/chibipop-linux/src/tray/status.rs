@@ -3,11 +3,14 @@
 //! mapping from those states to menu-row text and the SNI `Status`.
 //!
 //! The registry is daemon-owned and works with or without a tray — it is
-//! fed from what the daemon already knows (the ticket-33 cursor rung
-//! selection and its live health, the always-bound control socket), and
-//! later channel tickets flip states as their backends land. Nothing here
-//! touches D-Bus, so all of it is testable without a tray host.
+//! fed from what the daemon already knows (the ticket-34 capture backend
+//! selection and the consent it resolved before publishing, the
+//! ticket-33 cursor rung selection and its live health, the
+//! always-bound control socket), and later channel tickets flip states
+//! as their backends land. Nothing here touches D-Bus, so all of it is
+//! testable without a tray host.
 
+use crate::capture::backend::{Backend, Selection as CaptureSelection};
 use crate::cursor::{Rung, Selection};
 
 /// One monitored input channel, in menu order.
@@ -40,13 +43,16 @@ impl ChannelId {
 
 /// What one channel is doing. `detail` is the human half of the menu
 /// row — short, honest, and naming the mechanism or the exact gap.
+///
+/// Two states, not three: every channel the daemon tracks now resolves
+/// to a real verdict at startup (the ADR-0002 capture ladder including
+/// the portal's eager consent, the ADR-0003 cursor ladder, the
+/// always-bound control socket), so there is no channel left for a
+/// "not built yet" placeholder to describe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
     /// Working; `detail` names what serves it ("control socket").
     Up { detail: String },
-    /// Not implemented yet — an honest placeholder, not an error, so it
-    /// must not raise NeedsAttention while the port is incomplete.
-    NotBuilt { detail: String },
     /// Down; `detail` names exactly what is missing or denied, per the
     /// ADR-0006 example row "Cursor: portal denied — see settings".
     Down { detail: String },
@@ -57,19 +63,13 @@ impl ChannelState {
         ChannelState::Up { detail: detail.into() }
     }
 
-    pub fn not_built(detail: impl Into<String>) -> ChannelState {
-        ChannelState::NotBuilt { detail: detail.into() }
-    }
-
     pub fn down(detail: impl Into<String>) -> ChannelState {
         ChannelState::Down { detail: detail.into() }
     }
 
     fn detail(&self) -> &str {
         match self {
-            ChannelState::Up { detail }
-            | ChannelState::NotBuilt { detail }
-            | ChannelState::Down { detail } => detail,
+            ChannelState::Up { detail } | ChannelState::Down { detail } => detail,
         }
     }
 }
@@ -80,6 +80,7 @@ impl ChannelState {
 pub fn rung_detail(rung: Rung) -> &'static str {
     match rung {
         Rung::ImageCopyCapture => "ext-image-copy-capture cursor session",
+        Rung::PortalMetadata => "portal ScreenCast cursor metadata",
         Rung::HyprctlPoll => "hyprctl cursorpos polling",
     }
 }
@@ -95,6 +96,25 @@ pub fn cursor_state(selection: &Selection) -> ChannelState {
     }
 }
 
+/// The capture channel's state, straight from the ADR-0002 backend
+/// selection. A portal backend that has been selected but whose
+/// consent has not been answered yet is *not* reported here — the
+/// daemon overwrites this row with the consent outcome before the tray
+/// is ever published.
+pub fn capture_state(selection: &CaptureSelection) -> ChannelState {
+    match selection {
+        CaptureSelection::Backend(Backend::WlrScreencopy) => {
+            ChannelState::up("wlr-screencopy region capture")
+        }
+        CaptureSelection::Backend(Backend::Portal) => {
+            ChannelState::up("portal ScreenCast + PipeWire")
+        }
+        CaptureSelection::Unsupported { missing } => {
+            ChannelState::down(format!("unsupported - missing {}", missing.join(", ")))
+        }
+    }
+}
+
 /// All three channels. Fixed-size — the set of channels is the app's
 /// shape, not data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,16 +123,14 @@ pub struct ChannelStatuses {
 }
 
 impl ChannelStatuses {
-    /// What the daemon knows at startup: capture has no backend wired
-    /// into the loop yet, the cursor rung was just selected, and the
+    /// What the daemon knows once startup is done: `capture` is the
+    /// already-resolved capture state (the daemon runs ADR-0002's
+    /// selection and, for the portal backend, its eager consent before
+    /// publishing the tray), the cursor rung was just selected, and the
     /// trigger is the always-bound control socket.
-    pub fn startup(cursor: &Selection) -> ChannelStatuses {
+    pub fn startup(capture: ChannelState, cursor: &Selection) -> ChannelStatuses {
         ChannelStatuses {
-            states: [
-                ChannelState::not_built("not built yet"),
-                cursor_state(cursor),
-                ChannelState::up("control socket"),
-            ],
+            states: [capture, cursor_state(cursor), ChannelState::up("control socket")],
         }
     }
 
@@ -142,10 +160,9 @@ impl ChannelStatuses {
         ChannelId::ALL.iter().map(|&id| self.row(id)).collect()
     }
 
-    /// The SNI `Status`: NeedsAttention when any channel is down.
-    /// NotBuilt stays Active — a feature that has not landed yet is not
-    /// an alarm, and an icon parked on NeedsAttention teaches the user
-    /// to ignore it.
+    /// The SNI `Status`: NeedsAttention exactly when a channel is
+    /// down. Nothing else raises it - an icon parked on NeedsAttention
+    /// teaches the user to ignore it.
     pub fn sni_status(&self) -> ksni::Status {
         if self.states.iter().any(|s| matches!(s, ChannelState::Down { .. })) {
             ksni::Status::NeedsAttention
@@ -159,15 +176,20 @@ impl ChannelStatuses {
 mod tests {
     use super::*;
 
-    /// The daemon's startup knowledge, verbatim: capture is honestly
-    /// "not built yet", the trigger is the control socket, and the
+    /// The common case: the promptless capture backend was selected.
+    fn screencopy() -> ChannelState {
+        capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy))
+    }
+
+    /// The daemon's startup knowledge, verbatim: the capture row names
+    /// the resolved backend, the trigger is the control socket, and the
     /// cursor row names the selected rung's mechanism.
     #[test]
     fn startup_rows_name_what_the_daemon_knows() {
-        let statuses = ChannelStatuses::startup(&Selection::Rung(Rung::HyprctlPoll));
+        let statuses = ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::HyprctlPoll));
         assert_eq!(
             vec![
-                "Capture: not built yet".to_string(),
+                "Capture: wlr-screencopy region capture".to_string(),
                 "Cursor: hyprctl cursorpos polling".to_string(),
                 "Trigger: control socket".to_string(),
             ],
@@ -179,7 +201,8 @@ mod tests {
     /// status to NeedsAttention, and recovery clears it.
     #[test]
     fn any_down_channel_needs_attention() {
-        let mut statuses = ChannelStatuses::startup(&Selection::Rung(Rung::ImageCopyCapture));
+        let mut statuses =
+            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::ImageCopyCapture));
         assert_eq!(ksni::Status::Active, statuses.sni_status(), "all-up must be Active");
 
         assert!(statuses.set(ChannelId::Trigger, ChannelState::down("socket gone")));
@@ -190,13 +213,19 @@ mod tests {
         assert_eq!(ksni::Status::Active, statuses.sni_status(), "recovery must clear it");
     }
 
-    /// NotBuilt is informational: an unfinished channel must not park
-    /// the icon on NeedsAttention forever.
+    /// ADR-0002's denial path as the tray sees it: a refused portal is
+    /// a capture row with the way back in it, and the icon says so.
     #[test]
-    fn not_built_is_not_an_alarm() {
-        let statuses = ChannelStatuses::startup(&Selection::Rung(Rung::ImageCopyCapture));
-        assert!(matches!(statuses.get(ChannelId::Capture), ChannelState::NotBuilt { .. }));
+    fn a_refused_capture_channel_shows_the_retry_and_needs_attention() {
+        let mut statuses =
+            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::ImageCopyCapture));
         assert_eq!(ksni::Status::Active, statuses.sni_status());
+        assert!(statuses.set(
+            ChannelId::Capture,
+            ChannelState::down("screen-capture permission denied - retry with `chibipop ctl reload`")
+        ));
+        assert!(statuses.row(ChannelId::Capture).contains("retry"));
+        assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status());
     }
 
     /// Today's real down case: the ticket-33 selection came back
@@ -206,7 +235,7 @@ mod tests {
     fn unsupported_cursor_selection_maps_to_a_down_row() {
         let selection =
             Selection::Unsupported { missing: vec!["ext_image_copy_capture_manager_v1".to_string()] };
-        let statuses = ChannelStatuses::startup(&selection);
+        let statuses = ChannelStatuses::startup(screencopy(), &selection);
         assert_eq!(
             "Cursor: unsupported - missing ext_image_copy_capture_manager_v1",
             statuses.row(ChannelId::Cursor)
@@ -218,7 +247,8 @@ mod tests {
     /// anything moved so the daemon logs transitions only.
     #[test]
     fn set_replaces_only_the_addressed_channel_and_reports_change() {
-        let mut statuses = ChannelStatuses::startup(&Selection::Rung(Rung::HyprctlPoll));
+        let mut statuses =
+            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::HyprctlPoll));
         let before_cursor = statuses.row(ChannelId::Cursor);
 
         assert!(statuses.set(ChannelId::Capture, ChannelState::up("wlr-screencopy")));
@@ -236,10 +266,72 @@ mod tests {
     /// inherit another's description.
     #[test]
     fn every_rung_has_its_own_row_text() {
-        let details = [Rung::ImageCopyCapture, Rung::HyprctlPoll].map(rung_detail);
-        assert_ne!(details[0], details[1]);
-        for detail in details {
+        let details =
+            [Rung::ImageCopyCapture, Rung::PortalMetadata, Rung::HyprctlPoll].map(rung_detail);
+        for (i, detail) in details.iter().enumerate() {
             assert!(!detail.is_empty());
+            assert!(
+                !details[..i].contains(detail),
+                "{detail:?} is reused between rungs: {details:?}"
+            );
+        }
+    }
+
+    /// The ADR-0002 selection maps onto three honest rows: either
+    /// backend names its mechanism, and no backend names the gap.
+    #[test]
+    fn every_capture_selection_maps_to_its_own_row() {
+        assert_eq!(ChannelState::up("wlr-screencopy region capture"), screencopy());
+        assert_eq!(
+            ChannelState::up("portal ScreenCast + PipeWire"),
+            capture_state(&CaptureSelection::Backend(Backend::Portal))
+        );
+        assert_eq!(
+            ChannelState::down(
+                "unsupported - missing zwlr_screencopy_manager_v1, org.freedesktop.portal.ScreenCast"
+            ),
+            capture_state(&CaptureSelection::Unsupported {
+                missing: vec![
+                    "zwlr_screencopy_manager_v1".to_string(),
+                    "org.freedesktop.portal.ScreenCast".to_string(),
+                ],
+            })
+        );
+    }
+
+    /// A session with no capture at all is a real alarm: hover cannot
+    /// work, so the icon must say so.
+    #[test]
+    fn an_unsupported_capture_selection_needs_attention() {
+        let capture = capture_state(&CaptureSelection::Unsupported {
+            missing: vec!["zwlr_screencopy_manager_v1".to_string()],
+        });
+        let statuses =
+            ChannelStatuses::startup(capture, &Selection::Rung(Rung::ImageCopyCapture));
+        assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status());
+        assert_eq!(
+            "Capture: unsupported - missing zwlr_screencopy_manager_v1",
+            statuses.row(ChannelId::Capture)
+        );
+    }
+
+    /// The row is read by a human in a menu, so it has to parse as one:
+    /// no punctuation soup, no protocol dump.
+    #[test]
+    fn the_capture_row_reads_as_a_sentence() {
+        for selection in [
+            CaptureSelection::Backend(Backend::WlrScreencopy),
+            CaptureSelection::Backend(Backend::Portal),
+        ] {
+            let statuses = ChannelStatuses::startup(
+                capture_state(&selection),
+                &Selection::Rung(Rung::HyprctlPoll),
+            );
+            let row = statuses.row(ChannelId::Capture);
+            assert!(row.starts_with("Capture: "), "{row}");
+            assert!(!row.contains('\n'), "{row}");
+            assert!(row.split_whitespace().count() >= 3, "{row}");
+            assert!(!row.ends_with('.'), "{row}");
         }
     }
 }
