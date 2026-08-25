@@ -11,6 +11,8 @@
 //! `cfg(target_os = "linux")` — the stub pulls in none of it.
 
 #[cfg(target_os = "linux")]
+mod capture;
+#[cfg(target_os = "linux")]
 mod control;
 #[cfg(target_os = "linux")]
 mod cursor;
