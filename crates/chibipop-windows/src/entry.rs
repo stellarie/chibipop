@@ -8,7 +8,8 @@ use chibipop::lookup::engine::LookupEngine;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
-use chibipop_windows::text::capture::UPSCALE;
+use chibipop::text::source::UPSCALE;
+use chibipop::text::SettingsSnapshot;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -135,8 +136,15 @@ pub fn run() -> Result<()> {
             };
 
             let capture = probe_capture_size();
-            let source =
-                chibipop_windows::text::ocr::OcrTextSource::new(tiles, false, capture, true, "ja")?;
+            let mut source = chibipop_windows::text::text_source(
+                SettingsSnapshot {
+                    max_passes: tiles,
+                    prefer_vertical: false,
+                    capture,
+                    scan_alphanumeric: true,
+                },
+                "ja",
+            )?;
             let region_was_default = region.is_none();
             let region = match region {
                 None => chibipop::text::layout::region_around(cursor, false, capture),
@@ -162,7 +170,7 @@ pub fn run() -> Result<()> {
                     println!(
                         "read {i}: {:>4} ms  via {}  lines={}",
                         t.elapsed().as_millis(),
-                        read.source.as_str(),
+                        read.source,
                         read.lines.len()
                     );
                 }
@@ -179,16 +187,16 @@ pub fn run() -> Result<()> {
                         println!("dump:    wrote {}x{} to {}", cap.w, cap.h, path.display());
                     }
                     let resolved = chibipop::text::layout::resolve(&lines, cursor, true);
-                    (lines, resolved, cap.source, cap.dxgi_error)
+                    (lines, resolved, cap.source, cap.fallback)
                 }
                 None => {
                     let read = source.resolve_in_region(cursor, region)?;
-                    (read.lines, read.resolved, read.source, read.dxgi_error)
+                    (read.lines, read.resolved, read.source, read.fallback)
                 }
             };
             match &dxgi_error {
-                Some(why) => println!("capture: {}  (dxgi: {why})", source_used.as_str()),
-                None => println!("capture: {}", source_used.as_str()),
+                Some(why) => println!("capture: {source_used}  (dxgi: {why})"),
+                None => println!("capture: {source_used}"),
             }
 
             println!();
@@ -302,11 +310,13 @@ pub fn run() -> Result<()> {
         Command::Watch { dict, rules, tiles } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
-            let source = chibipop_windows::text::ocr::OcrTextSource::new(
-                tiles,
-                false,
-                chibipop::text::layout::CaptureSize::default(),
-                true,
+            let mut source = chibipop_windows::text::text_source(
+                SettingsSnapshot {
+                    max_passes: tiles,
+                    prefer_vertical: false,
+                    capture: chibipop::text::layout::CaptureSize::default(),
+                    scan_alphanumeric: true,
+                },
                 "ja",
             )?;
             let dictionary = SqliteDictionary::open(&dict)?;
@@ -320,7 +330,7 @@ pub fn run() -> Result<()> {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(125));
 
-                let cursor = match source.cursor() {
+                let cursor = match chibipop_windows::text::capture::cursor_position() {
                     Ok(c) => c,
                     Err(e) => { eprintln!("cursor: {e}"); continue; }
                 };

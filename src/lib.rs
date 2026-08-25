@@ -16,3 +16,4 @@ pub mod settings;
 pub mod text;
 pub mod ui;
 pub mod update;
+pub mod worker;

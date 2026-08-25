@@ -3,9 +3,9 @@
 use crate::anki;
 use crate::config::Config;
 use crate::controller::{
-    Command, Controller, ControllerConfig, Event, LookupOutcome, PopupView, RequestId, TrayAction,
+    Command, Controller, ControllerConfig, Event, PopupView, TrayAction,
 };
-use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
+use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay};
 use crate::input::hooks::Hooks;
 use crate::library::{Library, Pending};
 use crate::lock::LibraryLock;
@@ -14,11 +14,13 @@ use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
-use crate::present::{self, DictInfo, Presentation, PresentConfig};
+use crate::present::{DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::layout::CaptureSize;
-use crate::text::ocr::{recogniser_available, OcrTextSource};
+use crate::text::capture::{CaptureGuard, CaptureGuardMsg, WinCapture, WM_APP_CAPTURE_GUARD};
+use crate::text::ocr::{recogniser_available, WinrtOcr};
+use crate::worker::{Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings};
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, Renderer};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
@@ -35,7 +37,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -51,8 +52,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Worker pushed a result.
 const WM_APP_RESULT: u32 = WM_APP + 1;
 
-/// Wake the pump. +2 is tray's.
-const WM_APP_CAPTURE_GUARD: u32 = WM_APP + 3;
 
 /// Dupe check finished.
 const WM_APP_ANKI: u32 = WM_APP + 4;
@@ -69,8 +68,6 @@ const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 /// Background save finished.
 const WM_APP_SAVED: u32 = WM_APP + 9;
 
-/// Hide-ack wait, then capture.
-const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Pending-cursor poll, ms.
 const DISPATCH_TICK_MS: u32 = 20;
@@ -86,37 +83,6 @@ const REBUILD_TICK_MS: u32 = 100;
 const APPLY_BUDGET_MS: u128 = 50;
 
 
-/// Hover, drill-down, reload.
-pub enum TriggerKind {
-    Hover(PhysPoint),
-    DrillDown(String),
-    Reload(Box<WorkerSettings>),
-}
-
-/// What the worker owns.
-pub struct WorkerSettings {
-    pub max_passes: u8,
-    pub prefer_vertical: bool,
-    pub capture: CaptureSize,
-    pub scan_alphanumeric: bool,
-    pub language: String,
-    pub present_cfg: PresentConfig,
-    pub scan_display: ScanDisplay,
-    /// Refreshed by every edit.
-    pub dicts: Vec<DictInfo>,
-}
-
-/// One gated cursor movement.
-struct Trigger {
-    kind: TriggerKind,
-    id: RequestId,
-}
-
-/// One answer, carrying its id.
-struct WorkerResult {
-    id: RequestId,
-    outcome: LookupOutcome,
-}
 
 /// One dupe check's answer.
 struct AnkiDupeResult {
@@ -131,49 +97,6 @@ struct AddNoteResult {
     err: Option<String>,
 }
 
-/// Popup out of one capture.
-enum CaptureGuardMsg {
-    /// Hide now; ack when done.
-    Hide { ack: mpsc::Sender<()> },
-    /// Undo a Hide. Fire-and-forget.
-    Restore,
-}
-
-/// The worker's guard handle.
-struct CaptureGuard {
-    main_tid: u32,
-    request_tx: mpsc::Sender<CaptureGuardMsg>,
-}
-
-impl CaptureGuard {
-    /// Blocks until hidden.
-    fn hide_for_capture(&self) {
-        let (ack_tx, ack_rx) = mpsc::channel();
-        if self.request_tx.send(CaptureGuardMsg::Hide { ack: ack_tx }).is_err() {
-            return; // main thread gone - nothing left to hide.
-        }
-        self.wake_main_thread();
-        if ack_rx.recv_timeout(ACK_TIMEOUT).is_err() {
-            eprintln!(
-                "chibipop: capture guard: hide was not acknowledged within {ACK_TIMEOUT:?}; \
-                 capturing anyway - this capture may include the popup itself"
-            );
-        }
-    }
-
-    /// Undoes `hide_for_capture`.
-    fn restore_after_capture(&self) {
-        let _ = self.request_tx.send(CaptureGuardMsg::Restore);
-        self.wake_main_thread();
-    }
-
-    /// Thread message, not window.
-    fn wake_main_thread(&self) {
-        unsafe {
-            let _ = PostThreadMessageW(self.main_tid, WM_APP_CAPTURE_GUARD, WPARAM(0), LPARAM(0));
-        }
-    }
-}
 
 /// Settings alone, no tray.
 pub fn settings_only(
@@ -823,57 +746,44 @@ fn service_settings_click(
     }
 }
 
-/// What the worker needs.
-struct WorkerSpawn {
+/// The Windows worker parts, built on the worker thread: capture and OCR
+/// backends are thread-affine (COM, per-thread DXGI cache), so nothing is
+/// constructed until the core `Worker`'s thread runs this.
+fn worker_open(
     dict_path: PathBuf,
     rules_path: PathBuf,
-    settings: WorkerSettings,
-    main_tid: u32,
-    trigger_rx: mpsc::Receiver<Trigger>,
-    result_tx: mpsc::Sender<WorkerResult>,
-    worker_capture_guard_active: Arc<AtomicBool>,
-    capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
-}
-
-/// Spawn it, await startup.
-fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>)> {
-    let WorkerSpawn {
-        dict_path,
-        rules_path,
-        settings,
-        main_tid,
-        trigger_rx,
-        result_tx,
-        worker_capture_guard_active,
-        capture_guard_tx,
-    } = w;
-    let (startup_tx, startup_rx) = mpsc::channel::<Result<Vec<DictInfo>>>();
-
-    let worker = thread::spawn(move || {
-        worker_main(
-            dict_path,
-            rules_path,
-            settings.present_cfg,
-            settings.max_passes,
-            settings.prefer_vertical,
-            settings.capture,
-            settings.scan_alphanumeric,
-            settings.language,
-            settings.scan_display,
-            main_tid,
-            trigger_rx,
-            result_tx,
-            startup_tx,
-            worker_capture_guard_active,
-            capture_guard_tx,
-        );
-    });
-
-    let dicts: Vec<DictInfo> = startup_rx
-        .recv()
-        .context("worker thread ended before completing startup")??;
-
-    Ok((worker, dicts))
+    language: String,
+    guard: CaptureGuard,
+) -> impl FnOnce() -> Result<WorkerParts> + Send + 'static {
+    move || {
+        let fallback = crate::config::default_ocr_language();
+        let substitute =
+            startup_language(&language, &fallback, || recogniser_available(&language));
+        let language = match substitute {
+            Some(sub) => {
+                eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
+                sub
+            }
+            None => language,
+        };
+        // Contract 3: DPI before GDI.
+        let capture = WinCapture::new(Some(guard)).context("preparing screen capture")?;
+        let ocr = WinrtOcr::new(&language).context("creating the OCR text source")?;
+        let dict = SqliteDictionary::open(&dict_path).with_context(|| {
+            format!(
+                "opening {} - add dictionaries in the settings window",
+                dict_path.display()
+            )
+        })?;
+        let rules = load_rules(&rules_path)?;
+        let engine = LookupEngine::new(Deconjugator::new(rules));
+        Ok(WorkerParts {
+            capture: Box::new(capture),
+            ocr: Box::new(ocr),
+            dict: Box::new(dict),
+            engine,
+        })
+    }
 }
 
 /// Run until the user quits.
@@ -892,8 +802,6 @@ pub fn run(
     let db_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
-    let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
-    let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     // Unknown until Popup::create.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
     let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
@@ -903,19 +811,25 @@ pub fn run(
     let main_tid = unsafe { GetCurrentThreadId() };
     let mut live = derive(&cfg);
 
-    // Contract 3: DPI before GDI.
     // Never joined - join hangs.
-    let (_worker, mut dicts) = spawn_worker(WorkerSpawn {
-        dict_path: db_path.clone(),
-        rules_path: rules_path.clone(),
+    let (worker, mut dicts) = Worker::spawn(
         // Spawn reads the file itself.
-        settings: worker_settings(&live, &[]),
-        main_tid,
-        trigger_rx,
-        result_tx: result_tx.clone(),
-        worker_capture_guard_active: Arc::clone(&capture_guard_active),
-        capture_guard_tx: capture_guard_tx.clone(),
-    })?;
+        worker_settings(&live, &[]),
+        worker_open(
+            db_path.clone(),
+            rules_path.clone(),
+            live.language.clone(),
+            CaptureGuard {
+                active: Arc::clone(&capture_guard_active),
+                main_tid,
+                request_tx: capture_guard_tx.clone(),
+            },
+        ),
+        // Worker pushed a result.
+        move || unsafe {
+            let _ = PostThreadMessageW(main_tid, WM_APP_RESULT, WPARAM(0), LPARAM(0));
+        },
+    )?;
 
     let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
@@ -1139,7 +1053,7 @@ pub fn run(
                     live: &live,
                     overlay: overlay.as_ref(),
                     anki_button: anki_button.as_ref(),
-                    trigger_tx: &trigger_tx,
+                    trigger_tx: worker.trigger(),
                     dicts: &dicts,
                     anki_tx: &anki_tx,
                     add_tx: &add_tx,
@@ -1401,7 +1315,7 @@ pub fn run(
         } else if msg.message == WM_APP_RESULT {
             // Only the freshest queued.
             let mut freshest: Option<WorkerResult> = None;
-            while let Ok(r) = result_rx.try_recv() {
+            while let Ok(r) = worker.results().try_recv() {
                 freshest = Some(r);
             }
             if let Some(result) = freshest {
@@ -1492,240 +1406,6 @@ pub fn run(
     // exit(0) kills it mid-write.
     join_save(&mut save_job);
     std::process::exit(0)
-}
-
-/// One reload into the cache.
-///
-/// dicts goes stale otherwise.
-fn take_reload(
-    s: WorkerSettings,
-    present_cfg: &mut PresentConfig,
-    scan_display: &mut ScanDisplay,
-    dicts: &mut Vec<DictInfo>,
-) {
-    *present_cfg = s.present_cfg;
-    *scan_display = s.scan_display;
-    *dicts = s.dicts;
-}
-
-/// Newest hover; all reloads.
-fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<WorkerSettings>) {
-    let mut reloads = Vec::new();
-    let mut hover = None;
-    let mut take = |t: Trigger| match t.kind {
-        TriggerKind::Reload(s) => reloads.push(*s),
-        _ => hover = Some(t),
-    };
-    take(first);
-    while let Ok(next) = rx.try_recv() {
-        take(next);
-    }
-    (hover, reloads)
-}
-
-/// Serves triggers, owns OCR.
-#[allow(clippy::too_many_arguments)]
-fn worker_main(
-    dict_path: PathBuf,
-    rules_path: PathBuf,
-    mut present_cfg: PresentConfig,
-    max_ocr_passes: u8,
-    prefer_vertical: bool,
-    capture: CaptureSize,
-    scan_alphanumeric: bool,
-    language: String,
-    mut scan_display: ScanDisplay,
-    main_tid: u32,
-    trigger_rx: mpsc::Receiver<Trigger>,
-    result_tx: mpsc::Sender<WorkerResult>,
-    startup_tx: mpsc::Sender<Result<Vec<DictInfo>>>,
-    capture_guard_active: Arc<AtomicBool>,
-    capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
-) {
-    let fallback = crate::config::default_ocr_language();
-    let substitute = startup_language(&language, &fallback, || recogniser_available(&language));
-    let language = match substitute {
-        Some(sub) => {
-            eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
-            sub
-        }
-        None => language,
-    };
-    let built =
-        OcrTextSource::new(max_ocr_passes, prefer_vertical, capture, scan_alphanumeric, &language);
-    let mut ocr = match built.context("creating the OCR text source") {
-        Ok(o) => o,
-        Err(e) => {
-            let _ = startup_tx.send(Err(e));
-            return;
-        }
-    };
-    let dict = match SqliteDictionary::open(&dict_path).with_context(|| {
-        format!(
-            "opening {} - add dictionaries in the settings window",
-            dict_path.display()
-        )
-    }) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = startup_tx.send(Err(e));
-            return;
-        }
-    };
-    let rules = match load_rules(&rules_path) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = startup_tx.send(Err(e));
-            return;
-        }
-    };
-    let engine = LookupEngine::new(Deconjugator::new(rules));
-
-    // Refreshed by every Reload.
-    let mut dicts: Vec<DictInfo> = match dict.dicts().context("reading dictionary identities") {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = startup_tx.send(Err(e));
-            return;
-        }
-    };
-
-    let capture_guard = CaptureGuard { main_tid, request_tx: capture_guard_tx };
-
-    // An Arc would be ceremony.
-    if startup_tx.send(Ok(dicts.clone())).is_err() {
-        return; // main thread gave up waiting; nothing left to do.
-    }
-
-    // Sender dropped: shutdown.
-    while let Ok(first) = trigger_rx.recv() {
-        let (hover, reloads) = drain(first, &trigger_rx);
-        for s in reloads {
-            ocr.apply_settings(
-                s.max_passes,
-                s.prefer_vertical,
-                s.capture,
-                s.scan_alphanumeric,
-                &s.language,
-            );
-            take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
-        }
-        let Some(trigger) = hover else {
-            continue;
-        };
-
-        // Fresh, so no ordering rule.
-        let guard = if capture_guard_active.load(Ordering::SeqCst) {
-            Some(&capture_guard)
-        } else {
-            None
-        };
-
-        // One bad frame is not fatal.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match trigger.kind {
-                TriggerKind::Hover(cursor) => resolve_trigger(
-                    &ocr,
-                    &dict,
-                    &engine,
-                    &dicts,
-                    &present_cfg,
-                    cursor,
-                    guard,
-                    scan_display,
-                ),
-                TriggerKind::DrillDown(ref text) => resolve_drilldown(
-                    &dict,
-                    &engine,
-                    &dicts,
-                    &present_cfg,
-                    text,
-                ),
-                TriggerKind::Reload(_) => {
-                    LookupOutcome::Failed("a reload reached the hover path".to_string())
-                }
-            }
-        }))
-        .unwrap_or_else(|_| LookupOutcome::Failed("a hover lookup panicked".to_string()));
-
-        if result_tx.send(WorkerResult { id: trigger.id, outcome }).is_err() {
-            break; // main thread gone
-        }
-        unsafe {
-            let _ = PostThreadMessageW(main_tid, WM_APP_RESULT, WPARAM(0), LPARAM(0));
-        }
-    }
-}
-
-/// One hover: OCR to present.
-#[allow(clippy::too_many_arguments)]
-fn resolve_trigger(
-    ocr: &OcrTextSource,
-    dict: &SqliteDictionary,
-    engine: &LookupEngine,
-    dicts: &[DictInfo],
-    present_cfg: &PresentConfig,
-    cursor: PhysPoint,
-    capture_guard: Option<&CaptureGuard>,
-    scan_display: ScanDisplay,
-) -> LookupOutcome {
-    let raw = match capture_guard {
-        Some(guard) => {
-            guard.hide_for_capture();
-            let r = ocr.resolve_at_tiled_scanned(cursor, scan_display.captures);
-            guard.restore_after_capture();
-            r
-        }
-        None => ocr.resolve_at_tiled_scanned(cursor, scan_display.captures),
-    };
-    let (resolved, mut scan) = match raw {
-        Ok((Some(r), scan)) => (r, scan),
-        Ok((None, _)) => return LookupOutcome::Hide,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
-    };
-
-    let text = &resolved.span.text[resolved.span.cursor_byte_offset..];
-    let hits = match engine.run(dict, text) {
-        Ok(h) => h,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
-    };
-    if hits.is_empty() {
-        return LookupOutcome::Hide;
-    }
-
-    let presentation = present::build(&hits, dicts, present_cfg);
-    let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
-    if scan_display.highlight {
-        if let Some(rect) = matched {
-            scan.push(ScanRect { rect, kind: ScanKind::Match });
-        }
-    }
-    LookupOutcome::Ready {
-        presentation: Box::new(presentation),
-        anchor: resolved.span.anchor,
-        orientation: resolved.orientation,
-        matched,
-        scan,
-    }
-}
-
-/// Dict lookup without OCR.
-fn resolve_drilldown(
-    dict: &SqliteDictionary,
-    engine: &LookupEngine,
-    dicts: &[DictInfo],
-    present_cfg: &PresentConfig,
-    text: &str,
-) -> LookupOutcome {
-    let hits = match engine.run(dict, text) {
-        Ok(h) => h,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
-    };
-    if hits.is_empty() {
-        return LookupOutcome::Hide;
-    }
-    let p = present::build(&hits, dicts, present_cfg);
-    LookupOutcome::DrillDown(Box::new(p))
 }
 
 /// Measure, place, show, paint.
@@ -2291,51 +1971,6 @@ mod tests {
         assert_eq!(Theme::dark().background, theme_from_config(&popup_config("anything-else", "X")).background);
     }
 
-    fn ws(passes: u8) -> WorkerSettings {
-        WorkerSettings {
-            max_passes: passes,
-            prefer_vertical: false,
-            capture: CaptureSize::default(),
-            scan_alphanumeric: true,
-            language: "ja".to_string(),
-            present_cfg: Config::default().present_config(),
-            scan_display: ScanDisplay { captures: false, highlight: false },
-            dicts: Vec::new(),
-        }
-    }
-
-    /// Newest hover; every reload.
-    #[test]
-    fn drain_keeps_the_newest_hover_and_every_reload() {
-        let (tx, rx) = mpsc::channel::<Trigger>();
-        let reload = TriggerKind::Reload(Box::new(ws(2)));
-        tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
-        let newer = TriggerKind::Hover(PhysPoint { x: 9, y: 9 });
-        tx.send(Trigger { kind: newer, id: RequestId(3) }).unwrap();
-        let second = TriggerKind::Reload(Box::new(ws(4)));
-        tx.send(Trigger { kind: second, id: RequestId(4) }).unwrap();
-        let older = TriggerKind::Hover(PhysPoint { x: 1, y: 1 });
-        let first = Trigger { kind: older, id: RequestId(1) };
-        let (hover, reloads) = drain(first, &rx);
-        let hover = hover.expect("a hover survives");
-        assert!(matches!(hover.kind, TriggerKind::Hover(p) if p.x == 9), "newest hover wins");
-        assert_eq!(2, reloads.len(), "neither reload may be swallowed");
-        let passes: Vec<u8> = reloads.iter().map(|r| r.max_passes).collect();
-        assert_eq!(vec![2, 4], passes, "reloads keep the order they were sent");
-    }
-
-    /// A reload alone still arrives.
-    #[test]
-    fn drain_returns_no_hover_when_only_a_reload_queued() {
-        let (tx, rx) = mpsc::channel::<Trigger>();
-        drop(tx);
-        let first = Trigger { kind: TriggerKind::Reload(Box::new(ws(3))), id: RequestId(1) };
-        let (hover, reloads) = drain(first, &rx);
-        assert!(hover.is_none());
-        assert_eq!(1, reloads.len());
-        assert_eq!(3, reloads[0].max_passes);
-    }
-
     #[test]
     fn derive_carries_every_popup_field() {
         let mut cfg = Config::default();
@@ -2874,19 +2509,6 @@ mod tests {
         );
     }
 
-    /// Same id, new dictionary.
-    #[test]
-    fn a_reload_replaces_the_cached_dictionary_identities() {
-        let mut present_cfg = Config::default().present_config();
-        let mut scan_display = ScanDisplay { captures: false, highlight: false };
-        let mut dicts = vec![di(7, "Removed")];
-        let mut s = ws(2);
-        s.dicts = vec![di(7, "Added")];
-
-        take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
-
-        assert_eq!(vec![di(7, "Added")], dicts, "the removed name must not answer");
-    }
 
     /// Never the last dictionary.
     #[test]

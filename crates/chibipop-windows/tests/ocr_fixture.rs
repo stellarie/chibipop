@@ -8,7 +8,7 @@
 //! zero tests.
 #![cfg(windows)]
 
-use chibipop::text::layout::{resolve, CaptureSize};
+use chibipop::text::layout::resolve;
 
 const FIX_W: i32 = 400;
 const FIX_H: i32 = 120;
@@ -25,13 +25,7 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         eprintln!("SKIP: tests/fixtures/japanese_bgra.bin not present");
         return;
     };
-    let built = chibipop_windows::text::ocr::OcrTextSource::new(
-        1,
-        false,
-        CaptureSize::default(),
-        true,
-        "ja",
-    );
+    let built = chibipop_windows::text::ocr::WinrtOcr::new("ja");
     let source = match built {
         Ok(source) => source,
         Err(_) => {

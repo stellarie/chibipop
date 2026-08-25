@@ -30,4 +30,5 @@ pub mod ui;
 #[cfg(windows)]
 use chibipop::{
     anki, config, controller, dict, geom, library, lookup, paths, present, settings, update,
+    worker,
 };

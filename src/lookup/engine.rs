@@ -80,7 +80,7 @@ impl LookupEngine {
         LookupEngine { deconjugator }
     }
 
-    pub fn run<D: Dictionary>(&self, dict: &D, text: &str) -> Result<Vec<Hit>> {
+    pub fn run<D: Dictionary + ?Sized>(&self, dict: &D, text: &str) -> Result<Vec<Hit>> {
         let cleaned = clean_input(text);
         if cleaned.is_empty() {
             return Ok(Vec::new());

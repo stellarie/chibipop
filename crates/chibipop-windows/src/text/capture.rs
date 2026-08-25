@@ -1,14 +1,16 @@
 //! Screen capture. Win32.
 
 use crate::geom::{PhysPoint, PhysRect};
+use crate::text::{Frame, RegionCapture};
 use anyhow::{Context, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use windows::core::{Interface, HRESULT};
-use windows::Win32::Foundation::{HMODULE, RECT};
+use windows::Win32::Foundation::{HMODULE, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
@@ -25,15 +27,15 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
-    HGDIOBJ, SRCCOPY,
+    GetMonitorInfoW, MonitorFromPoint, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    SRCCOPY,
 };
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
 
-/// Small text else misreads.
-pub const UPSCALE: i32 = 2;
 
 /// First; else DPI-scaled.
 pub fn init_dpi_awareness() -> Result<()> {
@@ -44,45 +46,113 @@ pub fn init_dpi_awareness() -> Result<()> {
     Ok(())
 }
 
-/// Which path produced the pixels.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CaptureSource {
-    Dxgi,
-    BitBlt,
+/// Wake the pump. +2 is tray's.
+pub const WM_APP_CAPTURE_GUARD: u32 = WM_APP + 3;
+
+/// Hide-ack wait, then capture.
+const ACK_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Popup out of one capture.
+pub enum CaptureGuardMsg {
+    /// Hide now; ack when done.
+    Hide { ack: mpsc::Sender<()> },
+    /// Undo a Hide. Fire-and-forget.
+    Restore,
 }
 
-impl CaptureSource {
-    /// For logs and probe output.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CaptureSource::Dxgi => "dxgi",
-            CaptureSource::BitBlt => "bitblt",
+/// The worker's guard handle.
+pub struct CaptureGuard {
+    /// Recomputed by `apply_live`.
+    pub active: Arc<AtomicBool>,
+    pub main_tid: u32,
+    pub request_tx: mpsc::Sender<CaptureGuardMsg>,
+}
+
+impl CaptureGuard {
+    /// Blocks until hidden.
+    fn hide_for_capture(&self) {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if self.request_tx.send(CaptureGuardMsg::Hide { ack: ack_tx }).is_err() {
+            return; // main thread gone - nothing left to hide.
+        }
+        self.wake_main_thread();
+        if ack_rx.recv_timeout(ACK_TIMEOUT).is_err() {
+            eprintln!(
+                "chibipop: capture guard: hide was not acknowledged within {ACK_TIMEOUT:?}; \
+                 capturing anyway - this capture may include the popup itself"
+            );
+        }
+    }
+
+    /// Undoes `hide_for_capture`.
+    fn restore_after_capture(&self) {
+        let _ = self.request_tx.send(CaptureGuardMsg::Restore);
+        self.wake_main_thread();
+    }
+
+    /// Thread message, not window.
+    fn wake_main_thread(&self) {
+        unsafe {
+            let _ = PostThreadMessageW(self.main_tid, WM_APP_CAPTURE_GUARD, WPARAM(0), LPARAM(0));
         }
     }
 }
 
-/// Pixels plus their provenance.
-pub struct Capture {
-    pub buf: Vec<u8>,
-    pub w: i32,
-    pub h: i32,
-    pub source: CaptureSource,
-    /// Why DXGI was not used.
-    pub dxgi_error: Option<String>,
+/// The Windows capture backend: DXGI first, BitBlt fallback.
+pub struct WinCapture {
+    guard: Option<CaptureGuard>,
+    /// `begin_read` hid; `end_read` reshows.
+    hiding: bool,
 }
 
-/// Capture + upscale by `factor`; BGRA.
-pub fn capture_upscaled_by(region: PhysRect, factor: i32) -> Result<Capture> {
-    let cap = capture_region(region)?;
-    let need = (region.w as usize)
-        .checked_mul(region.h as usize)
-        .and_then(|n| n.checked_mul(4))
-        .context("region too large")?;
-    if cap.buf.len() < need {
-        anyhow::bail!("capture is short: {} < {need}", cap.buf.len());
+impl WinCapture {
+    /// DPI awareness before any GDI.
+    pub fn new(guard: Option<CaptureGuard>) -> Result<Self> {
+        init_dpi_awareness()?;
+        Ok(WinCapture { guard, hiding: false })
     }
-    let (buf, w, h) = upscale_by(&cap.buf, region.w, region.h, factor);
-    Ok(Capture { buf, w, h, ..cap })
+}
+
+impl RegionCapture for WinCapture {
+    fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+        capture_region(region)
+    }
+
+    fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
+        monitor_bounds_containing(p)
+    }
+
+    // Fresh check per read, so no ordering rule.
+    fn begin_read(&mut self) {
+        let Some(guard) = &self.guard else { return };
+        if guard.active.load(Ordering::SeqCst) {
+            guard.hide_for_capture();
+            self.hiding = true;
+        }
+    }
+
+    fn end_read(&mut self) {
+        if self.hiding {
+            if let Some(guard) = &self.guard {
+                guard.restore_after_capture();
+            }
+            self.hiding = false;
+        }
+    }
+}
+
+/// The monitor holding `p`.
+fn monitor_bounds_containing(p: PhysPoint) -> PhysRect {
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x: p.x, y: p.y }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            let rc = mi.rcMonitor;
+            PhysRect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top }
+        } else {
+            PhysRect { x: p.x - 960, y: p.y - 540, w: 1920, h: 1080 }
+        }
+    }
 }
 
 // -- DXGI Desktop Duplication -----------------------------------------
@@ -141,15 +211,15 @@ thread_local! {
 }
 
 /// DXGI first, BitBlt fallback.
-fn capture_region(region: PhysRect) -> Result<Capture> {
+fn capture_region(region: PhysRect) -> Result<Frame> {
     match capture_dxgi(region) {
         // A flat frame is never real text.
-        Ok(buf) if !is_uniform(&buf) => Ok(Capture {
+        Ok(buf) if !is_uniform(&buf) => Ok(Frame {
             buf,
             w: region.w,
             h: region.h,
-            source: CaptureSource::Dxgi,
-            dxgi_error: None,
+            source: "dxgi",
+            fallback: None,
         }),
         Ok(_) => bitblt_after(region, "DXGI frame was one flat colour".to_string()),
         Err(e) => bitblt_after(region, format!("{e:#}")),
@@ -157,18 +227,18 @@ fn capture_region(region: PhysRect) -> Result<Capture> {
 }
 
 /// BitBlt, remembering DXGI's reason.
-fn bitblt_after(region: PhysRect, why: String) -> Result<Capture> {
+fn bitblt_after(region: PhysRect, why: String) -> Result<Frame> {
     if !DXGI_WARNED.swap(true, Ordering::Relaxed) {
         eprintln!("chibipop: DXGI capture unavailable ({why}); using BitBlt");
     }
     let buf = capture_bitblt(region)
         .with_context(|| format!("DXGI failed ({why}); BitBlt also failed"))?;
-    Ok(Capture {
+    Ok(Frame {
         buf,
         w: region.w,
         h: region.h,
-        source: CaptureSource::BitBlt,
-        dxgi_error: Some(why),
+        source: "bitblt",
+        fallback: Some(why),
     })
 }
 
@@ -548,24 +618,6 @@ fn capture_bitblt(region: PhysRect) -> Result<Vec<u8>> {
     }
 }
 
-/// Nearest-neighbour upscale by `factor`.
-fn upscale_by(src: &[u8], w: i32, h: i32, factor: i32) -> (Vec<u8>, i32, i32) {
-    let (w2, h2) = (w * factor, h * factor);
-    let mut dst = vec![0u8; (w2 as usize) * (h2 as usize) * 4];
-    for y in 0..h2 as usize {
-        let sy = y / factor as usize;
-        for x in 0..w2 as usize {
-            let sx = x / factor as usize;
-            let si = (sy * w as usize + sx) * 4;
-            let di = (y * w2 as usize + x) * 4;
-            dst[di] = src[si];
-            dst[di + 1] = src[si + 1];
-            dst[di + 2] = src[si + 2];
-            dst[di + 3] = 0xFF;
-        }
-    }
-    (dst, w2, h2)
-}
 
 /// The cursor's position.
 pub fn cursor_position() -> Result<PhysPoint> {
@@ -580,31 +632,6 @@ pub fn cursor_position() -> Result<PhysPoint> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn upscale_by_doubles_a_2x2_pixel() {
-        let src = [255u8, 0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 255, 255, 0, 0];
-        let (dst, w2, h2) = upscale_by(&src, 2, 2, 2);
-        assert_eq!((4, 4), (w2, h2));
-        assert_eq!(dst.len(), 4 * 4 * 4);
-        // Top-left source pixel fills a 2x2 block.
-        assert_eq!(&dst[0..4], &[255, 0, 0, 255]);
-        assert_eq!(&dst[4..8], &[255, 0, 0, 255]);
-    }
-
-    #[test]
-    fn upscale_by_one_is_a_pass_through_size() {
-        let src = vec![10u8; 3 * 3 * 4];
-        let (dst, w2, h2) = upscale_by(&src, 3, 3, 1);
-        assert_eq!((3, 3), (w2, h2));
-        assert_eq!(dst.len(), src.len());
-    }
-
-    #[test]
-    fn upscale_by_four_quadruples_each_dimension() {
-        let src = vec![1u8; 2 * 2 * 4];
-        let (_, w2, h2) = upscale_by(&src, 2, 2, 4);
-        assert_eq!((8, 8), (w2, h2));
-    }
 
     #[test]
     fn an_all_black_frame_is_uniform() {
