@@ -75,7 +75,7 @@ fn decode(bytes: &[u8]) -> Result<ksni::Icon, String> {
     // documents and what the SNI spec's Pixmap carries. Getting this
     // wrong is invisible in tests and glaring in a bar, hence the
     // golden pixel in this module's tests.
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel.rotate_right(1);
     }
 
