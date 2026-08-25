@@ -182,6 +182,22 @@ jobs:
             exit 1
           fi
 
+      # ADR-0009's OCR quality gate: the committed 152-crop benchmark corpus
+      # through the ported meikiocr pipeline, asserting the ADR's floors
+      # (horizontal CER <= 5 % / hit-scan >= 90 %, vertical CER <= 20 % /
+      # hit-scan >= 75 %) and +-3 pp parity with the Python harness's 1x
+      # numbers. Deliberately outside the x3 loop above and marked
+      # `test = false` in the crate manifest: that loop exists to catch
+      # process-global state racing between parallel tests, and this target
+      # has none - it reads committed files and committed models and answers
+      # the same thing every time, so repeating it only spends runner time on
+      # the slowest target in the tree. CPU-only; ONNX Runtime arrives as
+      # `ort`'s pinned prebuilt download, so there is nothing to apt-install.
+      # `--nocapture` puts the measured-vs-reference table in the log, which
+      # is what the next regression gets read against.
+      - name: OCR quality gate
+        run: cargo test -p chibipop-linux --test ocr_gate -- --nocapture
+
       # Same warning-count mechanics as tier0 (see the long comment there;
       # --color never is load-bearing). The count is per-platform after the
       # workspace split (ADR-0007): on Linux the windows crate cfg-stubs to
