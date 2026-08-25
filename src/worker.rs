@@ -9,14 +9,25 @@ use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::present::{self, DictInfo, PresentConfig};
 use crate::text::layout::CaptureSize;
+use crate::text::mask::CaptureMask;
 use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
 use std::thread;
 
+/// One hover: where the cursor is, and what its grab must not read.
+#[derive(Clone, Copy)]
+pub struct Hover {
+    pub at: PhysPoint,
+    /// Our own popup where the platform cannot exclude it (ADR-0008).
+    /// `CaptureMask::NONE` on a frozen grab, which predates the popup,
+    /// and on platforms that exclude the surface themselves.
+    pub mask: CaptureMask,
+}
+
 /// Hover, drill-down, reload.
 pub enum TriggerKind {
-    Hover(PhysPoint),
+    Hover(Hover),
     DrillDown(String),
     Reload(Box<WorkerSettings>),
 }
@@ -193,13 +204,13 @@ fn worker_main(
         // One bad frame is not fatal.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match &trigger.kind {
-                TriggerKind::Hover(cursor) => resolve_trigger(
+                TriggerKind::Hover(h) => resolve_trigger(
                     &mut source,
                     dict.as_ref(),
                     &engine,
                     &dicts,
                     &present_cfg,
-                    *cursor,
+                    *h,
                     scan_display,
                 ),
                 TriggerKind::DrillDown(text) => resolve_drilldown(
@@ -230,10 +241,10 @@ fn resolve_trigger(
     engine: &LookupEngine,
     dicts: &[DictInfo],
     present_cfg: &PresentConfig,
-    cursor: PhysPoint,
+    hover: Hover,
     scan_display: ScanDisplay,
 ) -> LookupOutcome {
-    let raw = source.resolve_at_tiled_scanned(cursor, scan_display.captures);
+    let raw = source.resolve_at_tiled_scanned(hover.at, scan_display.captures, hover.mask);
     let (resolved, mut scan) = match raw {
         Ok((Some(r), scan)) => (r, scan),
         Ok((None, _)) => return LookupOutcome::Hide,
@@ -308,15 +319,17 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Trigger>();
         let reload = TriggerKind::Reload(Box::new(ws(2)));
         tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
-        let newer = TriggerKind::Hover(PhysPoint { x: 9, y: 9 });
+        let at = PhysPoint { x: 9, y: 9 };
+        let newer = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE });
         tx.send(Trigger { kind: newer, id: RequestId(3) }).unwrap();
         let second = TriggerKind::Reload(Box::new(ws(4)));
         tx.send(Trigger { kind: second, id: RequestId(4) }).unwrap();
-        let older = TriggerKind::Hover(PhysPoint { x: 1, y: 1 });
+        let at = PhysPoint { x: 1, y: 1 };
+        let older = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE });
         let first = Trigger { kind: older, id: RequestId(1) };
         let (hover, reloads) = drain(first, &rx);
         let hover = hover.expect("a hover survives");
-        assert!(matches!(hover.kind, TriggerKind::Hover(p) if p.x == 9), "newest hover wins");
+        assert!(matches!(hover.kind, TriggerKind::Hover(h) if h.at.x == 9), "newest hover wins");
         assert_eq!(2, reloads.len(), "neither reload may be swallowed");
         let passes: Vec<u8> = reloads.iter().map(|r| r.max_passes).collect();
         assert_eq!(vec![2, 4], passes, "reloads keep the order they were sent");

@@ -4,8 +4,10 @@
 //! the bin crates; everything here is platform-neutral.
 
 pub mod layout;
+pub mod mask;
 pub mod source;
 
+pub use mask::{CaptureMask, CaptureMode};
 pub use source::{RegionRead, SettingsSnapshot, TextSource};
 
 use crate::geom::{PhysPoint, PhysRect};

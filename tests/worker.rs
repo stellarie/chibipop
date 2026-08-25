@@ -9,8 +9,9 @@ use chibipop::lookup::engine::LookupEngine;
 use chibipop::lookup::model::{FakeDictionary, Sense};
 use chibipop::present::DictInfo;
 use chibipop::text::layout::{CaptureSize, OcrLine, OcrWord};
+use chibipop::text::mask::{CaptureMask, CaptureMode};
 use chibipop::text::{Frame, OcrEngine, RegionCapture};
-use chibipop::worker::{Trigger, TriggerKind, Worker, WorkerParts, WorkerSettings};
+use chibipop::worker::{Hover, Trigger, TriggerKind, Worker, WorkerParts, WorkerSettings};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -144,8 +145,56 @@ fn spawn(
     (worker, dicts, log_rx)
 }
 
+/// Where the fakes' hovers land.
+const AT: PhysPoint = PhysPoint { x: 600, y: 300 };
+
 fn hover(id: u64) -> Trigger {
-    Trigger { kind: TriggerKind::Hover(PhysPoint { x: 600, y: 300 }), id: RequestId(id) }
+    Trigger {
+        kind: TriggerKind::Hover(Hover { at: AT, mask: CaptureMask::NONE }),
+        id: RequestId(id),
+    }
+}
+
+/// A hover with our own popup over the hovered point.
+fn masked_hover(id: u64, mode: CaptureMode) -> Trigger {
+    let popup = PhysRect { x: AT.x - 50, y: AT.y - 50, w: 100, h: 100 };
+    Trigger {
+        kind: TriggerKind::Hover(Hover { at: AT, mask: CaptureMask::for_mode(mode, Some(popup)) }),
+        id: RequestId(id),
+    }
+}
+
+/// The mask boundary is a capture edge: `FakeOcr`'s one word spans the
+/// whole grab, so a popup anywhere in it takes the word with it rather
+/// than leaving half a glyph to look up (ADR-0008).
+#[test]
+fn a_live_hover_under_our_own_popup_resolves_nothing() {
+    let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
+    worker.trigger().send(masked_hover(7, CaptureMode::Live)).unwrap();
+    let result = worker.results().recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(RequestId(7), result.id);
+    assert!(
+        matches!(result.outcome, LookupOutcome::Hide),
+        "a word touching the mask must be dropped, not half-recognised"
+    );
+    assert_eq!(
+        vec!["begin_read", "grab", "ocr", "end_read"],
+        events(&log_rx),
+        "masking is arithmetic on the grabbed pixels: no extra pass"
+    );
+}
+
+/// A frozen grab predates the popup, so the same rect masks nothing.
+#[test]
+fn a_frozen_hover_is_maskless_and_still_resolves() {
+    let (worker, _dicts, _log_rx) = spawn(Some("食"), false, None, None);
+    worker.trigger().send(masked_hover(8, CaptureMode::Frozen)).unwrap();
+    let result = worker.results().recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(RequestId(8), result.id);
+    assert!(
+        matches!(result.outcome, LookupOutcome::Ready { .. }),
+        "trigger mode captures before the popup exists; nothing to mask"
+    );
 }
 
 /// The whole pipeline: trigger in, presented lookup out, read bracketed.

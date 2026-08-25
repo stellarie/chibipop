@@ -19,6 +19,7 @@ use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::capture::{CaptureGuard, CaptureGuardMsg, WinCapture, WM_APP_CAPTURE_GUARD};
 use crate::text::layout::CaptureSize;
+use crate::text::mask::CaptureMask;
 use crate::text::ocr::{recogniser_available, WinrtOcr};
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{anki_button_label, Renderer};
@@ -27,7 +28,9 @@ use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
-use crate::worker::{Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings};
+use crate::worker::{
+    Hover, Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings,
+};
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::HashSet;
@@ -1556,8 +1559,15 @@ fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
 /// One Command, one effect.
 fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Event> {
     match cmd {
-        Command::RequestLookup { id, point } => {
-            let _ = x.trigger_tx.send(Trigger { kind: TriggerKind::Hover(point), id });
+        // Windows keeps its own popup out of its own captures at the OS
+        // level - WDA_EXCLUDEFROMCAPTURE or the hide/reshow capture guard
+        // - so it supplies no mask rects and `popup` goes unread here
+        // (ADR-0008).
+        Command::RequestLookup { id, point, popup: _ } => {
+            let _ = x.trigger_tx.send(Trigger {
+                kind: TriggerKind::Hover(Hover { at: point, mask: CaptureMask::NONE }),
+                id,
+            });
             None
         }
         Command::RequestDrillDown { id, text } => {

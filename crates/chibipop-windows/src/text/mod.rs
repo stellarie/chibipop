@@ -7,7 +7,9 @@ pub mod ocr;
 // Core owns the vocabulary and the layout/hit-scan logic (ADR-0001);
 // re-exported so the modules above keep addressing them as `crate::text::…`,
 // unchanged by the workspace split.
-pub use chibipop::text::{layout, Frame, RegionCapture, SettingsSnapshot, TextSource, TextSpan};
+pub use chibipop::text::{
+    layout, mask, Frame, RegionCapture, SettingsSnapshot, TextSource, TextSpan,
+};
 
 use anyhow::Result;
 
