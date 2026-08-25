@@ -1,6 +1,6 @@
 //! The settings window's model.
 
-use crate::config::{Config, FieldMapping, TriggerMode};
+use crate::config::{Config, FieldMapping, OcrClipboardConfig, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
@@ -62,6 +62,7 @@ pub struct SettingsForm {
     pub sentence_mode: String,
     pub static_region_key: String,
     pub show_static_overlay: bool,
+    pub ocr_clipboard_key: String,
     pub include_screenshot: bool,
     /// Only the top dict's entry.
     pub first_dict_only: bool,
@@ -332,6 +333,12 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         sentence_mode: cfg.anki.sentence_mode.clone(),
         static_region_key: cfg.anki.static_region_key.clone(),
         show_static_overlay: cfg.anki.show_static_overlay,
+        ocr_clipboard_key: cfg
+            .actions
+            .ocr_clipboard
+            .as_ref()
+            .and_then(|action| action.hotkey.clone())
+            .unwrap_or_default(),
         include_screenshot: cfg.actions.screenshot.include_on_add,
         first_dict_only: cfg.anki.first_dict_only,
         enabled_plugins: cfg.plugins.enabled.clone(),
@@ -396,6 +403,13 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.static_region_key = form.static_region_key.clone();
     out.anki.show_static_overlay = form.show_static_overlay;
     out.anki.first_dict_only = form.first_dict_only;
+    out.actions.ocr_clipboard = if form.ocr_clipboard_key.is_empty() {
+        None
+    } else {
+        Some(OcrClipboardConfig {
+            hotkey: Some(form.ocr_clipboard_key.clone()),
+        })
+    };
     out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
@@ -794,6 +808,35 @@ mod tests {
         let form = from_config(&cfg, &dicts());
         let out = apply_to(&form, &cfg);
         assert_eq!("f10", out.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn ocr_clipboard_key_round_trips_through_the_form() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".into()),
+        });
+
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("f9", form.ocr_clipboard_key);
+
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            Some("f9".to_string()),
+            out.actions.ocr_clipboard.and_then(|a| a.hotkey)
+        );
+    }
+
+    #[test]
+    fn empty_ocr_clipboard_key_disables_the_action() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".into()),
+        });
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_clipboard_key.clear();
+
+        assert_eq!(None, apply_to(&form, &cfg).actions.ocr_clipboard);
     }
 
     #[test]

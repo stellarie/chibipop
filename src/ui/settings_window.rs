@@ -132,6 +132,8 @@ const ID_SHOW_STATIC_OVERLAY: i32 = 159;
 const ID_STATIC_CAPTURE_HINT: i32 = 160;
 /// First-dict-only checkbox.
 const ID_FIRST_DICT_ONLY: i32 = 161;
+/// OCR clipboard key button.
+const ID_OCR_CLIPBOARD_KEY: i32 = 162;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -501,6 +503,9 @@ thread_local! {
     // Static region key vk.
     static SR_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
+    // OCR clipboard key vk.
+    static OCR_CLIP_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+
     // Field-map toggle click, by `HWND`.
     static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
 
@@ -779,6 +784,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
                 ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
                 ID_STATIC_REGION_KEY => unsafe { begin_capture(hwnd, ID_STATIC_REGION_KEY) },
+                ID_OCR_CLIPBOARD_KEY => unsafe { begin_capture(hwnd, ID_OCR_CLIPBOARD_KEY) },
                 _ => {}
             }
             LRESULT(0)
@@ -1601,6 +1607,7 @@ fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let cell = match id {
         ID_TRIGGER_KEY => &CAPTURED_VK,
         ID_STATIC_REGION_KEY => &SR_CAPTURED_VK,
+        ID_OCR_CLIPBOARD_KEY => &OCR_CLIP_CAPTURED_VK,
         _ => &ANKI_CAPTURED_VK,
     };
     cell.with(|c| c.set(Some((mine, vk))));
@@ -1632,6 +1639,11 @@ fn resolved_anki_add_key(hwnd: HWND, template: &str) -> String {
 /// Same, for the static key.
 fn resolved_sr_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&SR_CAPTURED_VK, hwnd, template)
+}
+
+/// Same, for the OCR clipboard key.
+fn resolved_ocr_clipboard_key(hwnd: HWND, template: &str) -> String {
+    resolved_captured_key(&OCR_CLIP_CAPTURED_VK, hwnd, template)
 }
 
 /// Parseable form of `vk`.
@@ -2185,8 +2197,8 @@ impl SettingsWindow {
         let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
             return false;
         };
-        // SAFETY: `id` is one of {ID_TRIGGER_KEY,
-        // ID_ANKI_ADD_KEY}, live descendants of `self.hwnd`,
+        // SAFETY: `id` is one of the key capture ids, a live descendant of
+        // `self.hwnd`,
         // created in `build`; `SetWindowTextW` copies the
         // string during the call.
         unsafe {
@@ -2763,6 +2775,30 @@ impl SettingsWindow {
             gen.push(check("Hide the popup from screen capture", ID_EXCLUDE,
                   form.exclude_from_capture, y)?);
             y += ROW_H + 18;
+            y += 12;
+            gen.push(group("Actions", y, ROW_H + 38)?);
+            y += 20;
+            gen.push(label("OCR clipboard key", y)?);
+            let ocr_clipboard_vk = crate::config::parse_trigger_key(&form.ocr_clipboard_key);
+            OCR_CLIP_CAPTURED_VK.with(|c| {
+                c.set(ocr_clipboard_vk.map(|vk| (h.0 as isize, vk)));
+            });
+            let ocr_clipboard_name = ocr_clipboard_vk
+                .map(crate::config::trigger_key_name)
+                .unwrap_or_else(|| "Not set".to_string());
+            gen.push(child(
+                page,
+                w!("BUTTON"),
+                &ocr_clipboard_name,
+                WS_TABSTOP,
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_OCR_CLIPBOARD_KEY,
+                f,
+            )?);
+            y += ROW_H + 18;
             let y_general = y;
 
             // ---- Dictionaries ----
@@ -3267,6 +3303,7 @@ impl SettingsWindow {
 
             let trigger_key = resolved_trigger_key(h, &template.trigger_key);
             let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
+            let ocr_clipboard_key = resolved_ocr_clipboard_key(h, &template.ocr_clipboard_key);
 
             // Empty is not missing.
             let rows = self.field_map_rows.borrow();
@@ -3332,6 +3369,7 @@ impl SettingsWindow {
                 sentence_mode: sentence_mode.to_string(),
                 static_region_key: resolved_sr_key(h, &template.static_region_key),
                 show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
+                ocr_clipboard_key,
                 include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
                 first_dict_only: checked(ID_FIRST_DICT_ONLY),
                 enabled_plugins: self
@@ -3411,6 +3449,11 @@ impl Drop for SettingsWindow {
             }
         });
         SR_CAPTURED_VK.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        OCR_CLIP_CAPTURED_VK.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
@@ -3877,6 +3920,22 @@ mod tests {
         assert_eq!(Some((ID_ANKI_ADD_KEY, "A".to_string())), got);
         assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
         ANKI_CAPTURED_VK.with(|c| c.set(None));
+    }
+
+    #[test]
+    fn take_captured_key_routes_the_ocr_clipboard_key_to_its_own_id() {
+        let hwnd = HWND(6014 as *mut core::ffi::c_void);
+        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_OCR_CLIPBOARD_KEY))));
+
+        let got = take_captured_key(hwnd, 0x78);
+
+        assert_eq!(Some((ID_OCR_CLIPBOARD_KEY, "F9".to_string())), got);
+        assert_eq!(
+            Some((hwnd.0 as isize, 0x78)),
+            OCR_CLIP_CAPTURED_VK.with(|c| c.get())
+        );
+        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
+        OCR_CLIP_CAPTURED_VK.with(|c| c.set(None));
     }
 
     /// The two cells stay apart.

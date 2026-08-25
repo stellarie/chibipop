@@ -1182,12 +1182,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
         Hooks::set_action_hotkey(1, vk, 0);
     }
-    if let Some((vk, mods)) = live
+    if let Some(vk) = live
         .actions_ocr_clipboard_hotkey
         .as_deref()
-        .and_then(crate::config::parse_hotkey)
+        .and_then(crate::config::parse_trigger_key)
     {
-        Hooks::set_action_hotkey(2, vk, mods);
+        Hooks::set_action_hotkey(2, vk, 0);
     }
 
     // No tray means no control.
@@ -1243,17 +1243,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut region_selection = crate::action::selection::RegionSelection::new()?;
     let mut action_registry = crate::action::ActionRegistry::new();
     action_registry.register(Box::new(crate::action::screenshot::MiningContextScreenshot));
-    if live
-        .actions_ocr_clipboard_hotkey
-        .as_deref()
-        .and_then(crate::config::parse_hotkey)
-        .is_some()
-    {
-        action_registry.register_at(
-            2,
-            Box::new(crate::action::ocr_clipboard::OcrClipboardAction),
-        );
-    }
+    sync_ocr_clipboard_action(
+        &mut action_registry,
+        live.actions_ocr_clipboard_hotkey.as_deref(),
+    );
     // One writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
     let mut popup_gen: u64 = 0;
@@ -1908,6 +1901,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 });
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
+                                sync_ocr_clipboard_action(
+                                    &mut action_registry,
+                                    live.actions_ocr_clipboard_hotkey.as_deref(),
+                                );
                                 apply_live(
                                     &live,
                                     &popup,
@@ -1984,6 +1981,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     });
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
+                                sync_ocr_clipboard_action(
+                                    &mut action_registry,
+                                    live.actions_ocr_clipboard_hotkey.as_deref(),
+                                );
                                 apply_live(
                                     &live,
                                     &popup,
@@ -3673,10 +3674,23 @@ fn apply_live(
     match live
         .actions_ocr_clipboard_hotkey
         .as_deref()
-        .and_then(crate::config::parse_hotkey)
+        .and_then(crate::config::parse_trigger_key)
     {
-        Some((vk, mods)) => Hooks::set_action_hotkey(2, vk, mods),
+        Some(vk) => Hooks::set_action_hotkey(2, vk, 0),
         None => Hooks::set_action_hotkey(2, 0, 0),
+    }
+}
+
+/// Adds the action when a valid key exists.
+fn sync_ocr_clipboard_action(
+    registry: &mut crate::action::ActionRegistry,
+    hotkey: Option<&str>,
+) {
+    if hotkey.and_then(crate::config::parse_trigger_key).is_some() {
+        registry.register_at(
+            2,
+            Box::new(crate::action::ocr_clipboard::OcrClipboardAction),
+        );
     }
 }
 
@@ -4255,6 +4269,19 @@ mod tests {
         assert_eq!(crate::config::TriggerMode::HoldKey, live.trigger_mode);
         assert_eq!("f8", live.trigger_key);
         assert_eq!("f9", live.anki_add_key);
+    }
+
+    #[test]
+    fn derive_carries_the_ocr_clipboard_key() {
+        let mut cfg = Config::default();
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+            hotkey: Some("f9".to_string()),
+        });
+
+        assert_eq!(
+            Some("f9".to_string()),
+            derive(&cfg).actions_ocr_clipboard_hotkey
+        );
     }
 
     #[test]
