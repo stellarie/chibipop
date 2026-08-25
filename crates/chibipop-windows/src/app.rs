@@ -21,7 +21,8 @@ use crate::text::capture::{CaptureGuard, CaptureGuardMsg, WinCapture, WM_APP_CAP
 use crate::text::layout::CaptureSize;
 use crate::text::ocr::{recogniser_available, WinrtOcr};
 use crate::ui::overlay::Overlay;
-use crate::ui::render::{anki_button_label, Renderer};
+use crate::ui::layout::anki_button_label;
+use crate::ui::render::Renderer;
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};

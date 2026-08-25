@@ -78,8 +78,8 @@ jobs:
       # cargo prefixes every diagnostic with an ANSI escape and `^error` never
       # matches. That silently counted 0 and this gate had never once run.
       #
-      # The repo carries three accepted clippy findings. CI must assert the
-      # COUNT is 3 - a fourth is a real regression. Counting every rendered
+      # The repo carries two accepted clippy findings. CI must assert the
+      # COUNT is 2 - a third is a real regression. Counting every rendered
       # warning (minus cargo's per-target "generated N warnings" summaries)
       # instead of matching known lint TEXTS, which is blind to any new lint -
       # that is how a dead-code regression got through on 2026-07-31. See
@@ -92,25 +92,26 @@ jobs:
       # per-package run does not help: clippy lints workspace-member
       # dependencies with the same flags). Left as warnings, every target
       # lints, cargo deduplicates repeat diagnostics across targets, and one
-      # workspace-wide run renders each finding exactly once. The three:
+      # workspace-wide run renders each finding exactly once. The two:
       # lookup/deconj.rs useless_conversion and lookup/model.rs
-      # too_many_arguments in core, ui/render.rs layout_pass
-      # too_many_arguments in chibipop-windows.
+      # too_many_arguments, both in core.
       #
-      # Was 4 until 2026-08-09. The hot-reload branch replaced worker_main's
-      # trigger drain, which was the `while_let_loop` site, so the count went
-      # down because the code did. This number is a baseline, not a constant:
-      # when it moves, say in the commit message whether it is a finding or a
-      # re-baseline, and move docs/REGRESSION.md's table with it.
-      - name: Clippy - exactly three accepted findings
+      # Was 4 until 2026-08-09 (the hot-reload branch removed worker_main's
+      # `while_let_loop` site), then 3 until 2026-08-25: ticket 27 moved the
+      # layout walk into core as `PopupScene`, and chibipop-windows'
+      # ui/render.rs `layout_pass` - the third finding - no longer exists.
+      # This number is a baseline, not a constant: when it moves, say in the
+      # commit message whether it is a finding or a re-baseline, and move
+      # docs/REGRESSION.md's table with it.
+      - name: Clippy - exactly two accepted findings
         shell: bash
         run: |
           raw=$(cargo clippy --workspace --color never --all-targets --all-features 2>&1)
           n=$(printf '%s\n' "$raw" | grep -E "^warning" | grep -vcE "generated [0-9]+ warning" || true)
           echo "accepted clippy findings: $n"
-          if [ "$n" -ne 3 ]; then
+          if [ "$n" -ne 2 ]; then
             printf '%s\n' "$raw"
-            echo "::error::expected exactly 3 accepted clippy findings, got $n"
+            echo "::error::expected exactly 2 accepted clippy findings, got $n"
             exit 1
           fi
 

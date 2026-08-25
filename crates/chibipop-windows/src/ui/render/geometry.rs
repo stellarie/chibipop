@@ -97,130 +97,93 @@ pub fn to_json_text(v: &Value) -> String {
 
 /// One measure-only capture.
 ///
-/// Mirrors `paint_once`'s walk with
-/// `target: None`: same elements,
-/// same widths, same y arithmetic.
+/// Builds the scene through the same
+/// `Text` engine paint uses, then
+/// projects it onto the golden's
+/// schema. Nothing here decides
+/// geometry: it only reads it.
 fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
-    let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-        .context("DWriteCreateFactory")?;
-    let formats: RefCell<FormatCache> = RefCell::default();
+    let text = Text::new()?;
     // No window: the capture is
     // defined at 96 dpi. The runner
     // has no HWND to ask anyway.
     let scale = 1.0f32;
 
-    let (total_w, view_h, content_h) = measure_layout(
-        &dwrite,
-        &formats,
+    let scene = scene_of(
+        &text,
         &spec.p,
         &spec.theme,
-        scale,
-        spec.max_w,
-        spec.max_h,
+        spec.max_w as f32 / scale,
+        spec.max_h as f32 / scale,
         spec.show_back,
         spec.side_panel,
     )?;
+    let (total_w, view_h, content_h) = popup_size(&scene, scale, spec.max_w);
 
-    let (elems, side) = build_elements(&spec.p, &spec.theme, spec.show_back, spec.side_panel);
-    let has_side = !side.is_empty();
-    let side_extra = if has_side {
-        SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
-    } else {
-        0.0
-    };
-    let pad = spec.theme.padding as f32;
-    let content_w = (spec.max_w as f32 / scale - 2.0 * pad - side_extra).max(0.0);
-    let origin = pad;
-
-    let span_px = max_scroll(content_h, view_h);
+    let span_px = layout::max_scroll(content_h, view_h);
     let scroll_px = spec.scroll.clamp(0, span_px);
     let scroll_dip = (scroll_px as f32 / scale) as i32;
 
-    let hits = RefCell::new(Vec::new());
-    let geom = RefCell::new(Vec::new());
-    let used = layout_pass(
-        &dwrite,
-        &formats,
-        None,
-        &elems,
-        &spec.theme,
-        origin,
-        origin,
-        content_w,
-        scroll_dip as f32,
-        &LayoutSinks { hits: Some(&hits), geom: Some(&geom) },
-    )
-    .context("capturing the layout walk")?;
-
-    let side_json = if has_side {
-        let rows = RefCell::new(Vec::new());
-        let side_h = side_measure(
-            &dwrite,
-            &formats,
-            &spec.theme.font_name,
-            spec.theme.collapsed_size,
-            &side,
-            SIDE_PANEL_W,
-            Some(&rows),
-        )
-        .context("capturing the side column")?;
-        let sep_x = origin + content_w + SIDE_GAP;
-        let col_x = sep_x + SEPARATOR_THICKNESS + SIDE_GAP;
-        let rows: Vec<Value> = rows
-            .borrow()
-            .iter()
-            .map(|r| {
-                json!({
-                    "idx": r.idx,
-                    "text": r.text,
-                    "y": px(r.y * scale),
-                    "h": px(r.h * scale),
+    let side_json = match &scene.side {
+        Some(side) => {
+            let rows: Vec<Value> = side
+                .rows
+                .iter()
+                .map(|r| {
+                    json!({
+                        "idx": r.idx,
+                        "text": r.text,
+                        "y": px(r.y * scale),
+                        "h": px(r.h * scale),
+                    })
                 })
+                .collect();
+            json!({
+                "separator_x": px(side.rule_x * scale),
+                "col_x": px(side.col_x * scale),
+                "col_w": px(side.col_w * scale),
+                "height": px(side.height * scale),
+                "rows": rows,
             })
-            .collect();
-        json!({
-            "separator_x": px(sep_x * scale),
-            "col_x": px(col_x * scale),
-            "col_w": px(SIDE_PANEL_W * scale),
-            "height": px(side_h * scale),
-            "rows": rows,
-        })
-    } else {
-        Value::Null
+        }
+        None => Value::Null,
     };
 
     // paint_once's thumb inputs, at
     // this capture's window size.
     let track_h = view_h - 2 * spec.theme.padding;
-    let total = used.ceil() as i32 + 2 * spec.theme.padding;
-    let thumb = scrollbar_thumb(track_h, total, view_h, scroll_dip)
+    let total = scene.used_h.ceil() as i32 + 2 * spec.theme.padding;
+    let thumb = layout::scrollbar_thumb(track_h, total, view_h, scroll_dip)
         .map(|(top, h)| json!({ "top": top, "h": h }))
         .unwrap_or(Value::Null);
 
-    let elements: Vec<Value> = geom
-        .borrow()
+    let elements: Vec<Value> = scene
+        .elems
         .iter()
         .enumerate()
         .map(|(i, e)| {
             json!({
                 "i": i,
-                "kind": e.kind,
+                "kind": e.kind.as_str(),
                 "text": e.text,
                 "font_size": px(e.font_size * scale),
                 "top_gap": px(e.top_gap * scale),
                 "wrap_w": px(e.wrap_w * scale),
-                "x": px(e.x * scale),
-                "y": px(e.y * scale),
-                "w": px(e.w * scale),
-                "h": px(e.h * scale),
+                "x": px(e.rect.x * scale),
+                "y": px(e.rect.y * scale),
+                "w": px(e.rect.w * scale),
+                "h": px(e.rect.h * scale),
                 "lines": e.lines,
                 "advance": px(e.advance * scale),
             })
         })
         .collect();
 
-    let hit_json: Vec<Value> = hits
-        .borrow()
+    // The main column only, as before:
+    // the side column's targets are
+    // covered by `side_panel` above.
+    let hit_json: Vec<Value> = scene
+        .hits
         .iter()
         .enumerate()
         .map(|(i, r)| {
@@ -242,7 +205,7 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
         .map(rect_json)
         .unwrap_or(Value::Null);
 
-    let anki = anki_button_label(&spec.p, &spec.theme, &spec.anki)
+    let anki = layout::anki_button_label(&spec.p, &spec.theme, &spec.anki)
         .map(|(label, color)| json!({ "label": label, "color": [color.0, color.1, color.2] }))
         .unwrap_or(Value::Null);
 
@@ -259,7 +222,7 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
         },
         "measure": { "total_w": total_w, "view_h": view_h, "content_h": content_h },
         "scroll": { "max_scroll": span_px, "scroll_used": scroll_px, "thumb": thumb },
-        "content": { "used_h": px(used * scale), "content_w": px(content_w * scale), "origin": px(origin * scale) },
+        "content": { "used_h": px(scene.used_h * scale), "content_w": px(scene.content_w * scale), "origin": px(scene.origin * scale) },
         "elements": elements,
         "hits": hit_json,
         "side_panel": side_json,

@@ -69,13 +69,14 @@ exclude the foreign bin crate — see the workspace `Cargo.toml`):
 - `cargo test --workspace --exclude chibipop-linux` **three times** — the
   wheel accumulator's process-global
   statics produced an intermittent red once that a single run missed.
-- Clippy, asserting the accepted-error **count is exactly 3**. The repo
-  carries three accepted errors on purpose, so `-D warnings` always exits
-  non-zero; a fourth is the regression to catch, and an exit code cannot see
+- Clippy, asserting the accepted-error **count is exactly 2**. The repo
+  carries two accepted errors on purpose, so `-D warnings` always exits
+  non-zero; a third is the regression to catch, and an exit code cannot see
   the difference. (It was 4 until 2026-08-09, when the hot-reload branch
-  deleted the loop that produced one of them. This number moves; when it
-  does, `REGRESSION.md`'s tier 0 table and `ci.yml` move with it, in the
-  same commit.)
+  deleted the loop that produced one of them, and 3 until 2026-08-25, when
+  the layout walk moved into core. This number moves; when it does,
+  `REGRESSION.md`'s tier 0 table and `ci.yml` move with it, in the same
+  commit.)
 - Clippy again with those suppressed, asserting **zero** other findings.
 - `cargo build --release --workspace --exclude chibipop-linux`.
 

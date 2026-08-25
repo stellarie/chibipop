@@ -80,7 +80,7 @@ check-shaped clippy spans the whole workspace unexcluded.
 | Check | Expected |
 |---|---|
 | Rust tests | **all green**, **885** total across **6** targets, 1 ignored (873 → 893 → 885 on 2026-08-17; see below) |
-| Clippy | **exactly 3** accepted errors (was 4; see below) |
+| Clippy | **exactly 2** accepted errors (was 3; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
@@ -227,16 +227,15 @@ owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that
 `LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
 before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
 
-**The three accepted clippy errors — count unchanged since 2026-08-09, sites re-confirmed
-2026-08-24 (ticket 24 workspace split moved the render.rs site into the Windows bin crate):**
+**The two accepted clippy errors — re-baselined 2026-08-25 (ticket 27 moved the popup's layout
+walk into core as `PopupScene`, deleting the `layout_pass` site in the Windows bin crate):**
 
 | Lint | Site |
 |---|---|
 | `useless_conversion` — explicit `.into_iter()` in an `IntoIterator` argument | `src/lookup/deconj.rs:78` |
 | `too_many_arguments` (8/7) | `src/lookup/model.rs:86` |
-| `too_many_arguments` (10/7) | `crates/chibipop-windows/src/ui/render.rs:794` |
 
-It was **4** until 2026-08-09. The fourth was `while_let_loop`, on `worker_main`'s trigger drain;
+It was **4** until 2026-08-09, and **3** until 2026-08-25. The fourth was `while_let_loop`, on `worker_main`'s trigger drain;
 the hot-reload branch replaced that loop with an explicit `drain` (a `Reload` message must never be
 swallowed by newest-wins coalescing), so the lint went with it. That is a legitimate 4 → 3, not a
 suppression — the count went **down** because the code did.
@@ -298,9 +297,9 @@ Three runs at each number, identical each time; six targets splitting 874 + 0 + 
 **0 failed**, the same **1 ignored**. Clippy did not move: **3** raw, **0** on the bin target.
 `golden_corpus` ran rather than skipping, because this checkout has a built `data/chibipop.sqlite`.
 
-**Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
-`-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
-that clippy passed. A 4th is a real regression — most often a field added by one commit and read by
+**Why counts, not exit status.** The repo carries two accepted clippy errors; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **2** rather than
+that clippy passed. A 3rd is a real regression — most often a field added by one commit and read by
 the next, which is why a task that adds a field must be the task that reads it.
 
 The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
