@@ -6,6 +6,7 @@
 pub mod action;
 pub mod anki;
 pub mod app;
+pub mod clipboard;
 pub mod config;
 pub mod dict;
 pub mod geom;

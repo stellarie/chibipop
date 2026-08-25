@@ -1,10 +1,12 @@
 //! Hotkey-triggered actions.
 
+pub mod ocr_clipboard;
 pub mod screenshot;
 pub mod selection;
 
 use crate::geom::PhysRect;
 use crate::present::Presentation;
+use crate::text::layout::OcrLine;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +36,15 @@ pub struct ActionContext<'a> {
     pub config: &'a crate::config::ActionsConfig,
     pub exe_dir: &'a Path,
     pub screenshot_tx: &'a mpsc::Sender<ScreenshotCommand>,
+    pub ocr_tx: &'a mpsc::Sender<OcrRequest>,
+}
+
+/// Pixels sent to the worker's OCR owner.
+pub struct OcrRequest {
+    pub bgra_buf: Vec<u8>,
+    pub width: i32,
+    pub height: i32,
+    pub result_tx: mpsc::Sender<std::result::Result<Vec<OcrLine>, String>>,
 }
 
 impl ActionContext<'_> {
@@ -46,6 +57,7 @@ impl ActionContext<'_> {
             config: Box::leak(Box::new(crate::config::ActionsConfig::default())),
             exe_dir: Path::new("."),
             screenshot_tx: Box::leak(Box::new(tx)),
+            ocr_tx: Box::leak(Box::new(mpsc::channel().0)),
         }
     }
 }
@@ -60,6 +72,9 @@ pub enum ActionOutcome {
         width: i32,
         height: i32,
         save_dir: PathBuf,
+    },
+    TextCaptured {
+        text: String,
     },
     Cancelled,
     Failed(String),
@@ -89,7 +104,7 @@ pub struct ScreenshotResult {
 /// Actions, indexed by hotkey.
 #[derive(Default)]
 pub struct ActionRegistry {
-    actions: Vec<Box<dyn Action>>,
+    actions: Vec<Option<Box<dyn Action>>>,
 }
 
 impl ActionRegistry {
@@ -99,7 +114,15 @@ impl ActionRegistry {
 
     /// Appends one action.
     pub fn register(&mut self, action: Box<dyn Action>) {
-        self.actions.push(action);
+        self.actions.push(Some(action));
+    }
+
+    /// Registers an action at its hotkey slot.
+    pub fn register_at(&mut self, index: usize, action: Box<dyn Action>) {
+        if self.actions.len() <= index {
+            self.actions.resize_with(index + 1, || None);
+        }
+        self.actions[index] = Some(action);
     }
 
     /// None if skipped or missing.
@@ -109,7 +132,7 @@ impl ActionRegistry {
         state: &AppState,
         ctx: &mut ActionContext,
     ) -> Option<ActionOutcome> {
-        let action = self.actions.get_mut(index)?;
+        let action = self.actions.get_mut(index)?.as_mut()?;
         if !action.is_available(state) {
             return None;
         }
@@ -183,5 +206,23 @@ mod tests {
         let mut ctx = ActionContext::empty();
         let outcome = reg.dispatch(5, &empty_state(), &mut ctx);
         assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn register_at_preserves_unregistered_slots() {
+        let mut reg = ActionRegistry::new();
+        reg.register_at(
+            2,
+            Box::new(StubAction {
+                available: true,
+                called: false,
+            }),
+        );
+        let mut ctx = ActionContext::empty();
+        assert!(reg.dispatch(1, &empty_state(), &mut ctx).is_none());
+        assert!(matches!(
+            reg.dispatch(2, &empty_state(), &mut ctx),
+            Some(ActionOutcome::Completed)
+        ));
     }
 }

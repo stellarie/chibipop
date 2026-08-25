@@ -30,7 +30,7 @@ use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,6 +79,8 @@ const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Pending-cursor poll, ms.
 const DISPATCH_TICK_MS: u32 = 20;
+
+const OCR_REQUEST_POLL: Duration = Duration::from_millis(20);
 
 /// Anchor-to-popup gap.
 const POPUP_GAP: i32 = 40;
@@ -159,8 +161,36 @@ enum WorkerOutcome {
 /// One dupe check's answer.
 struct AnkiDupeResult {
     gen: u64,
+    checked: Vec<String>,
     /// `None` = connection failed.
     dupes: Option<HashSet<String>>,
+}
+
+/// Partitions dupe refs.
+fn partition_dupes(
+    exprs: Vec<String>,
+    cache: &HashMap<String, bool>,
+) -> (HashSet<String>, Vec<String>, bool) {
+    let mut seen = HashSet::new();
+    let mut dupes = HashSet::new();
+    let mut uncached = Vec::new();
+    let mut cached_any = false;
+    for expr in exprs {
+        if !seen.insert(expr.clone()) {
+            continue;
+        }
+        match cache.get(&expr) {
+            Some(true) => {
+                cached_any = true;
+                dupes.insert(expr);
+            }
+            Some(false) => {
+                cached_any = true;
+            }
+            None => uncached.push(expr),
+        }
+    }
+    (dupes, uncached, cached_any)
 }
 
 /// One add-note's answer.
@@ -923,6 +953,7 @@ struct WorkerSpawn {
     enabled_plugins: Vec<String>,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
+    ocr_request_rx: mpsc::Receiver<crate::action::OcrRequest>,
     result_tx: mpsc::Sender<WorkerResult>,
     worker_capture_guard_active: Arc<AtomicBool>,
     capture_guard_tx: mpsc::Sender<CaptureGuardMsg>,
@@ -938,6 +969,7 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
         enabled_plugins,
         main_tid,
         trigger_rx,
+        ocr_request_rx,
         result_tx,
         worker_capture_guard_active,
         capture_guard_tx,
@@ -961,6 +993,7 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
             settings.static_region,
             main_tid,
             trigger_rx,
+            ocr_request_rx,
             result_tx,
             startup_tx,
             worker_capture_guard_active,
@@ -987,6 +1020,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let rules_path = rules_path.to_path_buf();
 
     let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>();
+    let (ocr_tx, ocr_request_rx) = mpsc::channel::<crate::action::OcrRequest>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     // Unknown until Popup::create.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
@@ -1008,6 +1042,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         enabled_plugins: cfg.plugins.enabled.clone(),
         main_tid,
         trigger_rx,
+        ocr_request_rx,
         result_tx: result_tx.clone(),
         worker_capture_guard_active: Arc::clone(&capture_guard_active),
         capture_guard_tx: capture_guard_tx.clone(),
@@ -1147,6 +1182,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
         Hooks::set_action_hotkey(1, vk, 0);
     }
+    if let Some((vk, mods)) = live
+        .actions_ocr_clipboard_hotkey
+        .as_deref()
+        .and_then(crate::config::parse_hotkey)
+    {
+        Hooks::set_action_hotkey(2, vk, mods);
+    }
 
     // No tray means no control.
     let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
@@ -1184,6 +1226,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let sr_hwnd = static_overlay.as_ref().map(StaticRegionOverlay::hwnd);
     // What is on screen now.
     let mut shown: Option<Shown> = None;
+    let mut dupe_cache: HashMap<String, bool> = HashMap::new();
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
@@ -1200,6 +1243,17 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut region_selection = crate::action::selection::RegionSelection::new()?;
     let mut action_registry = crate::action::ActionRegistry::new();
     action_registry.register(Box::new(crate::action::screenshot::MiningContextScreenshot));
+    if live
+        .actions_ocr_clipboard_hotkey
+        .as_deref()
+        .and_then(crate::config::parse_hotkey)
+        .is_some()
+    {
+        action_registry.register_at(
+            2,
+            Box::new(crate::action::ocr_clipboard::OcrClipboardAction),
+        );
+    }
     // One writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
     let mut popup_gen: u64 = 0;
@@ -1680,27 +1734,29 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 if !Hooks::take_action_hotkey(slot) {
                     continue;
                 }
-                if shown.is_none() {
-                    continue;
-                }
-                let _ = popup.hide();
-                if let Some(b) = &anki_button {
-                    b.hide();
+                let had_popup = shown.is_some();
+                if had_popup {
+                    let _ = popup.hide();
+                    if let Some(b) = &anki_button {
+                        b.hide();
+                    }
                 }
 
                 let outcome = {
-                    let s = shown.as_ref().unwrap();
                     let state = crate::action::AppState {
-                        popup_visible: true,
-                        presentation: Some(&s.presentation),
-                        anchor: Some(s.anchor),
-                        anki_connected: s.anki.connected,
+                        popup_visible: had_popup,
+                        presentation: shown.as_ref().map(|s| &s.presentation),
+                        anchor: shown.as_ref().map(|s| s.anchor),
+                        anki_connected: shown
+                            .as_ref()
+                            .is_some_and(|s| s.anki.connected),
                     };
                     let mut ctx = crate::action::ActionContext {
                         selection: &mut region_selection,
                         config: &cfg.actions,
                         exe_dir: &exe_dir,
                         screenshot_tx: &screenshot_tx,
+                        ocr_tx: &ocr_tx,
                     };
                     action_registry.dispatch(slot, &state, &mut ctx)
                 };
@@ -1763,13 +1819,20 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     Some(crate::action::ActionOutcome::Failed(msg)) => {
                         eprintln!("chibipop: action failed: {msg}");
                     }
+                    Some(crate::action::ActionOutcome::TextCaptured { text }) => {
+                        if let Err(e) = crate::clipboard::set_text(&text) {
+                            eprintln!("chibipop: copying OCR text failed: {e:#}");
+                        }
+                    }
                     _ => {}
                 }
 
                 // Restore after capture.
-                let _ = popup.show_without_activating();
-                if let Some(b) = &anki_button {
-                    b.show_without_activating();
+                if had_popup {
+                    let _ = popup.show_without_activating();
+                    if let Some(b) = &anki_button {
+                        b.show_without_activating();
+                    }
                 }
                 sync_anki_button(anki_button.as_ref(), shown.as_ref(), &theme);
             }
@@ -2067,15 +2130,32 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     exprs.push(e.to_string());
                                 }
                             }
-                            if !exprs.is_empty() {
+                            let (cached_dupes, uncached, cached_any) =
+                                partition_dupes(exprs, &dupe_cache);
+                            s.anki.dupes = cached_dupes;
+                            s.anki.connected = cached_any;
+                            s.anki.checking = !uncached.is_empty();
+                            if uncached.is_empty() {
+                                repaint_anki(
+                                    &popup,
+                                    &mut renderer,
+                                    &theme,
+                                    live.max_height_percent,
+                                    live.max_width_percent,
+                                    s,
+                                    live.side_panel,
+                                    anki_button.as_ref(),
+                                );
+                            } else {
                                 let url = live.anki_url.clone();
                                 let deck = live.anki_deck.clone();
                                 let model = live.anki_model.clone();
                                 let gen = popup_gen;
                                 let tx = anki_tx.clone();
+                                let checked = uncached;
                                 thread::spawn(move || {
                                     let refs: Vec<&str> =
-                                        exprs.iter().map(|s| s.as_str()).collect();
+                                        checked.iter().map(|s| s.as_str()).collect();
                                     let dupes =
                                         match anki::find_duplicates(&url, &deck, &model, &refs) {
                                             Ok(d) => Some(d),
@@ -2084,7 +2164,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                                 None
                                             }
                                         };
-                                    let _ = tx.send(AnkiDupeResult { gen, dupes });
+                                    let _ = tx.send(AnkiDupeResult {
+                                        gen,
+                                        checked,
+                                        dupes,
+                                    });
                                     // SAFETY: wakes the pump.
                                     unsafe {
                                         let _ = PostThreadMessageW(
@@ -2130,14 +2214,36 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 }
                             }
                         }
-                        if !exprs.is_empty() {
+                        let (cached_dupes, uncached, cached_any) =
+                            partition_dupes(exprs, &dupe_cache);
+                        if let Some(s) = shown.as_mut() {
+                            s.anki.dupes = cached_dupes;
+                            s.anki.connected = cached_any;
+                            s.anki.checking = !uncached.is_empty();
+                        }
+                        if uncached.is_empty() {
+                            if let Some(s) = shown.as_mut() {
+                                repaint_anki(
+                                    &popup,
+                                    &mut renderer,
+                                    &theme,
+                                    live.max_height_percent,
+                                    live.max_width_percent,
+                                    s,
+                                    live.side_panel,
+                                    anki_button.as_ref(),
+                                );
+                            }
+                        } else {
                             let url = live.anki_url.clone();
                             let deck = live.anki_deck.clone();
                             let model = live.anki_model.clone();
                             let gen = popup_gen;
                             let tx = anki_tx.clone();
+                            let checked = uncached;
                             thread::spawn(move || {
-                                let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
+                                let refs: Vec<&str> =
+                                    checked.iter().map(|s| s.as_str()).collect();
                                 let dupes = match anki::find_duplicates(&url, &deck, &model, &refs)
                                 {
                                     Ok(d) => Some(d),
@@ -2146,7 +2252,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                         None
                                     }
                                 };
-                                let _ = tx.send(AnkiDupeResult { gen, dupes });
+                                let _ = tx.send(AnkiDupeResult {
+                                    gen,
+                                    checked,
+                                    dupes,
+                                });
                                 // SAFETY: wakes the pump.
                                 unsafe {
                                     let _ = PostThreadMessageW(
@@ -2163,50 +2273,50 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
         } else if msg.message == WM_APP_ANKI {
             while let Ok(result) = anki_rx.try_recv() {
+                let checked = result.checked;
+                let dupes = result.dupes;
+                if let Some(found) = &dupes {
+                    for expr in &checked {
+                        dupe_cache.insert(expr.clone(), found.contains(expr));
+                    }
+                }
                 if let Some(s) = shown.as_mut() {
                     if s.gen == result.gen {
                         s.anki.checking = false;
-                        match result.dupes {
+                        match dupes {
                             Some(dupes) => {
                                 s.anki.connected = true;
-                                s.anki.dupes = dupes;
+                                for expr in &checked {
+                                    let is_dupe = dupes.contains(expr);
+                                    if is_dupe {
+                                        s.anki.dupes.insert(expr.clone());
+                                    } else {
+                                        s.anki.dupes.remove(expr);
+                                    }
+                                }
                             }
                             None => {
                                 s.anki.connected = false;
                             }
                         }
-                        let back = !s.history.is_empty();
-                        match show_presentation(
+                        repaint_anki(
                             &popup,
                             &mut renderer,
                             &theme,
                             live.max_height_percent,
                             live.max_width_percent,
-                            &s.presentation,
-                            s.anchor,
-                            s.scroll,
-                            back,
+                            s,
                             live.side_panel,
-                        ) {
-                            Ok((rect, content_h, view_h)) => {
-                                s.popup = rect;
-                                s.content_h = content_h;
-                                s.view_h = view_h;
-                                let m = max_scroll(s.content_h, s.view_h);
-                                if s.scroll > m {
-                                    s.scroll = m;
-                                }
-                                sync_anki_button(anki_button.as_ref(), Some(s), &theme);
-                            }
-                            Err(e) => {
-                                eprintln!("chibipop: repaint for dupe markers failed: {e:#}");
-                            }
-                        }
+                            anki_button.as_ref(),
+                        );
                     }
                 }
             }
         } else if msg.message == WM_APP_ADD_NOTE {
             while let Ok(result) = add_rx.try_recv() {
+                if result.err.is_none() {
+                    dupe_cache.insert(result.expr.clone(), true);
+                }
                 if let Some(s) = shown.as_mut() {
                     s.anki.adding = false;
                     if let Some(e) = result.err {
@@ -2216,6 +2326,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         if live.notify_on_add {
                             tray.notify("chibipop", &format!("{} added", result.expr));
                         }
+                        s.anki.dupes.insert(result.expr.clone());
                         s.anki.added.insert(result.expr);
                     }
                     let back = !s.history.is_empty();
@@ -2449,6 +2560,21 @@ fn resolve_recogniser(ocr_engine: &str, enabled: &[String]) -> Option<Box<dyn Re
     }
 }
 
+fn service_ocr_requests(
+    ocr: &OcrTextSource,
+    rx: &mpsc::Receiver<crate::action::OcrRequest>,
+) {
+    while let Ok(request) = rx.try_recv() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ocr.recogniser()
+                .recognise(&request.bgra_buf, request.width, request.height)
+                .map_err(|e| format!("{e:#}"))
+        }))
+        .unwrap_or_else(|_| Err("OCR worker panicked".to_string()));
+        let _ = request.result_tx.send(result);
+    }
+}
+
 /// Serves triggers, owns OCR.
 #[allow(clippy::too_many_arguments)]
 fn worker_main(
@@ -2467,6 +2593,7 @@ fn worker_main(
     mut static_region: Option<PhysRect>,
     main_tid: u32,
     trigger_rx: mpsc::Receiver<Trigger>,
+    ocr_request_rx: mpsc::Receiver<crate::action::OcrRequest>,
     result_tx: mpsc::Sender<WorkerResult>,
     startup_tx: mpsc::Sender<Result<Vec<DictInfo>>>,
     capture_guard_active: Arc<AtomicBool>,
@@ -2552,7 +2679,16 @@ fn worker_main(
     }
 
     // Sender dropped: shutdown.
-    while let Ok(first) = trigger_rx.recv() {
+    loop {
+        let first = match trigger_rx.recv_timeout(OCR_REQUEST_POLL) {
+            Ok(first) => first,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                service_ocr_requests(&ocr, &ocr_request_rx);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        service_ocr_requests(&ocr, &ocr_request_rx);
         let (hover, reloads) = drain(first, &trigger_rx);
         for s in reloads {
             ocr.apply_settings(
@@ -3203,6 +3339,45 @@ fn sync_anki_button(btn: Option<&AnkiButton>, shown: Option<&Shown>, theme: &The
     btn.render(&text, color, theme);
 }
 
+/// Repaints Anki state.
+#[allow(clippy::too_many_arguments)]
+fn repaint_anki(
+    popup: &Popup,
+    renderer: &mut Renderer,
+    theme: &Theme,
+    max_height_percent: i32,
+    max_width_percent: i32,
+    s: &mut Shown,
+    side_panel: bool,
+    anki_button: Option<&AnkiButton>,
+) {
+    let back = !s.history.is_empty();
+    match show_presentation(
+        popup,
+        renderer,
+        theme,
+        max_height_percent,
+        max_width_percent,
+        &s.presentation,
+        s.anchor,
+        s.scroll,
+        back,
+        side_panel,
+    ) {
+        Ok((rect, content_h, view_h)) => {
+            s.popup = rect;
+            s.content_h = content_h;
+            s.view_h = view_h;
+            let max = max_scroll(s.content_h, s.view_h);
+            if s.scroll > max {
+                s.scroll = max;
+            }
+            sync_anki_button(anki_button, Some(s), theme);
+        }
+        Err(e) => eprintln!("chibipop: repaint for Anki state failed: {e:#}"),
+    }
+}
+
 /// Pushes current, replaces.
 #[allow(clippy::too_many_arguments)]
 fn push_drilldown(
@@ -3344,6 +3519,7 @@ struct LiveSettings {
     notify_on_add: bool,
     per_character_lookup: bool,
     actions_screenshot_hotkey: String,
+    actions_ocr_clipboard_hotkey: Option<String>,
     include_screenshot: bool,
     first_dict_only: bool,
 }
@@ -3393,6 +3569,11 @@ fn derive(cfg: &Config) -> LiveSettings {
         notify_on_add: cfg.anki.notify_on_add,
         per_character_lookup: cfg.trigger.per_character_lookup,
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
+        actions_ocr_clipboard_hotkey: cfg
+            .actions
+            .ocr_clipboard
+            .as_ref()
+            .and_then(|action| action.hotkey.clone()),
         include_screenshot: cfg.actions.screenshot.include_on_add,
         first_dict_only: cfg.anki.first_dict_only,
     }
@@ -3488,6 +3669,14 @@ fn apply_live(
     }
     if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
         Hooks::set_action_hotkey(1, vk, 0);
+    }
+    match live
+        .actions_ocr_clipboard_hotkey
+        .as_deref()
+        .and_then(crate::config::parse_hotkey)
+    {
+        Some((vk, mods)) => Hooks::set_action_hotkey(2, vk, mods),
+        None => Hooks::set_action_hotkey(2, 0, 0),
     }
 }
 
@@ -3621,6 +3810,21 @@ mod tests {
     #[test]
     fn join_all_lines_empty_input_is_empty_string() {
         assert_eq!("", join_all_lines(&[]));
+    }
+
+    #[test]
+    fn dupe_partition_uses_cached_results_and_deduplicates_refs() {
+        let cache = HashMap::from([
+            ("宿舎".to_string(), true),
+            ("駅".to_string(), false),
+        ]);
+        let (dupes, uncached, cached_any) = partition_dupes(
+            vec!["宿舎".into(), "宿舎".into(), "駅".into(), "猫".into()],
+            &cache,
+        );
+        assert_eq!(HashSet::from(["宿舎".to_string()]), dupes);
+        assert_eq!(vec!["猫".to_string()], uncached);
+        assert!(cached_any);
     }
 
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
