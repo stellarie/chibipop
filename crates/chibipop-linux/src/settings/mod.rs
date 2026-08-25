@@ -10,6 +10,7 @@
 
 mod app;
 mod apply;
+mod autostart;
 pub mod child;
 mod rebuild;
 mod snippets;
@@ -17,7 +18,7 @@ mod snippets;
 mod channel;
 
 use crate::lock::{self, LockError};
-use crate::paths::Paths;
+use crate::paths::{self, Paths};
 use crate::{control, wayland};
 use anyhow::{Context, Result};
 use chibipop::library::Library;
@@ -84,6 +85,7 @@ pub fn run(paths: Paths) -> Result<()> {
         library_dir,
         db_path,
         runtime_dir: runtime_dir.to_path_buf(),
+        autostart: autostart::Target::resolve(&paths::Env::from_process()),
     };
     app::run(init)?;
 
