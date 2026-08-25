@@ -48,6 +48,26 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging", "uns
 # wlr-screencopy (ADR-0002's primary capture rung): the only protocol with
 # compositor-side region capture. Same wayland-rs generation as the pin above.
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+# The popup's own stack (ADR-0004, ticket 32): SCTK 0.21 drives the
+# wlr-layer surface and the `wl_shm` SlotPool behind it, tiny-skia
+# rasters the panel, cosmic-text shapes and rasterizes text with locale
+# `ja` (Han unification: kanji must be JP variants). No GPU context -
+# all three are resident in the daemon. cosmic-text carries its own
+# fontdb, so the JP-family probe asks the popup's own `FontSystem` and
+# binds no second font stack. iced pulls an older cosmic-text of its
+# own; that copy serves the settings process only and this pin is the
+# one the daemon paints with.
+#
+# `default-features = false`: SCTK's default `xkbcommon` feature links
+# the system libxkbcommon through pkg-config, and this popup has no
+# keyboard by construction (`keyboard_interactivity: none`, ADR-0004),
+# so the dependency would buy nothing and cost a build-time system
+# package on every CI runner and packaging target. Its `calloop` feature
+# stays off with it: the daemon owns the loop and already drives the
+# Wayland queue through `calloop-wayland-source`.
+smithay-client-toolkit = { version = "0.21.1", default-features = false }
+tiny-skia = "0.12.0"
+cosmic-text = "0.19.0"
 # The settings window's toolkit (ADR-0005): a separate `chibipop settings`
 # process, so none of this is resident in the daemon.
 iced = "0.14.0"

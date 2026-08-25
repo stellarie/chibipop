@@ -85,6 +85,12 @@ png.workspace = true
 # nothing here needs a build-time PipeWire.
 zbus.workspace = true
 libloading.workspace = true
+# The popup (ADR-0004, ticket 32): the layer surface and its shm
+# buffers, the panel raster, and the JP text stack - all daemon-side,
+# which is why none of them is a GPU stack.
+smithay-client-toolkit.workspace = true
+tiny-skia.workspace = true
+cosmic-text.workspace = true
 
 # The OCR fixture gate reads the committed corpus manifest and mirrors the
 # harness's NFKC normalisation; nothing in the shipped adapter needs them.
