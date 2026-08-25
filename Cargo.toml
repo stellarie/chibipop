@@ -51,6 +51,27 @@ iced = "0.14.0"
 # Font-family enumeration for the settings font combo; the same fontdb
 # iced already carries via cosmic-text, so no second font stack.
 fontdb = "0.23"
+# The Linux OCR engine (ADR-0009): meikiocr's three ONNX models driven by
+# ONNX Runtime. `ndarray` and `tracing` stay off - outputs are read as flat
+# slices and the daemon already owns its stderr log. The two distribution
+# paths ADR-0009 names are cargo features on chibipop-linux, not settings
+# here: the default downloads a pinned prebuilt runtime at build time (the
+# release tarball, and the only thing that makes `cargo test` work on a
+# bare ubuntu runner), the source-AUR path dlopens the system library.
+# Exact-pinned: an rc line reserves the right to move its API under us.
+# No `api-N` feature on purpose: `ort` then asks the backend for API 17,
+# its floor, which is the one setting under which both distribution paths
+# work - the pinned 1.28 download and a distro `libonnxruntime` as old as
+# 1.17 (Arch ships 1.24). Nothing here reaches past that API.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "copy-dylibs"] }
+# Verifies the bundled model files against their committed digests before
+# a session is built (ADR-0009 "hash-pinned, no first-run download").
+sha2 = "0.10.9"
+# Test-only, both: the OCR fixture gate decodes the committed corpus PNGs,
+# and mirrors the benchmark harness's NFKC step when it scores a
+# prediction (tools/ocr-bench/bench/common.py normalise()).
+png = "0.18.0"
+unicode-normalization = "0.1.24"
 
 [package]
 name = "chibipop"
