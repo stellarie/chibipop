@@ -27,6 +27,8 @@ mod logging;
 #[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
+mod popup;
+#[cfg(target_os = "linux")]
 mod settings;
 #[cfg(target_os = "linux")]
 mod tray;

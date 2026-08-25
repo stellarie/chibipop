@@ -1,6 +1,7 @@
 //! The daemon: calloop pump + instance lock + control socket + logging
-//! (ADR-0001: all sync, calloop as the Linux pump). No capture, OCR, or
-//! popup yet — those tickets plug into this loop.
+//! (ADR-0001: all sync, calloop as the Linux pump), plus the popup's
+//! layer surfaces (ADR-0004). No capture or OCR yet — those tickets
+//! plug their channels into this loop.
 
 use crate::control::{ControlSocket, StubState, Verb};
 use crate::cursor::{self, budget, hyprctl};
@@ -11,6 +12,7 @@ use crate::logging::Log;
 use crate::paths::Paths;
 use crate::tray::status::{ChannelId, ChannelState, ChannelStatuses};
 use crate::tray::{self, TrayHandle, TrayRequest};
+use crate::popup::{self, Demo, Popup, ShowRequest};
 use crate::wayland;
 use anyhow::{bail, Context, Result};
 use calloop::generic::Generic;
@@ -18,8 +20,8 @@ use calloop::signals::{Signal, Signals};
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction};
 use calloop_wayland_source::WaylandSource;
-use chibipop::controller::{Controller, ControllerConfig, Event};
-use chibipop::geom::PhysPoint;
+use chibipop::controller::{Command, Controller, ControllerConfig, Event};
+use chibipop::geom::{PhysPoint, PhysRect};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -28,6 +30,7 @@ use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::WlPointer;
 use wayland_client::protocol::wl_registry;
 use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::globals::registry_queue_init;
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::ext::image_capture_source::v1::client::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
@@ -41,16 +44,25 @@ use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV
 /// controller's tick-derived warning arithmetic.
 const DISPATCH_TICK_MS: u32 = 20;
 
+/// A demo anchor's box when no cursor sample has arrived yet: the
+/// canned popup still has to land somewhere.
+const DEMO_ANCHOR: PhysRect = PhysRect { x: 200, y: 200, w: 120, h: 32 };
+
 /// The pump's shared state.
-struct App {
+///
+/// `pub(crate)` because the popup's Wayland dispatch impls are written
+/// against it (`popup::surface`): SCTK 0.21 delegates through a blanket
+/// impl this state cannot use, so the forwarding impls live beside the
+/// code they serve and reach back through the accessors below.
+pub(crate) struct App {
     log: Log,
     stub: StubState,
     config_file: PathBuf,
     signal: LoopSignal,
     /// The cursor channel's Wayland side (ticket 33).
     cursor: CursorState,
-    /// Driven by cursor Events; its Commands are logged no-ops until
-    /// tickets 35/37 execute them.
+    /// Driven by cursor Events; its popup Commands are executed here,
+    /// the rest are logged no-ops until tickets 35/37.
     controller: Controller,
     /// CHIBIPOP_CURSOR_TRACE=1: log every sample and poll interval.
     trace: bool,
@@ -65,6 +77,14 @@ struct App {
     /// Channel health plus the SNI tray mirroring it (ADR-0006). Also
     /// the daemon's own view: it works unchanged when there is no tray.
     tray: TrayHandle,
+    /// The popup's layer surfaces (ADR-0004). `None` only where there
+    /// is no compositor to bind against: a unit test, or a session
+    /// missing the layer shell — the daemon stays up either way.
+    popup: Option<Popup>,
+    /// `CHIBIPOP_POPUP_DEMO=1`: the trigger verbs show and hide the
+    /// canned popup, so the surface can be driven before the capture
+    /// pipeline exists (ticket 35).
+    demo: Demo,
 }
 
 impl App {
@@ -82,7 +102,176 @@ impl App {
             // Exercises the exact gate real lookups will use: this line
             // reaches the log only when debug.show_lookup_log is on.
             self.log.lookup("(no capture yet - a trigger-down lookup would land here)");
+            if self.demo.armed {
+                self.demo_show();
+            }
         }
+        if verb == Verb::TriggerUp && self.demo.armed {
+            self.hide_popup();
+        }
+    }
+
+    /// The popup, from a Wayland dispatch. Those handlers only ever run
+    /// for objects the popup itself created, so its absence there is
+    /// impossible rather than merely unlikely.
+    pub(crate) fn popup_mut(&mut self) -> &mut Popup {
+        self.popup.as_mut().expect("a popup dispatch arrived with no popup bound")
+    }
+
+    /// Move the popup's diagnostics into the log. The popup owns no
+    /// log: this thread does.
+    pub(crate) fn flush_popup_notes(&mut self) {
+        let Some(popup) = self.popup.as_mut() else { return };
+        for line in popup.drain_notes() {
+            self.log.diag(&line);
+        }
+    }
+
+    /// A `preferred_scale` arrived. The scale is never latched
+    /// (ADR-0004): Hyprland may send 1.0 first and correct it later, so
+    /// a change to the surface currently showing is re-rastered and
+    /// re-placed, and the Controller hears the new rect.
+    pub(crate) fn popup_rescaled(&mut self, idx: usize, scale_120ths: u32) {
+        let moved = self.popup.as_mut().is_some_and(|p| p.preferred_scale(idx, scale_120ths));
+        self.flush_popup_notes();
+        if !moved {
+            return;
+        }
+        self.log.diag(&format!(
+            "popup: surface {idx} preferred scale {:.3} - re-rendering",
+            f64::from(scale_120ths) / 120.0
+        ));
+        let outcome = self.popup.as_mut().map(Popup::reshow);
+        self.flush_popup_notes();
+        match outcome {
+            Some(Ok(Some(placed))) => self.placed(placed),
+            Some(Err(e)) => self.log.diag(&format!("popup: re-render failed: {e:#}")),
+            _ => {}
+        }
+    }
+
+    /// One Event through the Controller, and every Command it answers
+    /// with executed. Tickets 35/37 fill the rest of this table in.
+    fn feed(&mut self, event: Event) {
+        for cmd in self.controller.handle(event) {
+            self.execute(cmd);
+        }
+    }
+
+    fn execute(&mut self, cmd: Command) {
+        match cmd {
+            Command::ShowPopup { presentation, anchor, scroll, show_back } => {
+                self.show_popup(&ShowRequest {
+                    presentation: *presentation,
+                    anchor,
+                    scroll,
+                    show_back,
+                    // The Anki affordance's own state travels with
+                    // `SyncAnkiButton` (ticket 37); until then the slot
+                    // is reserved only by the demo, which passes one.
+                    anki: None,
+                });
+            }
+            Command::RepaintPopup { scroll, show_back } => {
+                let req = self.popup.as_ref().and_then(Popup::request).map(|req| ShowRequest {
+                    scroll,
+                    show_back,
+                    ..req.clone()
+                });
+                if let Some(req) = req {
+                    self.show_popup(&req);
+                }
+            }
+            Command::HidePopup => self.hide_popup(),
+            other => self.log.diag(&format!("controller: {other:?} (no-op until tickets 35/37)")),
+        }
+    }
+
+    /// Measure, place, raster, commit — then tell the Controller where
+    /// it landed. The bin owns the measurer, so this round-trip is how
+    /// the Controller learns a rect it cannot compute (ADR-0004).
+    fn show_popup(&mut self, req: &ShowRequest) {
+        let started = Instant::now();
+        let shown = match self.popup.as_mut() {
+            Some(popup) => popup.show(req),
+            None => Err(anyhow::anyhow!("the popup has no layer surface on this compositor")),
+        };
+        self.flush_popup_notes();
+        match shown {
+            Ok(placed) => {
+                self.log.diag(&format!(
+                    "popup: shown on surface {} at {},{} {}x{} at {:.3}x (view {} of {} px) in {} us",
+                    placed.output,
+                    placed.rect.x,
+                    placed.rect.y,
+                    placed.rect.w,
+                    placed.rect.h,
+                    placed.scale,
+                    placed.view_h,
+                    placed.content_h,
+                    started.elapsed().as_micros(),
+                ));
+                self.placed(placed);
+            }
+            Err(e) => {
+                self.log.diag(&format!("popup: place failed: {e:#}"));
+                self.feed(Event::PopupPlaceFailed);
+            }
+        }
+    }
+
+    fn placed(&mut self, placed: popup::Placed) {
+        self.feed(Event::PopupPlaced {
+            rect: placed.rect,
+            content_h: placed.content_h,
+            view_h: placed.view_h,
+        });
+    }
+
+    /// Hide: a transparent buffer, never an unmap (ADR-0004), so
+    /// Hyprland's layer animation never fires and this stays instant.
+    fn hide_popup(&mut self) {
+        let started = Instant::now();
+        let was = self.popup.as_ref().and_then(Popup::shown).is_some();
+        if let Some(popup) = self.popup.as_mut() {
+            popup.hide();
+        }
+        self.flush_popup_notes();
+        if was {
+            self.log.diag(&format!("popup: hidden in {} us", started.elapsed().as_micros()));
+        }
+    }
+
+    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`). It goes through the
+    /// exact path a lookup will: measure, place, commit, `PopupPlaced`.
+    fn demo_show(&mut self) {
+        let anchor = self.demo.anchor.or_else(|| self.cursor_anchor()).unwrap_or(DEMO_ANCHOR);
+        self.log.diag(&format!(
+            "popup: demo show at anchor {},{} {}x{}",
+            anchor.x, anchor.y, anchor.w, anchor.h
+        ));
+        self.show_popup(&ShowRequest {
+            presentation: popup::canned(),
+            anchor,
+            scroll: 0,
+            show_back: false,
+            // The demo asks for the slot so the in-panel Anki
+            // affordance is painted and can be inspected; production
+            // asks for it only when AnkiConnect answered.
+            anki: Some(chibipop::present::AnkiPopupState {
+                enabled: true,
+                connected: true,
+                ..chibipop::present::AnkiPopupState::disabled()
+            }),
+        });
+    }
+
+    /// The last cursor sample as an anchor box, so a demo popup lands
+    /// where a lookup would have.
+    fn cursor_anchor(&mut self) -> Option<PhysRect> {
+        let (lx, ly) = self.last_poll?;
+        let pos = self.cursor.logical_to_global(f64::from(lx), f64::from(ly))?;
+        Some(PhysRect { x: pos.x, y: pos.y, w: DEMO_ANCHOR.w, h: DEMO_ANCHOR.h })
     }
 
     /// One message from the tray thread, executed here on the daemon
@@ -123,9 +312,10 @@ impl App {
     }
 
     /// `reload` re-reads the file and re-applies everything the daemon
-    /// honors today: the lookup-log gate live, `popup.layer` logged for
-    /// the popup ticket. The config file is the sole source of truth
-    /// (ADR-0005); nothing structured crosses the socket.
+    /// honors: the lookup-log gate, and the popup's own settings —
+    /// `popup.layer` needs no surface recreation, which is exactly why
+    /// it is a runtime toggle. The config file is the sole source of
+    /// truth (ADR-0005); nothing structured crosses the socket.
     fn reload_config(&mut self) {
         match chibipop::config::load_or_create(&self.config_file) {
             Ok(config) => {
@@ -138,13 +328,10 @@ impl App {
                     on_off(was),
                     on_off(now),
                 ));
-                self.log.diag(&format!(
-                    "config: popup.layer = {} (takes effect when the popup lands)",
-                    match config.popup_layer() {
-                        chibipop::config::PopupLayer::Overlay => "overlay",
-                        chibipop::config::PopupLayer::Top => "top",
-                    }
-                ));
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.reconfigure(&config);
+                }
+                self.flush_popup_notes();
             }
             Err(e) => self.log.diag(&format!("config: reload failed: {e:#}")),
         }
@@ -198,7 +385,7 @@ impl CursorHandler for App {
             self.log.diag(&format!("cursor: ({}, {})", pos.x, pos.y));
         }
         for cmd in self.controller.handle(Event::CursorMoved { pos }) {
-            self.log.diag(&format!("controller: {cmd:?} (no-op until tickets 35/37)"));
+            self.execute(cmd);
         }
     }
 }
@@ -339,10 +526,36 @@ pub fn run(paths: Paths) -> Result<()> {
 
     let mut event_loop: EventLoop<App> = EventLoop::try_new().context("creating the event loop")?;
 
-    // The long-lived Wayland queue; its own registry so future tickets
-    // see dynamic global changes.
-    let mut queue = conn.new_event_queue::<App>();
+    // The long-lived Wayland queue. `registry_queue_init` is what SCTK
+    // needs to bind the popup's globals from; the second, hand-made
+    // registry beside it is the cursor channel's, and it is also how
+    // this daemon sees dynamic global changes.
+    let (globals_list, mut queue) =
+        registry_queue_init::<App>(&conn).context("initialising the Wayland registry")?;
     let registry = conn.display().get_registry(&queue.handle(), ());
+
+    // The popup (ADR-0004). A compositor without the layer shell keeps
+    // the daemon up with a loud diagnostic rather than refusing to
+    // start: everything else - cursor, tray, settings - still works,
+    // and the capability report already named what is missing.
+    let popup = match Popup::bind(&globals_list, &queue.handle(), &config) {
+        Ok(popup) => Some(popup),
+        Err(e) => {
+            log.diag(&format!("popup: unavailable - {e:#}"));
+            None
+        }
+    };
+    let demo = Demo::from_env();
+    if demo.armed {
+        log.diag(&format!(
+            "popup: {}=1 - trigger-down shows the canned popup, trigger-up hides it{}",
+            Demo::ENV,
+            match demo.anchor {
+                Some(a) => format!(" (anchor {},{} {}x{})", a.x, a.y, a.w, a.h),
+                None => String::new(),
+            }
+        ));
+    }
 
     let mut app = App {
         log,
@@ -356,6 +569,8 @@ pub fn run(paths: Paths) -> Result<()> {
         last_move: Instant::now(),
         settings: SettingsChild::new(),
         tray: tray_handle,
+        popup,
+        demo,
     };
 
     // Bind what the selected rung needs and settle it before the pump
@@ -380,6 +595,20 @@ pub fn run(paths: Paths) -> Result<()> {
     if matches!(selection, cursor::Selection::Rung(cursor::Rung::ImageCopyCapture)) {
         app.log
             .diag(&format!("cursor: {} output cursor session(s) live", app.cursor.session_count()));
+    }
+
+    // The popup's surfaces: one per output, mapped now and never
+    // unmapped (ADR-0004). The output roundtrip above has already run,
+    // so every surface is created against known geometry; the second
+    // roundtrip lets the initial configures arrive and each surface map
+    // itself hidden before the pump starts.
+    if app.popup.is_some() {
+        app.popup_mut().map_all();
+        app.flush_popup_notes();
+        queue.roundtrip(&mut app).context("mapping the popup's layer surfaces")?;
+        app.flush_popup_notes();
+        let mapped = app.popup_mut().surface_count();
+        app.log.diag(&format!("popup: {mapped} layer surface(s) mapped hidden"));
     }
 
     WaylandSource::new(conn.clone(), queue)
@@ -431,7 +660,11 @@ pub fn run(paths: Paths) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("registering the signal source: {e}"))?;
 
     app.log.diag(&format!(
-        "ready: pump running (cursor channel wired; tray {}; no capture/OCR/popup yet)",
+        "ready: pump running (cursor channel wired; popup {}; tray {}; no capture/OCR yet)",
+        match app.popup.as_ref().map(Popup::surface_count) {
+            Some(n) => format!("on {n} output(s)"),
+            None => "unavailable".to_string(),
+        },
         if app.tray.is_connected() { "published" } else { "trayless" }
     ));
 
@@ -477,6 +710,8 @@ mod tests {
             tray: TrayHandle::trayless(ChannelStatuses::startup(&cursor::Selection::Rung(
                 cursor::Rung::HyprctlPoll,
             ))),
+            popup: None,
+            demo: Demo::default(),
         };
 
         cfg.debug.show_lookup_log = true;
@@ -589,6 +824,8 @@ mod tests {
             tray: TrayHandle::trayless(ChannelStatuses::startup(&cursor::Selection::Rung(
                 cursor::Rung::HyprctlPoll,
             ))),
+            popup: None,
+            demo: Demo::default(),
         }
     }
 }

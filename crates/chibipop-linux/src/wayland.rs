@@ -30,6 +30,13 @@ pub const REQUIRED: &[Requirement] = &[
     Requirement { interface: "wl_seat", why: "pointer and keyboard input" },
     Requirement { interface: "wl_output", why: "monitor geometry and scale" },
     Requirement { interface: "zwlr_layer_shell_v1", why: "the popup overlay surface" },
+    // ADR-0004 makes both mandatory: the popup lays out and rasters in
+    // physical pixels, so it needs the fractional scale to raster at
+    // and a viewport to declare the logical size it stands for. Without
+    // them a 1.5x desktop can only be served a blurry integer-scaled
+    // panel.
+    Requirement { interface: "wp_fractional_scale_manager_v1", why: "the popup's fractional scale" },
+    Requirement { interface: "wp_viewporter", why: "the popup's logical size at that scale" },
 ];
 
 /// The capture ladder (ADR-0003): any one rung will do; the portal rung
@@ -122,6 +129,8 @@ mod tests {
         "wl_output",
         "zwlr_layer_shell_v1",
         "zwlr_screencopy_manager_v1",
+        "wp_fractional_scale_manager_v1",
+        "wp_viewporter",
     ];
 
     #[test]
