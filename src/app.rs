@@ -32,7 +32,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -513,20 +515,6 @@ fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: not applied: {e:#}");
 }
 
-/// Freq needs a rebuild.
-///
-/// CRLF: the box is an EDIT.
-fn frequency_notice(library: &Path, db: &Path) -> String {
-    format!(
-        "Frequency lists rank the words in every dictionary, so changing one needs the \
-         whole database rebuilt - chibipop cannot do that while it is running. Nothing was \
-         changed. Quit chibipop, then run this in a terminal, and start chibipop again \
-         when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
-        library.display(),
-        db.display()
-    )
-}
-
 /// Names the active OCR engine.
 fn engine_status_line(cfg: &Config) -> String {
     match resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled) {
@@ -643,19 +631,9 @@ fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Does Apply touch a freq zip?
-///
-/// Those still need a rebuild.
-fn stages_frequency(form: &SettingsForm, dicts: &[DictInfo]) -> bool {
-    let added = form
-        .staged_adds
-        .iter()
-        .any(|a| form.freq_names.contains(&a.name));
-    let removed = form
-        .staged_removes
-        .iter()
-        .any(|name| !dicts.iter().any(|d| &d.name == name) && !form.unreadable.contains(name));
-    added || removed
+/// Frequency edits rebuild.
+fn needs_restart_rebuild(form: &SettingsForm) -> bool {
+    form.freq_changed && form.has_staged()
 }
 
 /// Which rows and files change.
@@ -1954,8 +1932,33 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
                             // Never half-apply.
-                            if edited.has_staged() && stages_frequency(&edited, &dicts) {
-                                w.set_status(&frequency_notice(&library, &db_path));
+                            if needs_restart_rebuild(&edited) {
+                                match LibraryLock::acquire(&library) {
+                                    Err(e) => refuse_apply(w, &e),
+                                    Ok(_lock) => {
+                                        match settings::stage_into_library(&edited, &library) {
+                                            Err(e) => refuse_apply(w, &e),
+                                            Ok(pending) => match pending.commit() {
+                                                Err(e) => refuse_apply(w, &e),
+                                                Ok(()) => {
+                                                    join_save(&mut save_job);
+                                                    if let Err(e) = updated.save(config_path) {
+                                                        eprintln!(
+                                                            "chibipop: saving config: {e:#}"
+                                                        );
+                                                    }
+                                                    restart_with_rebuild(
+                                                        &library,
+                                                        &db_path,
+                                                        config_path,
+                                                        &rules_path,
+                                                    );
+                                                    std::process::exit(0);
+                                                }
+                                            },
+                                        }
+                                    }
+                                }
                             } else if edited.has_staged() {
                                 match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
@@ -3277,6 +3280,35 @@ fn start_run(config_path: &Path, dict_path: &Path) -> Result<()> {
         .spawn()
         .context("starting chibipop")?;
     Ok(())
+}
+
+/// Start a detached rebuild.
+fn restart_with_rebuild(library: &Path, db: &Path, config: &Path, rules: &Path) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("chibipop.exe"));
+    let script = restart_script(&exe, library, db, config, rules);
+    if let Err(e) = Command::new("cmd")
+        .args(["/C", script.as_str()])
+        .creation_flags(0x0000_0008)
+        .spawn()
+    {
+        eprintln!("chibipop: could not start rebuild: {e:#}");
+    }
+}
+
+/// Build the restart command.
+fn restart_script(exe: &Path, library: &Path, db: &Path, config: &Path, rules: &Path) -> String {
+    format!(
+        "timeout /t 1 /nobreak >nul && \
+         \"{}\" build-dict --library \"{}\" --out \"{}\" && \
+         \"{}\" run --config \"{}\" --dict \"{}\" --rules \"{}\"",
+        exe.display(),
+        library.display(),
+        db.display(),
+        exe.display(),
+        config.display(),
+        db.display(),
+        rules.display(),
+    )
 }
 
 /// Live, not the gated point.
@@ -4705,45 +4737,55 @@ mod tests {
         assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
     }
 
-    /// A freq zip has no dict row.
     #[test]
-    fn adding_a_frequency_archive_is_refused() {
-        let mut form = staged_form(&[(Path::new("freq.zip"), "JA Freq")], &[]);
-        form.freq_names = vec!["JA Freq".to_string()];
-        assert!(stages_frequency(&form, &[]));
-    }
-
-    #[test]
-    fn adding_a_term_dictionary_stays_incremental() {
-        let form = staged_form(&[(Path::new("terms.zip"), "FixtureTerms")], &[]);
-        assert!(!stages_frequency(&form, &[]));
-    }
-
-    #[test]
-    fn removing_a_row_the_database_never_had_is_refused() {
-        let form = staged_form(&[], &["JA Freq"]);
-        assert!(stages_frequency(
-            &form,
-            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
-        ));
-    }
-
-    #[test]
-    fn a_refused_frequency_change_names_the_builder_and_both_paths() {
-        let notice = frequency_notice(
-            Path::new(r"C:\a\library"),
-            Path::new(r"C:\a\data\chibipop.sqlite"),
+    fn a_mixed_frequency_apply_uses_restart_rebuild() {
+        let mut form = settings::from_config(&Config::default(), &[]);
+        assert_eq!(
+            Some(crate::library::Kind::Frequency),
+            form.stage_add(&fixture("freq.zip"))
         );
-        assert!(notice.contains("Nothing was changed."), "{notice}");
+        assert_eq!(
+            Some(crate::library::Kind::Term),
+            form.stage_add(&fixture("terms.zip"))
+        );
+        assert!(needs_restart_rebuild(&form));
+    }
+
+    #[test]
+    fn a_term_only_apply_stays_incremental() {
+        let form = staged_form(&[(&fixture("terms.zip"), "FixtureTerms")], &[]);
+        assert!(!needs_restart_rebuild(&form));
+    }
+
+    #[test]
+    fn restart_script_preserves_rebuild_and_run_paths() {
+        let script = restart_script(
+            Path::new(r"C:\Program Files\chibipop.exe"),
+            Path::new(r"C:\data\library"),
+            Path::new(r"D:\dict\chibipop.sqlite"),
+            Path::new(r"D:\cfg\chibipop.toml"),
+            Path::new(r"E:\rules\deconjugator.json"),
+        );
+        assert!(script.starts_with("timeout /t 1 /nobreak >nul &&"), "{script}");
         assert!(
-            notice.contains("\r\nchibipop build-dict"),
-            "the command needs its own line"
+            script.contains("build-dict --library \"C:\\data\\library\""),
+            "{script}"
         );
-        assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
         assert!(
-            notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""),
-            "{notice}"
+            script.contains("--out \"D:\\dict\\chibipop.sqlite\""),
+            "{script}"
         );
+        assert!(
+            script.contains("run --config \"D:\\cfg\\chibipop.toml\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("--rules \"E:\\rules\\deconjugator.json\""),
+            "{script}"
+        );
+        let build = script.find("build-dict").expect("build command");
+        let run = script.find(" run --config").expect("run command");
+        assert!(build < run, "{script}");
     }
 
     #[test]
@@ -4769,26 +4811,6 @@ mod tests {
         let s = engine_status_line(&cfg);
         assert!(s.contains("meikiocr"), "{s}");
         assert!(s.contains("not found"), "{s}");
-    }
-
-    #[test]
-    fn removing_an_installed_dictionary_stays_incremental() {
-        let form = staged_form(&[], &["\u{5927}\u{8f9e}\u{6797}"]);
-        assert!(!stages_frequency(
-            &form,
-            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
-        ));
-    }
-
-    /// A broken zip has no dict row.
-    #[test]
-    fn removing_an_unreadable_file_stays_incremental() {
-        let mut form = staged_form(&[], &["broken.zip"]);
-        form.unreadable = vec!["broken.zip".to_string()];
-        assert!(!stages_frequency(
-            &form,
-            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
-        ));
     }
 
     #[test]
