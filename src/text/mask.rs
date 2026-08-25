@@ -52,6 +52,20 @@ impl CaptureMask {
         }
     }
 
+    /// This mask as it bears on one grab: the popup restricted to
+    /// `region`, or [`CaptureMask::NONE`] when it does not reach it.
+    ///
+    /// Everything a grab does with a mask is a function of this value
+    /// alone - the white fill, the word drop, and the key that decides
+    /// whether an unchanged re-grab may reuse an earlier pass's words.
+    /// Clipping first is what makes those three agree by construction
+    /// rather than by argument: two grabs of the same box whose clipped
+    /// masks are equal are the same question, and a popup that moved
+    /// somewhere else entirely does not make them different.
+    pub fn clipped_to(&self, region: PhysRect) -> CaptureMask {
+        CaptureMask { popup: self.popup.and_then(|p| p.intersection(region)) }
+    }
+
     /// The popup∩region overlap, in `region`-local pixels.
     ///
     /// `None` when nothing needs masking: no popup, or no overlap. A

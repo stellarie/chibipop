@@ -1,10 +1,11 @@
 //! The Linux program itself: clap CLI, dispatched to the daemon, the
-//! `ctl` client, or the capability probe. `main.rs` is a two-line entry
-//! that reaches this module on Linux and a stub everywhere else.
+//! `ctl` client, the capability probe, or the capture dump. `main.rs`
+//! is a two-line entry that reaches this module on Linux and a stub
+//! everywhere else.
 
 use crate::control::{self, Verb};
 use crate::paths::{self, Paths};
-use crate::{daemon, settings, wayland};
+use crate::{capture, daemon, settings, wayland};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -36,6 +37,26 @@ enum Command {
     Settings,
     /// Connect to the Wayland display, print the capability report, exit.
     Probe,
+    /// Grab screen regions with the capture backend and write PNGs.
+    ///
+    /// A diagnostic for the wlr-screencopy rung (ADR-0002), like
+    /// `probe`: lock-free, socket-free, safe beside a live daemon.
+    /// Without `--region` it samples every output.
+    CaptureDump {
+        /// One box in global physical pixels: `x,y,w,h`.
+        #[arg(long, value_name = "X,Y,W,H")]
+        region: Option<String>,
+        /// Where the PNGs go.
+        #[arg(long, default_value = "/tmp", value_name = "DIR")]
+        out: PathBuf,
+        /// Re-read the first box this many times, to watch the damage
+        /// race pace a dwell (ADR-0010).
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        dwell: u32,
+        /// Grab each output whole instead of a centred sample.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 pub fn run() -> ExitCode {
@@ -47,6 +68,9 @@ pub fn run() -> ExitCode {
         Command::Ctl { verb } => ctl(&paths, &verb),
         Command::Settings => settings::run(paths),
         Command::Probe => probe(),
+        Command::CaptureDump { region, out, dwell, full } => {
+            capture_dump(region.as_deref(), out, dwell, full)
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -88,4 +112,15 @@ fn probe() -> Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// The capture backend's diagnostic dump, also lock-free.
+fn capture_dump(
+    region: Option<&str>,
+    out: PathBuf,
+    dwell: u32,
+    full: bool,
+) -> Result<()> {
+    let region = region.map(capture::dump::parse_region).transpose()?;
+    capture::dump::run(capture::dump::Args { region, out, dwell, full })
 }

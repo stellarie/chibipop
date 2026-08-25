@@ -45,6 +45,9 @@ calloop = "0.14.4"
 calloop-wayland-source = "0.4.1"
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging", "unstable"] }
+# wlr-screencopy (ADR-0002's primary capture rung): the only protocol with
+# compositor-side region capture. Same wayland-rs generation as the pin above.
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 # The settings window's toolkit (ADR-0005): a separate `chibipop settings`
 # process, so none of this is resident in the daemon.
 iced = "0.14.0"

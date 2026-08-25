@@ -48,6 +48,7 @@ impl RegionCapture for FakeCapture {
             h: region.h,
             source: "fake",
             fallback: None,
+            unchanged: false,
         })
     }
 

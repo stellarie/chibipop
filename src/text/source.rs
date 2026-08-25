@@ -78,6 +78,29 @@ pub struct RegionRead {
     pub source: &'static str,
     /// Why the preferred path was not used, if it was not.
     pub fallback: Option<String>,
+    /// The pixels were the previous grab's, so the OCR was reused.
+    pub unchanged: bool,
+}
+
+/// One region's words, kept for an unchanged re-grab.
+///
+/// Word rects are already mapped to physical, so a reuse is a clone
+/// and nothing else.
+///
+/// The key is `(region, factor, mask)`, all three. `unchanged` is the
+/// backend's answer about the *raw* pixels it copied, but what OCR read
+/// was those pixels after masking, and what came back was filtered by
+/// the same mask - so a popup appearing over an otherwise still region
+/// is an unchanged grab whose question changed. Keying on the mask too
+/// is what stops that from serving unmasked words to a masked read, and
+/// vice versa. The mask is stored already clipped to `region`
+/// ([`CaptureMask::clipped_to`]), so a popup that moved somewhere this
+/// box cannot see does not cost a pass.
+struct Recognised {
+    region: PhysRect,
+    factor: i32,
+    mask: CaptureMask,
+    lines: Vec<OcrLine>,
 }
 
 /// The OCR knobs, reloadable.
@@ -94,6 +117,14 @@ pub struct TextSource {
     capture: Box<dyn RegionCapture>,
     ocr: Box<dyn OcrEngine>,
     settings: SettingsSnapshot,
+    /// What this read has recognised.
+    recognised: Vec<Recognised>,
+    /// What the previous read did, for a dwell re-check to reuse
+    /// (ADR-0010): a damage-paced backend answers an unchanged region
+    /// with the same pixels, and OCR of the same pixels is the same
+    /// answer. Two generations, so one read's tiles cannot evict each
+    /// other; both are bounded by the passes one read makes.
+    previous: Vec<Recognised>,
 }
 
 impl TextSource {
@@ -102,13 +133,22 @@ impl TextSource {
         ocr: Box<dyn OcrEngine>,
         settings: SettingsSnapshot,
     ) -> Self {
-        TextSource { capture, ocr, settings }
+        TextSource {
+            capture,
+            ocr,
+            settings,
+            recognised: Vec::new(),
+            previous: Vec::new(),
+        }
     }
 
     /// Swap in new OCR settings.
     pub fn apply_settings(&mut self, settings: SettingsSnapshot, language: &str) {
         self.ocr.set_language(language);
         self.settings = settings;
+        // Another language or capture size is another answer.
+        self.recognised.clear();
+        self.previous.clear();
     }
 
     /// Lines plus the outcome.
@@ -147,6 +187,7 @@ impl TextSource {
             resolved,
             source: frame.source,
             fallback: frame.fallback,
+            unchanged: frame.unchanged,
         })
     }
 
@@ -155,16 +196,73 @@ impl TextSource {
     /// `mask` is white-filled in the grabbed pixels before OCR sees them,
     /// and words that touch it are dropped on the way back out
     /// (ADR-0008).
+    ///
+    /// A backend that says the pixels are unchanged (ADR-0002's damage
+    /// race) skips the recogniser entirely: same pixels, same words. The
+    /// mask is part of that "same", because the pixels OCR sees are the
+    /// grab *after* masking - see [`CaptureMask::clipped_to`].
     pub fn recognise_at_capture(
         &mut self,
         region: PhysRect,
         factor: i32,
         mask: CaptureMask,
     ) -> Result<(Vec<OcrLine>, Frame)> {
+        // One value governs the fill, the word drop and the reuse key,
+        // so "same pixels, same words" can never drift from what was
+        // actually masked.
+        let mask = mask.clipped_to(region);
         let frame = grab_upscaled(self.capture.as_mut(), region, factor, mask)?;
+        if frame.unchanged {
+            if let Some(lines) = self.reuse(region, factor, mask) {
+                return Ok((lines, frame));
+            }
+        }
         let raw = self.ocr.recognise(&frame.buf, frame.w, frame.h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
-        Ok((to_desktop(raw, origin, factor, mask), frame))
+        let lines = to_desktop(raw, origin, factor, mask);
+        self.remember(region, factor, mask, &lines);
+        Ok((lines, frame))
+    }
+
+    /// This region's words from an earlier pass, if any pass asked the
+    /// same question - same box, same scale, same mask.
+    ///
+    /// A hit is promoted into this read's generation, so a dwell that
+    /// never re-OCRs never forgets either.
+    fn reuse(
+        &mut self,
+        region: PhysRect,
+        factor: i32,
+        mask: CaptureMask,
+    ) -> Option<Vec<OcrLine>> {
+        let same =
+            |r: &&Recognised| r.region == region && r.factor == factor && r.mask == mask;
+        if let Some(hit) = self.recognised.iter().find(same) {
+            return Some(hit.lines.clone());
+        }
+        let hit = self.previous.iter().find(same)?;
+        let lines = hit.lines.clone();
+        self.recognised.push(Recognised { region, factor, mask, lines: lines.clone() });
+        Some(lines)
+    }
+
+    /// Keep this pass's words for the next read.
+    fn remember(
+        &mut self,
+        region: PhysRect,
+        factor: i32,
+        mask: CaptureMask,
+        lines: &[OcrLine],
+    ) {
+        let entry = Recognised { region, factor, mask, lines: lines.to_vec() };
+        let slot = self
+            .recognised
+            .iter_mut()
+            .find(|r| r.region == region && r.factor == factor && r.mask == mask);
+        match slot {
+            Some(slot) => *slot = entry,
+            None => self.recognised.push(entry),
+        }
     }
 
     /// Tiled, scan rects dropped.
@@ -188,6 +286,9 @@ impl TextSource {
         mask: CaptureMask,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
         self.capture.begin_read();
+        // One read, one generation: the previous read's passes stay
+        // reusable, older ones go.
+        self.previous = std::mem::take(&mut self.recognised);
         let out = self.resolve_tiled_inner(cursor, collect, mask);
         self.capture.end_read();
         out
@@ -298,10 +399,7 @@ impl TextSource {
         tolerance: i32,
         mask: CaptureMask,
     ) -> Result<Vec<OcrWord>> {
-        let frame = grab_upscaled(self.capture.as_mut(), tile, UPSCALE, mask)?;
-        let origin = PhysPoint { x: tile.x, y: tile.y };
-        let raw = self.ocr.recognise(&frame.buf, frame.w, frame.h)?;
-        let lines = to_desktop(raw, origin, UPSCALE, mask);
+        let (lines, _) = self.recognise_at_capture(tile, UPSCALE, mask)?;
         Ok(nearest_line(&lines, perpendicular_centre, orientation, tolerance)
             .map(|line| line.words.clone())
             .unwrap_or_default())
@@ -487,6 +585,32 @@ mod tests {
                 h: region.h,
                 source: "solid",
                 fallback: None,
+                unchanged: false,
+            })
+        }
+
+        fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
+            PhysRect { x: p.x - 1000, y: p.y - 1000, w: 2000, h: 2000 }
+        }
+    }
+
+    /// A capture whose `unchanged` flag the test drives, so the reuse
+    /// path can be exercised without a compositor.
+    struct Paced {
+        unchanged: bool,
+        grabs: std::cell::Cell<u32>,
+    }
+
+    impl RegionCapture for Paced {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            self.grabs.set(self.grabs.get() + 1);
+            Ok(Frame {
+                buf: vec![0u8; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "paced",
+                fallback: None,
+                unchanged: self.unchanged,
             })
         }
 
@@ -516,6 +640,26 @@ mod tests {
                     words: vec![OcrWord { text: format!("w{i}"), rect: *rect }],
                 })
                 .collect())
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+    }
+
+    /// Counts how often the recogniser actually ran.
+    #[derive(Default)]
+    struct Counting {
+        runs: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl OcrEngine for Counting {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> Result<Vec<OcrLine>> {
+            self.runs.set(self.runs.get() + 1);
+            Ok(vec![OcrLine {
+                words: vec![OcrWord {
+                    text: "本".to_string(),
+                    rect: PhysRect { x: 0, y: 0, w: 40, h: 40 },
+                }],
+            }])
         }
 
         fn set_language(&mut self, _tag: &str) {}
@@ -654,5 +798,193 @@ mod tests {
             assert_eq!([DESK, DESK, DESK, 0xFF], px(&buf, w, 3, y), "just left of the mask");
             assert_eq!([0xFF; 4], px(&buf, w, 4, y), "first upscaled masked column");
         }
+    }
+
+    // -- reusing an unchanged grab's words (ADR-0002/ADR-0010) --
+
+    fn paced(unchanged: bool) -> (TextSource, std::rc::Rc<std::cell::Cell<u32>>) {
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = TextSource::new(
+            Box::new(Paced { unchanged, grabs: std::cell::Cell::new(0) }),
+            Box::new(Counting { runs: runs.clone() }),
+            SettingsSnapshot {
+                max_passes: 1,
+                prefer_vertical: false,
+                capture: CaptureSize::default(),
+                scan_alphanumeric: false,
+            },
+        );
+        (source, runs)
+    }
+
+    const BOX: PhysRect = PhysRect { x: 100, y: 100, w: 80, h: 40 };
+    const OTHER: PhysRect = PhysRect { x: 400, y: 100, w: 80, h: 40 };
+    const AT: PhysPoint = PhysPoint { x: 120, y: 110 };
+
+    /// The whole point of the damage race: unchanged pixels must not be
+    /// recognised twice (ADR-0002).
+    #[test]
+    fn unchanged_pixels_reuse_the_words_already_recognised() {
+        let (mut source, runs) = paced(true);
+        let first = source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("first read");
+        assert_eq!(runs.get(), 1, "the first read must recognise");
+        assert!(!first.lines.is_empty());
+
+        let again = source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("second read");
+        assert_eq!(runs.get(), 1, "an unchanged region must not be recognised again");
+        assert_eq!(again.lines, first.lines, "and must answer the same words");
+        assert!(again.unchanged, "the signal must reach the caller");
+    }
+
+    #[test]
+    fn changed_pixels_are_always_recognised() {
+        let (mut source, runs) = paced(false);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("first read");
+        let again = source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("second read");
+        assert_eq!(runs.get(), 2);
+        assert!(!again.unchanged);
+    }
+
+    /// `unchanged` is a hint, never a promise that words are held: a
+    /// region never recognised must still be recognised.
+    #[test]
+    fn an_unchanged_region_with_nothing_held_is_still_recognised() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("first read");
+        source.resolve_in_region(AT, OTHER, CaptureMask::NONE).expect("a different box");
+        assert_eq!(runs.get(), 2, "a box never read cannot be reused");
+    }
+
+    /// A dwell through the real read bracket: last read's words must
+    /// survive into this one, or a static screen re-OCRs every period
+    /// (ADR-0010's dwell re-check would cost what it saves).
+    #[test]
+    fn a_dwell_through_the_read_bracket_reuses_the_previous_read() {
+        let (mut source, runs) = paced(true);
+        source.resolve_at_tiled(AT, CaptureMask::NONE).expect("first read");
+        assert_eq!(runs.get(), 1, "the first read must recognise");
+        for _ in 0..4 {
+            source.resolve_at_tiled(AT, CaptureMask::NONE).expect("dwell read");
+        }
+        assert_eq!(runs.get(), 1, "a static dwell must never recognise again");
+    }
+
+    /// Several passes in one read must not evict each other: a tiled
+    /// read asks for a handful of boxes, and all of them dwell.
+    #[test]
+    fn two_regions_in_one_read_are_both_kept() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("pass 1");
+        source.resolve_in_region(AT, OTHER, CaptureMask::NONE).expect("tile");
+        assert_eq!(runs.get(), 2);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("pass 1 again");
+        source.resolve_in_region(AT, OTHER, CaptureMask::NONE).expect("tile again");
+        assert_eq!(runs.get(), 2, "neither region may evict the other");
+    }
+
+    /// New settings mean new answers: nothing held may survive them.
+    #[test]
+    fn new_settings_drop_everything_held() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("first read");
+        assert_eq!(runs.get(), 1);
+        let settings = SettingsSnapshot {
+            max_passes: 2,
+            prefer_vertical: true,
+            capture: CaptureSize::default(),
+            scan_alphanumeric: true,
+        };
+        source.apply_settings(settings, "ja");
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("read after reload");
+        assert_eq!(runs.get(), 2, "a reload must re-recognise");
+    }
+
+    // -- where the two features meet: the mask is part of "same words" --
+
+    /// `Counting`'s one word maps to this box out of `BOX` at `UPSCALE`.
+    const WORD: PhysRect = PhysRect { x: 100, y: 100, w: 20, h: 20 };
+
+    /// The dangerous direction, and the reason the mask is in the key:
+    /// the backend compares *raw* pixels, so a popup appearing over a
+    /// still region is an unchanged grab whose masked pixels changed.
+    /// Serving the held words there would hand the app its own popup
+    /// text - exactly what ADR-0008 exists to prevent.
+    #[test]
+    fn an_unchanged_regrab_under_a_new_mask_is_recognised_again() {
+        let (mut source, runs) = paced(true);
+        let bare = source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("first read");
+        assert_eq!(runs.get(), 1);
+        assert_eq!(1, bare.lines.len(), "the word is there when nothing is masked");
+
+        // The popup lands on the word: same raw pixels, different question.
+        let over_the_word = live(WORD.inflated(4, 4));
+        let masked = source.resolve_in_region(AT, BOX, over_the_word).expect("masked read");
+
+        assert_eq!(runs.get(), 2, "a new mask must not be answered from the old words");
+        assert!(
+            masked.lines.is_empty(),
+            "the masked word must be dropped, never served from the unmasked pass"
+        );
+    }
+
+    /// And back the other way: words recognised under a mask must not be
+    /// served to a read that masks nothing, or the popup's shadow
+    /// outlives it.
+    #[test]
+    fn an_unchanged_regrab_that_drops_its_mask_is_recognised_again() {
+        let (mut source, runs) = paced(true);
+        let over_the_word = live(WORD.inflated(4, 4));
+        let masked = source.resolve_in_region(AT, BOX, over_the_word).expect("masked read");
+        assert_eq!(runs.get(), 1);
+        assert!(masked.lines.is_empty(), "the word is masked away");
+
+        let bare = source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("maskless read");
+        assert_eq!(runs.get(), 2, "dropping the mask is a different question");
+        assert_eq!(1, bare.lines.len(), "the word must come back");
+    }
+
+    /// The same mask twice still reuses: the rule keys on the question,
+    /// not on whether a mask exists.
+    #[test]
+    fn an_unchanged_regrab_under_the_same_mask_reuses() {
+        let (mut source, runs) = paced(true);
+        let popup = live(WORD.inflated(4, 4));
+        source.resolve_in_region(AT, BOX, popup).expect("first read");
+        assert_eq!(runs.get(), 1);
+        source.resolve_in_region(AT, BOX, popup).expect("second read");
+        assert_eq!(runs.get(), 1, "same box, same mask, same pixels: same answer");
+    }
+
+    /// The case the reuse exists for. A popup is placed after the first
+    /// hover, so the mask changes - but it is nowhere near this box, and
+    /// a mask that does not reach a grab does not change it. Keying on
+    /// the *clipped* mask is what keeps the dwell re-check cheap here.
+    #[test]
+    fn a_popup_that_never_reaches_the_box_does_not_spoil_the_reuse() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("hover");
+        assert_eq!(runs.get(), 1);
+
+        let elsewhere = live(PhysRect { x: 2000, y: 2000, w: 300, h: 200 });
+        let again = source.resolve_in_region(AT, BOX, elsewhere).expect("dwell re-check");
+
+        assert_eq!(runs.get(), 1, "a popup outside the box is the same question");
+        assert_eq!(1, again.lines.len());
+    }
+
+    /// Two boxes, one popup that only reaches one of them: the box it
+    /// misses keeps reusing, the box it covers does not.
+    #[test]
+    fn a_popup_spoils_only_the_boxes_it_actually_covers() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("box");
+        source.resolve_in_region(AT, OTHER, CaptureMask::NONE).expect("other box");
+        assert_eq!(runs.get(), 2);
+
+        let over_box_only = live(BOX);
+        source.resolve_in_region(AT, OTHER, over_box_only).expect("other box again");
+        assert_eq!(runs.get(), 2, "the uncovered box still reuses");
+        source.resolve_in_region(AT, BOX, over_box_only).expect("covered box again");
+        assert_eq!(runs.get(), 3, "the covered box must be recognised afresh");
     }
 }
