@@ -123,3 +123,73 @@ fn read_dicts(db: &Path) -> Vec<DictInfo> {
     };
     dictionary.dicts().unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shortcuts::state::Published;
+    use crate::shortcuts::{Binding, ShortcutId};
+    use channel::{HotkeyChannel, HotkeyControl};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("chibipop_settings_channel_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The portal rung reaches the window with the key the portal named,
+    /// and the window renders the rebind control instead of a snippet.
+    #[test]
+    fn a_published_portal_binding_becomes_the_portal_control() {
+        let dir = scratch("portal");
+        shortcuts::state::publish(
+            &dir,
+            &Published::portal(vec![Binding {
+                id: ShortcutId::Trigger,
+                trigger: Some("Alt+F".into()),
+            }]),
+        )
+        .unwrap();
+        let channel = hotkey_channel(&dir);
+        assert_eq!(HotkeyChannel::Portal { current_binding: Some("Alt+F".into()) }, channel);
+        assert_eq!(
+            HotkeyControl::Rebind { current: Some("Alt+F".into()) },
+            channel.control(snippets::Compositor::Kde, "ALT+F")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bound but with no key reported (every Hyprland session): still the
+    /// portal's binding, and the control says so rather than claiming a
+    /// compositor snippet would help.
+    #[test]
+    fn a_portal_that_reports_no_key_is_still_the_portal_channel() {
+        let dir = scratch("nokey");
+        shortcuts::state::publish(
+            &dir,
+            &Published::portal(vec![Binding { id: ShortcutId::Trigger, trigger: None }]),
+        )
+        .unwrap();
+        assert_eq!(HotkeyChannel::Portal { current_binding: None }, hotkey_channel(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The native rung, and a machine where no daemon has ever run, both
+    /// show the snippet: the compositor bind is the only truth there is.
+    #[test]
+    fn the_native_rung_and_a_silent_daemon_both_show_the_snippet() {
+        let dir = scratch("native");
+        assert_eq!(HotkeyChannel::Native, hotkey_channel(&dir), "no file at all");
+        shortcuts::state::publish(&dir, &Published::native()).unwrap();
+        let channel = hotkey_channel(&dir);
+        assert_eq!(HotkeyChannel::Native, channel);
+        let HotkeyControl::Snippet { text } = channel.control(snippets::Compositor::Sway, "ALT+F")
+        else {
+            panic!("the native rung must render a snippet");
+        };
+        assert!(text.contains("chibipop ctl trigger-down"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

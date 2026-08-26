@@ -119,16 +119,35 @@ pub fn version() -> Option<u32> {
 /// which is what tells the portal the session is gone.
 pub fn spawn(preferred: [(ShortcutId, String); 2], tx: SyncSender<Event>) -> std::io::Result<()> {
     std::thread::Builder::new().name("chibipop-shortcuts".to_string()).spawn(move || {
-        if let Err(reason) = run(&preferred, &tx) {
-            let _ = tx.send(Event::Unavailable(reason));
+        if let Err(why) = run(&preferred, &tx) {
+            let _ = tx.send(Event::Unavailable { reason: why.reason, advice: why.advice });
         }
     })?;
     Ok(())
 }
 
+/// Why the rung is not serving.
+///
+/// Two fields, because two readers: a tray row wants one short clause
+/// (ADR-0006), and the log wants the whole story. Keeping them apart is
+/// what lets the app-id case explain a launch method without pasting a
+/// paragraph into a menu.
+pub struct Why {
+    /// Short enough for a status row.
+    pub reason: String,
+    /// What to do about it, when there is something to do.
+    pub advice: Option<String>,
+}
+
+impl From<String> for Why {
+    fn from(reason: String) -> Why {
+        Why { reason, advice: None }
+    }
+}
+
 /// The session, from handshake to the end of the bus: subscribe,
 /// CreateSession, BindShortcuts, ListShortcuts, then pump.
-fn run(preferred: &[(ShortcutId, String); 2], tx: &SyncSender<Event>) -> Result<(), String> {
+fn run(preferred: &[(ShortcutId, String); 2], tx: &SyncSender<Event>) -> Result<(), Why> {
     let conn = Connection::session().map_err(|err| format!("no session bus: {err}"))?;
     let sender = conn
         .unique_name()
@@ -190,8 +209,11 @@ fn run(preferred: &[(ShortcutId, String); 2], tx: &SyncSender<Event>) -> Result<
         }
         // A portal that binds but cannot list is odd, not fatal: the bind
         // result already said what we have.
-        Err(reason) => {
-            let _ = tx.send(Event::Note(format!("trigger: ListShortcuts failed - {reason}")));
+        Err(why) => {
+            let _ = tx.send(Event::Note(format!(
+                "trigger: ListShortcuts failed - {}",
+                why.reason
+            )));
         }
     }
 
@@ -371,7 +393,7 @@ fn request(
     step: &'static str,
     budget: Duration,
     call: impl FnOnce(&str) -> zbus::Result<OwnedObjectPath>,
-) -> Result<HashMap<String, OwnedValue>, String> {
+) -> Result<HashMap<String, OwnedValue>, Why> {
     let deadline = Instant::now() + budget;
     let token = handle_token();
     let predicted = request_path(sender, &token);
@@ -387,7 +409,7 @@ fn request(
         drop(watch);
         watch_response(conn, handle.as_str(), step)?
     };
-    watch.wait(step, deadline, budget)
+    Ok(watch.wait(step, deadline, budget)?)
 }
 
 /// A `Request.Response` payload: the spec's `(ua{sv})`, or why we never
@@ -408,7 +430,7 @@ fn watch_response(
     conn: &Connection,
     path: &str,
     step: &'static str,
-) -> Result<ResponseWatch, String> {
+) -> Result<ResponseWatch, Why> {
     let rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
         .sender(PORTAL_BUS)
@@ -475,7 +497,7 @@ impl ResponseWatch {
 /// Every `GlobalShortcuts` signal on the portal's object, on one match
 /// rule. Registered before the handshake, so a press that lands during it
 /// is queued rather than lost.
-fn watch_signals(conn: &Connection) -> Result<MessageIterator, String> {
+fn watch_signals(conn: &Connection) -> Result<MessageIterator, Why> {
     let rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
         .sender(PORTAL_BUS)
@@ -546,15 +568,15 @@ fn handle_token() -> String {
 /// missing feature and not a denial, it is "this launch has no identity",
 /// and the fix is a launch method rather than a setting. Everything else
 /// keeps the portal's own words, which is more useful than a category.
-fn explain(step: &str, err: zbus::Error) -> String {
+fn explain(step: &str, err: zbus::Error) -> Why {
     match &err {
         zbus::Error::MethodError(name, detail, _) => {
             refusal(step, name.as_str(), detail.as_deref())
         }
         zbus::Error::InterfaceNotFound | zbus::Error::Address(_) => {
-            format!("{step}: no portal here ({err})")
+            Why::from(format!("{step}: no portal here ({err})"))
         }
-        other => format!("{step}: {other}"),
+        other => Why::from(format!("{step}: {other}")),
     }
 }
 
@@ -562,14 +584,18 @@ fn explain(step: &str, err: zbus::Error) -> String {
 /// this is the part worth pinning: a `zbus::Error::MethodError` cannot
 /// be built without a live `Message`, and the sentence a user reads must
 /// not go untested for want of a bus.
-fn refusal(step: &str, name: &str, detail: Option<&str>) -> String {
+fn refusal(step: &str, name: &str, detail: Option<&str>) -> Why {
     let text = detail.unwrap_or_default();
     if name.ends_with(".NotAllowed") && text.to_lowercase().contains("app id") {
-        return format!(
-            "{step}: the portal requires an app id. xdg-desktop-portal takes it from the systemd unit a desktop-entry launch creates (app-chibipop-*.scope, with chibipop.desktop installed) and refuses shortcut sessions without one, so a shell-launched daemon cannot register global shortcuts - launch chibipop from its desktop entry or autostart unit"
-        );
+        return Why {
+            reason: format!("{step}: the portal requires an app id"),
+            advice: Some(
+                "xdg-desktop-portal names an app from the systemd unit a desktop-entry launch creates (app-chibipop-*.scope, with chibipop.desktop installed) and refuses shortcut sessions without one - launch chibipop from its desktop entry or autostart unit, or bind `chibipop ctl trigger-down|trigger-up` in your compositor instead"
+                    .to_string(),
+            ),
+        };
     }
-    format!("{step}: {name}: {text}")
+    Why::from(format!("{step}: {name}: {text}"))
 }
 
 /// A variant may itself hold a variant; look through those wrappers so a
@@ -744,10 +770,11 @@ mod tests {
     }
 
     /// The app-id refusal is the one failure a user can fix, so it says
-    /// how instead of quoting D-Bus. This is the live case on the
-    /// reference machine: a daemon launched from a shell has no systemd
-    /// app unit, so xdg-desktop-portal will not open a shortcuts session
-    /// for it at all.
+    /// how — in the advice, where there is room, while the row-sized
+    /// reason stays one clause. This is the live case on the reference
+    /// machine: a daemon launched from a shell has no systemd app unit,
+    /// so xdg-desktop-portal will not open a shortcuts session for it at
+    /// all.
     #[test]
     fn the_app_id_refusal_explains_the_launch_requirement() {
         let said = refusal(
@@ -755,13 +782,15 @@ mod tests {
             "org.freedesktop.portal.Error.NotAllowed",
             Some("An app id is required"),
         );
-        assert!(said.contains("app id"), "{said}");
-        assert!(said.contains("chibipop.desktop"), "{said}");
-        assert!(said.contains("CreateSession"), "{said}");
+        assert_eq!("CreateSession: the portal requires an app id", said.reason);
+        let advice = said.advice.expect("the app-id case has a way out");
+        assert!(advice.contains("chibipop.desktop"), "{advice}");
+        assert!(advice.contains("chibipop ctl trigger-down"), "{advice}");
     }
 
     /// Any other refusal keeps the portal's own words: a category would
-    /// throw away the only information in it.
+    /// throw away the only information in it, and inventing advice for a
+    /// reason we do not understand would be worse than none.
     #[test]
     fn other_refusals_quote_the_portal() {
         let said = refusal(
@@ -769,13 +798,14 @@ mod tests {
             "org.freedesktop.DBus.Error.AccessDenied",
             Some("Invalid session"),
         );
-        assert!(said.contains("AccessDenied"), "{said}");
-        assert!(said.contains("Invalid session"), "{said}");
+        assert!(said.reason.contains("AccessDenied"), "{}", said.reason);
+        assert!(said.reason.contains("Invalid session"), "{}", said.reason);
+        assert_eq!(None, said.advice);
         // A refusal with no message at all is still a sentence naming
         // the step that failed.
         let bare = refusal("ListShortcuts", "org.freedesktop.DBus.Error.UnknownMethod", None);
-        assert!(bare.contains("ListShortcuts"), "{bare}");
-        assert!(bare.contains("UnknownMethod"), "{bare}");
+        assert!(bare.reason.contains("ListShortcuts"), "{}", bare.reason);
+        assert!(bare.reason.contains("UnknownMethod"), "{}", bare.reason);
     }
 
     /// A `NotAllowed` that is not about an app id must not be dressed up
@@ -784,8 +814,8 @@ mod tests {
     fn a_different_denial_is_not_mistaken_for_the_app_id_case() {
         let said =
             refusal("BindShortcuts", "org.freedesktop.portal.Error.NotAllowed", Some("no thanks"));
-        assert!(!said.contains("chibipop.desktop"), "{said}");
-        assert!(said.contains("no thanks"), "{said}");
+        assert_eq!(None, said.advice);
+        assert!(said.reason.contains("no thanks"), "{}", said.reason);
     }
 
     // -- the predicted Request path (the race avoidance) --

@@ -242,8 +242,14 @@ impl App {
             }
             // The rung is not serving. The socket is, so this is a
             // status with a reason in it, never an exit.
-            shortcuts::Event::Unavailable(reason) => {
+            shortcuts::Event::Unavailable { reason, advice } => {
                 self.log.diag(&format!("trigger: portal rung unavailable - {reason}"));
+                // The row gets the short clause (ADR-0006: one line);
+                // the way out belongs in the log, where there is room
+                // for it.
+                if let Some(advice) = advice {
+                    self.log.diag(&format!("trigger: {advice}"));
+                }
                 self.note_channel(
                     ChannelId::Trigger,
                     ChannelState::up(shortcuts::native_detail(&reason)),
@@ -1666,14 +1672,21 @@ mod tests {
             shortcuts::ShortcutId::Trigger,
             Some("Alt+F"),
         )]));
-        app.handle_shortcut(shortcuts::Event::Unavailable(
-            "CreateSession: the portal requires an app id".to_string(),
-        ));
+        app.handle_shortcut(shortcuts::Event::Unavailable {
+            reason: "CreateSession: the portal requires an app id".to_string(),
+            advice: Some("launch chibipop from its desktop entry".to_string()),
+        });
 
         let row = app.tray.statuses().row(ChannelId::Trigger);
         assert!(row.contains("control socket"), "{row}");
         assert!(row.contains("app id"), "the row must carry the reason: {row}");
+        assert!(!row.contains("desktop entry"), "the advice belongs in the log: {row}");
         assert_eq!(ksni::Status::Active, app.tray.statuses().sni_status());
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(
+            written.contains("trigger: launch chibipop from its desktop entry"),
+            "log was: {written}"
+        );
 
         let published = shortcuts::state::read(&dir).expect("published");
         assert!(!published.portal);

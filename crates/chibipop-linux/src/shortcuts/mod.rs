@@ -132,9 +132,11 @@ pub enum Event {
     Changed(Vec<Binding>),
     /// A shortcut fired. `true` is `Activated`, `false` `Deactivated`.
     Fired { id: ShortcutId, activated: bool },
-    /// The rung is not serving, with the reason a user can act on. The
-    /// control socket carries the trigger from here.
-    Unavailable(String),
+    /// The rung is not serving. `reason` is short enough for a status
+    /// row; `advice` is the longer "and here is what to do", for the
+    /// log, when there is something to do. The control socket carries
+    /// the trigger from here either way.
+    Unavailable { reason: String, advice: Option<String> },
     /// A diagnostic from the portal thread, written by the pump.
     Note(String),
 }
