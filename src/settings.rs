@@ -45,6 +45,7 @@ pub struct SettingsForm {
     pub show_engine_log: bool,
     pub show_adapter_log: bool,
     pub freq_names: Vec<String>,
+    pub freq_changed: bool,
     pub staged_adds: Vec<StagedAdd>,
     pub staged_removes: Vec<String>,
     pub library_empty: bool,
@@ -94,6 +95,7 @@ impl SettingsForm {
         }
         if kind == Kind::Frequency {
             self.freq_names.push(name.clone());
+            self.freq_changed = true;
         } else {
             self.dict_names.push(name.clone());
         }
@@ -103,6 +105,7 @@ impl SettingsForm {
 
     /// Stage a row for removal.
     pub fn stage_remove(&mut self, name: &str) {
+        let was_freq = self.freq_names.iter().any(|n| n == name);
         self.dict_names.retain(|n| n != name);
         self.freq_names.retain(|n| n != name);
         let staged = self.staged_adds.len();
@@ -110,6 +113,9 @@ impl SettingsForm {
         // Never reached the library.
         if self.staged_adds.len() == staged && !self.staged_removes.iter().any(|n| n == name) {
             self.staged_removes.push(name.to_string());
+        }
+        if was_freq {
+            self.freq_changed = true;
         }
     }
 
@@ -122,6 +128,7 @@ impl SettingsForm {
     pub fn clear_staged(&mut self) {
         self.staged_adds.clear();
         self.staged_removes.clear();
+        self.freq_changed = false;
     }
 
     /// Take what Apply wrote.
@@ -319,6 +326,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         show_engine_log: cfg.debug.show_engine_log,
         show_adapter_log: cfg.debug.show_adapter_log,
         freq_names: Vec::new(),
+        freq_changed: false,
         staged_adds: Vec::new(),
         staged_removes: Vec::new(),
         library_empty: false,
@@ -1229,6 +1237,7 @@ mod tests {
     fn a_fresh_form_stages_nothing() {
         let form = staged_form();
         assert!(!form.has_staged());
+        assert!(!form.freq_changed);
         assert!(form.freq_names.is_empty());
         assert!(!form.library_empty);
     }
@@ -1278,6 +1287,20 @@ mod tests {
 
         assert_eq!(vec!["FixtureFreq".to_string()], form.freq_names);
         assert_eq!(dicts_before, form.dict_names, "it is not a dictionary");
+    }
+
+    #[test]
+    fn staging_a_freq_add_sets_freq_changed() {
+        let mut form = staged_form();
+        assert_eq!(Some(Kind::Frequency), form.stage_add(&fixture("freq.zip")));
+        assert!(form.freq_changed);
+    }
+
+    #[test]
+    fn staging_a_term_add_does_not_set_freq_changed() {
+        let mut form = staged_form();
+        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert!(!form.freq_changed);
     }
 
     #[test]
@@ -1366,6 +1389,22 @@ mod tests {
         form.stage_remove("jiten_freq_global.zip");
         assert!(form.freq_names.is_empty());
         assert_eq!(vec!["jiten_freq_global.zip".to_string()], form.staged_removes);
+    }
+
+    #[test]
+    fn removing_a_freq_row_sets_freq_changed() {
+        let mut form = staged_form();
+        form.freq_names = vec!["FixtureFreq".into()];
+        form.stage_remove("FixtureFreq");
+        assert!(form.freq_changed);
+    }
+
+    #[test]
+    fn removing_a_term_row_does_not_set_freq_changed() {
+        let mut form = staged_form();
+        let name = form.dict_names[0].clone();
+        form.stage_remove(&name);
+        assert!(!form.freq_changed);
     }
 
     #[test]
@@ -1728,6 +1767,14 @@ mod tests {
         assert!(!form.has_staged());
         assert!(form.staged_adds.is_empty());
         assert!(form.staged_removes.is_empty());
+    }
+
+    #[test]
+    fn clear_staged_resets_freq_changed() {
+        let mut form = staged_form();
+        form.freq_changed = true;
+        form.clear_staged();
+        assert!(!form.freq_changed);
     }
 
     #[test]

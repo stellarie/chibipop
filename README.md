@@ -100,7 +100,7 @@ Visual novels show text in the same place every time. Set a static region
 and chibipop reads from that area instead of following the cursor.
 
 1. Set the sentence mode to **Static region** in Settings.
-2. Press **R** (configurable). The screen dims.
+2. Press the **Region hotkey** you set in Settings. The screen dims.
 3. Drag a rectangle around the text box. Release.
 4. A teal outline marks the active region. Toggle it with **Show capture
    region outline** in Settings.
@@ -165,17 +165,15 @@ the popup, dictionary lookup, and highlight.
 ### Setting up meikiocr
 
 [meikiocr](https://github.com/rtr46/meikiocr) is a game-trained Japanese
-OCR engine. It ships with chibipop as a reference plugin, disabled by
-default.
+OCR engine. It ships with chibipop as a reference plugin. Discovery enables
+it automatically when its manifest parses successfully.
 
 1. **Install meikiocr.** Follow its README. You need Python with meikiocr,
    OpenCV, and ONNX Runtime.
-2. **Enable the plugin.** Settings > **Plugins** tab > check **meikiocr** >
-   **Apply**.
-3. **Configure the path.** Settings > **OCR / Debug** tab > select
+2. **Configure the path.** Settings > **OCR / Debug** tab > select
    **meikiocr** from the **OCR engine** dropdown > click **Configure...** >
    pick any file in your meikiocr folder.
-4. **Restart chibipop.** The startup line confirms the engine:
+3. **Restart chibipop.** The startup line confirms the engine:
    ```
    chibipop: OCR engine: meikiocr
    ```

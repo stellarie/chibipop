@@ -379,7 +379,7 @@ fn default_sentence_mode() -> String {
 
 /// Default static region key.
 fn default_static_region_key() -> String {
-    "r".to_string()
+    String::new()
 }
 
 /// Overlay on by default.
@@ -1061,8 +1061,8 @@ mod tests {
     }
 
     #[test]
-    fn static_region_key_defaults_to_r() {
-        assert_eq!("r", Config::default().anki.static_region_key);
+    fn static_region_key_defaults_to_empty() {
+        assert_eq!("", Config::default().anki.static_region_key);
     }
 
     #[test]
@@ -1128,6 +1128,34 @@ mod tests {
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
         assert_eq!("alt+r", back.anki.static_region_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn static_region_key_empty_survives_round_trip() {
+        let p = tmp("static_key_empty_rt");
+        let _ = std::fs::remove_file(&p);
+        let c = Config::default();
+        c.save(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("static_region_key = \"\""));
+        assert!(!text.contains("static_region_key = \"r\""));
+        assert_eq!("", load_or_create(&p).unwrap().anki.static_region_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_config_with_static_region_key_r_still_loads() {
+        let p = tmp("static_key_legacy");
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nstatic_region_key = \"r\"\n",
+        )).unwrap();
+        assert_eq!("r", load_or_create(&p).unwrap().anki.static_region_key);
         let _ = std::fs::remove_file(&p);
     }
 

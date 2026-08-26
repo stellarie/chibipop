@@ -398,7 +398,7 @@ fn main() -> Result<()> {
         Command::Settings { dict, config, audit } => {
             let dict = dict_path(dict);
             let config_path = config.unwrap_or_else(default_config_path);
-            let cfg = chibipop::config::load_or_create(&config_path)
+            let mut cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
             // Only for the dict names.
             //
@@ -412,6 +412,13 @@ fn main() -> Result<()> {
             };
             if audit {
                 return chibipop::ui::audit::run(&cfg, &dicts);
+            }
+            let plugins_root = chibipop::paths::beside_exe("plugins");
+            let found = chibipop::plugin::discover::discover(&plugins_root);
+            for name in chibipop::plugin::discover::text_provider_names(&found) {
+                if !cfg.plugins.enabled.contains(&name) {
+                    cfg.plugins.enabled.push(name);
+                }
             }
             chibipop::app::settings_only(cfg, &dicts, &config_path, &dict)
         }

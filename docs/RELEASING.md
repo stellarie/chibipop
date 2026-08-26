@@ -22,12 +22,11 @@ once. That is the one step a downloaded binary cannot remove.
 `chibipop.toml` is not shipped either: it is written with defaults beside the
 executable on first run.
 
-**`plugins/meikiocr/` ships disabled.** It is the reference text-provider
-plugin, per spec section 10. Discovery lists it, but `[plugins].enabled` is
-empty by default, so no plugin process starts until the user enables it from
-the Plugins tab. `config.toml` holds the machine-specific meikiocr install
-path, the HF cache directory, and the ONNX thread cap — the user edits that
-file, never `adapter.py` or `plugin.toml`.
+**`plugins/meikiocr/` ships enabled by discovery.** It is the reference
+text-provider plugin, per spec section 10. Discovery adds it to the in-memory
+enabled list when its manifest parses successfully. `config.toml` holds the
+machine-specific meikiocr install path, the HF cache directory, and the ONNX
+thread cap — the user edits that file, never `adapter.py` or `plugin.toml`.
 
 ## Cutting one
 

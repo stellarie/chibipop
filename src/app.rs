@@ -4,7 +4,7 @@ use crate::anki;
 use crate::config::{resolve_engine, Config, EngineChoice};
 use crate::geom::{in_sticky, place_popup, PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::input::hooks::Hooks;
-use crate::library::{Library, Pending};
+use crate::library::{Kind, Library, Pending};
 use crate::lock::LibraryLock;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
@@ -513,20 +513,6 @@ fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: not applied: {e:#}");
 }
 
-/// Freq needs a rebuild.
-///
-/// CRLF: the box is an EDIT.
-fn frequency_notice(library: &Path, db: &Path) -> String {
-    format!(
-        "Frequency lists rank the words in every dictionary, so changing one needs the \
-         whole database rebuilt - chibipop cannot do that while it is running. Nothing was \
-         changed. Quit chibipop, then run this in a terminal, and start chibipop again \
-         when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
-        library.display(),
-        db.display()
-    )
-}
-
 /// Names the active OCR engine.
 fn engine_status_line(cfg: &Config) -> String {
     match resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled) {
@@ -590,12 +576,13 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
-/// A dictionary Apply deletes.
+/// What one removal deletes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Removal {
     name: String,
     dict_id: Option<i64>,
     file: Option<String>,
+    kind: Option<Kind>,
 }
 
 /// What one Apply must edit.
@@ -610,6 +597,8 @@ struct EditPlan {
 struct EditReport {
     added: Vec<String>,
     removed: Vec<String>,
+    freq_added: Vec<String>,
+    freq_removed: Vec<String>,
     failed: Vec<String>,
     dicts: Vec<DictInfo>,
 }
@@ -643,34 +632,28 @@ fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Does Apply touch a freq zip?
-///
-/// Those still need a rebuild.
-fn stages_frequency(form: &SettingsForm, dicts: &[DictInfo]) -> bool {
-    let added = form
-        .staged_adds
-        .iter()
-        .any(|a| form.freq_names.contains(&a.name));
-    let removed = form
-        .staged_removes
-        .iter()
-        .any(|name| !dicts.iter().any(|d| &d.name == name) && !form.unreadable.contains(name));
-    added || removed
-}
-
 /// Which rows and files change.
 fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPlan {
     let removals = form
         .staged_removes
         .iter()
-        .map(|name| Removal {
-            name: name.clone(),
-            dict_id: dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id),
-            file: lib
+        .map(|name| {
+            let entry = lib
                 .entries
                 .iter()
                 .find(|e| &e.name == name || &e.file == name)
-                .map(|e| e.file.clone()),
+                .cloned();
+            let kind = entry.as_ref().map(|e| e.kind);
+            Removal {
+                name: name.clone(),
+                dict_id: if kind == Some(Kind::Frequency) {
+                    None
+                } else {
+                    dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id)
+                },
+                file: entry.as_ref().map(|e| e.file.clone()),
+                kind,
+            }
         })
         .collect();
     EditPlan {
@@ -701,8 +684,14 @@ fn edit_status(report: &EditReport) -> String {
     if !report.added.is_empty() {
         parts.push(format!("Added {}.", report.added.join(", ")));
     }
+    if !report.freq_added.is_empty() {
+        parts.push(format!("Added frequency {}.", report.freq_added.join(", ")));
+    }
     if !report.removed.is_empty() {
         parts.push(format!("Removed {}.", report.removed.join(", ")));
+    }
+    if !report.freq_removed.is_empty() {
+        parts.push(format!("Removed frequency {}.", report.freq_removed.join(", ")));
     }
     if !report.failed.is_empty() {
         parts.push(format!("Not applied: {}.", report.failed.join("; ")));
@@ -741,6 +730,9 @@ fn apply_edits(
     for removal in &plan.removals {
         say(format!("Removing {}\u{2026}", removal.name));
         match remove_one(&mut conn, &mut lib, dir, &mut pending, removal) {
+            Ok(()) if removal.kind == Some(Kind::Frequency) => {
+                report.freq_removed.push(removal.name.clone())
+            }
             Ok(()) => report.removed.push(removal.name.clone()),
             Err(e) => report.failed.push(format!("{}: {e:#}", removal.name)),
         }
@@ -750,7 +742,11 @@ fn apply_edits(
     for add in &plan.additions {
         say(format!("Reading {}\u{2026}", add.name));
         match add_one(&mut conn, &mut lib, dir, &freqs, add, tx) {
-            Ok(name) => report.added.push(name),
+            Ok((name, Kind::Frequency)) => report.freq_added.push(name),
+            Ok((name, Kind::Term)) => report.added.push(name),
+            Ok((name, Kind::Unreadable)) => {
+                report.failed.push(format!("{}: {name} is unreadable", add.name))
+            }
             Err(e) => report.failed.push(format!("{}: {e:#}", add.name)),
         }
     }
@@ -760,6 +756,54 @@ fn apply_edits(
     pending.commit()?;
     report.dicts = reader.dicts().context("re-reading dictionary identities")?;
     Ok(Box::new(report))
+}
+
+/// Reapplies ranks after edits.
+fn apply_edits_with_frequencies(
+    db: &Path,
+    dir: &Path,
+    form: &SettingsForm,
+    tx: &mpsc::Sender<EditMsg>,
+) -> Result<Box<EditReport>> {
+    if form.freq_changed {
+        validate_frequency_inputs(dir, form)?;
+    }
+    let report = apply_edits(db, dir, form, tx)?;
+    if !form.freq_changed {
+        return Ok(report);
+    }
+
+    let mut conn = open_writer(db)?;
+    let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let freqs = lib.freq_paths(dir);
+    let _ = tx.send(EditMsg::Status("Updating frequency rankings...".to_string()));
+    crate::dict::edit::reapply_frequencies(&mut conn, &freqs, &|text| {
+        let _ = tx.send(EditMsg::Status(text.to_string()));
+    })?;
+    Ok(report)
+}
+
+/// Validates frequency archives before edits.
+fn validate_frequency_inputs(dir: &Path, form: &SettingsForm) -> Result<()> {
+    let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let removed = settings::removed_files(form, &lib);
+    let mut freqs: Vec<PathBuf> = lib
+        .freq_paths(dir)
+        .into_iter()
+        .filter(|path| {
+            let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+                return true;
+            };
+            !removed.iter().any(|removed| removed == file)
+        })
+        .collect();
+    freqs.extend(
+        form.staged_adds
+            .iter()
+            .filter(|add| crate::library::kind_of(&add.source) == Kind::Frequency)
+            .map(|add| add.source.clone()),
+    );
+    crate::dict::build::load_freqs(&freqs).map(|_| ())
 }
 
 /// One dict: rows, then file.
@@ -782,6 +826,9 @@ fn remove_one(
         }
     }
     if let Some(file) = &removal.file {
+        if removal.kind == Some(Kind::Frequency) {
+            crate::dict::edit::forget_source(conn, &dir.join(file))?;
+        }
         lib.quarantine(dir, file)
             .with_context(|| format!("removing {file}"))?;
         pending.held(file.clone());
@@ -789,7 +836,7 @@ fn remove_one(
     Ok(())
 }
 
-/// One archive: file, then rows.
+/// Imports one archive.
 fn add_one(
     conn: &mut Connection,
     lib: &mut Library,
@@ -797,11 +844,21 @@ fn add_one(
     freqs: &[PathBuf],
     add: &crate::settings::StagedAdd,
     tx: &mpsc::Sender<EditMsg>,
-) -> Result<String> {
+) -> Result<(String, Kind)> {
     let entry = lib
         .import(dir, &add.source)
         .with_context(|| format!("importing {}", add.source.display()))?;
     let path = dir.join(&entry.file);
+    if entry.kind == Kind::Frequency {
+        return match crate::dict::edit::record_source(conn, &path) {
+            Ok(()) => Ok((entry.name, entry.kind)),
+            Err(e) => {
+                lib.entries.retain(|x| x.file != entry.file);
+                let _ = std::fs::remove_file(&path);
+                Err(e)
+            }
+        };
+    }
     let base = crate::dict::edit::next_entry_id(conn)?;
     let on_progress = |line: &str| {
         if let Some(text) = rebuild::friendly(&rebased(line, base)) {
@@ -809,7 +866,7 @@ fn add_one(
         }
     };
     match crate::dict::edit::add_dictionary(conn, &path, freqs, &on_progress) {
-        Ok(done) => Ok(done.name),
+        Ok(done) => Ok((done.name, entry.kind)),
         Err(e) => {
             lib.entries.retain(|x| x.file != entry.file);
             let _ = std::fs::remove_file(&path);
@@ -1010,6 +1067,14 @@ fn spawn_worker(w: WorkerSpawn) -> Result<(thread::JoinHandle<()>, Vec<DictInfo>
 
 /// Run until the user quits.
 pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
+    let plugins_root = crate::paths::beside_exe("plugins");
+    let found = crate::plugin::discover::discover(&plugins_root);
+    for name in crate::plugin::discover::text_provider_names(&found) {
+        if !cfg.plugins.enabled.contains(&name) {
+            cfg.plugins.enabled.push(name);
+        }
+    }
+
     // Nothing built yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
@@ -1179,8 +1244,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
     }
-    if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
-        Hooks::set_action_hotkey(1, vk, 0);
+    match crate::config::parse_trigger_key(&live.static_region_key) {
+        Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
+        None => Hooks::set_action_hotkey(1, 0, 0),
     }
     if let Some(vk) = live
         .actions_ocr_clipboard_hotkey
@@ -1944,10 +2010,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
-                            // Never half-apply.
-                            if edited.has_staged() && stages_frequency(&edited, &dicts) {
-                                w.set_status(&frequency_notice(&library, &db_path));
-                            } else if edited.has_staged() {
+                            if edited.has_staged() {
                                 match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
                                     Ok(lock) => {
@@ -1961,7 +2024,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                         let db = db_path.clone();
                                         let dir = library.clone();
                                         thread::spawn(move || {
-                                            let done = apply_edits(&db, &dir, &edited, &etx);
+                                            let done =
+                                                apply_edits_with_frequencies(&db, &dir, &edited, &etx);
                                             let _ = etx.send(EditMsg::Done(done));
                                         });
                                         let ms = t0.elapsed().as_millis();
@@ -3668,8 +3732,9 @@ fn apply_live(
     if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
         Hooks::set_action_hotkey(0, vk, mods);
     }
-    if let Some(vk) = crate::config::parse_trigger_key(&live.static_region_key) {
-        Hooks::set_action_hotkey(1, vk, 0);
+    match crate::config::parse_trigger_key(&live.static_region_key) {
+        Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
+        None => Hooks::set_action_hotkey(1, 0, 0),
     }
     match live
         .actions_ocr_clipboard_hotkey
@@ -4623,6 +4688,8 @@ mod tests {
         EditReport {
             added: added.iter().map(|s| (*s).to_string()).collect(),
             removed: removed.iter().map(|s| (*s).to_string()).collect(),
+            freq_added: Vec::new(),
+            freq_removed: Vec::new(),
             failed: failed.iter().map(|s| (*s).to_string()).collect(),
             dicts: Vec::new(),
         }
@@ -4695,45 +4762,76 @@ mod tests {
         assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
     }
 
-    /// A freq zip has no dict row.
     #[test]
-    fn adding_a_frequency_archive_is_refused() {
-        let mut form = staged_form(&[(Path::new("freq.zip"), "JA Freq")], &[]);
-        form.freq_names = vec!["JA Freq".to_string()];
-        assert!(stages_frequency(&form, &[]));
+    fn a_mixed_frequency_apply_reapplies_in_place() {
+        let (dir, _guard) = edit_scratch("mixed_frequency");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        let mut form = settings::from_config(&Config::default(), &[]);
+        assert_eq!(
+            Some(crate::library::Kind::Frequency),
+            form.stage_add(&fixture("freq.zip"))
+        );
+        assert_eq!(
+            Some(crate::library::Kind::Term),
+            form.stage_add(&fixture("terms.zip"))
+        );
+        let (tx, rx) = mpsc::channel::<EditMsg>();
+        let report =
+            apply_edits_with_frequencies(&db, &library, &form, &tx).expect("the apply must work");
+
+        assert_eq!(vec!["FixtureTerms".to_string()], report.added);
+        assert_eq!(vec!["FixtureFreq".to_string()], report.freq_added);
+        assert!(report.removed.is_empty());
+        assert!(report.freq_removed.is_empty());
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(library.join("freq.zip").exists());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let freq: i64 = conn
+            .query_row("SELECT freq FROM term WHERE surface = ?1", ["食べる"], |r| r.get(0))
+            .unwrap();
+        assert_eq!(7, freq);
+        assert_eq!(None, drifted(&library, &db).unwrap());
+        assert!(rx.try_iter().any(|message| {
+            matches!(message, EditMsg::Status(text) if text == "Updating frequency rankings...")
+        }));
     }
 
     #[test]
-    fn adding_a_term_dictionary_stays_incremental() {
-        let form = staged_form(&[(Path::new("terms.zip"), "FixtureTerms")], &[]);
-        assert!(!stages_frequency(&form, &[]));
+    fn a_frequency_removal_reapplies_nulls_in_place() {
+        let (dir, _guard) = edit_scratch("remove_frequency");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        std::fs::copy(fixture("freq.zip"), library.join("freq.zip")).unwrap();
+        let lib = Library::load(&library).unwrap();
+        let mut form = settings::with_library(settings::from_config(&Config::default(), &[]), &lib);
+        form.stage_remove("FixtureFreq");
+
+        let (tx, rx) = mpsc::channel::<EditMsg>();
+        let report =
+            apply_edits_with_frequencies(&db, &library, &form, &tx).expect("the removal must work");
+
+        assert!(report.added.is_empty());
+        assert!(report.removed.is_empty());
+        assert_eq!(vec!["FixtureFreq".to_string()], report.freq_removed);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(!library.join("freq.zip").exists());
+        assert_eq!(1, report.dicts.len());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let ranked: i64 = conn
+            .query_row("SELECT COUNT(*) FROM term WHERE freq IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(0, ranked);
+        assert_eq!(None, drifted(&library, &db).unwrap());
+        assert!(rx.try_iter().any(|message| {
+            matches!(message, EditMsg::Status(text) if text == "Updating frequency rankings...")
+        }));
     }
 
     #[test]
-    fn removing_a_row_the_database_never_had_is_refused() {
-        let form = staged_form(&[], &["JA Freq"]);
-        assert!(stages_frequency(
-            &form,
-            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
-        ));
-    }
-
-    #[test]
-    fn a_refused_frequency_change_names_the_builder_and_both_paths() {
-        let notice = frequency_notice(
-            Path::new(r"C:\a\library"),
-            Path::new(r"C:\a\data\chibipop.sqlite"),
-        );
-        assert!(notice.contains("Nothing was changed."), "{notice}");
-        assert!(
-            notice.contains("\r\nchibipop build-dict"),
-            "the command needs its own line"
-        );
-        assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
-        assert!(
-            notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""),
-            "{notice}"
-        );
+    fn a_term_only_form_does_not_mark_frequency_changes() {
+        let form = staged_form(&[(&fixture("terms.zip"), "FixtureTerms")], &[]);
+        assert!(!form.freq_changed);
     }
 
     #[test]
@@ -4759,26 +4857,6 @@ mod tests {
         let s = engine_status_line(&cfg);
         assert!(s.contains("meikiocr"), "{s}");
         assert!(s.contains("not found"), "{s}");
-    }
-
-    #[test]
-    fn removing_an_installed_dictionary_stays_incremental() {
-        let form = staged_form(&[], &["\u{5927}\u{8f9e}\u{6797}"]);
-        assert!(!stages_frequency(
-            &form,
-            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
-        ));
-    }
-
-    /// A broken zip has no dict row.
-    #[test]
-    fn removing_an_unreadable_file_stays_incremental() {
-        let mut form = staged_form(&[], &["broken.zip"]);
-        form.unreadable = vec!["broken.zip".to_string()];
-        assert!(!stages_frequency(
-            &form,
-            &[di(1, "\u{5927}\u{8f9e}\u{6797}")]
-        ));
     }
 
     #[test]
@@ -4909,26 +4987,29 @@ mod tests {
         assert_eq!(1, report.dicts.len());
     }
 
-    /// Task 4's guard, from here.
     #[test]
-    fn a_refused_addition_leaves_no_trace_in_the_library() {
-        let (dir, _guard) = edit_scratch("refused_add");
+    fn a_frequency_addition_stays_out_of_dictionary_rows() {
+        let (dir, _guard) = edit_scratch("add_frequency");
         let library = dir.join("library");
         let db = built_db(&dir, &library);
         let before = entry_count(&db);
-        let form = staged_form(&[(&fixture("freq.zip"), "FixtureFreq")], &[]);
+        let mut form = settings::from_config(&Config::default(), &[]);
+        assert_eq!(
+            Some(crate::library::Kind::Frequency),
+            form.stage_add(&fixture("freq.zip"))
+        );
 
         let (tx, _rx) = mpsc::channel::<EditMsg>();
-        let report = apply_edits(&db, &library, &form, &tx).expect("the apply must report");
+        let report = apply_edits_with_frequencies(&db, &library, &form, &tx)
+            .expect("the frequency apply must work");
 
         assert!(report.added.is_empty(), "{:?}", report.added);
-        assert_eq!(1, report.failed.len(), "{:?}", report.failed);
-        assert!(
-            !library.join("freq.zip").exists(),
-            "the imported copy must be removed"
-        );
+        assert_eq!(vec!["FixtureFreq".to_string()], report.freq_added);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(library.join("freq.zip").exists());
         assert_eq!(before, entry_count(&db));
         assert_eq!(1, dict_rows(&db).len());
+        assert_eq!(None, drifted(&library, &db).unwrap());
     }
 
     /// Refuse before it moves.
