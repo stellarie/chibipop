@@ -230,142 +230,23 @@ Tested with:
 
 Linux support is **in development** and not yet in any release. It targets
 Wayland compositors that speak the wlroots protocol family — **Hyprland is the
-reference compositor**, with Sway and friends first-class alongside it. KDE
-Plasma works through the desktop portals. X11 is not a target.
+reference compositor**, with sway and friends first-class alongside it. KDE
+Plasma works through the desktop portals; GNOME is best-effort. X11 is not a
+target.
 
-### The trigger key
-
-Wayland has no global key observation, so on wlroots compositors the
-**compositor's own keybind is the trigger**: it runs `chibipop ctl`, which
-speaks to the daemon over a UNIX socket. Two lines, and the default `ALT+F`
-chord (held while reading) looks like this on Hyprland:
+Wayland has no global key observation, so the compositor's own keybind is the
+trigger. Two lines bind the default `ALT+F` chord on Hyprland:
 
 ```
 bind  = ALT, F, exec, chibipop ctl trigger-down
 bindr = ALT, F, exec, chibipop ctl trigger-up
 ```
 
-and like this on sway:
-
-```
-bindsym --no-repeat Mod1+f exec chibipop ctl trigger-down
-bindsym --release   Mod1+f exec chibipop ctl trigger-up
-```
-
-`trigger-down` freezes one full grab of the monitor under the cursor *before*
-the popup appears, and every lookup while you hold the chord reads that frozen
-screen: the popup can cover the very word it is defining and the next lookup
-still reads through it. Moving onto another monitor mid-hold grabs that one.
-`trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the
-hands-free version — it freezes at toggle-on and stays frozen until you toggle
-off.
-
-**One Hyprland defect to know about** (present through at least 0.55.4,
-verified in source and live): if you release the modifier before the key —
-ALT up, then F up — Hyprland fires **no release bind at all**
-([hyprwm/Hyprland#5032](https://github.com/hyprwm/Hyprland/discussions/5032)).
-The `trigger-up` is lost and the popup sticks, following the cursor as if the
-chord were still held. No bind arrangement works around it, so make a habit of
-releasing `F` first; if the popup does stick, tap the chord again (releasing
-`F` first), or bind the toggle instead — one press bind, nothing to release,
-nothing to wedge:
-
-```
-bind = ALT, F, exec, chibipop ctl toggle
-```
-
-sway is not affected — it arms the release binding at press time and fires it
-on whichever key of the chord comes up first.
-
-**Holding a bare modifier** (the Windows default's hold-Shift feel) is one line
-on Hyprland, which can bind a modifier as the key itself:
-
-```
-bind  = SHIFT, Shift_L, exec, chibipop ctl trigger-down
-bindr = SHIFT, Shift_L, exec, chibipop ctl trigger-up
-```
-
-sway's equivalent is `bindsym --release Shift_L`. It is a real cost, not a free
-upgrade: every Shift press then spawns a short-lived `chibipop ctl`, so it
-suits a reading machine more than a typing one. On Hyprland it is also in the
-same wedge family as above — pressing any other key while Shift is held loses
-that release too, sticking the hold until the next clean Shift tap. And it is
-impossible on the portal shortcuts channel (KDE, GNOME 48+), whose spec
-requires modifier-plus-key — which is why `ALT+F` is the default everywhere.
-
-**The portal route** is the alternative that cannot lose a release. Launched
-with an app id — the desktop entry, the systemd user unit, or a uwsm session —
-chibipop registers its trigger on the GlobalShortcuts portal. On KDE and
-GNOME that is the whole story (the desktop shows a consent dialog and owns the
-binding). On Hyprland, with `xdg-desktop-portal-hyprland` running, the key
-stays in your config but rides the `global` dispatcher instead of `exec`:
-
-```
-bind = ALT, F, global, chibipop:trigger
-```
-
-Hyprland delivers the portal release keyed to the pressed shortcut itself,
-independent of the modifier state, so either release order retracts the popup.
-A daemon started from a bare shell has no app id and the portal refuses it —
-chibipop's status row says so, and the socket keeps serving meanwhile.
-
-Ready-to-copy snippets live in [`extras/hyprland.conf`](extras/hyprland.conf),
-and the settings window shows (and copies) the right snippet for whatever chord
-you configure.
-
-### GNOME
-
-GNOME is **best-effort**, and today that means something concrete:
-
-- **The popup cannot appear on stock GNOME.** chibipop draws its popup on the
-  `wlr-layer-shell` protocol, which GNOME's compositor (Mutter) does not
-  implement. On GNOME, chibipop starts and keeps running, and tells you exactly
-  that — a startup message naming the missing `zwlr_layer_shell_v1` capability,
-  and a `Popup: unsupported — missing zwlr_layer_shell_v1` line in its
-  per-channel status, not a crash. Everything that does not need an overlay
-  surface still works: the settings window opens (it is an ordinary window),
-  the capture, cursor and trigger channels still resolve and report themselves,
-  and `chibipop ctl` still answers. What does not run is the hover-and-read
-  loop, because there is nowhere to draw it. If GNOME ever gains a way to place
-  an overlay surface, the rest below is what its support looks like.
-- **Screen capture asks once.** GNOME has no promptless capture protocol, so
-  chibipop uses the ScreenCast portal: one consent dialog on first launch
-  covering all monitors, then a restore token keeps later launches silent. If
-  you deny it, chibipop shows an error state with a retry — it never loops the
-  dialog and never exits over it.
-- **Cursor tracking rides that same capture stream** (portal cursor metadata),
-  so it costs no extra prompt — but it also means a denied capture portal takes
-  cursor tracking down with it, and chibipop reports itself unsupported, naming
-  the missing capability.
-- **The trigger key needs GNOME 48 or newer.** Trigger keys register through
-  the GlobalShortcuts portal, which GNOME ships usably from version 48. On
-  older GNOME there is no trigger channel at all — chibipop's per-channel
-  status names it as down. Note that while bound, GNOME swallows the shortcut
-  (default `Alt+F`) globally; you can edit the binding in GNOME's portal
-  dialog.
-- **No tray icon on stock GNOME.** GNOME removed tray (StatusNotifier) support;
-  an extension such as *AppIndicator and KStatusNotifierItem Support* restores
-  it. chibipop is fully operable without the tray: the settings window opens
-  with `chibipop settings` (or from the autostart entry's launcher), the
-  per-channel status is written to the daemon's log at startup and on every
-  change — `chibipop probe` prints the capability report those verdicts come
-  from — and stopping the daemon is a `SIGTERM` (`systemctl --user stop
-  chibipop` for the unit in [`extras/`](extras/), or `pkill chibipop`). The tray
-  is a convenience over those, never the only way to reach them.
-- **The popup cannot hide itself from screen sharing.** Hyprland and KDE offer
-  ways to exclude chibipop's popup from third-party capture (chibipop shows
-  you the snippet); GNOME has no equivalent, so on GNOME the popup would be
-  visible in recordings and calls.
-
-### Starting at login
-
-The settings window has an autostart checkbox that writes (or removes)
-`~/.config/autostart/chibipop.desktop` directly — the file is the whole
-state, there is no config field to drift from it. GNOME, KDE, and
-uwsm-managed sessions honour that entry. Bare Hyprland/sway sessions
-don't read XDG autostart; [`extras/`](extras/) ships a systemd user unit
-and a Hyprland `exec-once` + trigger-bind snippet for those, each with
-its install line in [`extras/README.md`](extras/README.md).
+Everything else lives in [`docs/LINUX.md`](docs/LINUX.md): building and
+quick start, the trigger key's design (and Hyprland's release-bind defect),
+per-compositor support including KDE and GNOME, file locations, the command
+line, differences from Windows, and troubleshooting. Ready-to-copy session
+snippets live in [`extras/`](extras/).
 
 ---
 

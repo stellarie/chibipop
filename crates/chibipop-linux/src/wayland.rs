@@ -193,7 +193,7 @@ mod tests {
     /// global is named (so a Mutter that grows it self-heals the
     /// install), the cost is named as the hover loop, and the line must
     /// NOT claim the app cannot run - the daemon stays up and the
-    /// settings window opens, which is what README § Linux → GNOME
+    /// settings window opens, which is what docs/LINUX.md § GNOME
     /// promises.
     #[test]
     fn a_missing_layer_shell_costs_the_hover_loop_and_not_the_app() {

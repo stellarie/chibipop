@@ -6,6 +6,9 @@ checkbox does not cover. The checkbox writes an XDG autostart entry
 uwsm-managed sessions all honour — prefer it where it works, and pick
 **one** mechanism, not several.
 
+Full Linux setup — trigger key, per-compositor support, troubleshooting —
+is in [`docs/LINUX.md`](../docs/LINUX.md).
+
 ## chibipop.desktop
 
 An application-launcher entry, so chibipop shows up in app grids and
