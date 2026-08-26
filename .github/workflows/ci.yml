@@ -341,6 +341,16 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends sway fonts-noto-cjk
           sway --version
 
+      # `cage` is the *other* compositor this job needs, and it is here
+      # for what it lacks: it advertises no zwlr_layer_shell_v1, so a
+      # nested headless cage is the only stock-GNOME-shaped session CI
+      # can produce (ticket 49). `no_layer_shell` skips itself without
+      # it, which would quietly retire the GNOME posture from CI.
+      - name: Install cage
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends cage
+          cage --version || true
+
       # The same debug profile the gate's tests use, so the cache is one
       # dependency graph and not two. `-p chibipop-linux` keeps the
       # bin-name collision with chibipop-windows out of it (see the
@@ -351,7 +361,8 @@ jobs:
           cargo test -p chibipop-linux --no-run \
             --test wayland_probe --test popup_live \
             --test wlr_capture_live --test trigger_live \
-            --test portal_capture_live
+            --test portal_capture_live \
+            --test no_layer_shell --test portal_denial
 
       # Backgrounded on purpose: the compositor has to outlive this
       # step. One known-size output, no bar, no Xwayland, no bindings -
@@ -401,6 +412,17 @@ jobs:
             --test wayland_probe --test popup_live \
             --test wlr_capture_live --test trigger_live \
             --test portal_capture_live \
+            -- --nocapture --test-threads=1
+
+      # The degradation pair (ticket 49), kept separate because neither
+      # one runs against *this* compositor: `no_layer_shell` nests its
+      # own cage, and `portal_denial` talks to a fake denying portal on a
+      # private bus. Both are hermetic, and both assert what a user sees
+      # when a capability is missing or refused.
+      - name: Degradation - no layer shell, denied capture portal
+        run: |
+          cargo test -p chibipop-linux \
+            --test no_layer_shell --test portal_denial \
             -- --nocapture --test-threads=1
 
       # The direct smoke, the part no test target covers: a daemon

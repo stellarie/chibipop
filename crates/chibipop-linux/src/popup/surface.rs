@@ -161,7 +161,10 @@ pub struct Popup {
     outputs: OutputState,
     registry: RegistryState,
     shm: Shm,
-    shell: LayerShell,
+    /// `None` on a compositor that advertises no `zwlr_layer_shell_v1`
+    /// (stock GNOME): the popup then maps no surface and every show is
+    /// a named error, while the rest of it keeps answering SCTK.
+    shell: Option<LayerShell>,
     fractional: Option<WpFractionalScaleManagerV1>,
     viewporter: Option<WpViewporter>,
     pool: SlotPool,
@@ -191,17 +194,39 @@ pub struct Popup {
 impl Popup {
     /// Bind the popup's globals. Surfaces come later, once the output
     /// roundtrip has geometry to place them against.
+    ///
+    /// The layer shell is the one global whose absence is a *state*
+    /// rather than an error (ticket 49): stock GNOME advertises none,
+    /// and the popup then exists with no shell to draw on - it maps
+    /// nothing, shows nothing, and says so - while the seat, the
+    /// outputs and the shm pool it also owns keep serving the handlers
+    /// SCTK dispatches into `App`. Returning `Err` here instead would
+    /// leave those live proxies behind with nothing to answer their
+    /// events, which is exactly how a layer-shell-less session used to
+    /// panic on its first `wl_shm::format`.
+    ///
+    /// An `Err` from this function therefore means something no session
+    /// can work without (no `wl_compositor`, no `wl_shm`, no shared
+    /// memory), which the capability report has already named as fatal.
     pub fn bind(globals: &GlobalList, qh: &QueueHandle<App>, config: &Config) -> Result<Popup> {
         let compositor = CompositorState::bind(globals, qh)
             .map_err(|e| anyhow!("binding wl_compositor: {e}"))?;
         let shm = Shm::bind(globals, qh).map_err(|e| anyhow!("binding wl_shm: {e}"))?;
-        let shell = LayerShell::bind(globals, qh)
-            .map_err(|e| anyhow!("binding zwlr_layer_shell_v1: {e}"))?;
         // A screenful at 4K is 33 MB; the pool grows on demand, so
         // start at one modest popup and let it stretch.
         let pool = SlotPool::new(640 * 480 * 4, &shm).context("creating the popup's shm pool")?;
 
         let mut notes = Vec::new();
+        let shell = match LayerShell::bind(globals, qh) {
+            Ok(shell) => Some(shell),
+            Err(e) => {
+                notes.push(format!(
+                    "popup: no layer surface - {e}; the hover loop is unsupported on this \
+                     compositor and every other channel keeps running"
+                ));
+                None
+            }
+        };
         let fractional = globals.bind::<WpFractionalScaleManagerV1, App, _>(qh, 1..=1, ()).ok();
         let viewporter = globals.bind::<WpViewporter, App, _>(qh, 1..=1, ()).ok();
         if fractional.is_none() || viewporter.is_none() {
@@ -273,6 +298,13 @@ impl Popup {
             hits: None,
             notes,
         })
+    }
+
+    /// Can this popup ever draw? False on a compositor with no layer
+    /// shell, which is a supported state and not an error: the daemon
+    /// reports the Popup channel down and keeps every other channel.
+    pub fn available(&self) -> bool {
+        self.shell.is_some()
     }
 
     /// Diagnostics accumulated since the last drain. The popup owns no
@@ -497,18 +529,16 @@ impl Popup {
         let Some(info) = self.outputs.info(output) else { return };
         let geo = place::geometry_of(&info);
         let id = self.next_id;
-        self.next_id += 1;
 
+        // No shell, no surface: nothing is created and nothing is
+        // spent. The daemon has already said so once at startup, so
+        // this is silent rather than one note per output.
+        let Some(shell) = self.shell.as_ref() else { return };
         let surface = self.compositor.create_surface(qh);
         let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&surface, qh, ()));
         let scale = self.fractional.as_ref().map(|f| f.get_fractional_scale(&surface, qh, id));
-        let layer = self.shell.create_layer_surface(
-            qh,
-            surface,
-            self.layer,
-            Some(NAMESPACE),
-            Some(output),
-        );
+        let layer = shell.create_layer_surface(qh, surface, self.layer, Some(NAMESPACE), Some(output));
+        self.next_id += 1;
         // Inviolable (ADR-0004): the popup must never reserve space,
         // never take keyboard focus, and be positioned by margins from
         // the top-left corner of *this* output.

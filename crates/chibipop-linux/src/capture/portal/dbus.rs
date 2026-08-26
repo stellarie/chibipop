@@ -133,25 +133,30 @@ pub enum PortalError {
 }
 
 impl PortalError {
-    /// The tray/settings row text: short, honest, and naming the way
-    /// back (ADR-0006 style, e.g. "screen-capture permission denied -
-    /// retry from the tray or `chibipop ctl reload`").
+    /// The tray/settings row text: short, honest, and naming a way back
+    /// that exists (e.g. "screen-capture permission denied - retry with
+    /// Apply in the settings window or `chibipop ctl reload`").
     pub fn detail(&self) -> String {
         match self {
             PortalError::Absent(what) => format!(
                 "no screen-capture portal on the session bus ({what}) - install xdg-desktop-portal \
                  and its compositor backend, then retry with `chibipop ctl reload`"
             ),
-            PortalError::Denied => "screen-capture permission denied - retry from the tray or \
-                                    `chibipop ctl reload`"
+            // "From the tray" would be a lie: the tray's rows are
+            // status, not buttons (ADR-0006), and the retry hook is the
+            // `reload` verb - which is exactly what the settings
+            // window's Apply sends. Both routes are named because a
+            // stock-GNOME session has no tray to reach either from.
+            PortalError::Denied => "screen-capture permission denied - retry with Apply in the \
+                                    settings window or `chibipop ctl reload`"
                 .to_string(),
             PortalError::Ended(why) => format!(
-                "the portal ended the screen-capture request ({why}) - retry from the tray or \
-                 `chibipop ctl reload`"
+                "the portal ended the screen-capture request ({why}) - retry with Apply in the \
+                 settings window or `chibipop ctl reload`"
             ),
             PortalError::TimedOut(step) => format!(
-                "the screen-capture dialog went unanswered at {step} - answer it, then retry from \
-                 the tray"
+                "the screen-capture dialog went unanswered at {step} - answer it, then retry with \
+                 `chibipop ctl reload`"
             ),
             PortalError::Protocol(what) => format!(
                 "the screen-capture portal answered off-spec ({what}) - see the log; retry with \

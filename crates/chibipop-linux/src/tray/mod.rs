@@ -228,12 +228,14 @@ mod tests {
     use ksni::Tray;
 
     /// The startup registry a wlr session produces: the promptless
-    /// capture backend plus whichever cursor rung was selected.
+    /// capture backend, whichever cursor rung was selected, and a layer
+    /// shell to draw on.
     fn tray(selection: &Selection) -> (ChibipopTray, calloop::channel::Channel<TrayRequest>) {
         let (tx, rx) = calloop::channel::channel();
         let statuses = ChannelStatuses::startup(
             status::capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy)),
             selection,
+            status::popup_state(true),
         );
         (ChibipopTray { statuses, requests: tx }, rx)
     }
@@ -264,8 +266,8 @@ mod tests {
         found(tray);
     }
 
-    /// The ticket's menu shape: Settings, the three status rows, Quit —
-    /// and the status rows are disabled while the two actions are not.
+    /// The menu shape: Settings, one status row per channel, Quit — and
+    /// the status rows are disabled while the two actions are not.
     #[test]
     fn menu_is_settings_then_disabled_status_rows_then_quit() {
         let (tray, _rx) = tray(&Selection::Rung(Rung::ImageCopyCapture));
@@ -276,6 +278,7 @@ mod tests {
                 ("Capture: wlr-screencopy region capture".to_string(), false),
                 ("Cursor: ext-image-copy-capture cursor session".to_string(), false),
                 ("Trigger: control socket".to_string(), false),
+                ("Popup: wlr-layer-shell overlay surface".to_string(), false),
                 ("-".to_string(), false),
                 ("Quit".to_string(), true),
             ],
@@ -343,6 +346,7 @@ mod tests {
         let mut handle = TrayHandle::trayless(ChannelStatuses::startup(
             status::capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy)),
             &Selection::Rung(Rung::HyprctlPoll),
+            status::popup_state(true),
         ));
         assert!(!handle.is_connected());
 
@@ -370,6 +374,7 @@ mod tests {
         let mut handle = TrayHandle::trayless(ChannelStatuses::startup(
             status::capture_state(&CaptureSelection::Backend(Backend::Portal)),
             &Selection::Rung(Rung::HyprctlPoll),
+            status::popup_state(true),
         ));
         handle.set_channel(ChannelId::Capture, ChannelState::up("wlr-screencopy"));
 
