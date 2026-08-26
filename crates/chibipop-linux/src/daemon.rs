@@ -1393,6 +1393,7 @@ mod tests {
             portal_retry: None,
             popup: None,
             demo: Demo::default(),
+            scripting: false,
         }
     }
 
