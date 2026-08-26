@@ -19,6 +19,7 @@ mod channel;
 
 use crate::lock::{self, LockError};
 use crate::paths::{self, Paths};
+use crate::shortcuts;
 use crate::{control, wayland};
 use anyhow::{Context, Result};
 use chibipop::library::Library;
@@ -81,7 +82,7 @@ pub fn run(paths: Paths) -> Result<()> {
         socket_path: runtime_dir.join(control::file_name(&display)),
         log_path: paths.log_file(),
         compositor: snippets::Compositor::detect(),
-        channel: channel::HotkeyChannel::Native,
+        channel: hotkey_channel(&paths.state_dir),
         library_dir,
         db_path,
         runtime_dir: runtime_dir.to_path_buf(),
@@ -91,6 +92,26 @@ pub fn run(paths: Paths) -> Result<()> {
 
     drop(lock);
     Ok(())
+}
+
+/// Who owns the trigger binding, as the daemon published it (ticket 36).
+///
+/// The portal control is only rendered when a daemon actually got the
+/// GlobalShortcuts session *and* the bind through — never on a bus
+/// probe. ADR-0005's rule is that the hotkey section cannot lie about
+/// who owns the key, and "a portal exists on this machine" is not the
+/// same fact as "the portal owns this binding": the frontend refuses
+/// shortcut sessions to a launch with no app id, so a probe would print
+/// a portal binding for a daemon that has none. No file, or a file
+/// saying native, therefore means the compositor bind is the truth and
+/// the snippet is what helps.
+fn hotkey_channel(state_dir: &Path) -> channel::HotkeyChannel {
+    match shortcuts::state::read(state_dir) {
+        Some(published) if published.portal => channel::HotkeyChannel::Portal {
+            current_binding: published.trigger_description(),
+        },
+        _ => channel::HotkeyChannel::Native,
+    }
 }
 
 /// The built DB's dictionary names, read-only: what the daemon would see

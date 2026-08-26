@@ -460,14 +460,22 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
             ]
             .spacing(6)
             .into(),
-            // Constructed by ticket 36's portal session; rendered here
-            // so the portal channel needs no view reshaping.
+            // The portal rung (ticket 36). There is no in-app rebind to
+            // offer and pretending otherwise would be the one thing
+            // ADR-0005 forbids here: the portal owns the binding, the
+            // dialog it raises at bind time and the desktop's own
+            // shortcut editor are where a key changes, and the chord
+            // above is only what we ask for next time.
             HotkeyControl::Rebind { current } => column![
-                text(format!(
-                    "Portal binding: {}",
-                    current.as_deref().unwrap_or("(not bound)")
-                )),
-                button("Rebind..."),
+                text("Portal channel: the GlobalShortcuts portal owns this binding."),
+                text(match &current {
+                    Some(key) => format!("Current key: {key}"),
+                    None => "Current key: your desktop does not report one - open its global-shortcuts settings to see or change it".to_string(),
+                }),
+                text(
+                    "The chord above is the preferred trigger, offered to the portal at the next start; your desktop's shortcut editor has the last word."
+                )
+                .size(13),
             ]
             .spacing(6)
             .into(),

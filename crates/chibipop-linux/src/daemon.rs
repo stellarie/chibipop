@@ -17,6 +17,7 @@ use crate::paths::Paths;
 use crate::tray::status::{ChannelId, ChannelState, ChannelStatuses};
 use crate::tray::{self, TrayHandle, TrayRequest};
 use crate::popup::{self, Demo, Popup, ShowRequest};
+use crate::shortcuts;
 use crate::trigger::{self, Hold};
 use crate::wayland;
 use crate::worker;
@@ -66,6 +67,9 @@ const DEMO_ANCHOR: PhysRect = PhysRect { x: 200, y: 200, w: 120, h: 32 };
 pub(crate) struct App {
     log: Log,
     stub: StubState,
+    /// Where the trigger channel's published state goes, so the
+    /// settings window can render who owns the binding (ticket 36).
+    state_dir: PathBuf,
     config_file: PathBuf,
     /// The config as loaded, so a reload can rebuild what the Worker
     /// owns from the same source of truth the Controller reads.
@@ -189,6 +193,15 @@ impl App {
         };
         let outcome = self.stub.apply(verb);
         self.log.diag(&format!("control: {} - {}", verb.as_str(), outcome));
+        self.apply_verb(verb);
+    }
+
+    /// One trigger verb's effect, whichever channel delivered it: the
+    /// control socket (ADR-0003's rung 2, always bound) or the
+    /// GlobalShortcuts portal (rung 1). Both land here on purpose — a
+    /// portal press and a `chibipop ctl trigger-down` that could drift
+    /// apart would be two trigger semantics, and the product has one.
+    fn apply_verb(&mut self, verb: Verb) {
         match verb {
             Verb::Reload => self.reload_config(),
             // The canned popup stands in for a lookup, so the surface
@@ -198,6 +211,66 @@ impl App {
             Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
             Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
             Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
+        }
+    }
+
+    /// One event from the GlobalShortcuts session's thread (ticket 36).
+    ///
+    /// The portal is an *additional* source of the same presses the
+    /// socket carries, never a replacement, so a press goes through
+    /// [`App::apply_verb`] and everything else here is observability:
+    /// which channel owns the binding, what key it reports, and what
+    /// the settings window is allowed to claim about it.
+    fn handle_shortcut(&mut self, event: shortcuts::Event) {
+        match event {
+            shortcuts::Event::Bound(bindings) => self.trigger_bound("bound", bindings),
+            shortcuts::Event::Changed(bindings) => self.trigger_bound("re-bound", bindings),
+            shortcuts::Event::Fired { id, activated } => {
+                self.log.diag(&format!(
+                    "trigger: portal {} {}",
+                    if activated { "activated" } else { "deactivated" },
+                    id.as_str()
+                ));
+                match shortcuts::action(id, activated) {
+                    shortcuts::Action::Verb(verb) => self.apply_verb(verb),
+                    // The keyboard path to the Anki affordance. The
+                    // AnkiConnect call behind it is ticket 42's; this
+                    // rung's whole job is to say the user asked.
+                    shortcuts::Action::Add => self.feed(Event::AddRequested),
+                    shortcuts::Action::Nothing => {}
+                }
+            }
+            // The rung is not serving. The socket is, so this is a
+            // status with a reason in it, never an exit.
+            shortcuts::Event::Unavailable(reason) => {
+                self.log.diag(&format!("trigger: portal rung unavailable - {reason}"));
+                self.note_channel(
+                    ChannelId::Trigger,
+                    ChannelState::up(shortcuts::native_detail(&reason)),
+                );
+                self.publish_trigger(&shortcuts::state::Published::native());
+            }
+            shortcuts::Event::Note(line) => self.log.diag(&line),
+        }
+    }
+
+    /// The portal answered `BindShortcuts`, or the user re-bound a key
+    /// in the desktop's own UI (`ShortcutsChanged`). Same three effects
+    /// either way: a log line, the trigger row, and the file the
+    /// settings window reads.
+    fn trigger_bound(&mut self, what: &str, bindings: Vec<shortcuts::Binding>) {
+        let detail = shortcuts::portal_detail(&bindings);
+        self.log.diag(&format!("trigger: portal {what} - {detail}"));
+        self.note_channel(ChannelId::Trigger, ChannelState::up(detail));
+        self.publish_trigger(&shortcuts::state::Published::portal(bindings));
+    }
+
+    /// Tell the settings window who owns the binding (ADR-0005: the UI
+    /// never lies about that). A file it cannot write is a diagnostic,
+    /// not a failure — the trigger keeps working either way.
+    fn publish_trigger(&mut self, published: &shortcuts::state::Published) {
+        if let Err(e) = shortcuts::state::publish(&self.state_dir, published) {
+            self.log.diag(&format!("trigger: could not publish the channel state - {e}"));
         }
     }
 
@@ -869,6 +942,43 @@ pub fn run(paths: Paths) -> Result<()> {
         .with_context(|| format!("binding the control socket in {}", runtime_dir.display()))?;
     log.diag(&format!("control: listening on {}", socket.path().display()));
 
+    // The trigger channel's ladder (ADR-0003, ticket 36). The socket
+    // above is rung 2 and is now listening, so this decides only one
+    // thing: whether the GlobalShortcuts portal is *also* asked to
+    // carry the two shortcuts. Its session runs on its own thread and
+    // its news arrives here as events, so the pump stays sync
+    // (ADR-0001).
+    let (trigger_override, trigger_warning) = shortcuts::ChannelOverride::from_env();
+    if let Some(w) = &trigger_warning {
+        log.diag(w);
+    }
+    let trigger_selection = shortcuts::select(shortcuts::portal::probe(), trigger_override);
+    log.diag(&trigger_selection.startup_line());
+    // Until the portal answers, the honest published state is "the
+    // compositor owns the key": that is what the settings window must
+    // show, and a stale portal binding from a previous run must not
+    // outlive it.
+    let published = shortcuts::state::Published::native();
+    if let Err(e) = shortcuts::state::publish(&paths.state_dir, &published) {
+        log.diag(&format!("trigger: could not publish the channel state - {e}"));
+    }
+    let (shortcut_tx, shortcut_rx) = calloop::channel::sync_channel::<shortcuts::Event>(32);
+    let trigger_state = match trigger_selection {
+        shortcuts::Selection::Portal => {
+            match shortcuts::portal::spawn(shortcuts::preferred(&config), shortcut_tx) {
+                Ok(()) => ChannelState::up(shortcuts::pending_detail()),
+                Err(e) => {
+                    let why = format!("no thread for the portal session: {e}");
+                    log.diag(&format!("trigger: {why}"));
+                    ChannelState::up(shortcuts::native_detail(&why))
+                }
+            }
+        }
+        shortcuts::Selection::Native(reason) => {
+            ChannelState::up(shortcuts::native_detail(&shortcuts::native_reason(reason)))
+        }
+    };
+
     // The SNI tray (ADR-0006). It runs its own D-Bus thread and its
     // activations arrive here as `TrayRequest`s, so the pump stays sync.
     // Non-fatal by construction: `spawn` hands back diagnostics instead
@@ -876,8 +986,12 @@ pub fn run(paths: Paths) -> Result<()> {
     // bare Hyprland) and must cost nothing. The registry it carries is
     // the daemon's own view of channel health, tray or no tray.
     let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
-    let (tray_handle, tray_diagnostics) =
-        tray::spawn(ChannelStatuses::startup(capture_state, &selection), tray_tx);
+    let mut statuses = ChannelStatuses::startup(capture_state, &selection);
+    // The trigger row's default is the always-bound socket; the ladder
+    // above knows which rung actually owns the binding, and the tray
+    // must be right the first time it is published.
+    statuses.set(ChannelId::Trigger, trigger_state);
+    let (tray_handle, tray_diagnostics) = tray::spawn(statuses, tray_tx);
     for line in tray_diagnostics {
         log.diag(&line);
     }
@@ -926,6 +1040,7 @@ pub fn run(paths: Paths) -> Result<()> {
     let mut app = App {
         log,
         stub: StubState::default(),
+        state_dir: paths.state_dir.clone(),
         config_file: paths.config_file.clone(),
         signal: event_loop.get_signal(),
         cursor: CursorState::default(),
@@ -1047,6 +1162,20 @@ pub fn run(paths: Paths) -> Result<()> {
         // sample a cheap error instead of an unbounded queue.
         drop(cursor_rx);
     }
+
+    // The portal session's news: the bound set, every press and
+    // release, and its own diagnostics (ticket 36). Registered
+    // whichever rung was picked, because the receiver has to outlive
+    // the sender either way: on the native rung nothing was spawned to
+    // send, and an idle channel costs no wakeups.
+    event_loop
+        .handle()
+        .insert_source(shortcut_rx, |event, _, app: &mut App| {
+            if let calloop::channel::Event::Msg(event) = event {
+                app.handle_shortcut(event);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("registering the shortcut channel: {e}"))?;
 
     // Menu activations and the tray thread's own diagnostics, executed
     // on this thread. `Event::Closed` needs no handling: the tray
@@ -1232,6 +1361,7 @@ mod tests {
         App {
             log: Log::open(log_file, false),
             stub: StubState::default(),
+            state_dir: dir.to_path_buf(),
             config_file: dir.join("chibipop.toml"),
             config: chibipop::config::Config::default(),
             signal: event_loop.get_signal(),
@@ -1399,6 +1529,168 @@ mod tests {
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert_eq!(1, written.matches("lookup failed: no dictionary").count(), "log: {written}");
         assert_eq!(1, written.matches("lookup failed: something else").count(), "log: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- the trigger channel's portal rung (ticket 36) --
+
+    fn binding(id: shortcuts::ShortcutId, trigger: Option<&str>) -> shortcuts::Binding {
+        shortcuts::Binding { id, trigger: trigger.map(str::to_string) }
+    }
+
+    /// The whole point of the rung: a portal press does exactly what
+    /// `ctl trigger-down` does, and its release exactly what
+    /// `trigger-up` does — one trigger semantics, two sources.
+    #[test]
+    fn a_portal_press_takes_the_same_frozen_grab_as_the_socket_verb() {
+        let dir = scratch("portalhold");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
+
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::Trigger,
+            activated: true,
+        });
+        let hold = app.hold.expect("a portal press holds");
+        assert!(!hold.latched, "a key press is not a latch");
+        assert!(hold.output.contains(PhysPoint { x: 400, y: 300 }), "{:?}", hold.output);
+
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::Trigger,
+            activated: false,
+        });
+        assert_eq!(None, app.hold, "a portal release ends the hold");
+
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("trigger: portal activated trigger"), "log was: {written}");
+        assert!(written.contains("trigger: portal deactivated trigger"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The add shortcut is not a trigger: it must reach the Controller
+    /// without freezing anything, and its release must do nothing at all.
+    #[test]
+    fn the_add_shortcut_never_takes_a_grab() {
+        let dir = scratch("portaladd");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
+
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::AnkiAdd,
+            activated: true,
+        });
+        assert_eq!(None, app.hold, "anki-add is not the trigger");
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::AnkiAdd,
+            activated: false,
+        });
+        assert_eq!(None, app.hold);
+
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("trigger: portal activated anki-add"), "log was: {written}");
+        assert!(!written.contains("frozen grab"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the portal bound is what the tray row and the settings
+    /// window say — the observability half of ADR-0003's "channel
+    /// selection is visible".
+    #[test]
+    fn a_bind_names_the_owner_in_the_row_and_publishes_it() {
+        let dir = scratch("portalbound");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+
+        app.handle_shortcut(shortcuts::Event::Bound(vec![
+            binding(shortcuts::ShortcutId::Trigger, Some("Alt+F")),
+            binding(shortcuts::ShortcutId::AnkiAdd, None),
+        ]));
+
+        let row = app.tray.statuses().row(ChannelId::Trigger);
+        assert!(row.contains("GlobalShortcuts portal"), "{row}");
+        assert!(row.contains("trigger Alt+F"), "{row}");
+        assert!(row.contains("anki-add (key not reported)"), "{row}");
+        // A working trigger never raises the tray's attention icon: the
+        // socket is up and so is the portal.
+        assert_eq!(ksni::Status::Active, app.tray.statuses().sni_status());
+
+        let published = shortcuts::state::read(&dir).expect("the daemon publishes the channel");
+        assert!(published.portal);
+        assert_eq!(Some("Alt+F".to_string()), published.trigger_description());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The user re-bound the key in their desktop's own UI: the row and
+    /// the published state follow, without a restart.
+    #[test]
+    fn shortcuts_changed_updates_the_row_and_the_published_key() {
+        let dir = scratch("portalchanged");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+
+        app.handle_shortcut(shortcuts::Event::Bound(vec![binding(
+            shortcuts::ShortcutId::Trigger,
+            Some("Alt+F"),
+        )]));
+        app.handle_shortcut(shortcuts::Event::Changed(vec![binding(
+            shortcuts::ShortcutId::Trigger,
+            Some("Meta+Shift+R"),
+        )]));
+
+        let row = app.tray.statuses().row(ChannelId::Trigger);
+        assert!(row.contains("Meta+Shift+R"), "{row}");
+        assert!(!row.contains("Alt+F"), "the old key must be gone: {row}");
+        assert_eq!(
+            Some("Meta+Shift+R".to_string()),
+            shortcuts::state::read(&dir).expect("published").trigger_description()
+        );
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("trigger: portal re-bound"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A portal that cannot serve is a status with a reason in it, and
+    /// the socket is still the trigger: no attention icon, and the
+    /// settings window stops claiming a portal binding.
+    #[test]
+    fn an_unavailable_portal_leaves_the_socket_serving() {
+        let dir = scratch("portalgone");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+
+        app.handle_shortcut(shortcuts::Event::Bound(vec![binding(
+            shortcuts::ShortcutId::Trigger,
+            Some("Alt+F"),
+        )]));
+        app.handle_shortcut(shortcuts::Event::Unavailable(
+            "CreateSession: the portal requires an app id".to_string(),
+        ));
+
+        let row = app.tray.statuses().row(ChannelId::Trigger);
+        assert!(row.contains("control socket"), "{row}");
+        assert!(row.contains("app id"), "the row must carry the reason: {row}");
+        assert_eq!(ksni::Status::Active, app.tray.statuses().sni_status());
+
+        let published = shortcuts::state::read(&dir).expect("published");
+        assert!(!published.portal);
+        assert_eq!(None, published.trigger_description());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The portal thread owns no log, so its diagnostics travel as
+    /// events and are written here.
+    #[test]
+    fn a_shortcut_note_reaches_the_daemon_log() {
+        let dir = scratch("portalnote");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.handle_shortcut(shortcuts::Event::Note("trigger: v2 session /foo".to_string()));
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("trigger: v2 session /foo"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

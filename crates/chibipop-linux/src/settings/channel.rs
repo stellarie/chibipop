@@ -1,11 +1,14 @@
 //! Channel-aware hotkey controls (ADR-0005): the UI never lies about
 //! who owns the trigger binding.
 //!
-//! Today only the wlr-native channel exists — the compositor bind is
-//! the truth and the config chord is advisory. Ticket 36's
-//! GlobalShortcuts session will construct `Portal` and render the
-//! rebind flow; the enum is shaped so that lands without reshaping the
-//! view.
+//! Both rungs of ADR-0003's trigger ladder are real here. On the native
+//! rung the compositor bind is the truth and the config chord is
+//! advisory, so the only honest control is the snippet to paste. On the
+//! portal rung the GlobalShortcuts session owns the binding and reports
+//! it, so the control names the key the portal gave and points at the
+//! desktop's own editor — the daemon publishes which of the two it
+//! resolved (`shortcuts::state`), because a bus probe cannot tell them
+//! apart.
 
 use super::snippets::{self, Compositor};
 
@@ -16,8 +19,9 @@ pub enum HotkeyChannel {
     /// snippet to paste.
     Native,
     /// The XDG GlobalShortcuts portal owns the binding and reports it.
-    // Constructed by the portal session, ticket 36.
-    #[allow(dead_code)]
+    /// `current_binding` is the portal's own `trigger_description`, and
+    /// `None` where the implementation reports no key (xdph does not:
+    /// on Hyprland the key lives in the compositor's config).
     Portal { current_binding: Option<String> },
 }
 
@@ -27,8 +31,7 @@ pub enum HotkeyChannel {
 pub enum HotkeyControl {
     /// Copyable native-bind lines plus the advisory note.
     Snippet { text: String },
-    /// The portal's configure/rebind flow (ticket 36).
-    #[allow(dead_code)]
+    /// The portal's binding, and where the user changes it.
     Rebind { current: Option<String> },
 }
 
