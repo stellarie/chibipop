@@ -204,6 +204,101 @@ fn a_frozen_hover_is_maskless_and_still_resolves() {
     );
 }
 
+/// A backend that answers "unchanged" after its first grab: what a
+/// damage-paced dwell looks like from above the seam (ADR-0002).
+struct DwellingCapture {
+    log: mpsc::Sender<String>,
+    grabs: u32,
+}
+
+impl RegionCapture for DwellingCapture {
+    fn grab(&mut self, region: PhysRect) -> anyhow::Result<Frame> {
+        self.grabs += 1;
+        let _ = self.log.send("grab".to_string());
+        Ok(Frame {
+            buf: vec![0u8; (region.w * region.h * 4) as usize],
+            w: region.w,
+            h: region.h,
+            source: "fake",
+            fallback: None,
+            unchanged: self.grabs > 1,
+        })
+    }
+
+    fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
+        PhysRect { x: p.x - 2000, y: p.y - 2000, w: 4000, h: 4000 }
+    }
+
+    fn begin_read(&mut self) {
+        let _ = self.log.send("begin_read".to_string());
+    }
+
+    fn end_read(&mut self) {
+        let _ = self.log.send("end_read".to_string());
+    }
+}
+
+/// A worker over that backend; OCR reads the one word as ever.
+fn spawn_dwelling() -> (Worker, mpsc::Receiver<String>) {
+    let (log_tx, log_rx) = mpsc::channel::<String>();
+    let capture_log = log_tx.clone();
+    let (worker, _dicts) = Worker::spawn(
+        settings(),
+        move || {
+            Ok(WorkerParts {
+                capture: Box::new(DwellingCapture { log: capture_log, grabs: 0 }),
+                ocr: Box::new(FakeOcr {
+                    log: log_tx,
+                    text: Some("\u{98DF}".to_string()),
+                    panics: false,
+                }),
+                dict: Box::new(dict()),
+                reopen_dict: None,
+                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
+            })
+        },
+        || {},
+    )
+    .expect("the worker must start over healthy fakes");
+    (worker, log_rx)
+}
+
+/// ADR-0010's dwell re-check, at the cost that makes it viable.
+///
+/// A second look at a still screen reuses the first read's words: same
+/// pixels, same mask, same answer, no OCR pass. The popup coming up
+/// between two looks *is* a new question - the pixels OCR reads are the
+/// grab after masking (ADR-0008) - so that one look pays a pass, and
+/// every dwell behind it is free again.
+#[test]
+fn a_dwell_on_unchanged_pixels_skips_the_ocr_pass() {
+    let (worker, log_rx) = spawn_dwelling();
+    let mut seen: Vec<String> = Vec::new();
+    let count = |seen: &[String], what: &str| seen.iter().filter(|e| *e == what).count();
+    let passes = |seen: &[String]| (count(seen, "grab"), count(seen, "ocr"));
+
+    worker.trigger().send(hover(1)).unwrap();
+    let first = answer(&worker);
+    assert!(matches!(first.outcome, LookupOutcome::Ready { .. }));
+    seen.extend(events(&log_rx));
+    assert_eq!((1, 1), passes(&seen), "the first look reads the screen");
+
+    worker.trigger().send(hover(2)).unwrap();
+    answer(&worker);
+    seen.extend(events(&log_rx));
+    assert_eq!((2, 1), passes(&seen), "an unchanged dwell reuses the words it has");
+
+    worker.trigger().send(masked_hover(3, CaptureMode::Live)).unwrap();
+    answer(&worker);
+    seen.extend(events(&log_rx));
+    assert_eq!((3, 2), passes(&seen), "our own popup appearing is a new question");
+
+    worker.trigger().send(masked_hover(4, CaptureMode::Live)).unwrap();
+    answer(&worker);
+    seen.extend(events(&log_rx));
+    assert_eq!((4, 2), passes(&seen), "and every dwell behind it is free again");
+}
+
 /// The whole pipeline: trigger in, presented lookup out, read bracketed.
 #[test]
 fn a_hover_trigger_yields_a_ready_result() {
