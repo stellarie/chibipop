@@ -3,6 +3,12 @@
 //! CI is headless (ADR-0007), so this skips without `WAYLAND_DISPLAY` and
 //! skips again where the capture protocol ADR-0002's promptless rung needs
 //! is not advertised - that is a compositor verdict, not a test failure.
+//! A third verdict skips it too, and the daemon is the one who gives it:
+//! a press looks up what is under the cursor, so a session where
+//! ADR-0003's cursor ladder found no rung has nothing for these verbs to
+//! act on. That is the ticket-48 headless-sway case (sway 1.9 advertises
+//! no ext-image-copy-capture, runs no portal and is not Hyprland); the
+//! diagnostic it prints instead has its own tests in `daemon.rs`.
 //!
 //! One test, deliberately: it drives a whole daemon - real screencopy
 //! backend, real meikiocr models, real SQLite dictionary built here from
@@ -151,6 +157,17 @@ fn the_trigger_verbs_freeze_hold_and_release_a_real_grab() {
         return;
     }
     let session = Session::start();
+
+    // The cursor gate, asked of the daemon rather than re-derived from
+    // the registry here: it logs exactly one `cursor:` line at startup,
+    // and `hover unsupported` in it means a press has no position to
+    // freeze on. Skipping is the honest answer; the alternative is a
+    // 30 s wait for a grab that cannot happen.
+    let cursor = session.wait_for("cursor: ");
+    if cursor.contains("hover unsupported") {
+        eprintln!("skipping: this session gave the cursor ladder no rung - {cursor}");
+        return;
+    }
 
     // All three parts of the pipeline, on the worker thread.
     let up = session.wait_for("worker: pipeline up");

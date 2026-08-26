@@ -147,8 +147,9 @@ jobs:
   # oldest-supported-runner policy (the runner's glibc is the release
   # binary's floor; ubuntu-22.04 left the runner fleet in 2026). The gate is
   # compositor-free: the runner has no WAYLAND_DISPLAY, and every
-  # integration test that needs one skips without it (ADR-0007) - a
-  # headless-sway smoke job stays a later, non-blocking addition.
+  # integration test that needs one skips without it (ADR-0007). The real
+  # compositor lives in the non-blocking `sway-smoke` job below; nothing
+  # in this gate may ever depend on it.
   linux:
     name: Linux gate
     runs-on: ubuntu-24.04
@@ -244,6 +245,371 @@ jobs:
           name: chibipop-dev-linux-x64
           path: target/release/chibipop
           if-no-files-found: error
+
+  # ADR-0007's headless-sway smoke: the one job that runs chibipop
+  # against a real compositor - real layer surfaces, real wlr-screencopy
+  # pixels, a real control socket - where both gates above are
+  # deliberately compositor-free. It proves nothing about layout or
+  # lookup quality; it proves the protocol plumbing survives contact
+  # with a wlroots compositor that is not the dev box's Hyprland.
+  #
+  # NON-BLOCKING UNTIL PROVEN STABLE, AND THE FLIP IS ONE LINE: delete
+  # `continue-on-error: true` below. Nothing else changes - every step
+  # already fails loudly on anything it cannot honestly assert, and the
+  # sub-steps this compositor genuinely cannot run are skipped by name
+  # rather than faked.
+  #
+  # ubuntu-latest, deliberately unpinned where every other job is
+  # pinned: the interesting variable here is *which sway* the runner
+  # fleet carries, and an image migration bringing a newer one is
+  # exactly the news this job exists to deliver. It cannot red anything
+  # while it is non-blocking. When the flip to blocking happens, pin it.
+  #
+  # What this exercises on today's fleet (sway 1.9 / wlroots 0.17 on
+  # ubuntu-24.04), and what it cannot:
+  #   - zwlr_layer_shell_v1 v4, wp_viewporter, wp_fractional_scale_manager_v1:
+  #     all advertised, so ADR-0004's popup maps, paints and hides for
+  #     real. The grab pair below is the proof the pixels reached the
+  #     output rather than only the log.
+  #   - zwlr_screencopy_manager_v1 v3: ADR-0002's promptless rung 1, the
+  #     rung under test. Rung 2 is not: no xdg-desktop-portal runs on a
+  #     runner, so portal_capture_live skips itself.
+  #   - ADR-0003's cursor ladder has NO rung here: sway 1.9 advertises
+  #     no ext-image-copy-capture, there is no portal, and it is not
+  #     Hyprland. So the daemon must come up saying `hover unsupported`
+  #     and naming both missing globals, and a trigger press must answer
+  #     `no cursor sample yet` - the diagnostic path is what gets
+  #     smoked, and the daemon staying up is the assertion. A
+  #     trigger-mode *lookup* needs a cursor position, so that one
+  #     sub-step is impossible on this compositor and is reported as a
+  #     skip; OCR keeps its own gate in the Linux job above. sway 1.11+
+  #     (wlroots 0.19) advertises ext-image-copy-capture and would turn
+  #     that skip into a real rung with no change here.
+  sway-smoke:
+    name: Headless sway smoke
+    runs-on: ubuntu-latest
+    if: github.event.inputs.bless != 'true'
+    continue-on-error: true
+    # This job drives long-lived processes; the whole thing runs in
+    # about a minute on a warm cache, so twenty minutes is a leash, not
+    # a budget.
+    timeout-minutes: 20
+
+    env:
+      # One tree for everything this job writes: the private XDG dirs
+      # the daemon uses, the PNGs, the logs. Uploaded whole at the end.
+      SMOKE: /tmp/chibipop-smoke
+      # sway's own runtime dir, kept out of SMOKE so the artifact upload
+      # never has to walk sockets.
+      XDG_RUNTIME_DIR: /tmp/chibipop-smoke-run
+      WAYLAND_DISPLAY: wayland-1
+      # sway honours a pre-set SWAYSOCK, which is the only way to know
+      # the IPC path before it picks a pid.
+      SWAYSOCK: /tmp/chibipop-smoke-run/sway-ipc.sock
+      WLR_BACKENDS: headless
+      WLR_LIBINPUT_NO_DEVICES: "1"
+      # No GPU and no /dev/dri on a runner: pixman keeps the renderer
+      # choice deterministic instead of hoping EGL finds llvmpipe.
+      WLR_RENDERER: pixman
+      # The popup anchor every rect below is arithmetic against. Global
+      # physical pixels, well inside the headless output.
+      ANCHOR: 400,300,140,40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Its own cache, not the Linux gate's: sharing one would mean
+      # editing that job, and this job's dependency set is the same
+      # debug profile anyway, so a warm cache costs one entry.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sway-smoke
+
+      # fonts-noto-cjk is not decoration: the canned popup paints
+      # Japanese, and a tofu-only paint would still "map a surface"
+      # while proving nothing about ADR-0004's text stack. No wallpaper
+      # is configured (swaybg comes in as a sway dependency but is never
+      # launched), so the screen behind the popup is one constant
+      # colour - which is what makes the grab comparison below mean
+      # something.
+      - name: Install sway
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends sway fonts-noto-cjk
+          sway --version
+
+      # The same debug profile the gate's tests use, so the cache is one
+      # dependency graph and not two. `-p chibipop-linux` keeps the
+      # bin-name collision with chibipop-windows out of it (see the
+      # workspace Cargo.toml).
+      - name: Build the daemon and the live tests
+        run: |
+          cargo build -p chibipop-linux --bin chibipop
+          cargo test -p chibipop-linux --no-run \
+            --test wayland_probe --test popup_live \
+            --test wlr_capture_live --test trigger_live \
+            --test portal_capture_live
+
+      # Backgrounded on purpose: the compositor has to outlive this
+      # step. One known-size output, no bar, no Xwayland, no bindings -
+      # nothing here may depend on a keypress, because there is no seat
+      # input in a headless session and synthesizing one would be
+      # testing the synthesizer.
+      - name: Start headless sway
+        run: |
+          mkdir -p "$XDG_RUNTIME_DIR" "$SMOKE"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          cat > "$SMOKE/sway.conf" <<'EOF'
+          output HEADLESS-1 resolution 1920x1080 position 0 0
+          xwayland disable
+          EOF
+          nohup sway -c "$SMOKE/sway.conf" > "$SMOKE/sway.log" 2>&1 &
+          for _ in $(seq 1 150); do
+            [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && break
+            sleep 0.2
+          done
+          if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+            echo "::error::sway never created $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+            cat "$SMOKE/sway.log"
+            exit 1
+          fi
+          swaymsg -t get_outputs
+
+      # chibipop's own capability report, and the four globals ADR-0004
+      # and ADR-0002 rung 1 need. A missing one is a finding about this
+      # sway, printed as such, not a mystery later in the job.
+      - name: Capability probe
+        run: |
+          ./target/debug/chibipop probe | tee "$SMOKE/probe.txt"
+          for g in zwlr_layer_shell_v1 wp_fractional_scale_manager_v1 \
+                   wp_viewporter zwlr_screencopy_manager_v1; do
+            grep -q "$g v" "$SMOKE/probe.txt" ||
+              { echo "::error::this sway advertises no $g"; exit 1; }
+          done
+
+      # The WAYLAND_DISPLAY-gated tests, which now have a display. One
+      # at a time: several of them each drive a whole daemon, and two
+      # daemons racing one compositor (and one instance lock) would
+      # prove nothing. --nocapture so every honest skip says its reason
+      # in the log - that is half the point of running them here.
+      - name: WAYLAND_DISPLAY-gated integration tests
+        run: |
+          cargo test -p chibipop-linux \
+            --test wayland_probe --test popup_live \
+            --test wlr_capture_live --test trigger_live \
+            --test portal_capture_live \
+            -- --nocapture --test-threads=1
+
+      # The direct smoke, the part no test target covers: a daemon
+      # started the way a user starts it, driven only over its control
+      # socket, with the compositor's own pixels as the witness.
+      - name: Smoke - layer surface, screencopy grab, ctl round-trip
+        run: |
+          # -e is the runner's default for `run:`; spelling it out here
+          # because several lines below deliberately opt out of it, and
+          # a reader has to know which behaviour they are opting out of.
+          set -euo pipefail
+          BIN="$PWD/target/debug/chibipop"
+          export XDG_CONFIG_HOME="$SMOKE/config" XDG_DATA_HOME="$SMOKE/data" \
+                 XDG_STATE_HOME="$SMOKE/state" XDG_CACHE_HOME="$SMOKE/cache"
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
+          log="$SMOKE/state/chibipop/chibipop.log"
+
+          fail() {
+            echo "::error::$*"
+            echo "--- daemon log ---"
+            cat "$log" 2>/dev/null || echo "(no log yet)"
+            exit 1
+          }
+          # `grep -c` exits 1 on zero matches and prints 0; a missing
+          # file prints nothing at all.
+          count() { c=$(grep -cF "$1" "$log" 2>/dev/null || true); echo "${c:-0}"; }
+          # Wait for the Nth occurrence, so a second show is not
+          # satisfied by the first one's line.
+          wait_count() {
+            for _ in $(seq 1 600); do
+              [ "$(count "$1")" -ge "$2" ] && return 0
+              sleep 0.1
+            done
+            fail "waited 60 s for occurrence $2 of: $1"
+          }
+          grab() {
+            mkdir -p "$SMOKE/$1"
+            "$BIN" capture-dump --region "$2" --out "$SMOKE/$1" | sed 's/^/  /' ||
+              fail "capture-dump of $2 failed"
+          }
+          png() { echo "$SMOKE/$1/chibipop-capture-0.png"; }
+          # SIGTERM and reap, bounded: a daemon that ignores it gets
+          # SIGKILLed by the watchdog and fails this step, instead of
+          # hanging the job until GitHub's timeout.
+          stop() {
+            kill -TERM "$1"
+            ( sleep 10; kill -KILL "$1" ) 2> /dev/null &
+            watchdog=$!
+            status=0
+            wait "$1" 2> /dev/null || status=$?
+            kill "$watchdog" 2> /dev/null || true
+            # 143 is death by SIGTERM, which is how this daemon exits
+            # today; 0 would be a graceful handler doing it instead.
+            case "$status" in
+              0 | 143) echo "the daemon exited on SIGTERM (status $status)" ;;
+              *) fail "SIGTERM did not end the daemon (exit $status)" ;;
+            esac
+          }
+
+          echo "::group::daemon startup, popup demo armed"
+          CHIBIPOP_POPUP_DEMO=1 CHIBIPOP_POPUP_DEMO_ANCHOR="$ANCHOR" "$BIN" run &
+          demo=$!
+          wait_count "layer surface(s) mapped hidden" 1
+          grep -F "popup: layer surface 0 on " "$log" || fail "no layer surface was created"
+          grep -F "keyboard none" "$log" > /dev/null ||
+            fail "ADR-0004: the popup must never take keyboard focus"
+          grep -F "capture: wlr-screencopy" "$log" > /dev/null ||
+            fail "ADR-0002 rung 1 is what this job tests; the ladder picked something else"
+          # The cursor ladder's verdict, whatever it is, and the daemon
+          # surviving it. On sway 1.9 that verdict is `hover
+          # unsupported` naming both ext-image-copy-capture globals.
+          grep -F "cursor: " "$log" | head -2 || true
+          kill -0 "$demo" 2> /dev/null ||
+            fail "the daemon died on the cursor channel's verdict; it must stay up (ADR-0003)"
+          socket=$(sed -n 's/.*control: listening on //p' "$log" | head -1)
+          echo "control socket: $socket"
+          echo "::endgroup::"
+
+          echo "::group::show, hide, and the rect the popup reported"
+          "$BIN" ctl trigger-down || fail "ctl trigger-down was refused"
+          wait_count "popup: shown on surface" 1
+          shown=$(grep -F "popup: shown on surface" "$log" | tail -1)
+          echo "$shown"
+          grep -F "font: painting with" "$log" ||
+            fail "the panel painted without logging the font family it used"
+          # `popup: shown on surface N at X,Y WxH at S.SSSx` - the rect
+          # is the daemon's own arithmetic, and the grabs below read the
+          # compositor's answer to it.
+          geom=$(printf '%s\n' "$shown" |
+            grep -oE '[0-9-]+,[0-9-]+ [0-9]+x[0-9]+' | head -1 | tr ' x' ',,')
+          [ -n "$geom" ] || fail "could not parse a rect out of: $shown"
+          echo "popup rect: $geom"
+          "$BIN" ctl trigger-up || fail "ctl trigger-up was refused"
+          wait_count "popup: hidden in" 1
+          echo "::endgroup::"
+
+          echo "::group::three screencopy grabs of that rect"
+          # Hidden, shown, hidden again. The middle grab must differ
+          # from the first - that is the only assertion in this job that
+          # the popup's pixels actually reached the output rather than
+          # only the log - and the third must be byte-identical to the
+          # first, which is how "hide attaches a transparent buffer and
+          # never unmaps" looks from the compositor's side. Both grabs
+          # go through ADR-0002 rung 1, so one comparison tests the
+          # painter and the capture backend at once.
+          grab hidden-before "$geom"
+          "$BIN" ctl trigger-down || fail "the second ctl trigger-down was refused"
+          wait_count "popup: shown on surface" 2
+          grab shown "$geom"
+          "$BIN" ctl trigger-up || fail "the second ctl trigger-up was refused"
+          wait_count "popup: hidden in" 2
+          grab hidden-after "$geom"
+          if cmp -s "$(png hidden-before)" "$(png shown)"; then
+            fail "the grab of $geom is identical shown and hidden: no popup pixels reached the output"
+          fi
+          cmp "$(png hidden-before)" "$(png hidden-after)" ||
+            fail "hiding the popup did not restore the screen it covered"
+          echo "shown differs from hidden, and hiding restored the screen byte for byte"
+          echo "::endgroup::"
+
+          echo "::group::SIGTERM ends the daemon"
+          stop "$demo"
+          # FINDING, ticket 48, 2026-08-26: the daemon dies by SIGTERM's
+          # default disposition, not through its calloop signal source -
+          # `signal: ... shutting down` never reaches the log and the
+          # socket file survives. calloop's `Signals` blocks the signal
+          # on the thread that creates it, and by then the worker and
+          # tray threads exist and do not, so the kernel is free to pick
+          # one of those. Reproduced identically on Hyprland, so it is a
+          # daemon trait and not a sway one, and it is harmless in
+          # practice: `ControlSocket::bind` unlinks a stale socket on the
+          # next start. Reported rather than asserted either way - a
+          # smoke that lies about which shutdown path ran is worse than
+          # one that says which it saw.
+          if [ -n "$socket" ] && [ -e "$socket" ]; then
+            echo "note: $socket survived - the graceful shutdown path did not run"
+          else
+            echo "the daemon unlinked its control socket on the way out"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::trigger round-trip on the real (non-demo) path"
+          # The daemon truncates this file on start, but not before it
+          # holds the lock - so every `wait_count` below would happily
+          # match the demo daemon's lines in the window before it does.
+          rm -f "$log"
+          "$BIN" run &
+          real=$!
+          # Capture rung, OCR models and dictionary handle, all on the
+          # worker thread. There is no dictionary on a runner, so the
+          # honest `no dictionary at ...` half of this line is the
+          # expected one.
+          wait_count "worker: pipeline up" 1
+          grep -F "worker: pipeline up" "$log" | tail -1
+          "$BIN" ctl trigger-down || fail "ctl trigger-down was refused"
+          # Either outcome is honest and which one it is depends only on
+          # whether this compositor gave the cursor ladder a rung. A
+          # third outcome - silence, or a dead daemon - is not.
+          for _ in $(seq 1 300); do
+            [ "$(count "trigger: frozen grab of output")" -ge 1 ] && break
+            [ "$(count "trigger: no cursor sample yet")" -ge 1 ] && break
+            sleep 0.1
+          done
+          if [ "$(count "trigger: frozen grab of output")" -ge 1 ]; then
+            echo "a press froze a real grab:"
+            grep -F "trigger: frozen grab of output" "$log" | tail -1
+            if grep -F "lookup failed" "$log"; then
+              fail "the lookup behind the grab failed"
+            fi
+            grep -E "lookup|no dictionary at" "$log" | tail -3 || true
+          elif [ "$(count "trigger: no cursor sample yet")" -ge 1 ]; then
+            echo "SKIPPED (named): this compositor gave ADR-0003's cursor ladder no rung,"
+            echo "so a press has no position to look up and says exactly that:"
+            grep -F "trigger: no cursor sample yet" "$log" | tail -1
+            echo "The lookup-through-OCR sub-step is not runnable here; the trigger"
+            echo "verbs, the socket and the diagnostic path are, and just were."
+          else
+            fail "a press did neither: no frozen grab and no diagnostic"
+          fi
+          "$BIN" ctl trigger-up || fail "ctl trigger-up was refused"
+          kill -0 "$real" 2> /dev/null || fail "the daemon died on a trigger round-trip"
+          stop "$real"
+          echo "::endgroup::"
+
+          echo "smoke: layer surface mapped and painted, screencopy grab pair proved it,"
+          echo "smoke: control socket round-tripped every verb, both daemons ended on SIGTERM"
+
+      # The findings this job exists to report: which sway ran, which
+      # rungs it lit up, which it did not.
+      - name: sway findings
+        if: always()
+        run: |
+          sway --version || true
+          swaymsg -t get_outputs || true
+          echo "--- chibipop probe ---"
+          cat "$SMOKE/probe.txt" 2> /dev/null || echo "(the probe never ran)"
+          echo "--- sway log ---"
+          cat "$SMOKE/sway.log" 2> /dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sway-smoke-evidence
+          path: |
+            /tmp/chibipop-smoke/**/*.png
+            /tmp/chibipop-smoke/*.log
+            /tmp/chibipop-smoke/*.txt
+            /tmp/chibipop-smoke/state/chibipop/chibipop.log
+          if-no-files-found: warn
 
   # ADR-0011 bless mechanics: workflow_dispatch with bless=true reruns the
   # golden tests with CHIBIPOP_BLESS=1, which rewrites the goldens instead of

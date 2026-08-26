@@ -1945,6 +1945,9 @@ mod tests {
         app.handle_shortcut(shortcuts::Event::Note("trigger: v2 session /foo".to_string()));
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(written.contains("trigger: v2 session /foo"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // -- live hover and the dwell re-check (ADR-0010) --
 
     use chibipop::lookup::deconj::Deconjugator;
