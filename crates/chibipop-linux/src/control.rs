@@ -174,8 +174,13 @@ pub fn send(runtime_dir: &Path, display: &str, verb: Verb) -> std::io::Result<St
 /// means live-apply, absent means config-only) and must not re-derive it.
 pub fn send_to(path: &Path, verb: Verb) -> std::io::Result<String> {
     let mut stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    // Generous on purpose: a verb can land while the daemon is still
+    // in startup (the worker pipeline's model load takes seconds on
+    // slow hardware); the connect queues and the pump answers as soon
+    // as it runs, so a real key press must outwait that window rather
+    // than vanish into a client timeout.
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     stream.write_all(format!("{}\n", verb.as_str()).as_bytes())?;
     let mut reply = String::new();
     stream.read_to_string(&mut reply)?;

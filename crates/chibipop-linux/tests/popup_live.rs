@@ -198,6 +198,12 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
         mapped.split_whitespace().find_map(|w| w.parse().ok()).expect("a surface count");
     assert!(count >= 1, "{mapped}");
 
+    // The pump serves `ctl` only once startup - including the worker
+    // pipeline's model load, ~1-2 s cold - is done; the ready line is
+    // the daemon's own mark for it. Asking earlier races that load
+    // (the connect queues, the reply times out on a slow runner).
+    session.wait_for("ready: pump running");
+
     // A show measures, places, commits and reports the rect back to the
     // Controller (`Event::PopupPlaced`).
     let focus_before = hyprctl("activewindow");
