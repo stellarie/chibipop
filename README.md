@@ -132,6 +132,51 @@ Wayland compositors that speak the wlroots protocol family — **Hyprland is the
 reference compositor**, with Sway and friends first-class alongside it. KDE
 Plasma works through the desktop portals. X11 is not a target.
 
+### The trigger key
+
+Wayland has no global key observation, so on wlroots compositors the
+**compositor's own keybind is the trigger**: it runs `chibipop ctl`, which
+speaks to the daemon over a UNIX socket. Two lines, and the default `ALT+F`
+chord (held while reading) looks like this on Hyprland:
+
+```
+bind  = ALT, F, exec, chibipop ctl trigger-down
+bindr = ALT, F, exec, chibipop ctl trigger-up
+```
+
+and like this on sway:
+
+```
+bindsym --no-repeat Mod1+f exec chibipop ctl trigger-down
+bindsym --release   Mod1+f exec chibipop ctl trigger-up
+```
+
+`trigger-down` freezes one full grab of the monitor under the cursor *before*
+the popup appears, and every lookup while you hold the chord reads that frozen
+screen: the popup can cover the very word it is defining and the next lookup
+still reads through it. Moving onto another monitor mid-hold grabs that one.
+`trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the
+hands-free version — it freezes at toggle-on and stays frozen until you toggle
+off.
+
+**Holding a bare modifier** (the Windows default's hold-Shift feel) is one line
+on Hyprland, which can bind a modifier as the key itself:
+
+```
+bind  = SHIFT, Shift_L, exec, chibipop ctl trigger-down
+bindr = SHIFT, Shift_L, exec, chibipop ctl trigger-up
+```
+
+sway's equivalent is `bindsym --release Shift_L`. It is a real cost, not a free
+upgrade: every Shift press then spawns a short-lived `chibipop ctl`, so it
+suits a reading machine more than a typing one. It is also impossible on the
+portal shortcuts channel (KDE, GNOME 48+), whose spec requires
+modifier-plus-key — which is why `ALT+F` is the default everywhere.
+
+Ready-to-copy snippets live in [`extras/hyprland.conf`](extras/hyprland.conf),
+and the settings window shows (and copies) the right snippet for whatever chord
+you configure.
+
 ### GNOME
 
 GNOME is **best-effort**, and today that means something concrete:

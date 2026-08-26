@@ -33,7 +33,11 @@ mod settings;
 #[cfg(target_os = "linux")]
 mod tray;
 #[cfg(target_os = "linux")]
+mod trigger;
+#[cfg(target_os = "linux")]
 mod wayland;
+#[cfg(target_os = "linux")]
+mod worker;
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {

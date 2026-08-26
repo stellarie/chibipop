@@ -25,11 +25,22 @@ pub struct Hover {
     pub mask: CaptureMask,
 }
 
-/// Hover, drill-down, reload.
+/// Hover, drill-down, reload, and trigger mode's freeze.
 pub enum TriggerKind {
     Hover(Hover),
     DrillDown(String),
     Reload(Box<WorkerSettings>),
+    /// Trigger press: take one full grab of the output holding this
+    /// point and read every lookup out of it until [`TriggerKind::Thaw`]
+    /// (ADR-0010). Sent again mid-hold when the cursor crosses onto
+    /// another output, which is what makes the second monitor live.
+    ///
+    /// Answers nothing: it is state, not a lookup. A grab that fails is
+    /// reported by the lookups that follow it, which is where a user
+    /// can see it.
+    Freeze(PhysPoint),
+    /// Trigger release: drop the frozen frame, grabs go live again.
+    Thaw,
 }
 
 /// What the worker owns.
@@ -69,6 +80,13 @@ pub struct WorkerResult {
     pub outcome: LookupOutcome,
 }
 
+/// How a `reload` gets a fresh view of the dictionary file.
+///
+/// A rebuild builds beside the database and renames over it, so the
+/// handle the worker holds keeps reading the inode it opened: reopening
+/// is what serves the new dictionary, and this is the reopen.
+pub type ReopenDict = Box<dyn Fn() -> Result<Box<dyn Dictionary>>>;
+
 /// What the bin supplies, built on the worker thread.
 ///
 /// Built there because backends may be thread-affine (COM apartments,
@@ -78,6 +96,14 @@ pub struct WorkerParts {
     pub capture: Box<dyn RegionCapture>,
     pub ocr: Box<dyn OcrEngine>,
     pub dict: Box<dyn Dictionary>,
+    /// Called on every reload, when the bin supplies one.
+    ///
+    /// `None` where a rebuild replaces the whole process instead - the
+    /// Windows bin restarts itself on a finished build, so its worker
+    /// never outlives the database it opened and has nothing to reopen.
+    /// A reopen that fails keeps the handle it has: an out-of-date
+    /// dictionary still answers, a dropped one answers nothing.
+    pub reopen_dict: Option<ReopenDict>,
     pub engine: LookupEngine,
 }
 
@@ -126,11 +152,28 @@ impl Worker {
     }
 }
 
-/// One reload into the cache.
+/// What a drained batch settles before its newest hover: settings, and
+/// trigger mode's freeze state.
 ///
-/// dicts goes stale otherwise.
+/// Kept in arrival order, unlike hovers - a reload and a press are
+/// state, and state cannot coalesce.
+enum Pre {
+    Reload(WorkerSettings),
+    Freeze(PhysPoint),
+    Thaw,
+}
+
+/// One reload into the cache: settings, and a fresh look at the file.
+///
+/// `dicts` goes stale otherwise - and so does the dictionary handle,
+/// which is why a bin that survives its own rebuilds supplies a reopen.
+/// The reopened file's own identities win over the ones the bin sent:
+/// the bin's list is what it knew before the rebuild, this one is what
+/// the database says now.
 fn take_reload(
     s: WorkerSettings,
+    reopen: Option<&ReopenDict>,
+    dict: &mut Box<dyn Dictionary>,
     present_cfg: &mut PresentConfig,
     scan_display: &mut ScanDisplay,
     dicts: &mut Vec<DictInfo>,
@@ -138,21 +181,35 @@ fn take_reload(
     *present_cfg = s.present_cfg;
     *scan_display = s.scan_display;
     *dicts = s.dicts;
+    let Some(reopen) = reopen else { return };
+    match reopen().and_then(|fresh| {
+        let identities = fresh.dicts().context("reading dictionary identities")?;
+        Ok((fresh, identities))
+    }) {
+        Ok((fresh, identities)) => {
+            *dict = fresh;
+            *dicts = identities;
+        }
+        // The handle we hold still answers; a dropped one would not.
+        Err(e) => eprintln!("chibipop: reopening the dictionary failed: {e:#}"),
+    }
 }
 
-/// Newest hover; all reloads.
-fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<WorkerSettings>) {
-    let mut reloads = Vec::new();
+/// Newest hover; every state change, in order.
+fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<Pre>) {
+    let mut pre = Vec::new();
     let mut hover = None;
     let mut take = |t: Trigger| match t.kind {
-        TriggerKind::Reload(s) => reloads.push(*s),
+        TriggerKind::Reload(s) => pre.push(Pre::Reload(*s)),
+        TriggerKind::Freeze(at) => pre.push(Pre::Freeze(at)),
+        TriggerKind::Thaw => pre.push(Pre::Thaw),
         _ => hover = Some(t),
     };
     take(first);
     while let Ok(next) = rx.try_recv() {
         take(next);
     }
-    (hover, reloads)
+    (hover, pre)
 }
 
 /// Serves triggers, owns OCR.
@@ -164,7 +221,7 @@ fn worker_main(
     result_tx: mpsc::Sender<WorkerResult>,
     startup_tx: mpsc::Sender<Result<Vec<DictInfo>>>,
 ) {
-    let WorkerParts { capture, ocr, dict, engine } = match open() {
+    let WorkerParts { capture, ocr, mut dict, reopen_dict, engine } = match open() {
         Ok(p) => p,
         Err(e) => {
             let _ = startup_tx.send(Err(e));
@@ -192,10 +249,30 @@ fn worker_main(
 
     // Sender dropped: shutdown.
     while let Ok(first) = trigger_rx.recv() {
-        let (hover, reloads) = drain(first, &trigger_rx);
-        for s in reloads {
-            source.apply_settings(s.snapshot(), &s.language);
-            take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
+        let (hover, pre) = drain(first, &trigger_rx);
+        for change in pre {
+            match change {
+                Pre::Reload(s) => {
+                    source.apply_settings(s.snapshot(), &s.language);
+                    take_reload(
+                        s,
+                        reopen_dict.as_ref(),
+                        &mut dict,
+                        &mut present_cfg,
+                        &mut scan_display,
+                        &mut dicts,
+                    );
+                }
+                // The press-time grab: one full output, before any
+                // popup exists (ADR-0010). A failure is remembered by
+                // the source, so the hold's lookups report it.
+                Pre::Freeze(at) => {
+                    if let Err(e) = source.freeze(at) {
+                        eprintln!("chibipop: the trigger-press grab failed: {e:#}");
+                    }
+                }
+                Pre::Thaw => source.thaw(),
+            }
         }
         let Some(trigger) = hover else {
             continue;
@@ -220,8 +297,8 @@ fn worker_main(
                     &present_cfg,
                     text,
                 ),
-                TriggerKind::Reload(_) => {
-                    LookupOutcome::Failed("a reload reached the hover path".to_string())
+                TriggerKind::Reload(_) | TriggerKind::Freeze(_) | TriggerKind::Thaw => {
+                    LookupOutcome::Failed("a state change reached the hover path".to_string())
                 }
             }
         }))
@@ -313,9 +390,9 @@ mod tests {
         }
     }
 
-    /// Newest hover; every reload.
+    /// Newest hover; every state change, in order.
     #[test]
-    fn drain_keeps_the_newest_hover_and_every_reload() {
+    fn drain_keeps_the_newest_hover_and_every_state_change() {
         let (tx, rx) = mpsc::channel::<Trigger>();
         let reload = TriggerKind::Reload(Box::new(ws(2)));
         tx.send(Trigger { kind: reload, id: RequestId(2) }).unwrap();
@@ -327,12 +404,36 @@ mod tests {
         let at = PhysPoint { x: 1, y: 1 };
         let older = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE });
         let first = Trigger { kind: older, id: RequestId(1) };
-        let (hover, reloads) = drain(first, &rx);
+        let (hover, pre) = drain(first, &rx);
         let hover = hover.expect("a hover survives");
         assert!(matches!(hover.kind, TriggerKind::Hover(h) if h.at.x == 9), "newest hover wins");
-        assert_eq!(2, reloads.len(), "neither reload may be swallowed");
-        let passes: Vec<u8> = reloads.iter().map(|r| r.max_passes).collect();
-        assert_eq!(vec![2, 4], passes, "reloads keep the order they were sent");
+        let passes: Vec<u8> = pre
+            .iter()
+            .filter_map(|p| match p {
+                Pre::Reload(s) => Some(s.max_passes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vec![2, 4], passes, "neither reload may be swallowed, and order holds");
+    }
+
+    /// A press and its release are state, not lookups: both survive a
+    /// batch that also carries a hover, and in the order they arrived.
+    #[test]
+    fn drain_keeps_a_freeze_and_a_thaw_in_arrival_order() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        let at = PhysPoint { x: 40, y: 50 };
+        tx.send(Trigger { kind: TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE }), id: RequestId(2) })
+            .unwrap();
+        tx.send(Trigger { kind: TriggerKind::Thaw, id: RequestId(3) }).unwrap();
+        drop(tx);
+        let first = Trigger { kind: TriggerKind::Freeze(at), id: RequestId(1) };
+        let (hover, pre) = drain(first, &rx);
+        assert!(hover.is_some(), "the hover between them still runs");
+        assert!(
+            matches!(pre.as_slice(), [Pre::Freeze(p), Pre::Thaw] if *p == at),
+            "a freeze and a thaw must not coalesce"
+        );
     }
 
     /// A reload alone still arrives.
@@ -341,14 +442,20 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Trigger>();
         drop(tx);
         let first = Trigger { kind: TriggerKind::Reload(Box::new(ws(3))), id: RequestId(1) };
-        let (hover, reloads) = drain(first, &rx);
+        let (hover, pre) = drain(first, &rx);
         assert!(hover.is_none());
-        assert_eq!(1, reloads.len());
-        assert_eq!(3, reloads[0].max_passes);
+        assert!(matches!(pre.as_slice(), [Pre::Reload(s)] if s.max_passes == 3));
     }
 
     fn di(id: i64, name: &str) -> DictInfo {
         DictInfo { dict_id: id, name: name.to_string() }
+    }
+
+    /// One dictionary, named whatever the test says.
+    fn one_dict(name: &str) -> Box<dyn Dictionary> {
+        let mut d = crate::lookup::model::FakeDictionary::new();
+        d.add_dict(7, name);
+        Box::new(d)
     }
 
     /// Same id, new dictionary.
@@ -357,11 +464,63 @@ mod tests {
         let mut present_cfg = Config::default().present_config();
         let mut scan_display = ScanDisplay { captures: false, highlight: false };
         let mut dicts = vec![di(7, "Removed")];
+        let mut dict = one_dict("Removed");
         let mut s = ws(2);
         s.dicts = vec![di(7, "Added")];
 
-        take_reload(s, &mut present_cfg, &mut scan_display, &mut dicts);
+        take_reload(s, None, &mut dict, &mut present_cfg, &mut scan_display, &mut dicts);
 
         assert_eq!(vec![di(7, "Added")], dicts, "the removed name must not answer");
+    }
+
+    /// The reload gap ticket 41 pinned: a rebuild renames a new database
+    /// over the old inode, so only reopening serves it. The reopened
+    /// file's identities win over the ones the bin sent, because the bin
+    /// only knows what it read before the rebuild.
+    #[test]
+    fn a_reload_reopens_the_dictionary_and_takes_its_identities() {
+        let mut present_cfg = Config::default().present_config();
+        let mut scan_display = ScanDisplay { captures: false, highlight: false };
+        let mut dicts = vec![di(7, "BeforeTheRebuild")];
+        let mut dict = one_dict("BeforeTheRebuild");
+        let reopen: ReopenDict = Box::new(|| Ok(one_dict("AfterTheRebuild")));
+
+        take_reload(
+            ws(2),
+            Some(&reopen),
+            &mut dict,
+            &mut present_cfg,
+            &mut scan_display,
+            &mut dicts,
+        );
+
+        assert_eq!(vec![di(7, "AfterTheRebuild")], dicts);
+        assert_eq!(
+            vec![di(7, "AfterTheRebuild")],
+            dict.dicts().unwrap(),
+            "the handle itself must be the reopened one"
+        );
+    }
+
+    /// A reopen that fails keeps the handle we have: an out-of-date
+    /// dictionary still answers lookups, a dropped one answers nothing.
+    #[test]
+    fn a_failed_reopen_keeps_the_dictionary_already_open() {
+        let mut present_cfg = Config::default().present_config();
+        let mut scan_display = ScanDisplay { captures: false, highlight: false };
+        let mut dicts = vec![di(7, "StillHere")];
+        let mut dict = one_dict("StillHere");
+        let reopen: ReopenDict = Box::new(|| anyhow::bail!("the database is a directory"));
+
+        take_reload(
+            ws(2),
+            Some(&reopen),
+            &mut dict,
+            &mut present_cfg,
+            &mut scan_display,
+            &mut dicts,
+        );
+
+        assert_eq!(vec![di(7, "StillHere")], dict.dicts().unwrap());
     }
 }

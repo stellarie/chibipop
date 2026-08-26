@@ -780,6 +780,11 @@ fn worker_open(
             capture: Box::new(capture),
             ocr: Box::new(ocr),
             dict: Box::new(dict),
+            // A finished rebuild restarts this whole process
+            // (`start_run` on `Progress::Done`), so this worker never
+            // outlives the database it opened and a reload has nothing
+            // to reopen.
+            reopen_dict: None,
             engine,
         })
     }

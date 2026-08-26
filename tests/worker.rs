@@ -100,8 +100,13 @@ fn senses() -> Vec<Sense> {
 
 /// One term, one entry, one dictionary.
 fn dict() -> FakeDictionary {
+    dict_named("FakeDict")
+}
+
+/// The same, under another dictionary name.
+fn dict_named(name: &str) -> FakeDictionary {
     let mut d = FakeDictionary::new();
-    d.add_dict(1, "FakeDict");
+    d.add_dict(1, name);
     d.add_term("食", None, None, "", None, 10, 1);
     d.add_entry(10, 1, senses());
     d
@@ -137,6 +142,7 @@ fn spawn(
                 capture: Box::new(FakeCapture { log: capture_log, gate, entered_tx }),
                 ocr: Box::new(FakeOcr { log: log_tx, text, panics }),
                 dict: Box::new(dict()),
+                reopen_dict: None,
                 engine: LookupEngine::new(Deconjugator::new(Vec::new())),
             })
         },
@@ -352,6 +358,7 @@ fn wake_fires_after_each_result() {
                     panics: false,
                 }),
                 dict: Box::new(dict()),
+                reopen_dict: None,
                 engine: LookupEngine::new(Deconjugator::new(Vec::new())),
             })
         },
@@ -364,4 +371,161 @@ fn wake_fires_after_each_result() {
     worker.trigger().send(hover(7)).unwrap();
     wake_rx.recv_timeout(TIMEOUT).expect("a result must wake the event loop");
     assert!(worker.results().try_recv().is_ok(), "the result precedes its wake");
+}
+
+// -- trigger mode's hold, end to end through the Worker (ADR-0010) --
+
+/// A hover somewhere else, so the hold is asked for a second box.
+fn hover_at(id: u64, at: PhysPoint) -> Trigger {
+    Trigger {
+        kind: TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE }),
+        id: RequestId(id),
+    }
+}
+
+fn freeze(id: u64, at: PhysPoint) -> Trigger {
+    Trigger { kind: TriggerKind::Freeze(at), id: RequestId(id) }
+}
+
+/// One answer, or a test failure.
+fn answer(worker: &Worker) -> chibipop::worker::WorkerResult {
+    worker.results().recv_timeout(TIMEOUT).expect("the worker must answer")
+}
+
+/// The whole point of freezing: one copy at press, and every lookup in
+/// the hold reads it - however many lookups the cursor asks for.
+#[test]
+fn a_trigger_hold_copies_once_and_serves_every_lookup_from_that_copy() {
+    let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
+    worker.trigger().send(freeze(1, AT)).unwrap();
+    worker.trigger().send(hover(2)).unwrap();
+    assert!(matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }));
+
+    // The cursor moved: another box, out of the same frame.
+    worker.trigger().send(hover_at(3, PhysPoint { x: AT.x + 120, y: AT.y })).unwrap();
+    assert!(matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }));
+
+    let seen = events(&log_rx);
+    assert_eq!(
+        1,
+        seen.iter().filter(|e| *e == "grab").count(),
+        "a hold is one copy, no matter how many lookups: {seen:?}"
+    );
+    assert_eq!(
+        vec!["begin_read", "grab", "end_read"],
+        seen.iter().filter(|e| *e != "ocr").cloned().collect::<Vec<_>>(),
+        "only the press-time grab brackets a read: {seen:?}"
+    );
+    assert_eq!(2, seen.iter().filter(|e| *e == "ocr").count(), "each box is read once");
+}
+
+/// The read-through property. The same popup rect that hides the word
+/// from a live grab cannot hide it from the hold: those pixels were
+/// copied before the popup existed (ADR-0008/0010).
+#[test]
+fn a_hold_resolves_the_word_the_popup_is_covering() {
+    let (worker, _dicts, _log_rx) = spawn(Some("食"), false, None, None);
+    // Live, unfrozen: our own popup takes the word with it.
+    worker.trigger().send(masked_hover(1, CaptureMode::Live)).unwrap();
+    assert!(matches!(answer(&worker).outcome, LookupOutcome::Hide));
+
+    worker.trigger().send(freeze(2, AT)).unwrap();
+    worker.trigger().send(masked_hover(3, CaptureMode::Live)).unwrap();
+    assert!(
+        matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }),
+        "a frozen hold reads through the popup, whatever mask it is handed"
+    );
+}
+
+/// Release ends the hold: the next lookup copies the screen again.
+#[test]
+fn a_thaw_returns_the_worker_to_live_grabs() {
+    let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
+    worker.trigger().send(freeze(1, AT)).unwrap();
+    worker.trigger().send(hover(2)).unwrap();
+    answer(&worker);
+    worker.trigger().send(Trigger { kind: TriggerKind::Thaw, id: RequestId(3) }).unwrap();
+    worker.trigger().send(hover(4)).unwrap();
+    answer(&worker);
+
+    let seen = events(&log_rx);
+    assert_eq!(
+        2,
+        seen.iter().filter(|e| *e == "grab").count(),
+        "the press-time copy, then a live one after the release: {seen:?}"
+    );
+}
+
+/// A crossed output takes a fresh full grab: the second press-time copy
+/// is what makes "hold and glance at the other monitor" work.
+#[test]
+fn a_second_freeze_mid_hold_copies_again() {
+    let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
+    worker.trigger().send(freeze(1, AT)).unwrap();
+    worker.trigger().send(hover(2)).unwrap();
+    answer(&worker);
+    let entered = PhysPoint { x: AT.x + 5000, y: AT.y };
+    worker.trigger().send(freeze(3, entered)).unwrap();
+    worker.trigger().send(hover_at(4, entered)).unwrap();
+    assert!(matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }));
+
+    let seen = events(&log_rx);
+    assert_eq!(
+        2,
+        seen.iter().filter(|e| *e == "grab").count(),
+        "one copy per press, and crossing outputs is a press: {seen:?}"
+    );
+}
+
+/// The reload gap ticket 41 pinned, through the real seam: a rebuild
+/// renames a new database over the old inode, so the handle the worker
+/// holds keeps reading the old one until a `reload` reopens it - and the
+/// reopened file's identities are what the popup then names.
+#[test]
+fn a_reload_reopens_the_dictionary_the_worker_reads() {
+    let (log_tx, _log_rx) = mpsc::channel::<String>();
+    let capture_log = log_tx.clone();
+    let (worker, dicts) = Worker::spawn(
+        settings(),
+        move || {
+            Ok(WorkerParts {
+                capture: Box::new(FakeCapture {
+                    log: capture_log,
+                    gate: None,
+                    entered_tx: None,
+                }),
+                ocr: Box::new(FakeOcr {
+                    log: log_tx,
+                    text: Some("食".to_string()),
+                    panics: false,
+                }),
+                dict: Box::new(dict_named("BeforeTheRebuild")),
+                // What the settings process's rename leaves behind.
+                reopen_dict: Some(Box::new(|| Ok(Box::new(dict_named("AfterTheRebuild"))))),
+                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
+            })
+        },
+        || {},
+    )
+    .expect("the worker must start");
+    assert_eq!("BeforeTheRebuild", dicts[0].name);
+
+    // The bin can only send what it knew before the rebuild.
+    let mut reloaded = settings();
+    reloaded.dicts = vec![DictInfo { dict_id: 1, name: "WhatTheBinKnew".to_string() }];
+    worker
+        .trigger()
+        .send(Trigger { kind: TriggerKind::Reload(Box::new(reloaded)), id: RequestId(1) })
+        .unwrap();
+    worker.trigger().send(hover(2)).unwrap();
+
+    let result = answer(&worker);
+    let LookupOutcome::Ready { presentation, .. } = result.outcome else {
+        panic!("expected a hit after the reload");
+    };
+    let top = presentation.top.expect("the hit must present");
+    assert_eq!(
+        "AfterTheRebuild", top.blocks[0].dict_name,
+        "the reopened database's identities must win over the bin's stale list"
+    );
 }

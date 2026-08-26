@@ -5,6 +5,7 @@
 
 pub mod layout;
 pub mod mask;
+mod frozen;
 pub mod source;
 
 pub use mask::{CaptureMask, CaptureMode};

@@ -8,6 +8,7 @@ use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
     tile_forward, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
 };
+use crate::text::frozen::FrozenFrame;
 use crate::text::mask::CaptureMask;
 use crate::text::{Frame, OcrEngine, RegionCapture, TextSpan};
 use anyhow::{Context, Result};
@@ -112,11 +113,26 @@ pub struct SettingsSnapshot {
     pub scan_alphanumeric: bool,
 }
 
+/// What trigger mode's press-time grab left behind.
+enum Frozen {
+    /// The frame every lookup in this hold reads (ADR-0010).
+    Held(FrozenFrame),
+    /// The press-time grab failed. Trigger mode without a frozen frame
+    /// is not trigger mode: every lookup in the hold says so, rather
+    /// than quietly reading a live grab whose pixels our own popup
+    /// would be in (ADR-0008).
+    Failed(String),
+}
+
 /// Point in, text span out.
 pub struct TextSource {
     capture: Box<dyn RegionCapture>,
     ocr: Box<dyn OcrEngine>,
     settings: SettingsSnapshot,
+    /// The trigger hold's press-time grab, while one is held. Every
+    /// grab is served out of it and the backend is not touched at all
+    /// (ADR-0010).
+    frozen: Option<Frozen>,
     /// What this read has recognised.
     recognised: Vec<Recognised>,
     /// What the previous read did, for a dwell re-check to reuse
@@ -137,6 +153,7 @@ impl TextSource {
             capture,
             ocr,
             settings,
+            frozen: None,
             recognised: Vec::new(),
             previous: Vec::new(),
         }
@@ -149,6 +166,46 @@ impl TextSource {
         // Another language or capture size is another answer.
         self.recognised.clear();
         self.previous.clear();
+    }
+
+    /// Freeze on the output holding `at`: one full grab now, read by
+    /// every lookup until [`TextSource::thaw`] (ADR-0010).
+    ///
+    /// Answers the box it froze. A failed grab is remembered too: the
+    /// hold then reports it rather than falling back to live pixels,
+    /// which in trigger mode nothing masks.
+    pub fn freeze(&mut self, at: PhysPoint) -> Result<PhysRect> {
+        // Frozen pixels are a different answer to the same question, so
+        // no earlier pass may be reused across the edge.
+        self.recognised.clear();
+        self.previous.clear();
+        match FrozenFrame::take(self.capture.as_mut(), at) {
+            Ok(frame) => {
+                let region = frame.region();
+                self.frozen = Some(Frozen::Held(frame));
+                Ok(region)
+            }
+            Err(e) => {
+                self.frozen = Some(Frozen::Failed(format!("{e:#}")));
+                Err(e)
+            }
+        }
+    }
+
+    /// Drop the hold's frozen frame; grabs go live again.
+    pub fn thaw(&mut self) {
+        if self.frozen.take().is_some() {
+            self.recognised.clear();
+            self.previous.clear();
+        }
+    }
+
+    /// The box the hold's frozen grab covers, if one is held.
+    pub fn frozen_region(&self) -> Option<PhysRect> {
+        match &self.frozen {
+            Some(Frozen::Held(f)) => Some(f.region()),
+            _ => None,
+        }
     }
 
     /// Lines plus the outcome.
@@ -195,7 +252,9 @@ impl TextSource {
     ///
     /// `mask` is white-filled in the grabbed pixels before OCR sees them,
     /// and words that touch it are dropped on the way back out
-    /// (ADR-0008).
+    /// (ADR-0008). A frozen hold answers with no mask at all, whatever
+    /// the caller asked for: those pixels predate the popup, so there is
+    /// nothing in them to hide (ADR-0010).
     ///
     /// A backend that says the pixels are unchanged (ADR-0002's damage
     /// race) skips the recogniser entirely: same pixels, same words. The
@@ -210,8 +269,11 @@ impl TextSource {
         // One value governs the fill, the word drop and the reuse key,
         // so "same pixels, same words" can never drift from what was
         // actually masked.
-        let mask = mask.clipped_to(region);
-        let frame = grab_upscaled(self.capture.as_mut(), region, factor, mask)?;
+        let mask = match self.frozen {
+            Some(_) => CaptureMask::NONE,
+            None => mask.clipped_to(region),
+        };
+        let frame = self.grab(region, factor, mask)?;
         if frame.unchanged {
             if let Some(lines) = self.reuse(region, factor, mask) {
                 return Ok((lines, frame));
@@ -222,6 +284,16 @@ impl TextSource {
         let lines = to_desktop(raw, origin, factor, mask);
         self.remember(region, factor, mask, &lines);
         Ok((lines, frame))
+    }
+
+    /// This pass's pixels: the hold's frozen frame, or a live grab.
+    fn grab(&mut self, region: PhysRect, factor: i32, mask: CaptureMask) -> Result<Frame> {
+        match &mut self.frozen {
+            Some(Frozen::Held(f)) => finish_grab(f.crop(region), region, factor, mask),
+            // The hold has no pixels, so it has no lookups either.
+            Some(Frozen::Failed(why)) => Err(anyhow::anyhow!(why.clone())),
+            None => grab_upscaled(self.capture.as_mut(), region, factor, mask),
+        }
     }
 
     /// This region's words from an earlier pass, if any pass asked the
@@ -277,6 +349,11 @@ impl TextSource {
     /// Tiled read + scan rects. One logical read: brackets the backend's
     /// `begin_read`/`end_read` around every pass.
     ///
+    /// A frozen hold brackets nothing, because it touches no backend:
+    /// every pass is a crop of the press-time frame (ADR-0010), and
+    /// arming a damage race around pixels nobody is reading would cost
+    /// wakeups for an answer the hold ignores.
+    ///
     /// `mask` is what OCR must not read - our own popup, on a live grab
     /// (ADR-0008) - and governs every pass of this one read.
     pub fn resolve_at_tiled_scanned(
@@ -285,12 +362,17 @@ impl TextSource {
         collect: bool,
         mask: CaptureMask,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
-        self.capture.begin_read();
+        let live = self.frozen.is_none();
+        if live {
+            self.capture.begin_read();
+        }
         // One read, one generation: the previous read's passes stay
         // reusable, older ones go.
         self.previous = std::mem::take(&mut self.recognised);
         let out = self.resolve_tiled_inner(cursor, collect, mask);
-        self.capture.end_read();
+        if live {
+            self.capture.end_read();
+        }
         out
     }
 
@@ -439,16 +521,26 @@ fn to_desktop(
 }
 
 /// Grab, mask, upscale by `factor`; BGRA.
-///
-/// Masked before the upscale: a quarter of the pixels to write at 2x, and
-/// the nearest-neighbour blow-up carries the hard edge through exactly.
 fn grab_upscaled(
     capture: &mut dyn RegionCapture,
     region: PhysRect,
     factor: i32,
     mask: CaptureMask,
 ) -> Result<Frame> {
-    let mut frame = capture.grab(region)?;
+    let frame = capture.grab(region)?;
+    finish_grab(frame, region, factor, mask)
+}
+
+/// Shape-check, mask and upscale one grabbed frame - live or frozen.
+///
+/// Masked before the upscale: a quarter of the pixels to write at 2x, and
+/// the nearest-neighbour blow-up carries the hard edge through exactly.
+fn finish_grab(
+    mut frame: Frame,
+    region: PhysRect,
+    factor: i32,
+    mask: CaptureMask,
+) -> Result<Frame> {
     if frame.w != region.w || frame.h != region.h {
         anyhow::bail!(
             "capture is {}x{}, wanted {}x{}",
@@ -986,5 +1078,162 @@ mod tests {
         assert_eq!(runs.get(), 2, "the uncovered box still reuses");
         source.resolve_in_region(AT, BOX, over_box_only).expect("covered box again");
         assert_eq!(runs.get(), 3, "the covered box must be recognised afresh");
+    }
+
+    // -- trigger mode's frozen hold (ADR-0010) --
+
+    /// A backend whose pixels differ on every grab, so a frozen read
+    /// can be told from a live one, and whose grabs are counted through
+    /// a handle the test keeps. Can be made to refuse the copy.
+    struct Moving {
+        grabs: Rc<std::cell::Cell<u8>>,
+        fails: bool,
+    }
+
+    impl RegionCapture for Moving {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            anyhow::ensure!(!self.fails, "the compositor refused the copy");
+            self.grabs.set(self.grabs.get() + 1);
+            Ok(Frame {
+                // Nth grab, so the pixels say which one they came from.
+                buf: vec![0x10 + self.grabs.get(); (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "moving",
+                fallback: None,
+                unchanged: false,
+            })
+        }
+
+        fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+            OUTPUT
+        }
+    }
+
+    /// The one output `Moving` knows about.
+    const OUTPUT: PhysRect = PhysRect { x: 0, y: 0, w: 600, h: 400 };
+
+    /// A source over `Moving`, what OCR was shown, and the grab count.
+    /// `words` are the image-pixel boxes OCR reports, one line each.
+    fn moving(
+        fails: bool,
+        words: Vec<PhysRect>,
+    ) -> (TextSource, SeenImage, Rc<std::cell::Cell<u8>>) {
+        let seen = Rc::new(RefCell::new(None));
+        let grabs = Rc::new(std::cell::Cell::new(0));
+        let ocr = RecordingOcr { seen: Rc::clone(&seen), words };
+        let capture = Moving { grabs: Rc::clone(&grabs), fails };
+        (TextSource::new(Box::new(capture), Box::new(ocr), snap()), seen, grabs)
+    }
+
+    /// Which grab OCR was shown the pixels of. Alpha is the upscale's
+    /// own, so only the colour bytes carry the backend's answer.
+    fn shown_grab(seen: &SeenImage) -> u8 {
+        let (buf, _, _) = seen.borrow_mut().take().expect("OCR ran");
+        let colours: Vec<u8> =
+            buf.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let first = colours[0];
+        assert!(colours.iter().all(|&b| b == first), "one grab's pixels are one value");
+        first - 0x10
+    }
+
+    /// The freeze itself: one grab of the whole output holding the point.
+    #[test]
+    fn a_freeze_takes_one_full_output_grab() {
+        let (mut source, _seen, grabs) = moving(false, Vec::new());
+        assert_eq!(None, source.frozen_region(), "nothing is frozen to begin with");
+        assert_eq!(OUTPUT, source.freeze(PhysPoint { x: 300, y: 200 }).expect("the freeze"));
+        assert_eq!(Some(OUTPUT), source.frozen_region());
+        assert_eq!(1, grabs.get(), "one press, one copy");
+    }
+
+    /// What "frozen" means: the screen moves on, the hold does not.
+    #[test]
+    fn a_frozen_hold_reads_the_press_time_pixels_and_no_others() {
+        let (mut source, seen, _grabs) = moving(false, Vec::new());
+        source.freeze(PhysPoint { x: 300, y: 200 }).expect("the freeze");
+        source.recognise_at_capture(BOX, 1, CaptureMask::NONE).expect("a read in the hold");
+        assert_eq!(1, shown_grab(&seen), "the press-time grab, not a later one");
+    }
+
+    /// A hold copies nothing and arms nothing: every pass is a crop of
+    /// the one press-time frame.
+    #[test]
+    fn a_frozen_hold_never_touches_the_backend_again() {
+        let (mut source, seen, grabs) = moving(false, Vec::new());
+        source.freeze(AT).expect("the freeze");
+        for _ in 0..3 {
+            source.resolve_at_tiled(AT, CaptureMask::NONE).expect("a read in the hold");
+        }
+        source.recognise_at_capture(OTHER, 1, CaptureMask::NONE).expect("another box");
+        assert_eq!(1, grabs.get(), "the whole hold costs one copy");
+        assert_eq!(1, shown_grab(&seen), "every box comes out of that copy");
+    }
+
+    /// The mask is the caller's belief about a live grab; frozen pixels
+    /// predate the popup, so the belief is ignored rather than obeyed.
+    /// This is the read-through property, at the seam that decides it.
+    #[test]
+    fn a_mask_over_a_frozen_hold_is_ignored() {
+        let (mut source, seen, _grabs) = moving(false, vec![PhysRect { x: 0, y: 0, w: 20, h: 20 }]);
+        source.freeze(AT).expect("the freeze");
+        // A popup right over the box we are about to read.
+        let read = source.resolve_in_region(AT, BOX, live(BOX)).expect("a read under the popup");
+        assert_eq!(1, shown_grab(&seen), "no white fill may reach a frozen read");
+        assert_eq!(1, read.lines.len(), "and no word may be dropped for touching it");
+    }
+
+    /// Release drops the frame: the next grab is the screen's again.
+    #[test]
+    fn a_thaw_returns_the_source_to_live_grabs() {
+        let (mut source, seen, grabs) = moving(false, Vec::new());
+        source.freeze(AT).expect("the freeze");
+        source.thaw();
+        assert_eq!(None, source.frozen_region());
+        source.recognise_at_capture(BOX, 1, CaptureMask::NONE).expect("a live read");
+        assert_eq!(2, grabs.get(), "a live read copies again");
+        assert_eq!(2, shown_grab(&seen), "and OCR sees the newer pixels");
+    }
+
+    /// Trigger mode without a frozen frame is not trigger mode: a
+    /// press-time grab that failed must fail the hold's lookups rather
+    /// than quietly serve live pixels nothing is masking.
+    #[test]
+    fn a_failed_press_time_grab_fails_every_lookup_in_the_hold() {
+        let (mut source, _seen, _grabs) = moving(true, Vec::new());
+        let Err(e) = source.freeze(AT) else { panic!("a refusing backend cannot freeze") };
+        assert!(format!("{e:#}").contains("refused the copy"), "{e:#}");
+
+        let Err(e) = source.resolve_in_region(AT, BOX, CaptureMask::NONE) else {
+            panic!("a hold with no pixels must not answer a lookup")
+        };
+        assert!(format!("{e:#}").contains("refused the copy"), "{e:#}");
+    }
+
+    /// A freeze is a different answer to the same question, so words
+    /// recognised live must not be served out of the frozen frame.
+    #[test]
+    fn a_freeze_drops_the_words_recognised_before_it() {
+        let (mut source, runs) = paced(true);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("a live read");
+        assert_eq!(runs.get(), 1);
+        source.freeze(AT).expect("the freeze");
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("a read in the hold");
+        assert_eq!(runs.get(), 2, "frozen pixels must be recognised for themselves");
+        source.thaw();
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("a live read again");
+        assert_eq!(runs.get(), 3, "and the live pixels again on the way out");
+    }
+
+    /// Within a hold the pixels cannot change, so the second read of a
+    /// box reuses the OCR the first one paid for.
+    #[test]
+    fn a_second_read_of_the_same_box_in_one_hold_reuses_its_words() {
+        let (mut source, runs) = paced(false);
+        source.freeze(AT).expect("the freeze");
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("first read");
+        assert_eq!(runs.get(), 1);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("second read");
+        assert_eq!(runs.get(), 1, "the same box of one frozen frame is the same words");
     }
 }

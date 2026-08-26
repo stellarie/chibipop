@@ -17,15 +17,20 @@ use crate::paths::Paths;
 use crate::tray::status::{ChannelId, ChannelState, ChannelStatuses};
 use crate::tray::{self, TrayHandle, TrayRequest};
 use crate::popup::{self, Demo, Popup, ShowRequest};
+use crate::trigger::{self, Hold};
 use crate::wayland;
+use crate::worker;
 use anyhow::{bail, Context, Result};
 use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction};
 use calloop_wayland_source::WaylandSource;
-use chibipop::controller::{Command, Controller, ControllerConfig, Event};
+use chibipop::controller::{Command, Controller, ControllerConfig, Event, RequestId};
 use chibipop::geom::{PhysPoint, PhysRect};
+use chibipop::present::DictInfo;
+use chibipop::text::mask::{CaptureMask, CaptureMode};
+use chibipop::worker::{Hover, Trigger, TriggerKind, Worker};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -62,16 +67,24 @@ pub(crate) struct App {
     log: Log,
     stub: StubState,
     config_file: PathBuf,
+    /// The config as loaded, so a reload can rebuild what the Worker
+    /// owns from the same source of truth the Controller reads.
+    config: chibipop::config::Config,
     signal: LoopSignal,
     /// The cursor channel's Wayland side (ticket 33).
     cursor: CursorState,
-    /// Driven by cursor Events; its popup Commands are executed here,
-    /// the rest are logged no-ops until tickets 35/37.
+    /// Driven by cursor Events and the trigger verbs; its Commands are
+    /// executed below.
     controller: Controller,
     /// CHIBIPOP_CURSOR_TRACE=1: log every sample and poll interval.
     trace: bool,
     /// Last hyprctl sample (logical), for move detection.
     last_poll: Option<(i32, i32)>,
+    /// The newest cursor sample, global physical: where a press looks.
+    last_cursor: Option<PhysPoint>,
+    /// Which cursor rung serves this session, so a press knows whether
+    /// it can ask for a fresh sample or must use the newest event.
+    cursor_rung: Option<cursor::Rung>,
     /// When the hyprctl rung last saw the cursor move.
     last_move: Instant,
     /// At most one settings child (ADR-0005), spawned from the tray's
@@ -86,14 +99,30 @@ pub(crate) struct App {
     /// missing the layer shell — the daemon stays up either way.
     popup: Option<Popup>,
     /// `CHIBIPOP_POPUP_DEMO=1`: the trigger verbs show and hide the
-    /// canned popup, so the surface can be driven before the capture
-    /// pipeline exists (ticket 35).
+    /// canned popup instead of looking anything up, so the surface can
+    /// be driven without a dictionary.
     demo: Demo,
-    /// The portal capture backend, once consent was granted (ADR-0002
-    /// rung 2). `None` on a screencopy session, and also on a portal
-    /// session whose dialog was refused - which is a status row and a
-    /// retry, never an exit.
-    capture: Option<PortalCapture>,
+    /// The core pipeline: capture + OCR + dictionary on their own
+    /// thread (ADR-0001). `None` when it could not be built - no
+    /// capture protocol, no OCR models, a refused portal - and the
+    /// daemon stays up saying so.
+    worker: Option<Worker>,
+    /// What a spawn needs, kept so a granted portal retry can hand the
+    /// new session to a fresh pipeline.
+    worker_setup: worker::Setup,
+    /// The wake the worker thread pings when a result is queued.
+    worker_ping: calloop::ping::Ping,
+    /// Dictionary identities the pipeline last reported.
+    dicts: Vec<DictInfo>,
+    /// Trigger mode's hold, while one is held (ADR-0010).
+    hold: Option<Hold>,
+    /// The last lookup failure logged, so a moving cursor cannot repeat
+    /// one line hundreds of times.
+    last_warning: Option<String>,
+    /// Whether a portal session is already serving pixels. The backend
+    /// itself lives on the worker thread, so this is what the retry
+    /// checks instead of holding it.
+    portal_serving: bool,
     /// What the ladder picked, so `reload` knows whether a retry is
     /// even meaningful.
     capture_selection: capture_backend::Selection,
@@ -160,20 +189,104 @@ impl App {
         };
         let outcome = self.stub.apply(verb);
         self.log.diag(&format!("control: {} - {}", verb.as_str(), outcome));
-        if verb == Verb::Reload {
-            self.reload_config();
+        match verb {
+            Verb::Reload => self.reload_config(),
+            // The canned popup stands in for a lookup, so the surface
+            // can be driven on a machine with no dictionary at all.
+            Verb::TriggerDown | Verb::Toggle if self.demo.armed => self.demo_show(),
+            Verb::TriggerUp if self.demo.armed => self.hide_popup(),
+            Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
+            Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
+            Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
         }
-        if verb == Verb::TriggerDown {
-            // Exercises the exact gate real lookups will use: this line
-            // reaches the log only when debug.show_lookup_log is on.
-            self.log.lookup("(no capture yet - a trigger-down lookup would land here)");
-            if self.demo.armed {
-                self.demo_show();
+    }
+
+    /// One trigger verb's effect (ADR-0010).
+    ///
+    /// A press freezes the output under the cursor and looks up what is
+    /// there; a release drops the frame and retracts the popup. The
+    /// grab is sent to the Worker *before* the lookup that follows it
+    /// and the Worker serves its queue in order, so "the grab predates
+    /// the popup" is a property of the ordering rather than a hope.
+    fn trigger(&mut self, step: trigger::Step) {
+        match step {
+            trigger::Step::Freeze { latched } => {
+                let Some(at) = self.cursor_now() else {
+                    self.log.diag("trigger: no cursor sample yet - nothing to look up");
+                    return;
+                };
+                let output = self.output_containing(at);
+                self.freeze_at(at, output);
+                self.hold = Some(Hold { output, latched });
+                self.feed(Event::TriggerDown);
+                // The press is its own first cursor sample: nothing has
+                // to move for the first lookup to run.
+                self.feed(Event::CursorMoved { pos: at });
+            }
+            trigger::Step::Release => {
+                self.hold = None;
+                self.thaw();
+                self.feed(Event::TriggerUp);
+            }
+            trigger::Step::Nothing(why) => self.log.diag(&format!("trigger: {why}")),
+        }
+    }
+
+    /// Take the press-time grab of `output`, on the Worker's thread.
+    fn freeze_at(&mut self, at: PhysPoint, output: PhysRect) {
+        let Some(worker) = self.worker.as_ref() else {
+            self.log.diag(
+                "trigger: no pipeline - a lookup needs capture, OCR models and a dictionary",
+            );
+            return;
+        };
+        // Freezes answer nothing, so the id is never matched against a
+        // result; a failed grab is reported by the lookups behind it.
+        let sent = worker
+            .trigger()
+            .send(Trigger { kind: TriggerKind::Freeze(at), id: RequestId(0) })
+            .is_ok();
+        if !sent {
+            self.log.diag("trigger: the pipeline has gone away");
+            self.worker = None;
+            return;
+        }
+        self.log.diag(&format!(
+            "trigger: frozen grab of output {},{} {}x{} for cursor {},{}",
+            output.x, output.y, output.w, output.h, at.x, at.y
+        ));
+    }
+
+    /// Drop the hold's frozen frame; grabs go live again.
+    fn thaw(&mut self) {
+        let Some(worker) = self.worker.as_ref() else { return };
+        let _ = worker.trigger().send(Trigger { kind: TriggerKind::Thaw, id: RequestId(0) });
+        self.log.diag("trigger: hold released, frozen grab dropped");
+    }
+
+    /// Where the cursor is *now*, for a press.
+    ///
+    /// The polling rung is asked directly: a press is exactly when its
+    /// adaptive interval may be at its slowest (ADR-0010), and reading
+    /// the position is free. The event rungs have already delivered
+    /// their newest sample.
+    fn cursor_now(&mut self) -> Option<PhysPoint> {
+        if self.cursor_rung == Some(cursor::Rung::HyprctlPoll) {
+            if let Some((lx, ly)) = hyprctl::sample() {
+                self.last_poll = Some((lx, ly));
+                if let Some(pos) = self.cursor.logical_to_global(f64::from(lx), f64::from(ly)) {
+                    self.last_cursor = Some(pos);
+                }
             }
         }
-        if verb == Verb::TriggerUp && self.demo.armed {
-            self.hide_popup();
-        }
+        self.last_cursor
+    }
+
+    /// The output box holding `at`, by the same arithmetic the capture
+    /// backend uses - so the box the daemon records for a hold is the
+    /// box the Worker actually froze.
+    fn output_containing(&self, at: PhysPoint) -> PhysRect {
+        crate::capture::geometry::bounds_containing(&self.cursor.geometries(), at)
     }
 
     /// The popup, from a Wayland dispatch. Those handlers only ever run
@@ -216,7 +329,7 @@ impl App {
     }
 
     /// One Event through the Controller, and every Command it answers
-    /// with executed. Tickets 35/37 fill the rest of this table in.
+    /// with executed. Ticket 37 fills in the Anki rows.
     fn feed(&mut self, event: Event) {
         for cmd in self.controller.handle(event) {
             self.execute(cmd);
@@ -225,6 +338,21 @@ impl App {
 
     fn execute(&mut self, cmd: Command) {
         match cmd {
+            // What OCR must not read is our own popup, and only on a
+            // live grab: a frozen hold's pixels predate it (ADR-0008,
+            // ADR-0010). Wayland has no protocol-level surface
+            // exclusion, so this rect is the whole mechanism.
+            Command::RequestLookup { id, point, popup } => {
+                let mask = CaptureMask::for_mode(self.capture_mode(), popup);
+                self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id);
+            }
+            Command::RequestDrillDown { id, text } => {
+                self.send_trigger(TriggerKind::DrillDown(text), id);
+            }
+            Command::RequestReload { id } => {
+                let settings = worker::settings(&self.config, &self.dicts);
+                self.send_trigger(TriggerKind::Reload(Box::new(settings)), id);
+            }
             Command::ShowPopup { presentation, anchor, scroll, show_back } => {
                 self.show_popup(&ShowRequest {
                     presentation: *presentation,
@@ -248,7 +376,55 @@ impl App {
                 }
             }
             Command::HidePopup => self.hide_popup(),
-            other => self.log.diag(&format!("controller: {other:?} (no-op until tickets 35/37)")),
+            // Screen content: written only where the user opted in.
+            Command::LogLookup { headword, match_len } => {
+                self.log.lookup(&format!("{headword}  match={match_len}"));
+            }
+            // A cursor crossing text the dictionary cannot serve would
+            // otherwise repeat one line per sample.
+            Command::WarnLookupFailed(msg) => {
+                if self.last_warning.as_deref() != Some(msg.as_str()) {
+                    self.log.diag(&format!("lookup failed: {msg}"));
+                    self.last_warning = Some(msg);
+                }
+            }
+            other => self.log.diag(&format!("controller: {other:?} (no-op until ticket 37)")),
+        }
+    }
+
+    /// One trigger into the pipeline, or one line saying there is none.
+    fn send_trigger(&mut self, kind: TriggerKind, id: RequestId) {
+        let Some(worker) = self.worker.as_ref() else {
+            self.log.diag("lookup: no pipeline - nothing to ask");
+            return;
+        };
+        if worker.trigger().send(Trigger { kind, id }).is_err() {
+            self.log.diag("lookup: the pipeline has gone away");
+            self.worker = None;
+        }
+    }
+
+    /// How this lookup's pixels relate to the popup, in time: a hold
+    /// reads the press-time frame, everything else reads the screen.
+    fn capture_mode(&self) -> CaptureMode {
+        match self.hold {
+            Some(_) => CaptureMode::Frozen,
+            None => CaptureMode::Live,
+        }
+    }
+
+    /// The Worker answered. Only the freshest queued result matters:
+    /// the older ones were superseded before they arrived (latest-wins,
+    /// as on Windows).
+    fn drain_results(&mut self) {
+        let mut freshest = None;
+        if let Some(worker) = self.worker.as_ref() {
+            while let Ok(result) = worker.results().try_recv() {
+                freshest = Some(result);
+            }
+        }
+        if let Some(result) = freshest {
+            self.feed(Event::LookupResult { id: result.id, outcome: result.outcome });
         }
     }
 
@@ -401,8 +577,38 @@ impl App {
                     popup.reconfigure(&config);
                 }
                 self.flush_popup_notes();
+                // The Controller answers this with `RequestReload`,
+                // which is what pushes the new settings into the Worker
+                // and reopens the dictionary a rebuild renamed over.
+                self.config = config;
+                let cfg = controller_config(&self.config);
+                self.feed(Event::ConfigReloaded(Box::new(cfg)));
             }
             Err(e) => self.log.diag(&format!("config: reload failed: {e:#}")),
+        }
+    }
+
+    /// Build (or rebuild) the core pipeline on its own thread.
+    ///
+    /// Dropping the old handle first ends the old thread: its trigger
+    /// channel closes and it returns from `recv`. A pipeline that
+    /// cannot be built is a log line and a daemon that still runs -
+    /// cursor, tray, settings and the popup are all unaffected.
+    fn spawn_worker(&mut self, portal: Option<PortalCapture>) {
+        self.worker = None;
+        let settings = worker::settings(&self.config, &self.dicts);
+        let started = Instant::now();
+        match worker::spawn(&self.worker_setup, settings, portal, self.worker_ping.clone()) {
+            Ok((worker, dicts)) => {
+                self.log.diag(&format!(
+                    "worker: pipeline up in {} ms; {}",
+                    started.elapsed().as_millis(),
+                    worker::dict_line(&self.worker_setup.db, &dicts),
+                ));
+                self.dicts = dicts;
+                self.worker = Some(worker);
+            }
+            Err(e) => self.log.diag(&format!("worker: unavailable - {e:#}")),
         }
     }
 
@@ -415,15 +621,20 @@ impl App {
     /// a shell one-liner reach the same hook, and the trigger channel
     /// stays the minimal verb set ADR-0003 argues for.
     fn retry_portal_capture(&mut self) {
-        if self.capture.is_some() || self.capture_selection.backend() != Some(Backend::Portal) {
+        if self.portal_serving || self.capture_selection.backend() != Some(Backend::Portal) {
             return;
         }
         let Some(retry) = self.portal_retry.take() else { return };
         self.log.diag("capture: retrying the portal consent (reload)");
         let (capture, state) = open_portal(&retry, &mut self.log);
-        self.capture = capture;
         self.portal_retry = Some(retry);
         self.note_channel(ChannelId::Capture, state);
+        // The Worker thread is what reads through the session, so a
+        // granted retry hands it to a fresh pipeline.
+        if capture.is_some() {
+            self.portal_serving = true;
+            self.spawn_worker(capture);
+        }
     }
 
     /// One `hyprctl cursorpos` poll tick: sample, feed the seam on
@@ -473,9 +684,19 @@ impl CursorHandler for App {
         if self.trace {
             self.log.diag(&format!("cursor: ({}, {})", pos.x, pos.y));
         }
-        for cmd in self.controller.handle(Event::CursorMoved { pos }) {
-            self.execute(cmd);
+        self.last_cursor = Some(pos);
+        // Crossing outputs mid-hold takes one fresh full grab of the
+        // entered output (ADR-0010), and it has to be taken before the
+        // lookup that noticed the crossing - so it happens here, not
+        // behind the Controller.
+        if let Some(hold) = self.hold {
+            if let Some(output) = trigger::regrab(hold, &self.cursor.geometries(), pos) {
+                self.log.diag("trigger: the cursor crossed onto another output");
+                self.freeze_at(pos, output);
+                self.hold = Some(Hold { output, ..hold });
+            }
         }
+        self.feed(Event::CursorMoved { pos });
     }
 }
 
@@ -697,6 +918,11 @@ pub fn run(paths: Paths) -> Result<()> {
         ));
     }
 
+    // The Worker's wake: a result queued on its thread becomes one
+    // event-loop wakeup here (ADR-0001 - the pump stays sync).
+    let (worker_ping, worker_pings) =
+        calloop::ping::make_ping().context("creating the worker wake")?;
+
     let mut app = App {
         log,
         stub: StubState::default(),
@@ -706,14 +932,30 @@ pub fn run(paths: Paths) -> Result<()> {
         controller: Controller::new(controller_config(&config)),
         trace,
         last_poll: None,
+        last_cursor: None,
+        cursor_rung: match &selection {
+            cursor::Selection::Rung(rung) => Some(*rung),
+            cursor::Selection::Unsupported { .. } => None,
+        },
         last_move: Instant::now(),
         settings: SettingsChild::new(),
         tray: tray_handle,
-        capture,
+        worker: None,
+        worker_setup: worker::Setup {
+            globals: globals.clone(),
+            backend: capture_selection.backend(),
+            db: paths.data_dir.join("chibipop.sqlite"),
+        },
+        worker_ping,
+        dicts: Vec::new(),
+        hold: None,
+        last_warning: None,
+        portal_serving: capture.is_some(),
         capture_selection,
         portal_retry,
         popup,
         demo,
+        config,
     };
 
     // Bind what the selected rung needs and settle it before the pump
@@ -829,8 +1071,20 @@ pub fn run(paths: Paths) -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("registering the signal source: {e}"))?;
 
+    // The Worker's results, drained on its wake.
+    event_loop
+        .handle()
+        .insert_source(worker_pings, |_, _, app: &mut App| app.drain_results())
+        .map_err(|e| anyhow::anyhow!("registering the worker wake: {e}"))?;
+
+    // The pipeline itself, last: opening the OCR models and the
+    // dictionary blocks, and everything above must already be true
+    // before a lookup can be asked for. On the portal rung the
+    // consented session moves onto the worker thread here.
+    app.spawn_worker(capture);
+
     app.log.diag(&format!(
-        "ready: pump running (cursor channel wired; popup {}; capture {}; tray {}; no OCR yet)",
+        "ready: pump running (cursor channel wired; popup {}; capture {}; tray {}; lookups {})",
         match app.popup.as_ref().map(Popup::surface_count) {
             Some(n) => format!("on {n} output(s)"),
             None => "unavailable".to_string(),
@@ -840,7 +1094,8 @@ pub fn run(paths: Paths) -> Result<()> {
             Some(Backend::Portal) => "portal",
             None => "unsupported",
         },
-        if app.tray.is_connected() { "published" } else { "trayless" }
+        if app.tray.is_connected() { "published" } else { "trayless" },
+        if app.worker.is_some() { "ready" } else { "unavailable" },
     ));
 
     event_loop.run(None, &mut app, |_| {}).context("running the event loop")?;
@@ -968,26 +1223,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A screencopy session, which is what every test here wants: the
-    /// promptless rung, so no test can wander into a portal dialog.
+    /// A screencopy session with no pipeline, which is what every test
+    /// here wants: the promptless rung, so no test can wander into a
+    /// portal dialog, and no OCR models are opened for a log assertion.
     fn test_app(dir: &std::path::Path, log_file: &std::path::Path, event_loop: &EventLoop<App>) -> App {
         let capture = capture_backend::Selection::Backend(Backend::WlrScreencopy);
+        let (worker_ping, _pings) = calloop::ping::make_ping().unwrap();
         App {
             log: Log::open(log_file, false),
             stub: StubState::default(),
             config_file: dir.join("chibipop.toml"),
+            config: chibipop::config::Config::default(),
             signal: event_loop.get_signal(),
             settings: SettingsChild::new(),
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
             trace: false,
             last_poll: None,
+            last_cursor: None,
+            cursor_rung: Some(cursor::Rung::HyprctlPoll),
             last_move: Instant::now(),
             tray: TrayHandle::trayless(ChannelStatuses::startup(
                 tray::status::capture_state(&capture),
                 &cursor::Selection::Rung(cursor::Rung::HyprctlPoll),
             )),
-            capture: None,
+            worker: None,
+            worker_setup: worker::Setup {
+                globals: Vec::new(),
+                backend: Some(Backend::WlrScreencopy),
+                db: dir.join("chibipop.sqlite"),
+            },
+            worker_ping,
+            dicts: Vec::new(),
+            hold: None,
+            last_warning: None,
+            portal_serving: false,
             capture_selection: capture,
             portal_retry: None,
             popup: None,
@@ -1015,6 +1285,120 @@ mod tests {
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(!written.contains("retrying the portal consent"), "log was: {written}");
         assert_eq!(before, app.tray.statuses().row(ChannelId::Capture));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch dir per test, named after it.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("chibipop_daemon_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The verbs' effect on the hold. There is no pipeline here, which
+    /// is exactly the point: the hold is the daemon's own state and the
+    /// verb table must be right whether or not a lookup can run.
+    #[test]
+    fn a_press_holds_and_a_release_ends_it() {
+        let dir = scratch("hold");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        // An event rung, so no test ever shells out to hyprctl.
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
+
+        app.handle_request("trigger-down", Some(Verb::TriggerDown));
+        let hold = app.hold.expect("a press holds");
+        assert!(!hold.latched, "a key press is not a latch");
+        assert!(hold.output.contains(PhysPoint { x: 400, y: 300 }), "{:?}", hold.output);
+
+        app.handle_request("trigger-up", Some(Verb::TriggerUp));
+        assert_eq!(None, app.hold, "a release ends the hold");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `toggle` outlives the key: a release while latched changes
+    /// nothing, and only a second toggle ends it (ADR-0010).
+    #[test]
+    fn a_toggle_holds_the_freeze_until_it_is_toggled_off() {
+        let dir = scratch("toggle");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
+
+        app.handle_request("toggle", Some(Verb::Toggle));
+        assert!(app.hold.is_some_and(|h| h.latched), "toggle-on latches");
+        app.handle_request("trigger-up", Some(Verb::TriggerUp));
+        assert!(app.hold.is_some(), "a stray release must not end a toggle");
+        app.handle_request("toggle", Some(Verb::Toggle));
+        assert_eq!(None, app.hold, "toggle-off ends it");
+
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("a toggle holds the freeze"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Trigger mode reads where the cursor is, so a press before the
+    /// cursor channel has said anything is a line, not a lookup.
+    #[test]
+    fn a_press_before_the_first_cursor_sample_looks_nothing_up() {
+        let dir = scratch("nocursor");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+
+        app.handle_request("trigger-down", Some(Verb::TriggerDown));
+
+        assert_eq!(None, app.hold, "nothing to freeze on");
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("no cursor sample yet"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Crossing outputs mid-hold re-grabs, and the hold follows the
+    /// cursor onto the output it entered (ADR-0010). This box has one
+    /// monitor, so the geometry is injected; `trigger::regrab` carries
+    /// the decision and this pins that the daemon acts on it.
+    #[test]
+    fn a_hold_follows_the_cursor_onto_another_output() {
+        let dir = scratch("crossing");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let left = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
+        app.hold = Some(Hold { output: left, latched: false });
+
+        // No output geometry has arrived, so `bounds_containing`
+        // answers with a plausible box around the point - which is a
+        // different box than the one held, i.e. a crossing.
+        app.on_cursor_position(PhysPoint { x: 5000, y: 500 });
+
+        let now = app.hold.expect("the hold survives the crossing");
+        assert_ne!(left, now.output, "the hold must move to the entered output");
+        assert!(now.output.contains(PhysPoint { x: 5000, y: 500 }));
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("crossed onto another output"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One failing lookup must not become one log line per cursor
+    /// sample: a cursor crossing text no dictionary can serve would
+    /// otherwise flood the file at the sample rate.
+    #[test]
+    fn a_repeated_lookup_failure_is_logged_once() {
+        let dir = scratch("warnonce");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        for _ in 0..3 {
+            app.execute(Command::WarnLookupFailed("no dictionary".to_string()));
+        }
+        app.execute(Command::WarnLookupFailed("something else".to_string()));
+
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert_eq!(1, written.matches("lookup failed: no dictionary").count(), "log: {written}");
+        assert_eq!(1, written.matches("lookup failed: something else").count(), "log: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

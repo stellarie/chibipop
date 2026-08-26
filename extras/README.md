@@ -27,10 +27,22 @@ Adjust `ExecStart` if the binary is not at `/usr/bin/chibipop`.
 
 ## hyprland.conf
 
-`exec-once` plus example native trigger binds for bare Hyprland. Copy it
-to `~/.config/hypr/chibipop.conf` and include it from your main config:
+`exec-once` plus native trigger binds for bare Hyprland. Copy it to
+`~/.config/hypr/chibipop.conf` and include it from your main config:
 
     source = ~/.config/hypr/chibipop.conf
 
-The bind lines mirror the default `ALT+F` chord; the settings window
-shows the exact snippet for whatever chord you configure.
+The active bind lines mirror the default `ALT+F` chord — press runs
+`chibipop ctl trigger-down`, release runs `trigger-up` — and the settings
+window shows the exact snippet for whatever chord you configure. Two
+commented-out extras sit beside them: the one-line **bare-modifier hold**
+(hold Shift, Hyprland only) and a **toggle** bind for hands-free reading.
+
+The same pair on sway and other wlr compositors, which have no
+modifier-as-key bind:
+
+    bindsym --no-repeat Mod1+f exec chibipop ctl trigger-down
+    bindsym --release   Mod1+f exec chibipop ctl trigger-up
+
+sway's own `bindsym --release Shift_L` is the documented bare-modifier
+form there (ADR-0003); it is untested by this project.
