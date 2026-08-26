@@ -114,6 +114,108 @@ The tarball is reproducible: sorted entries, no owners, one timestamp (the
 commit's), `gzip -n`. Repackaging the same commit twice gives the same bytes,
 so "is this the asset the workflow built" is a `sha256sum`.
 
+### The AUR packages
+
+Two, templated in [`packaging/aur/`](../packaging/aur) and pushed by hand
+(ADR-0007). An Arch user installs and updates through pacman and never sees
+a tarball:
+
+| package | builds from | ONNX Runtime |
+|---|---|---|
+| `chibipop-bin` | the release tarball above | inside the binary — nothing to install |
+| `chibipop` | the release **tag** | the distro's `onnxruntime`, dlopened |
+
+`chibipop-bin` compiles nothing: it repacks the asset. The one flag that
+makes the source package a *distro* package is `--no-default-features
+--features system-onnxruntime` — the default feature downloads a pinned
+ONNX Runtime prebuilt mid-build and links it statically, which a distro
+package must not do, and `system-onnxruntime` switches `ort` to dlopening
+`libonnxruntime.so` instead (ADR-0009). Nothing else about the build
+differs, and the models are committed, so neither package downloads
+anything but its own source.
+
+Both install one layout, and it is not free-form: `/usr/bin/chibipop`
+resolves its data by walking up from its own directory
+(`models::LAYOUTS`, and the daemon's rules search one directory over).
+
+```
+/usr/bin/chibipop
+/usr/share/chibipop/data/deconjugator.json           required at runtime
+/usr/share/chibipop/models/meiki/                    the three ONNX models
+/usr/share/applications/chibipop.desktop
+/usr/lib/systemd/user/chibipop.service               a *user* unit
+/usr/share/icons/hicolor/scalable/apps/chibipop.svg  the .desktop entry's Icon=
+/usr/share/doc/chibipop/{README.md,extras/}          snippets, not config
+/usr/share/licenses/<pkgname>/{LICENSE,LICENSE.models.md}
+```
+
+Move either of the first two and the package still installs, then refuses
+to OCR or stops resolving conjugated forms — so
+`crates/chibipop-linux/tests/aur_packaging.rs` runs each PKGBUILD's own
+`package()` over a stub `$srcdir` and asks the binary's search where the
+models are in the `$pkgdir` that comes out. It needs no `makepkg`
+(`package()` is a shell function over `install`), so it runs on a CI runner
+like any other test.
+
+A pacman install is never portable mode: nothing writes a `chibipop.toml`
+beside `/usr/bin/chibipop`, so config, data and state land in the XDG
+directories (ADR-0006).
+
+**Bumping.** One command rewrites both templates for a tag — pkgver, pkgrel,
+every checksum, and both `.SRCINFO`s:
+
+```bash
+packaging/aur/bump.sh v0.9.0
+```
+
+It downloads exactly the sources the PKGBUILDs declare *after* the version
+rewrite, so a URL a new tag breaks fails there instead of on a user's
+machine. `--local FILE` supplies one source from disk instead (matched by the
+name the PKGBUILD gives it), which is how the packages are rehearsed before a
+release exists; `--only NAME` does one package; `--no-srcinfo` skips the
+`.SRCINFO` regeneration for a box with no `makepkg`. Then review the diff and
+push each package by hand — the script prints the three commands.
+
+**Rehearsing in a clean container.** No tag and no release asset needed:
+build the tarball locally, point a copy of the PKGBUILD at it, and let
+`makepkg -s` resolve the declared dependencies for real.
+
+```bash
+docker run --rm --cap-add SYS_NICE -v /tmp/aur:/host:ro archlinux:base-devel bash -c '
+  pacman -Syu --noconfirm --needed sudo namcap sway
+  useradd -m builder && echo "builder ALL=(ALL) NOPASSWD: ALL" >/etc/sudoers.d/builder
+  cp -r /host/pkg /home/builder/pkg && chown -R builder /home/builder/pkg
+  su - builder -c "cd ~/pkg && makepkg -s --noconfirm" && namcap /home/builder/pkg/*.pkg.tar.zst
+  pacman -U --noconfirm /home/builder/pkg/*.pkg.tar.zst && chibipop --version'
+```
+
+`--cap-add SYS_NICE` is only for the last step worth doing: Arch's `sway`
+carries `cap_sys_nice=ep` and a container without that capability cannot
+`execve` it at all. With it, `WLR_BACKENDS=headless WLR_RENDERER=pixman sway`
+gives the *installed* binary a real compositor, and `chibipop run` must log
+`worker: pipeline up` — which is the OCR engine resolving
+`/usr/share/chibipop/models/meiki` and digesting all three models, and on the
+source package also the system `libonnxruntime.so` being found.
+
+`namcap` must report **no errors**. The warnings it does report are these,
+and all of them are accepted:
+
+- `ELF file is unstripped` (`chibipop-bin` only) — deliberate, exactly as the
+  tarball ships it. The source package takes makepkg's default and is
+  stripped.
+- `Unused shared library ld-linux-x86-64.so.2` — the loader.
+- `Dependency libgcc / libstdc++ detected and implicitly satisfied`, and
+  `Dependency included, but may not be needed ('gcc-libs')` — naming
+  `gcc-libs` for a `libgcc_s`/`libstdc++` user is Arch convention, and
+  namcap's heuristic disagrees with it, not with us.
+- `Dependency included, but may not be needed ('onnxruntime')` (source
+  package only) — it is dlopened, so nothing namcap can read links to it.
+  Dropping it would ship a package whose OCR dies on first use.
+
+An error namcap *did* report and that was fixed rather than accepted:
+`Dependency hicolor-icon-theme detected and not included`. Both packages
+install an icon into that theme's directories, so both depend on it.
+
 ## Cutting one
 
 1. **Decide the version.** Update `version` in `Cargo.toml`.
@@ -149,7 +251,15 @@ so "is this the asset the workflow built" is a `sha256sum`.
    - Linux: `tar xzf`, then `./chibipop probe` and `./chibipop run` — the log
      must say `worker: pipeline up`, which is the OCR engine finding and
      digesting `models/meiki` beside the binary. Then publish.
-7. **Refresh the latest-build copy** so `Documents\chibipop-latest` runs the
+7. **Bump the AUR packages** once the release is published — the source URLs
+   point at it:
+   ```bash
+   packaging/aur/bump.sh vX.Y.Z
+   ```
+   Build both in a clean container (recipe above), then push each by hand.
+   `chibipop-bin` is the one an Arch user gets in seconds; the source package
+   is the one that works on a distro whose glibc the tarball is too new for.
+8. **Refresh the latest-build copy** so `Documents\chibipop-latest` runs the
    version you just shipped:
    ```powershell
    pwsh -File scripts/blank-copy.ps1
