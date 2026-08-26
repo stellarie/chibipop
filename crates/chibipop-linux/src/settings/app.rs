@@ -94,6 +94,9 @@ struct App {
     /// Its presence *is* the busy flag - Rebuild and Apply are refused
     /// while it is set.
     rebuild_progress: Option<String>,
+    /// A click's check is in flight; the button stays shut until the
+    /// line comes back, so a held Enter cannot start ten of them.
+    checking_update: bool,
     status: String,
 }
 
@@ -124,6 +127,7 @@ impl App {
             selected_dict: None,
             add_path: String::new(),
             rebuild_progress: None,
+            checking_update: false,
             status: String::new(),
         }
     }
@@ -292,6 +296,8 @@ enum Message {
     CopyBind,
     CopyRule,
     Autostart(bool),
+    CheckUpdate,
+    UpdateChecked(String),
     Apply,
 }
 
@@ -374,6 +380,22 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             app.autostart_on = target.is_enabled();
         }
+        Message::CheckUpdate => {
+            app.checking_update = true;
+            app.status = "Checking for updates\u{2026}".to_string();
+            // ureq blocks and this is the UI thread: one click, one
+            // thread, one line back - the rebuild row's shape, with a
+            // single message instead of a stream.
+            let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+            std::thread::spawn(move || {
+                let _ = tx.unbounded_send(super::update::report(env!("CARGO_PKG_VERSION")));
+            });
+            return Task::run(rx, Message::UpdateChecked);
+        }
+        Message::UpdateChecked(line) => {
+            app.checking_update = false;
+            app.status = line;
+        }
         Message::Apply => app.apply(),
     }
     Task::none()
@@ -417,6 +439,7 @@ fn view(app: &App) -> Element<'_, Message> {
         ocr_section(app),
         anki_section(app),
         startup_section(app),
+        update_section(app),
         debug_section(app),
         status_row(app),
     ]
@@ -791,6 +814,27 @@ fn startup_section(app: &App) -> Element<'_, Message> {
     section("Startup", body)
 }
 
+/// The Updates row, mirroring the Windows window's group of the same
+/// name - and stopping where ADR-0007 says it stops. The check reports;
+/// there is no swap on this platform to offer, so the row says which
+/// asset to fetch and who owns the binary.
+fn update_section(app: &App) -> Element<'_, Message> {
+    section(
+        "Updates",
+        column![
+            button("Check for updates")
+                .on_press_maybe((!app.checking_update).then_some(Message::CheckUpdate)),
+            text(format!(
+                "You are running {}. A check asks GitHub for the newest release \
+                 and reports it; chibipop never replaces its own binary here.",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .size(13),
+        ]
+        .spacing(8),
+    )
+}
+
 fn debug_section(app: &App) -> Element<'_, Message> {
     section(
         "Debug",
@@ -870,6 +914,7 @@ mod tests {
             selected_dict: None,
             add_path: String::new(),
             rebuild_progress: None,
+            checking_update: false,
             status: String::new(),
         }
     }
@@ -1088,5 +1133,26 @@ mod tests {
         let _ = update(&mut app, Message::Autostart(true));
         assert!(!app.autostart_on);
         assert!(app.status.contains("XDG config directory"), "{}", app.status);
+    }
+
+    /// The check's answer is a status line and an open button again.
+    /// Only the click's own arm reaches the network, so what is driven
+    /// here is the line coming back - what it says for each outcome is
+    /// [`super::super::update`]'s to prove.
+    #[test]
+    fn a_finished_update_check_reports_and_reopens_the_button() {
+        let dir = scratch("update");
+        let mut app = app(&dir);
+        app.checking_update = true;
+        app.status = "Checking\u{2026}".to_string();
+
+        let _ = update(
+            &mut app,
+            Message::UpdateChecked("v9.9.9 is available.".to_string()),
+        );
+
+        assert!(!app.checking_update, "a finished check reopens the button");
+        assert_eq!("v9.9.9 is available.", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
