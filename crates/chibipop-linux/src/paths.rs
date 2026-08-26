@@ -159,6 +159,120 @@ pub fn config_home(env: &Env) -> Option<PathBuf> {
         .or_else(|| env.home.as_deref().map(|h| h.join(".config")))
 }
 
+/// The bare command name, the only guess left when the running exe
+/// cannot be identified.
+pub const COMMAND: &str = "chibipop";
+
+/// The binary a generated launcher or command snippet should name: the
+/// AppImage itself when running from one (`current_exe` inside an
+/// AppImage points into a `/tmp` mount that is gone by the next login),
+/// otherwise this exe.
+///
+/// Lives here rather than in `settings::autostart` because two features
+/// need the same answer: the autostart entry's `Exec`, and every
+/// compositor bind snippet the settings window hands out. Under
+/// `cargo run` the binary is `target/debug/chibipop` and is not on
+/// PATH, so a snippet naming the bare command execs nothing (ticket 51).
+pub fn exec_path() -> std::io::Result<PathBuf> {
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        let appimage = PathBuf::from(appimage);
+        if appimage.is_absolute() {
+            return Ok(appimage);
+        }
+    }
+    std::env::current_exe()
+}
+
+/// [`exec_path`] for text a user will paste, with [`COMMAND`] as the
+/// last resort. `current_exe` can genuinely fail (an unreadable or
+/// deleted `/proc/self/exe`), and on such a host the bare name is the
+/// only guess left: sometimes wrong, always better than an empty word
+/// in a bind line.
+pub fn exec_name() -> PathBuf {
+    exec_path().unwrap_or_else(|_| PathBuf::from(COMMAND))
+}
+
+/// Whether a path can stand in a `sh` command line as itself.
+///
+/// Deliberately narrow: only characters that are literal to every
+/// POSIX shell in every context. Anything else — a space, which a
+/// checkout under a human-named directory really has, a glob
+/// character, a quote — sends the path through [`shell_quote`].
+fn is_bare_word(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '+' | ':' | '-'))
+}
+
+/// A path as one shell word, for command text we hand a user or a
+/// compositor. Every consumer of that text (a Hyprland `exec`
+/// dispatcher, a sway `exec`, a shell) splits on whitespace and then
+/// runs `/bin/sh`, so the quoting rule is the shell's: wrap in single
+/// quotes, inside which every character is literal, and splice an
+/// embedded `'` back in as `'\''` (close, escaped quote, reopen).
+/// Paths that are already bare words are left alone, so the common
+/// installed case stays a config line a human can read.
+///
+/// One case no quoting can save: Hyprland splits a `bind =` line on
+/// commas before the dispatcher ever sees it, so a path containing a
+/// comma cannot be expressed there at all. Not worth a special case —
+/// the sway dialect has no such rule, and the snippet is text the user
+/// can still edit.
+pub fn shell_quote(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if is_bare_word(&text) {
+        return text.into_owned();
+    }
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// What a typed `~` path resolved to, or why it could not.
+///
+/// A GUI text entry is not a shell, so nothing expands `~` for the
+/// settings window's path fields; this is that expansion, kept pure so
+/// the caller's tests never have to fight over process-global `HOME`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typed {
+    /// The path to use, `~` already replaced (or never present).
+    Path(PathBuf),
+    /// A `~` path with no `$HOME` to resolve it against. Probing the
+    /// literal `./~/...` would only refuse for the wrong reason.
+    NoHome,
+    /// `~user/...`: resolving it needs passwd lookups this binary has no
+    /// business doing. Refused, not probed.
+    UserRelative,
+}
+
+/// Expand a leading `~` in a path the user typed. `~` and `~/` are the
+/// home directory itself; anything without a leading `~` is taken
+/// verbatim, so plain relative paths keep resolving against the cwd.
+pub fn expand_tilde(typed: &str, home: Option<&Path>) -> Typed {
+    let Some(rest) = typed.strip_prefix('~') else {
+        return Typed::Path(PathBuf::from(typed));
+    };
+    // `~name` is user-relative; `~` and `~/…` are ours. Extra leading
+    // separators are stripped so `join` cannot mistake the remainder for
+    // an absolute path and throw the home directory away.
+    let rest = if rest.is_empty() {
+        ""
+    } else if let Some(r) = rest.strip_prefix('/') {
+        r.trim_start_matches('/')
+    } else {
+        return Typed::UserRelative;
+    };
+    let Some(home) = home else {
+        return Typed::NoHome;
+    };
+    // `~/` alone is the home directory, and `join("")` would append a
+    // trailing separator instead of leaving it be.
+    if rest.is_empty() {
+        Typed::Path(home.to_path_buf())
+    } else {
+        Typed::Path(home.join(rest))
+    }
+}
+
 /// Per the basedir spec, a relative `$XDG_*` value is invalid: ignore it.
 fn xdg(value: Option<&Path>) -> Option<&Path> {
     value.filter(|p| p.is_absolute())
@@ -260,5 +374,24 @@ mod tests {
         let p = resolve(&env_with_home(), None);
         let msg = p.runtime_dir().unwrap_err().to_string();
         assert!(msg.contains("XDG_RUNTIME_DIR"), "{msg}");
+    }
+
+    /// The one character single quotes cannot contain. `'\''` is the
+    /// shell's own splice, and a snippet that got it wrong would run a
+    /// truncated path.
+    #[test]
+    fn an_embedded_quote_is_spliced_the_way_sh_wants() {
+        assert_eq!(r"'/home/u/it'\''s/chibipop'", shell_quote(Path::new("/home/u/it's/chibipop")));
+    }
+
+    /// Quoting is skipped only for paths that are literal to every
+    /// shell; anything else pays for a pair of quotes.
+    #[test]
+    fn only_shell_safe_paths_are_left_bare() {
+        assert_eq!("chibipop", shell_quote(Path::new("chibipop")));
+        assert_eq!("/usr/bin/chibipop-0.1_x86", shell_quote(Path::new("/usr/bin/chibipop-0.1_x86")));
+        assert_eq!("'chibipop*'", shell_quote(Path::new("chibipop*")));
+        assert_eq!("'$HOME/chibipop'", shell_quote(Path::new("$HOME/chibipop")));
+        assert_eq!("''", shell_quote(Path::new("")));
     }
 }

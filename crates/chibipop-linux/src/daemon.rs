@@ -1349,7 +1349,10 @@ pub fn run(paths: Paths) -> Result<()> {
         log.diag(w);
     }
     let trigger_selection = shortcuts::select(shortcuts::portal::probe(), trigger_override);
-    log.diag(&trigger_selection.startup_line());
+    // The advice half of this line is a bind the user pastes, so it
+    // names this binary rather than a bare `chibipop` PATH may lack
+    // (ticket 51).
+    log.diag(&trigger_selection.startup_line(&crate::paths::exec_name()));
     // Until the portal answers, the honest published state is "the
     // compositor owns the key": that is what the settings window must
     // show, and a stale portal binding from a previous run must not

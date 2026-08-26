@@ -7,6 +7,9 @@
 //! from third-party capture, so the window offers the compositor's own
 //! rule where one exists and says so where none does.
 
+use crate::paths;
+use std::path::Path;
+
 /// Which compositor family the snippets target. Detection is
 /// best-effort env sniffing: a wrong guess still yields a valid snippet
 /// for *some* compositor, clearly labelled.
@@ -53,14 +56,21 @@ fn split_chord(chord: &str) -> (Vec<&str>, &str) {
 
 /// The native-bind snippet: press runs `trigger-down`, release
 /// `trigger-up`, exactly the verbs the control socket speaks.
-pub fn bind_snippet(compositor: Compositor, chord: &str) -> String {
+///
+/// `exe` is the binary to name, resolved by the caller
+/// (`paths::exec_name`) and never looked up here: a pasted bind must
+/// exec the daemon the user is actually running, which under
+/// `cargo run` is `target/debug/chibipop` and is not on PATH
+/// (ticket 51). Keeping the lookup outside keeps this function pure.
+pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path) -> String {
     let (mods, key) = split_chord(chord);
+    let exe = paths::shell_quote(exe);
     match compositor {
         Compositor::Hyprland => {
             let mods = mods.join(" ");
             format!(
-                "bind = {mods}, {key}, exec, chibipop ctl trigger-down\n\
-                 bindr = {mods}, {key}, exec, chibipop ctl trigger-up"
+                "bind = {mods}, {key}, exec, {exe} ctl trigger-down\n\
+                 bindr = {mods}, {key}, exec, {exe} ctl trigger-up"
             )
         }
         _ => {
@@ -74,8 +84,8 @@ pub fn bind_snippet(compositor: Compositor, chord: &str) -> String {
                 .join("+");
             format!(
                 "# sway syntax - adapt to your compositor\n\
-                 bindsym --no-repeat {chord} exec chibipop ctl trigger-down\n\
-                 bindsym --release {chord} exec chibipop ctl trigger-up"
+                 bindsym --no-repeat {chord} exec {exe} ctl trigger-down\n\
+                 bindsym --release {chord} exec {exe} ctl trigger-up"
             )
         }
     }
@@ -110,19 +120,23 @@ pub fn capture_rule(compositor: Compositor) -> (String, Option<String>) {
 mod tests {
     use super::*;
 
+    /// The path a real dev build hands out: not on PATH, and a bare
+    /// word, so it must appear verbatim.
+    const DEV_EXE: &str = "/home/u/chibipop/target/debug/chibipop";
+
     #[test]
     fn hyprland_bind_for_the_default_chord() {
-        let snippet = bind_snippet(Compositor::Hyprland, "ALT+F");
+        let snippet = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new(DEV_EXE));
         assert_eq!(
             snippet,
-            "bind = ALT, F, exec, chibipop ctl trigger-down\n\
-             bindr = ALT, F, exec, chibipop ctl trigger-up"
+            "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-down\n\
+             bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-up"
         );
     }
 
     #[test]
     fn hyprland_bind_for_a_two_modifier_chord() {
-        let snippet = bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K");
+        let snippet = bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K", Path::new("chibipop"));
         assert_eq!(
             snippet,
             "bind = CTRL SHIFT, K, exec, chibipop ctl trigger-down\n\
@@ -132,14 +146,45 @@ mod tests {
 
     #[test]
     fn sway_bind_keeps_the_chord_spelling() {
-        let snippet = bind_snippet(Compositor::Sway, "ALT+F");
-        assert!(snippet.contains("bindsym --no-repeat ALT+F exec chibipop ctl trigger-down"));
-        assert!(snippet.contains("bindsym --release ALT+F exec chibipop ctl trigger-up"));
+        let snippet = bind_snippet(Compositor::Sway, "ALT+F", Path::new(DEV_EXE));
+        assert!(snippet.contains(&format!(
+            "bindsym --no-repeat ALT+F exec {DEV_EXE} ctl trigger-down"
+        )));
+        assert!(
+            snippet.contains(&format!("bindsym --release ALT+F exec {DEV_EXE} ctl trigger-up"))
+        );
     }
 
     #[test]
     fn unknown_compositor_gets_the_labelled_sway_dialect() {
-        assert!(bind_snippet(Compositor::Other, "ALT+F").starts_with("# sway syntax"));
+        assert!(bind_snippet(Compositor::Other, "ALT+F", Path::new(DEV_EXE))
+            .starts_with("# sway syntax"));
+    }
+
+    /// A path with a space is the everyday case (`~/My Builds/...`, and
+    /// any checkout under a directory a human named), and an unquoted
+    /// one silently execs the wrong word. Both dialects must survive it.
+    #[test]
+    fn a_path_with_a_space_is_quoted_for_both_dialects() {
+        let exe = Path::new("/home/u/my builds/chibipop");
+        assert_eq!(
+            bind_snippet(Compositor::Hyprland, "ALT+F", exe),
+            "bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-down\n\
+             bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-up"
+        );
+        let sway = bind_snippet(Compositor::Sway, "ALT+F", exe);
+        assert!(
+            sway.contains(
+                "bindsym --no-repeat ALT+F exec '/home/u/my builds/chibipop' ctl trigger-down"
+            ),
+            "{sway}"
+        );
+        assert!(
+            sway.contains(
+                "bindsym --release ALT+F exec '/home/u/my builds/chibipop' ctl trigger-up"
+            ),
+            "{sway}"
+        );
     }
 
     #[test]

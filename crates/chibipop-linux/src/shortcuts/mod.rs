@@ -45,6 +45,7 @@ pub mod portal;
 pub mod state;
 
 use crate::control::Verb;
+use std::path::Path;
 
 /// Every shortcut chibipop will ever register, and nothing else
 /// (ADR-0003: keep the consent dialog small).
@@ -211,7 +212,12 @@ pub enum Selection {
 
 impl Selection {
     /// The one startup line the daemon logs for the trigger channel.
-    pub fn startup_line(self) -> String {
+    ///
+    /// `exe` is the binary the native rung's advice must name, resolved
+    /// by the caller (`paths::exec_name`): the line tells the user what
+    /// to bind, and under `cargo run` the bare command name is not on
+    /// PATH, so a snippet built from it execs nothing (ticket 51).
+    pub fn startup_line(self, exe: &Path) -> String {
         match self {
             Selection::Portal => format!(
                 "trigger: {} portal (ADR-0003 rung 1) - registering {} and {}; the control socket keeps serving too",
@@ -220,8 +226,9 @@ impl Selection {
                 ShortcutId::AnkiAdd.as_str()
             ),
             Selection::Native(NativeReason::NoPortal) => format!(
-                "trigger: control socket only (ADR-0003 rung 2) - no {} on the session bus; bind `chibipop ctl trigger-down|trigger-up` in your compositor",
-                portal::SHORTCUTS_INTERFACE
+                "trigger: control socket only (ADR-0003 rung 2) - no {} on the session bus; bind `{} ctl trigger-down|trigger-up` in your compositor",
+                portal::SHORTCUTS_INTERFACE,
+                crate::paths::shell_quote(exe)
             ),
             Selection::Native(NativeReason::Forced) => format!(
                 "trigger: control socket only - {}=native override active (test hook)",
@@ -344,8 +351,13 @@ pub fn portal_detail(bindings: &[Binding]) -> String {
 
 /// The trigger row when the portal rung is not serving: the socket is,
 /// and `why` is the part a user can act on.
+///
+/// Names the verbs, not the binary: a status row has one short line
+/// (ADR-0006), and a bare `chibipop` in it would be a command that does
+/// not resolve under `cargo run` (ticket 51). The bind lines that do
+/// name the running exe are the settings window's snippet.
 pub fn native_detail(why: &str) -> String {
-    format!("control socket (`chibipop ctl trigger-down`) - {why}")
+    format!("control socket (`ctl trigger-down`) - {why}")
 }
 
 /// The native rung's own reason, phrased for a status row.
@@ -429,16 +441,30 @@ mod tests {
 
     /// Every rung's startup line names the mechanism, and the native
     /// ones name the socket so a reader knows the trigger still works.
+    /// The rung-2 line is also the user's instruction, so it must name
+    /// the running binary rather than a bare command name that PATH may
+    /// not have (ticket 51).
     #[test]
     fn every_startup_line_names_what_serves_the_trigger() {
-        assert!(Selection::Portal.startup_line().contains("GlobalShortcuts"));
-        assert!(Selection::Portal.startup_line().contains("control socket"));
+        let exe = Path::new("/home/u/chibipop/target/debug/chibipop");
+        assert!(Selection::Portal.startup_line(exe).contains("GlobalShortcuts"));
+        assert!(Selection::Portal.startup_line(exe).contains("control socket"));
         for reason in
             [NativeReason::NoPortal, NativeReason::Forced, NativeReason::ForcedButAbsent]
         {
-            let line = Selection::Native(reason).startup_line();
+            let line = Selection::Native(reason).startup_line(exe);
             assert!(line.contains("control socket"), "{line}");
+            assert!(!line.contains('\n'), "{line}");
         }
+
+        let advice = Selection::Native(NativeReason::NoPortal).startup_line(exe);
+        assert!(
+            advice.contains("bind `/home/u/chibipop/target/debug/chibipop ctl trigger-down"),
+            "{advice}"
+        );
+        let spaced = Selection::Native(NativeReason::NoPortal)
+            .startup_line(Path::new("/home/u/my builds/chibipop"));
+        assert!(spaced.contains("bind `'/home/u/my builds/chibipop' ctl"), "{spaced}");
     }
 
     #[test]

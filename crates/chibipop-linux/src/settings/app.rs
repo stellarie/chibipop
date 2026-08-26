@@ -49,6 +49,12 @@ pub struct Init {
     pub runtime_dir: PathBuf,
     /// `None` when no XDG config root resolves; the row says so.
     pub autostart: Option<autostart::Target>,
+    /// `$HOME`, for expanding a typed `~` path; `None` when it is unset.
+    pub home: Option<PathBuf>,
+    /// The binary compositor snippets must name, resolved before the
+    /// window opened (`paths::exec_name`): a pasted bind has to exec
+    /// *this* daemon, not whatever `chibipop` PATH finds (ticket 51).
+    pub exe: PathBuf,
 }
 
 pub fn run(init: Init) -> anyhow::Result<()> {
@@ -78,6 +84,8 @@ struct App {
     db_path: PathBuf,
     runtime_dir: PathBuf,
     autostart: Option<autostart::Target>,
+    home: Option<PathBuf>,
+    exe: PathBuf,
     /// Mirrors the `.desktop` file, re-read after every toggle.
     autostart_on: bool,
     /// System font families for the font combo.
@@ -123,6 +131,8 @@ impl App {
             runtime_dir: init.runtime_dir,
             autostart_on: init.autostart.as_ref().is_some_and(autostart::Target::is_enabled),
             autostart: init.autostart,
+            home: init.home,
+            exe: init.exe,
             fonts,
             selected_dict: None,
             add_path: String::new(),
@@ -133,7 +143,7 @@ impl App {
     }
 
     fn bind_snippet(&self) -> String {
-        snippets::bind_snippet(self.compositor, &self.linux.trigger_key_linux)
+        snippets::bind_snippet(self.compositor, &self.linux.trigger_key_linux, &self.exe)
     }
 
     fn apply(&mut self) {
@@ -164,13 +174,31 @@ impl App {
         self.rebuild_progress.is_some()
     }
 
-    /// Stage the typed path for import.
+    /// Stage the typed path for import. `~` is expanded first: this
+    /// entry is the only way to add a dictionary (no portal dialog), and
+    /// a shell is the only thing that would otherwise do it.
     fn add_dictionary(&mut self) {
         let typed = self.add_path.trim();
         if typed.is_empty() {
             return;
         }
-        let source = PathBuf::from(typed);
+        let source = match crate::paths::expand_tilde(typed, self.home.as_deref()) {
+            crate::paths::Typed::Path(p) => p,
+            crate::paths::Typed::NoHome => {
+                self.status = format!(
+                    "{typed} starts with ~ but HOME is unset, so there is nothing to \
+                     expand it against; type the full path instead."
+                );
+                return;
+            }
+            crate::paths::Typed::UserRelative => {
+                self.status = format!(
+                    "{typed} is a user-relative ~ path, which is not supported; \
+                     type the full path instead."
+                );
+                return;
+            }
+        };
         match self.form.stage_add(&source) {
             Some(_) => {
                 self.status = format!(
@@ -475,7 +503,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
     .spacing(20);
 
     let hotkey: Element<'_, Message> =
-        match app.channel.control(app.compositor, &app.linux.trigger_key_linux) {
+        match app.channel.control(app.compositor, &app.linux.trigger_key_linux, &app.exe) {
             HotkeyControl::Snippet { text: snippet } => column![
                 text("Native channel: your compositor owns the binding. Paste this into its config:"),
                 container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
@@ -907,6 +935,8 @@ mod tests {
             db_path: dir.join("chibipop.sqlite"),
             runtime_dir: dir.join("run"),
             autostart: None,
+            home: None,
+            exe: PathBuf::from("/usr/bin/chibipop"),
             autostart_on: false,
             fonts: vec!["Noto Sans".to_string()],
             capture_w: "480".to_string(),
@@ -939,6 +969,92 @@ mod tests {
         assert!(app.form.has_staged(), "the add must wait for a rebuild");
         assert!(app.add_path.is_empty(), "the entry clears once the path is taken");
         assert!(app.status.contains("Rebuild"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The expansion itself, on the pure function so no test has to move
+    /// the process's `HOME` out from under its siblings.
+    #[test]
+    fn a_typed_tilde_path_expands_against_home() {
+        use crate::paths::{expand_tilde, Typed};
+        let home = Path::new("/home/u");
+        let h = Some(home);
+
+        assert_eq!(
+            Typed::Path(PathBuf::from("/home/u/Downloads/jitendex.zip")),
+            expand_tilde("~/Downloads/jitendex.zip", h)
+        );
+        // Bare `~` and `~/` are the home directory, with no stray
+        // trailing separator and no panic.
+        assert_eq!(Typed::Path(home.to_path_buf()), expand_tilde("~", h));
+        assert_eq!(Typed::Path(home.to_path_buf()), expand_tilde("~/", h));
+        // Nothing else is touched: an absolute path and a plain relative
+        // one both pass through, and a `~` mid-path is a real file name.
+        assert_eq!(Typed::Path(PathBuf::from("/tmp/a.zip")), expand_tilde("/tmp/a.zip", h));
+        assert_eq!(Typed::Path(PathBuf::from("dl/a.zip")), expand_tilde("dl/a.zip", h));
+        assert_eq!(Typed::Path(PathBuf::from("dl/~/a.zip")), expand_tilde("dl/~/a.zip", h));
+        // The two refusals.
+        assert_eq!(Typed::UserRelative, expand_tilde("~root/a.zip", h));
+        assert_eq!(Typed::NoHome, expand_tilde("~/a.zip", None));
+        assert_eq!(Typed::NoHome, expand_tilde("~", None));
+    }
+
+    /// End to end through the real message handler: a `~` path stages the
+    /// same archive the absolute path does.
+    #[test]
+    fn adding_a_tilde_path_stages_the_same_archive_the_absolute_path_does() {
+        let dir = scratch("add_tilde");
+        let mut app = app(&dir);
+        // The fixture tree stands in for a home directory; injecting it
+        // beats mutating the shared process environment.
+        app.home = Some(fixture("terms.zip").parent().unwrap().to_path_buf());
+
+        let _ = update(&mut app, Message::AddPath("~/terms.zip".to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+
+        assert!(app.form.dict_names.iter().any(|n| n == "FixtureTerms"), "{:?}", app.form.dict_names);
+        assert!(app.form.has_staged(), "the add must wait for a rebuild");
+        assert!(app.add_path.is_empty(), "the entry clears once the path is taken");
+        assert!(app.status.contains("Rebuild"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bare `~` is a directory, not an archive: refused by the resolved
+    /// path, which is what the message must name.
+    #[test]
+    fn adding_a_bare_tilde_is_refused_by_its_resolved_path() {
+        let dir = scratch("add_bare_tilde");
+        let mut app = app(&dir);
+        app.home = Some(dir.clone());
+
+        let _ = update(&mut app, Message::AddPath("~".to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+
+        assert!(!app.form.has_staged());
+        assert!(app.status.contains(&dir.display().to_string()), "{}", app.status);
+        assert!(app.status.contains("not a readable dictionary archive"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `~user/…` and a missing `$HOME` each say what is wrong instead of
+    /// probing a literal `~` path.
+    #[test]
+    fn a_user_relative_tilde_and_a_missing_home_are_refused_with_a_reason() {
+        let dir = scratch("add_tilde_bad");
+        let mut app = app(&dir);
+        app.home = Some(dir.clone());
+
+        let _ = update(&mut app, Message::AddPath("~root/terms.zip".to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+        assert!(!app.form.has_staged());
+        assert!(app.status.contains("user-relative"), "{}", app.status);
+        assert!(!app.add_path.is_empty(), "a refused path stays in the entry");
+
+        app.home = None;
+        let _ = update(&mut app, Message::AddPath("~/terms.zip".to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+        assert!(!app.form.has_staged());
+        assert!(app.status.contains("HOME is unset"), "{}", app.status);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1081,6 +1197,8 @@ mod tests {
             db_path: config_home.join("chibipop.sqlite"),
             runtime_dir: config_home.join("run"),
             autostart: autostart::Target::resolve(&env),
+            home: env.home.clone(),
+            exe: PathBuf::from("/usr/bin/chibipop"),
         }
     }
 

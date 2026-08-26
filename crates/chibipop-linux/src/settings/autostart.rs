@@ -38,7 +38,7 @@ impl Target {
     /// `$XDG_CONFIG_HOME` nor `$HOME`) or the exe path is unknowable —
     /// the window then says so instead of guessing a path.
     pub fn resolve(env: &Env) -> Option<Target> {
-        Some(Target { config_home: paths::config_home(env)?, exec: exec_path().ok()? })
+        Some(Target { config_home: paths::config_home(env)?, exec: paths::exec_path().ok()? })
     }
 
     /// The full path of the autostart entry.
@@ -67,19 +67,6 @@ impl Target {
         }
         std::fs::write(&file, entry(&self.exec))
     }
-}
-
-/// The binary an autostart entry should launch: the AppImage itself when
-/// running from one (`current_exe` inside an AppImage points into a
-/// `/tmp` mount that is gone by the next login), otherwise this exe.
-pub fn exec_path() -> io::Result<PathBuf> {
-    if let Some(appimage) = std::env::var_os("APPIMAGE") {
-        let appimage = PathBuf::from(appimage);
-        if appimage.is_absolute() {
-            return Ok(appimage);
-        }
-    }
-    std::env::current_exe()
 }
 
 /// The entry text, per the desktop-entry spec: `Exec` runs the daemon
@@ -410,7 +397,10 @@ mod tests {
 
     /// The Hyprland snippet's bind lines must be the same lines the
     /// settings window hands out for the default chord - two spellings
-    /// of one trigger would be a support trap.
+    /// of one trigger would be a support trap. The shipped file is for
+    /// an *installed* chibipop, so the bare command name is the right
+    /// exe there; a dev checkout gets its own path from
+    /// `paths::exec_name` at runtime (ticket 51).
     #[test]
     fn the_shipped_hyprland_snippet_matches_the_window_snippet() {
         let text = extras("hyprland.conf");
@@ -420,6 +410,7 @@ mod tests {
         let snippet = super::super::snippets::bind_snippet(
             super::super::snippets::Compositor::Hyprland,
             &chord,
+            Path::new(paths::COMMAND),
         );
         for line in snippet.lines() {
             assert!(text.contains(line), "extras/hyprland.conf is missing {line:?}");

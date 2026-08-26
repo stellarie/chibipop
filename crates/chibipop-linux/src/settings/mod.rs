@@ -76,6 +76,7 @@ pub fn run(paths: Paths) -> Result<()> {
         Err(_) => form,
     };
 
+    let env = paths::Env::from_process();
     let init = app::Init {
         form,
         linux: apply::LinuxFields::from_config(&cfg),
@@ -87,7 +88,12 @@ pub fn run(paths: Paths) -> Result<()> {
         library_dir,
         db_path,
         runtime_dir: runtime_dir.to_path_buf(),
-        autostart: autostart::Target::resolve(&paths::Env::from_process()),
+        autostart: autostart::Target::resolve(&env),
+        home: env.home.clone(),
+        // Resolved in this process, which is the same binary as the
+        // daemon (`chibipop settings`), so the snippet names the exe
+        // the user is actually running (ticket 51).
+        exe: paths::exec_name(),
     };
     app::run(init)?;
 
@@ -157,7 +163,7 @@ mod tests {
         assert_eq!(HotkeyChannel::Portal { current_binding: Some("Alt+F".into()) }, channel);
         assert_eq!(
             HotkeyControl::Rebind { current: Some("Alt+F".into()) },
-            channel.control(snippets::Compositor::Kde, "ALT+F")
+            channel.control(snippets::Compositor::Kde, "ALT+F", Path::new("chibipop"))
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -186,11 +192,12 @@ mod tests {
         shortcuts::state::publish(&dir, &Published::native()).unwrap();
         let channel = hotkey_channel(&dir);
         assert_eq!(HotkeyChannel::Native, channel);
-        let HotkeyControl::Snippet { text } = channel.control(snippets::Compositor::Sway, "ALT+F")
+        let HotkeyControl::Snippet { text } =
+            channel.control(snippets::Compositor::Sway, "ALT+F", Path::new("/opt/cp/chibipop"))
         else {
             panic!("the native rung must render a snippet");
         };
-        assert!(text.contains("chibipop ctl trigger-down"), "{text}");
+        assert!(text.contains("/opt/cp/chibipop ctl trigger-down"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

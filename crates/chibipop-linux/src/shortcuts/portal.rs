@@ -590,7 +590,7 @@ fn refusal(step: &str, name: &str, detail: Option<&str>) -> Why {
         return Why {
             reason: format!("{step}: the portal requires an app id"),
             advice: Some(
-                "xdg-desktop-portal names an app from the systemd unit a desktop-entry launch creates (app-chibipop-*.scope, with chibipop.desktop installed) and refuses shortcut sessions without one - launch chibipop from its desktop entry or autostart unit, or bind `chibipop ctl trigger-down|trigger-up` in your compositor instead"
+                "xdg-desktop-portal names an app from the systemd unit a desktop-entry launch creates (app-chibipop-*.scope, with chibipop.desktop installed) and refuses shortcut sessions without one - launch chibipop from its desktop entry or autostart unit, or bind the control socket's `ctl trigger-down|trigger-up` verbs in your compositor instead (the settings window's hotkey section has the exact bind lines for this binary)"
                     .to_string(),
             ),
         };
@@ -785,7 +785,11 @@ mod tests {
         assert_eq!("CreateSession: the portal requires an app id", said.reason);
         let advice = said.advice.expect("the app-id case has a way out");
         assert!(advice.contains("chibipop.desktop"), "{advice}");
-        assert!(advice.contains("chibipop ctl trigger-down"), "{advice}");
+        assert!(advice.contains("ctl trigger-down|trigger-up"), "{advice}");
+        // The way out must not spell a command that assumes `chibipop`
+        // is on PATH: under `cargo run` it is not (ticket 51), and the
+        // bind lines that name the running exe live in the window.
+        assert!(!advice.contains("chibipop ctl"), "{advice}");
     }
 
     /// Any other refusal keeps the portal's own words: a category would
