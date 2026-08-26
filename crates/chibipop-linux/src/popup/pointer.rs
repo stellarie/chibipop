@@ -70,7 +70,7 @@ pub enum Hit {
     /// A scene target: expand, drill down, or back.
     Action(HitAction),
     /// The Anki slot. Core reserves it and the painter fills it
-    /// (ADR-0004); ticket 42 wires the action behind it.
+    /// (ADR-0004); a click on it is the Controller's `AddRequested`.
     Anki,
 }
 
