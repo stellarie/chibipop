@@ -470,7 +470,28 @@ mod tests {
         assert!(!p.out.exists(), "a refused rebuild writes nothing");
 
         drop(held);
-        done(&drive(&form, p).1);
+        // Freed, but not always instantly reacquirable: sibling tests in
+        // this binary fork children (settings::child, cursor::hyprctl),
+        // and a fork clones the fd table - between clone and exec the
+        // child's copy of `held`'s fd keeps the flock alive (CLOEXEC
+        // closes only at exec). A bounded retry rides out that window;
+        // production never hits it because the holding process forks
+        // nothing while it rebuilds.
+        let mut tries = 0;
+        let last = loop {
+            let (tx, rx) = mpsc::channel();
+            match spawn(&form, p.clone(), move |progress| {
+                let _ = tx.send(progress);
+            }) {
+                Ok(()) => break collect(rx).1,
+                Err(LockError::AlreadyRunning { .. }) if tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("the freed library lock: {e:?}"),
+            }
+        };
+        done(&last);
     }
 
     #[test]
