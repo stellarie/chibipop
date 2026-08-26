@@ -376,7 +376,7 @@ impl App {
     /// come back as a repaint *before* the next step resolves, or a
     /// scripted scroll would be followed by a click against the frame
     /// it just replaced. Called after every path that may have painted
-    /// - a synchronous show, a configure, a frame callback - because
+    /// (a synchronous show, a configure, a frame callback), because
     /// which of the three actually rasters depends on whether the
     /// surface had to be resized first. Re-entrant calls return at once
     /// and the loop below picks up the pass they armed.
