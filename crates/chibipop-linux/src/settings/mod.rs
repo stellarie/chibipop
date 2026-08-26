@@ -14,6 +14,7 @@ mod autostart;
 pub mod child;
 mod rebuild;
 mod snippets;
+mod update;
 
 mod channel;
 
