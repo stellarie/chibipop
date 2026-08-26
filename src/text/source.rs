@@ -1131,7 +1131,7 @@ mod tests {
     fn shown_grab(seen: &SeenImage) -> u8 {
         let (buf, _, _) = seen.borrow_mut().take().expect("OCR ran");
         let colours: Vec<u8> =
-            buf.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            buf.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
         let first = colours[0];
         assert!(colours.iter().all(|&b| b == first), "one grab's pixels are one value");
         first - 0x10

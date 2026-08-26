@@ -166,7 +166,7 @@ mod tests {
     }
 
     fn blues(frame: &Frame) -> Vec<u8> {
-        frame.buf.chunks_exact(4).map(|p| p[0]).collect()
+        frame.buf.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
     }
 
     fn frozen() -> FrozenFrame {
