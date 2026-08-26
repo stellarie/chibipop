@@ -67,10 +67,27 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path) -> String {
     let exe = paths::shell_quote(exe);
     match compositor {
         Compositor::Hyprland => {
-            let mods = mods.join(" ");
+            let mask = mods.join(" ");
+            // The caveat lines are part of the snippet on purpose.
+            // Hyprland (≤ 0.55.4, verified in source and live) can fire
+            // NO release bind when a chord's modifier goes up before its
+            // key: release matching requires the bind's mod mask to hold
+            // at the release instant (KeybindManager.cpp "Gate A"), and
+            // a modifier-keyed `bindr` is shadowed the moment another
+            // key is pressed during the hold (hyprwm/Hyprland#5032,
+            // #7675). Every rescue was tried and measured — a modifier
+            // `bindr`/`bindir`, an empty-mask `bindr` on the key, and a
+            // submap-scoped `bindri` (which wedges the whole keymap) —
+            // see ticket 53. So the pair is shipped as-is and the user
+            // is told the one habit and the one recovery that exist.
+            // The GlobalShortcuts `global` dispatcher is immune by
+            // design, which is one more reason the portal rung is
+            // rung 1 (ADR-0003).
             format!(
-                "bind = {mods}, {key}, exec, {exe} ctl trigger-down\n\
-                 bindr = {mods}, {key}, exec, {exe} ctl trigger-up"
+                "bind = {mask}, {key}, exec, {exe} ctl trigger-down\n\
+                 bindr = {mask}, {key}, exec, {exe} ctl trigger-up\n\
+                 # Release {key} before {mask} - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
+                 # If the popup sticks, tap the chord again (release {key} first), or bind `ctl toggle` instead."
             )
         }
         _ => {
@@ -130,17 +147,23 @@ mod tests {
         assert_eq!(
             snippet,
             "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-down\n\
-             bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-up"
+             bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-up\n\
+             # Release F before ALT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
+             # If the popup sticks, tap the chord again (release F first), or bind `ctl toggle` instead."
         );
     }
 
+    /// The wedge caveat names the user's own chord, not the default's:
+    /// a CTRL+SHIFT+K user must be told to release K first.
     #[test]
     fn hyprland_bind_for_a_two_modifier_chord() {
         let snippet = bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K", Path::new("chibipop"));
         assert_eq!(
             snippet,
             "bind = CTRL SHIFT, K, exec, chibipop ctl trigger-down\n\
-             bindr = CTRL SHIFT, K, exec, chibipop ctl trigger-up"
+             bindr = CTRL SHIFT, K, exec, chibipop ctl trigger-up\n\
+             # Release K before CTRL SHIFT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
+             # If the popup sticks, tap the chord again (release K first), or bind `ctl toggle` instead."
         );
     }
 
@@ -167,10 +190,14 @@ mod tests {
     #[test]
     fn a_path_with_a_space_is_quoted_for_both_dialects() {
         let exe = Path::new("/home/u/my builds/chibipop");
-        assert_eq!(
-            bind_snippet(Compositor::Hyprland, "ALT+F", exe),
-            "bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-down\n\
-             bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-up"
+        let hypr = bind_snippet(Compositor::Hyprland, "ALT+F", exe);
+        assert!(
+            hypr.contains("bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-down"),
+            "{hypr}"
+        );
+        assert!(
+            hypr.contains("bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-up"),
+            "{hypr}"
         );
         let sway = bind_snippet(Compositor::Sway, "ALT+F", exe);
         assert!(

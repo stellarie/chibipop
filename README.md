@@ -260,6 +260,23 @@ still reads through it. Moving onto another monitor mid-hold grabs that one.
 hands-free version — it freezes at toggle-on and stays frozen until you toggle
 off.
 
+**One Hyprland defect to know about** (present through at least 0.55.4,
+verified in source and live): if you release the modifier before the key —
+ALT up, then F up — Hyprland fires **no release bind at all**
+([hyprwm/Hyprland#5032](https://github.com/hyprwm/Hyprland/discussions/5032)).
+The `trigger-up` is lost and the popup sticks, following the cursor as if the
+chord were still held. No bind arrangement works around it, so make a habit of
+releasing `F` first; if the popup does stick, tap the chord again (releasing
+`F` first), or bind the toggle instead — one press bind, nothing to release,
+nothing to wedge:
+
+```
+bind = ALT, F, exec, chibipop ctl toggle
+```
+
+sway is not affected — it arms the release binding at press time and fires it
+on whichever key of the chord comes up first.
+
 **Holding a bare modifier** (the Windows default's hold-Shift feel) is one line
 on Hyprland, which can bind a modifier as the key itself:
 
@@ -270,9 +287,27 @@ bindr = SHIFT, Shift_L, exec, chibipop ctl trigger-up
 
 sway's equivalent is `bindsym --release Shift_L`. It is a real cost, not a free
 upgrade: every Shift press then spawns a short-lived `chibipop ctl`, so it
-suits a reading machine more than a typing one. It is also impossible on the
-portal shortcuts channel (KDE, GNOME 48+), whose spec requires
-modifier-plus-key — which is why `ALT+F` is the default everywhere.
+suits a reading machine more than a typing one. On Hyprland it is also in the
+same wedge family as above — pressing any other key while Shift is held loses
+that release too, sticking the hold until the next clean Shift tap. And it is
+impossible on the portal shortcuts channel (KDE, GNOME 48+), whose spec
+requires modifier-plus-key — which is why `ALT+F` is the default everywhere.
+
+**The portal route** is the alternative that cannot lose a release. Launched
+with an app id — the desktop entry, the systemd user unit, or a uwsm session —
+chibipop registers its trigger on the GlobalShortcuts portal. On KDE and
+GNOME that is the whole story (the desktop shows a consent dialog and owns the
+binding). On Hyprland, with `xdg-desktop-portal-hyprland` running, the key
+stays in your config but rides the `global` dispatcher instead of `exec`:
+
+```
+bind = ALT, F, global, chibipop:trigger
+```
+
+Hyprland delivers the portal release keyed to the pressed shortcut itself,
+independent of the modifier state, so either release order retracts the popup.
+A daemon started from a bare shell has no app id and the portal refuses it —
+chibipop's status row says so, and the socket keeps serving meanwhile.
 
 Ready-to-copy snippets live in [`extras/hyprland.conf`](extras/hyprland.conf),
 and the settings window shows (and copies) the right snippet for whatever chord
