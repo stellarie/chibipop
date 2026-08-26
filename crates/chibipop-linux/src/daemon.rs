@@ -2274,6 +2274,14 @@ mod tests {
         }
 
         fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "fake-ocr"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
     }
 
     /// The real core pipeline over those fakes: no screen, no OCR

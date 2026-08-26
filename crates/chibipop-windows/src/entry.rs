@@ -178,15 +178,7 @@ pub fn run() -> Result<()> {
             };
 
             let capture = probe_capture_size();
-            // Built by hand (not `text_source`) so the probe can name
-            // the engine: core's `OcrEngine` seam carries no metadata.
-            let win_ocr = chibipop_windows::text::ocr::WinrtOcr::new("ja")?;
-            let engine_name =
-                chibipop::text::recogniser::Recogniser::name(&win_ocr).to_string();
-            let win_cap = chibipop_windows::text::capture::WinCapture::new(None)?;
-            let mut source = chibipop::text::TextSource::new(
-                Box::new(win_cap),
-                Box::new(win_ocr),
+            let mut source = chibipop_windows::text::text_source(
                 SettingsSnapshot {
                     max_passes: tiles,
                     upscale: UPSCALE,
@@ -194,7 +186,9 @@ pub fn run() -> Result<()> {
                     capture,
                     scan_alphanumeric: true,
                 },
-            );
+                "ja",
+            )?;
+            let engine_name = chibipop::text::OcrEngine::name(source.engine()).to_string();
             let region_was_default = region.is_none();
             let region = match region {
                 None => chibipop::text::layout::region_around(cursor, false, capture),

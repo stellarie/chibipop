@@ -134,9 +134,9 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
             captures: config.debug.show_scan_region,
             highlight: config.popup.highlight_match,
         },
-        sentence_mode: config.anki.sentence_mode.clone(),
-        // The static-region overlay is a Windows surface; on Linux a
-        // "static" mode falls through to line mode with a warning.
+        sentence_mode: config.anki.sentence_mode,
+        // The static-region overlay is a Windows surface; on Linux
+        // `SentenceMode::Static` falls through to line mode with a warning.
         static_region: None,
         dicts: dicts.to_vec(),
     }

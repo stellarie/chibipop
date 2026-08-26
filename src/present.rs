@@ -14,7 +14,7 @@ pub struct Presentation {
     pub collapsed: Vec<CollapsedRow>,
     /// Every group as a full card.
     pub all_cards: Vec<Card>,
-    /// The OCR line; set by app.rs.
+    /// The OCR line; set by worker.rs.
     pub sentence: Option<String>,
 }
 
@@ -649,16 +649,14 @@ mod tests {
         assert!(p.sentence.is_none());
     }
 
+    /// Guards the payload path, not a
+    /// hand-rolled copy of it.
     #[test]
     fn sentence_source_appears_in_fields_when_set() {
         let mut p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg());
         p.sentence = Some("その猫はかわいい。".to_string());
-        let card = p.top.as_ref().unwrap();
 
-        let mut fields = crate::anki::fields_from_card(card, &card.blocks);
-        if let Some(sentence) = &p.sentence {
-            fields.insert("sentence".to_string(), sentence.clone());
-        }
+        let (_, fields) = crate::controller::note_payload(&p, false);
 
         assert_eq!(Some(&"その猫はかわいい。".to_string()), fields.get("sentence"));
     }

@@ -6,7 +6,6 @@
 pub mod layout;
 pub mod mask;
 mod frozen;
-pub mod recogniser;
 pub mod source;
 
 pub use mask::{CaptureMask, CaptureMode};
@@ -96,7 +95,7 @@ pub trait OcrEngine {
     /// Lines of words, each word carrying its box in image pixels.
     ///
     /// `bgra` is `w * h * 4` bytes in [`Frame`]'s format. Word boxes are what
-    /// hit-scan resolves against, so a recogniser that cannot box a word must
+    /// hit-scan resolves against, so an engine that cannot box a word must
     /// drop it rather than invent a rect. Lines with no words are dropped, so
     /// an empty result means "nothing recognised".
     fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>>;
@@ -106,4 +105,55 @@ pub trait OcrEngine {
     /// An engine that cannot serve `tag` keeps the language it has and says
     /// so on stderr: a hover in the wrong language still beats no hover.
     fn set_language(&mut self, tag: &str);
+
+    /// Which engine this is: a stable id, not a display name.
+    ///
+    /// The built-in engines name themselves ("windows-ocr", "meiki-ocr")
+    /// and a plugin answers with its manifest name, so a log line or a
+    /// `probe` report names what actually read the pixels rather than
+    /// which platform it ran on.
+    fn name(&self) -> &str;
+
+    /// Does `recognise` box its words?
+    ///
+    /// Hit-scan resolves against those boxes, so an engine that reads text
+    /// without geometry answers `false` here rather than inventing rects.
+    /// Both built-in engines box every word; a plugin answers with the
+    /// claim in its manifest, which is what `plugin check` holds it to.
+    fn provides_geometry(&self) -> bool;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A plugin that reads text but cannot box it - the honest shape of a
+    /// geometry-less engine.
+    struct TextOnly;
+
+    impl OcrEngine for TextOnly {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> Result<Vec<OcrLine>> {
+            Ok(Vec::new())
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "text-only"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            false
+        }
+    }
+
+    /// The metadata rides the same trait object the pipeline holds, so no
+    /// caller needs to know which concrete engine it was handed.
+    #[test]
+    fn a_geometry_less_engine_says_so_through_the_seam() {
+        let engine: Box<dyn OcrEngine> = Box::new(TextOnly);
+        assert!(engine.recognise(&[], 10, 10).unwrap().is_empty());
+        assert_eq!("text-only", engine.name());
+        assert!(!engine.provides_geometry());
+    }
 }

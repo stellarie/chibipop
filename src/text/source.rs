@@ -276,9 +276,9 @@ impl TextSource {
     /// nothing in them to hide (ADR-0010).
     ///
     /// A backend that says the pixels are unchanged (ADR-0002's damage
-    /// race) skips the recogniser entirely: same pixels, same words. The
-    /// mask is part of that "same", because the pixels OCR sees are the
-    /// grab *after* masking - see [`CaptureMask::clipped_to`].
+    /// race) skips OCR entirely: same pixels, same words. The mask is
+    /// part of that "same", because the pixels OCR sees are the grab
+    /// *after* masking - see [`CaptureMask::clipped_to`].
     pub fn recognise_at_capture(
         &mut self,
         region: PhysRect,
@@ -375,7 +375,7 @@ impl TextSource {
     ///
     /// `mask` is what OCR must not read - our own popup, on a live grab
     /// (ADR-0008) - and governs every pass of this one read. The third
-    /// element is pass 1's OCR lines, for sentence capture (`"all"` mode).
+    /// element is pass 1's OCR lines, for `SentenceMode::All` capture.
     pub fn resolve_at_tiled_scanned(
         &mut self,
         cursor: PhysPoint,
@@ -759,9 +759,17 @@ mod tests {
         }
 
         fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
     }
 
-    /// Counts how often the recogniser actually ran.
+    /// Counts how often the engine actually ran.
     #[derive(Default)]
     struct Counting {
         runs: std::rc::Rc<std::cell::Cell<u32>>,
@@ -779,6 +787,14 @@ mod tests {
         }
 
         fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
     }
 
     fn snap() -> SettingsSnapshot {

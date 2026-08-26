@@ -92,6 +92,14 @@ impl OcrEngine for FakeOcr {
     fn set_language(&mut self, tag: &str) {
         let _ = self.log.send(format!("set_language {tag}"));
     }
+
+    fn name(&self) -> &str {
+        "fake-ocr"
+    }
+
+    fn provides_geometry(&self) -> bool {
+        true
+    }
 }
 
 fn senses() -> Vec<Sense> {
@@ -122,7 +130,7 @@ fn settings() -> WorkerSettings {
         language: "ja".to_string(),
         present_cfg: chibipop::config::Config::default().present_config(),
         scan_display: ScanDisplay { captures: false, highlight: false },
-        sentence_mode: "line".to_string(),
+        sentence_mode: chibipop::config::SentenceMode::Line,
         static_region: None,
         dicts: Vec::new(),
     }

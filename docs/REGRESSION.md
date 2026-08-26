@@ -102,7 +102,7 @@ check-shaped clippy spans the whole workspace unexcluded.
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **1010** total across **8** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system; see below) |
+| Rust tests | **all green**, **1407** total across **15** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system → 1407 on 2026-08-26; see below) |
 | Clippy | **exactly 1** accepted error (was 2; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -524,7 +524,7 @@ assumed.
 parses each `plugin.toml` it finds, and lists a broken manifest beside its error instead of
 dropping it — a filter here would make `plugin list`'s per-failure reason impossible. `src/plugin/cli.rs`
 is also new (`list`, `test_one`), and `chibipop plugin list` / `chibipop plugin test` are wired into
-`src/main.rs`, but none of that carries its own unit test — it was proven for real in Step 6, not
+`crates/chibipop-windows/src/main.rs`, but none of that carries its own unit test — it was proven for real in Step 6, not
 in the suite; see the task report. Three tests, all new, none rewritten: a missing root returns
 empty rather than erroring; a directory with one good and one broken manifest reports both, the
 second as `Err`; a directory holding a subfolder with no `plugin.toml` skips it without moving the
@@ -700,7 +700,7 @@ full-screen and work against its published coordinates. `probe` reads a coordina
 the pointer, so it disturbs nothing; the rows that *do* move the pointer are marked.
 
 > [!note] Which language each command can actually test — added 2026-08-17
-> **`probe` and `watch` hardcode `"ja"`** (`src/main.rs:140` and `:311`), so **no `probe` row on
+> **`probe` and `watch` hardcode `"ja"`** (`crates/chibipop-windows/src/main.rs:140` and `:311`), so **no `probe` row on
 > this page can test Chinese OCR at all**. Only `run` reads `ocr.language`. `watch` additionally
 > ignores the configured capture size and always uses `CaptureSize::default()`. Anything about
 > zh-Hans / zh-Hant therefore has to go through §1.21, which drives the real app.
@@ -837,7 +837,7 @@ Record the PID (`Get-Process chibipop`), open Settings, change **Capture height*
 > [!warning] `probe` is not a read-only observer, and it reads the file rather than the process
 > **It writes.** `probe` calls `config::load_or_create`, whose NotFound arm **creates a fresh
 > `chibipop.toml`** — including when `--region` makes the config irrelevant. That side effect is new
-> as of this branch (`src/main.rs`, before the `--region` match). Probing a directory with no config
+> as of this branch (`crates/chibipop-windows/src/main.rs`, before the `--region` match). Probing a directory with no config
 > is therefore not an inspection, it is an initialisation. Harmless in the ordinary case, since the
 > app writes that file anyway — not harmless if you were about to conclude something from the file
 > being absent.
@@ -2177,7 +2177,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **Every geometry fixture used touching glyphs** | A whole class of bug that ten tests and a release walk straight past. Real OCR emits *gaps*; a fixture at `x=100,130,160` with `w=30` has none, and gap-conditional code is invisible to it. When a code path branches on spacing, at least one fixture must be spaced. |
 | **`glossary` and `glossary_html` are different Anki sources** | Cards that look plain next to a popup that looks rich. Nothing errors — the field map just asked for the other one. Check `target/release/chibipop.toml` before believing the feature is missing. |
 | **A child that prints progress will fill a 4 KB pipe and stop** | A build at ~3% CPU with a WAL that stopped growing, forever. `RedirectStandardOutput = $true` + `ReadToEnd()` after the wait loop is the trap; redirect to a **file** instead. Corpus-dependent, so it passes on the small corpus and hangs on the big one. |
-| **`probe` and `watch` are Japanese-only** | A Chinese OCR check that "fails" while the app works. Both hardcode `"ja"` (`src/main.rs:140`, `:311`); only `run` reads `ocr.language`. `watch` also ignores the configured capture size. |
+| **`probe` and `watch` are Japanese-only** | A Chinese OCR check that "fails" while the app works. Both hardcode `"ja"` (`crates/chibipop-windows/src/main.rs:140`, `:311`); only `run` reads `ocr.language`. `watch` also ignores the configured capture size. |
 | **DXGI declines a region that crosses a screen edge** | `DXGI capture unavailable (no DXGI output for region); using BitBlt` on any probe within half a capture-width of x=0. Not a failure — the fallback is the design — but it means edge-of-screen probes are not measuring the DXGI path. |
 | **A stripped dependency reads as a free one** | Task 3 measured 3.44 MB after adding `zip`, because nothing called it yet and the linker dropped it. Size a new dependency only once something actually reaches it. Also: 3,928,064 bytes is 3.75 MB, not 3.93 — divide by 2²⁰, not 10⁶. |
 

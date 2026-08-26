@@ -3,6 +3,7 @@
 //! Modeless - see D9.
 //! Numbers are combos, not spins.
 
+use crate::config::SentenceMode;
 use crate::library::Kind;
 use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use crate::text::ocr::tag_matches;
@@ -149,6 +150,28 @@ const FIELD_MAP_SOURCES: [&str; 8] = [
     "screenshot",
     "sentence",
 ];
+
+/// The sentence-capture combo, in the order it is filled.
+///
+/// A Win32 combo answers with the index it was filled at, so this table
+/// is both halves of the UI edge: the labels going in, and the mode
+/// coming back out.
+const SENTENCE_MODES: [(SentenceMode, &str); 3] = [
+    (SentenceMode::Line, "Current line"),
+    (SentenceMode::All, "All lines"),
+    (SentenceMode::Static, "Static region"),
+];
+
+/// The mode a combo selection names.
+///
+/// No selection (`-1`, a combo that lost it) reads as the default, which
+/// is the item `build` selects when it finds none.
+fn sentence_mode_at(selection: isize) -> SentenceMode {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| SENTENCE_MODES.get(i))
+        .map_or(SentenceMode::Line, |&(mode, _)| mode)
+}
 
 /// First plugin-enable id.
 const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
@@ -1287,8 +1310,8 @@ unsafe fn update_static_controls(hwnd: HWND) {
     // of `hwnd`, created in `build`.
     unsafe {
         let is_static = dlg_item(hwnd, ID_SENTENCE_MODE)
-            .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0 == 2)
-            .unwrap_or(false);
+            .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
+            .is_ok_and(|i| sentence_mode_at(i) == SentenceMode::Static);
         let cmd = if is_static { SW_SHOW } else { SW_HIDE };
         if let Ok(c) = dlg_item(hwnd, ID_STATIC_REGION_LABEL) {
             let _ = ShowWindow(c, cmd);
@@ -1643,9 +1666,12 @@ fn resolved_sr_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&SR_CAPTURED_VK, hwnd, template)
 }
 
-/// Same, for the OCR clipboard key.
-fn resolved_ocr_clipboard_key(hwnd: HWND, template: &str) -> String {
-    resolved_captured_key(&OCR_CLIP_CAPTURED_VK, hwnd, template)
+/// Same, for the OCR clipboard key. This is the edge where the window's
+/// "Not set" button becomes the form's `None`: nothing inward carries
+/// an empty string meaning "off" (ADR-0012).
+fn resolved_ocr_clipboard_key(hwnd: HWND, template: Option<&str>) -> Option<String> {
+    let key = resolved_captured_key(&OCR_CLIP_CAPTURED_VK, hwnd, template.unwrap_or_default());
+    (!key.is_empty()).then_some(key)
 }
 
 /// Parseable form of `vk`.
@@ -2782,7 +2808,8 @@ impl SettingsWindow {
             gen.push(group("Actions", y, ROW_H + 38)?);
             y += 20;
             gen.push(label("OCR clipboard key", y)?);
-            let ocr_clipboard_vk = crate::config::parse_trigger_key(&form.ocr_clipboard_key);
+            let ocr_clipboard_vk =
+                crate::config::parse_trigger_key(form.ocr_clipboard_key.as_deref().unwrap_or(""));
             OCR_CLIP_CAPTURED_VK.with(|c| {
                 c.set(ocr_clipboard_vk.map(|vk| (h.0 as isize, vk)));
             });
@@ -3062,15 +3089,10 @@ impl SettingsWindow {
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X, y, FIELD_W, 220, ID_SENTENCE_MODE, f)?;
             ank.push(sentence_combo);
-            let modes = [
-                ("line", "Current line"),
-                ("all", "All lines"),
-                ("static", "Static region"),
-            ];
-            for (i, (val, text)) in modes.iter().enumerate() {
+            for (i, (mode, text)) in SENTENCE_MODES.iter().enumerate() {
                 SendMessageW(sentence_combo, CB_ADDSTRING, None,
                     Some(LPARAM(wide(text).as_ptr() as isize)));
-                if form.sentence_mode == *val {
+                if form.sentence_mode == *mode {
                     SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -3078,7 +3100,7 @@ impl SettingsWindow {
                 SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
             }
             y += ROW_H;
-            let is_static = form.sentence_mode == "static";
+            let is_static = form.sentence_mode == SentenceMode::Static;
             ank.push(child(page, w!("STATIC"), "Region hotkey",
                 WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H,
                 ID_STATIC_REGION_LABEL, f)?);
@@ -3270,11 +3292,7 @@ impl SettingsWindow {
             let staged = self.staged.borrow();
 
             let theme = if combo_index(ID_THEME) == 1 { "light" } else { "dark" };
-            let sentence_mode = match combo_index(ID_SENTENCE_MODE) {
-                1 => "all",
-                2 => "static",
-                _ => "line",
-            };
+            let sentence_mode = sentence_mode_at(combo_index(ID_SENTENCE_MODE));
             let font = {
                 let i = combo_index(ID_FONT);
                 if i < 0 {
@@ -3309,7 +3327,8 @@ impl SettingsWindow {
 
             let trigger_key = resolved_trigger_key(h, &template.trigger_key);
             let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
-            let ocr_clipboard_key = resolved_ocr_clipboard_key(h, &template.ocr_clipboard_key);
+            let ocr_clipboard_key =
+                resolved_ocr_clipboard_key(h, template.ocr_clipboard_key.as_deref());
 
             // Empty is not missing.
             let rows = self.field_map_rows.borrow();
@@ -3373,7 +3392,7 @@ impl SettingsWindow {
                 anki_add_key,
                 field_map,
                 notify_on_add: checked(ID_NOTIFY_ON_ADD),
-                sentence_mode: sentence_mode.to_string(),
+                sentence_mode,
                 static_region_key: resolved_sr_key(h, &template.static_region_key),
                 show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
                 ocr_clipboard_key,
@@ -3977,6 +3996,18 @@ mod tests {
         CAPTURED_VK.with(|c| c.set(None));
 
         assert_eq!("garbage", resolved_trigger_key(hwnd, "garbage"));
+    }
+
+    /// The "Not set" button is the form's `None`, never an empty string
+    /// standing in for it (ADR-0012).
+    #[test]
+    fn resolved_ocr_clipboard_key_maps_an_unset_button_to_none() {
+        let hwnd = HWND(6015 as *mut core::ffi::c_void);
+        OCR_CLIP_CAPTURED_VK.with(|c| c.set(None));
+
+        assert_eq!(None, resolved_ocr_clipboard_key(hwnd, None));
+        assert_eq!(None, resolved_ocr_clipboard_key(hwnd, Some("")));
+        assert_eq!(Some("f9".to_string()), resolved_ocr_clipboard_key(hwnd, Some("f9")));
     }
 
     // ---- anki add-key capture ----

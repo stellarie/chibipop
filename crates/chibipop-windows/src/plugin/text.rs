@@ -5,7 +5,6 @@ use crate::plugin::manifest::Manifest;
 use crate::plugin::proto::{RecogniseParams, RecogniseResult, Rect};
 use crate::plugin::strikes::Strikes;
 use crate::text::layout::{OcrLine, OcrWord};
-use crate::text::recogniser::Recogniser;
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use std::cell::RefCell;
@@ -93,7 +92,10 @@ impl PluginText {
     }
 }
 
-impl Recogniser for PluginText {
+/// The core worker seam: a plugin serves hovers exactly like the
+/// built-in engine, strikes and all, and answers the same metadata
+/// (ADR-0001).
+impl chibipop::text::OcrEngine for PluginText {
     fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         if self.disabled() {
             let why = self.strikes.borrow().last_error().unwrap_or("no detail").to_string();
@@ -115,22 +117,6 @@ impl Recogniser for PluginText {
         }
     }
 
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn provides_geometry(&self) -> bool {
-        self.geometry
-    }
-}
-
-/// The core worker seam: a plugin serves hovers exactly like the
-/// built-in engine, strikes and all.
-impl chibipop::text::OcrEngine for PluginText {
-    fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
-        Recogniser::recognise(self, buf, w, h)
-    }
-
     fn set_language(&mut self, tag: &str) {
         // A plugin's languages come from its manifest; honour a reload
         // only if the manifest listed the tag, and say so if not.
@@ -141,6 +127,14 @@ impl chibipop::text::OcrEngine for PluginText {
             "chibipop: plugin \"{}\" serves {}; keeping it (reload asked for {tag})",
             self.name, self.language
         );
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn provides_geometry(&self) -> bool {
+        self.geometry
     }
 }
 
@@ -208,8 +202,8 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_can_stand_in_as_a_recogniser() {
-        fn boxed(p: PluginText) -> Box<dyn Recogniser> {
+    fn a_plugin_can_stand_in_as_an_ocr_engine() {
+        fn boxed(p: PluginText) -> Box<dyn chibipop::text::OcrEngine> {
             Box::new(p)
         }
         let _ = boxed;

@@ -222,6 +222,42 @@ pub fn hold_region(
     }
 }
 
+/// The add-note payload: expr from
+/// written (else reading), the first
+/// dictionary's blocks only when
+/// configured, plus the captured
+/// sentence.
+///
+/// One rule, one place: the state
+/// machine and the platform bins
+/// (screenshot fields) both call it.
+/// Empty expr and no fields = no top
+/// card.
+pub fn note_payload(
+    p: &Presentation,
+    first_dict_only: bool,
+) -> (String, HashMap<String, String>) {
+    let Some(card) = p.top.as_ref() else {
+        return (String::new(), HashMap::new());
+    };
+    let expr = card
+        .written
+        .as_deref()
+        .or(card.reading.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let blocks_to_send = if first_dict_only {
+        &card.blocks[..1.min(card.blocks.len())]
+    } else {
+        &card.blocks[..]
+    };
+    let mut fields = crate::anki::fields_from_card(card, blocks_to_send);
+    if let Some(sentence) = &p.sentence {
+        fields.insert("sentence".to_string(), sentence.clone());
+    }
+    (expr, fields)
+}
+
 /// Saved for back navigation.
 #[derive(Debug, Clone, PartialEq)]
 struct HistoryEntry {
@@ -496,22 +532,10 @@ impl Controller {
         if s.placed.is_none() {
             return Vec::new();
         }
-        let Some(card) = s.presentation.top.as_ref() else { return Vec::new() };
-        let expr = card
-            .written
-            .as_deref()
-            .or(card.reading.as_deref())
-            .unwrap_or("")
-            .to_string();
-        let blocks_to_send = if self.cfg.first_dict_only {
-            &card.blocks[..1.min(card.blocks.len())]
-        } else {
-            &card.blocks[..]
-        };
-        let mut fields = crate::anki::fields_from_card(card, blocks_to_send);
-        if let Some(sentence) = &s.presentation.sentence {
-            fields.insert("sentence".to_string(), sentence.clone());
+        if s.presentation.top.is_none() {
+            return Vec::new();
         }
+        let (expr, fields) = note_payload(&s.presentation, self.cfg.first_dict_only);
         if s.anki.adding || s.anki.added.contains(&expr) {
             return Vec::new();
         }
@@ -898,7 +922,7 @@ fn same_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::present::{Card, CollapsedRow};
+    use crate::present::{Card, CollapsedRow, GlossBlock};
 
     fn cfg() -> ControllerConfig {
         ControllerConfig {
@@ -1925,5 +1949,42 @@ mod tests {
         assert!(c.handle(Event::AddRequested).is_empty());
         c.handle(placed(POPUP, 200, 200));
         assert!(!c.handle(Event::AddRequested).is_empty());
+    }
+
+    /// One rule, three shapes.
+    #[test]
+    fn the_note_payload_trims_to_the_first_dict_and_carries_the_sentence() {
+        let block = |name: &str, gloss: &str| GlossBlock {
+            dict_name: name.to_string(),
+            glosses: vec![gloss.to_string()],
+            glosses_html: vec![gloss.to_string()],
+        };
+        let mut p = Presentation {
+            top: Some(Card {
+                written: None,
+                reading: Some("\u{306D}\u{3053}".into()),
+                blocks: vec![block("A", "cat"), block("B", "feline")],
+                ..card("\u{732B}")
+            }),
+            collapsed: Vec::new(),
+            all_cards: Vec::new(),
+            sentence: Some("\u{732B}\u{304C}\u{3044}\u{308B}".into()),
+        };
+
+        // Reading stands in for a missing written form.
+        let (expr, fields) = note_payload(&p, false);
+        assert_eq!("\u{306D}\u{3053}", expr);
+        assert_eq!(Some(&"\u{732B}\u{304C}\u{3044}\u{308B}".to_string()), fields.get("sentence"));
+        let both = fields.get("glossary").expect("glossary field");
+        assert!(both.contains("cat") && both.contains("feline"), "{both}");
+
+        // First dict only drops the rest.
+        let (_, trimmed) = note_payload(&p, true);
+        let first = trimmed.get("glossary").expect("glossary field");
+        assert!(first.contains("cat") && !first.contains("feline"), "{first}");
+
+        // No top card: nothing to add.
+        p.top = None;
+        assert_eq!((String::new(), HashMap::new()), note_payload(&p, false));
     }
 }

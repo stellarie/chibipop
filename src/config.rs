@@ -447,12 +447,15 @@ pub struct AnkiConfig {
     /// Which fields go where.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
-    /// "line", "all", or "static".
+    /// How the Anki sentence field is assembled.
     #[serde(default = "default_sentence_mode")]
-    pub sentence_mode: String,
+    pub sentence_mode: SentenceMode,
     /// Set the static region.
     #[serde(default = "default_static_region_key")]
     pub static_region_key: String,
+    /// Same key on Linux, in portal syntax.
+    #[serde(default = "default_static_region_key_linux")]
+    pub static_region_key_linux: String,
     /// [x, y, w, h] if set.
     #[serde(default)]
     pub static_region: Option<[i32; 4]>,
@@ -495,13 +498,36 @@ fn default_notify_on_add() -> bool {
     true
 }
 
+/// `anki.sentence_mode`: which text the Anki sentence field gets.
+///
+/// `lowercase` for the TOML: existing files carry `"line"`, `"all"`,
+/// and `"static"`, and they keep parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SentenceMode {
+    /// The OCR line the cursor is on.
+    Line,
+    /// Every line the hover's capture read.
+    All,
+    /// Every line inside the user-drawn region, which is also what a
+    /// lookup reads from in this mode.
+    Static,
+}
+
 /// Default sentence mode.
-fn default_sentence_mode() -> String {
-    "line".to_string()
+fn default_sentence_mode() -> SentenceMode {
+    SentenceMode::Line
 }
 
 /// Default static region key.
 fn default_static_region_key() -> String {
+    String::new()
+}
+
+/// Unbound, like its Windows twin: ADR-0003 keeps the portal's shortcut
+/// list to the trigger and the Anki add, so a chord shipped here would
+/// claim a system-wide grab that nothing binds.
+fn default_static_region_key_linux() -> String {
     String::new()
 }
 
@@ -534,6 +560,7 @@ impl Default for AnkiConfig {
             field_map: default_field_map(),
             sentence_mode: default_sentence_mode(),
             static_region_key: default_static_region_key(),
+            static_region_key_linux: default_static_region_key_linux(),
             static_region: None,
             show_static_overlay: default_show_static_overlay(),
             first_dict_only: false,
@@ -576,6 +603,9 @@ pub struct OcrClipboardConfig {
     /// Empty or absent disables the action.
     #[serde(default)]
     pub hotkey: Option<String>,
+    /// Same action on Linux, in portal syntax; absent disables it.
+    #[serde(default)]
+    pub hotkey_linux: Option<String>,
 }
 
 /// On by default.
@@ -821,6 +851,7 @@ mod tests {
         assert_eq!(Platform::current().default_font(), c.popup.font);
         assert_eq!("ALT+F", c.trigger.trigger_key_linux);
         assert_eq!("ALT+A", c.anki.add_key_linux);
+        assert_eq!("", c.anki.static_region_key_linux, "unbound, like its Windows twin");
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
         assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()],
                    c.dictionaries.display_order);
@@ -1209,7 +1240,7 @@ mod tests {
 
     #[test]
     fn sentence_mode_defaults_to_line() {
-        assert_eq!("line", Config::default().anki.sentence_mode);
+        assert_eq!(SentenceMode::Line, Config::default().anki.sentence_mode);
     }
 
     #[test]
@@ -1316,11 +1347,40 @@ mod tests {
         let p = tmp("sentence_static_rt");
         let _ = std::fs::remove_file(&p);
         let mut c = Config::default();
-        c.anki.sentence_mode = "static".to_string();
+        c.anki.sentence_mode = SentenceMode::Static;
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
-        assert_eq!("static", back.anki.sentence_mode);
+        assert_eq!(SentenceMode::Static, back.anki.sentence_mode);
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// The strings an 0.9.x file carries still name the modes: the enum
+    /// is a Rust-side type, not a file format change.
+    #[test]
+    fn a_config_written_before_the_enum_still_names_every_mode() {
+        for (written, expected) in [
+            ("line", SentenceMode::Line),
+            ("all", SentenceMode::All),
+            ("static", SentenceMode::Static),
+        ] {
+            let p = tmp(&format!("sentence_legacy_{written}"));
+            let _ = std::fs::remove_file(&p);
+            std::fs::write(&p, format!(concat!(
+                "[trigger]\nmode = \"live\"\n\n",
+                "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+                "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+                "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+                "[anki]\nsentence_mode = \"{}\"\n",
+            ), written)).unwrap();
+            let loaded = load_or_create(&p).unwrap();
+            assert_eq!(expected, loaded.anki.sentence_mode, "{written} must still load");
+            // And the file we write back is the one it can read again.
+            loaded.save(&p).unwrap();
+            assert!(std::fs::read_to_string(&p)
+                .unwrap()
+                .contains(&format!("sentence_mode = \"{written}\"")));
+            let _ = std::fs::remove_file(&p);
+        }
     }
 
     /// Guards the shipped default.
@@ -1742,6 +1802,12 @@ mod tests {
         c.anki.model = "Kaishi".to_string();
         c.anki.add_key = "d".to_string();
         c.anki.add_key_linux = "CTRL+ALT+A".to_string();
+        c.anki.static_region_key = "0x52".to_string();
+        c.anki.static_region_key_linux = "ALT+R".to_string();
+        c.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".to_string()),
+            hotkey_linux: Some("ALT+C".to_string()),
+        });
         c.save(&p).unwrap();
         assert_eq!(c, load_or_create(&p).unwrap());
         let _ = std::fs::remove_file(&p);
@@ -1770,6 +1836,7 @@ mod tests {
         // New fields: the documented defaults, no migration.
         assert_eq!("ALT+F", c.trigger.trigger_key_linux);
         assert_eq!("ALT+A", c.anki.add_key_linux);
+        assert_eq!("", c.anki.static_region_key_linux);
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
         // The whole-struct save writes the new keys with those defaults
         // and the old values verbatim.
@@ -1779,6 +1846,7 @@ mod tests {
         assert!(saved.contains("trigger_key_linux = \"ALT+F\""));
         assert!(saved.contains("add_key = \"d\""));
         assert!(saved.contains("add_key_linux = \"ALT+A\""));
+        assert!(saved.contains("static_region_key_linux = \"\""));
         assert!(saved.contains("layer = \"overlay\""));
         assert!(saved.contains("font = \"Meiryo\""));
         assert_eq!(c, load_or_create(&p).unwrap());
@@ -1796,7 +1864,8 @@ mod tests {
             "layer = \"top\"\n\n",
             "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n\n",
             "[ocr]\nlanguage = \"en\"\n\n",
-            "[anki]\nadd_key_linux = \"SUPER+K\"\n",
+            "[anki]\nadd_key_linux = \"SUPER+K\"\nstatic_region_key_linux = \"SUPER+R\"\n\n",
+            "[actions.ocr_clipboard]\nhotkey_linux = \"SUPER+C\"\n",
         )).unwrap();
         // A Windows-style edit: change a rendered field, save the struct.
         let mut c = load_or_create(&p).unwrap();
@@ -1805,6 +1874,12 @@ mod tests {
         let back = load_or_create(&p).unwrap();
         assert_eq!("SUPER+J", back.trigger.trigger_key_linux);
         assert_eq!("SUPER+K", back.anki.add_key_linux);
+        assert_eq!("SUPER+R", back.anki.static_region_key_linux);
+        assert_eq!(
+            Some("SUPER+C".to_string()),
+            back.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone()),
+            "the Linux OCR-clipboard chord survives a Windows-side save"
+        );
         assert_eq!(PopupLayer::Top, back.popup.layer);
         assert_eq!("en", back.ocr.language, "hidden on Linux, never dropped");
         assert_eq!("light", back.popup.theme);
@@ -2037,19 +2112,39 @@ mod tests {
         assert_eq!(None, cfg.actions.ocr_clipboard);
     }
 
+    /// Both platforms' chords ride the one nested section (ADR-0012).
     #[test]
     fn ocr_clipboard_hotkey_round_trips() {
         let mut cfg = Config::default();
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
             hotkey: Some("ctrl+shift+o".into()),
+            hotkey_linux: Some("CTRL+SHIFT+O".into()),
         });
         let text = toml::to_string(&cfg).unwrap();
         let loaded: Config = toml::from_str(&text).unwrap();
         assert_eq!(
             Some(OcrClipboardConfig {
                 hotkey: Some("ctrl+shift+o".to_string()),
+                hotkey_linux: Some("CTRL+SHIFT+O".to_string()),
             }),
             loaded.actions.ocr_clipboard
+        );
+    }
+
+    /// A Windows-shaped section predating the Linux twin.
+    #[test]
+    fn an_ocr_clipboard_section_without_the_linux_twin_loads_with_it_absent() {
+        let toml = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n\n",
+            "[actions.ocr_clipboard]\nhotkey = \"f9\"\n",
+        );
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            Some(OcrClipboardConfig { hotkey: Some("f9".to_string()), hotkey_linux: None }),
+            cfg.actions.ocr_clipboard
         );
     }
 

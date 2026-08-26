@@ -42,8 +42,8 @@ use std::path::Path;
 const DET_THRESHOLD: f32 = 0.5;
 /// Below this a proposed character is noise. Upstream's default.
 const REC_THRESHOLD: f32 = 0.1;
-/// Recogniser batch ceiling, upstream's default: it bounds peak memory on
-/// a page-sized capture without costing throughput.
+/// Batch ceiling for the recogniser models, upstream's default: it bounds
+/// peak memory on a page-sized capture without costing throughput.
 const MAX_BATCH: usize = 8;
 
 /// One detected line and the characters read out of it.
@@ -252,6 +252,15 @@ impl chibipop::text::OcrEngine for MeikiOcr {
         if !serves_language(tag) {
             eprintln!("chibipop: the Linux OCR engine reads ja only; keeping it rather than {tag}");
         }
+    }
+
+    fn name(&self) -> &str {
+        "meiki-ocr"
+    }
+
+    /// Per-character boxes, finer than a word rect (ADR-0009).
+    fn provides_geometry(&self) -> bool {
+        true
     }
 }
 

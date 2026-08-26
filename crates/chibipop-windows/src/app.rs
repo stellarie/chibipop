@@ -903,7 +903,7 @@ fn worker_open(
     move || {
         // Resolved once, never saved.
         let ocr: Box<dyn chibipop::text::OcrEngine> =
-            match resolve_recogniser(&ocr_engine, &enabled_plugins) {
+            match resolve_plugin_engine(&ocr_engine, &enabled_plugins) {
                 Some(plugin) => plugin,
                 None => {
                     let fallback = crate::config::default_ocr_language();
@@ -1083,11 +1083,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             None
         }
     };
-    if let (Some(ref ov), Some(region)) = (&static_overlay, live.static_region) {
-        if live.sentence_mode == "static" && live.show_static_overlay {
-            if let Err(e) = ov.show(region) {
-                eprintln!("chibipop: showing static region overlay failed: {e:#}");
-            }
+    if let (Some(ov), Some(region)) = (&static_overlay, live.static_overlay_region()) {
+        if let Err(e) = ov.show(region) {
+            eprintln!("chibipop: showing static region overlay failed: {e:#}");
         }
     }
 
@@ -1183,6 +1181,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut controller = Controller::new(controller_config(&live));
     // OpenSettings, loop-deferred.
     let mut want_settings = false;
+    // The screenshot worker owns
+    // the add this Command::AddNote
+    // stands for (include_screenshot).
+    let mut screenshot_owns_add = false;
     // Rising/falling key edges.
     let mut trigger_was_held = false;
     // Static overlay visibility.
@@ -1314,6 +1316,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     add_tx: &add_tx,
                     main_tid,
                     want_settings: &mut want_settings,
+                    screenshot_owns_add: &mut screenshot_owns_add,
                     dupe_cache: &dupe_cache,
                 },
             )
@@ -1433,15 +1436,27 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 // include_screenshot (upstream 0.9.x): pick a region, save
                 // the PNG, and let the screenshot worker attach the card; a
                 // cancelled selection falls back to the plain add.
+                //
+                // `Controller::start_add`'s own guards, applied here: this
+                // flow dispatches the add itself, so the state machine
+                // never sees the request and cannot refuse it for us.
+                // Nothing to add, an add in flight, or one already added
+                // means no selector and no PNG at all.
                 let payload = if live.include_screenshot {
                     controller.popup().map(|view| {
-                        (note_payload(&view, live.first_dict_only), view.anki.connected)
+                        let (expr, fields) = note_payload(&view, live.first_dict_only);
+                        let refused = expr.is_empty()
+                            || view.anki.adding
+                            || view.anki.added.contains(&expr);
+                        (refused, (expr, fields), view.anki.connected)
                     })
                 } else {
                     None
                 };
                 match payload {
-                    Some(((expr, fields), anki_connected)) => {
+                    // Refused: the hotkey does nothing.
+                    Some((true, ..)) => {}
+                    Some((false, (expr, fields), anki_connected)) => {
                         let _ = popup.hide();
                         if let Some(b) = &anki_button {
                             b.hide();
@@ -1476,14 +1491,22 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     anki_connected,
                                 };
                                 let _ = screenshot_tx.send(cmd);
+                                // The worker owns this add now.
+                                screenshot_owns_add = true;
                             }
-                        } else {
-                            drive!(Event::AddRequested);
                         }
                         let _ = popup.show_without_activating();
                         if let Some(b) = &anki_button {
                             b.show_without_activating();
                         }
+                        // The Controller owns the add's state either
+                        // way - in-flight mark, repaint, button sync -
+                        // and refuses the next press until the answer
+                        // lands. Only the AddNote dispatch is the
+                        // worker's; a cancelled selection (or a failed
+                        // capture) falls back to the plain add.
+                        drive!(Event::AddRequested);
+                        screenshot_owns_add = false;
                     }
                     None => {
                         drive!(Event::AddRequested);
@@ -1898,10 +1921,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 if let Some(e) = &result.err {
                     eprintln!("chibipop: screenshot failed: {e}");
                 } else if !result.expr.is_empty() {
+                    // The word is in the collection now: teach the
+                    // cache, or a cached `false` outlives the add.
+                    dupe_cache.insert(result.expr.clone(), true);
                     if live.notify_on_add {
                         tray.notify("chibipop", &format!("{} added", result.expr));
                     }
-                    drive!(Event::NoteAdded { expr: result.expr, failed: false });
+                }
+                // The failure has to land too - the popup marked itself
+                // in-flight when the hotkey dispatched this add.
+                if !result.expr.is_empty() {
+                    let failed = result.err.is_some();
+                    drive!(Event::NoteAdded { expr: result.expr, failed });
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
@@ -1977,9 +2008,9 @@ fn find_text_plugin<'a>(
 
 /// Spawns one plugin process.
 ///
-/// Concrete so the caller may
-/// coerce to either engine trait.
-fn spawn_plugin_recogniser(name: &str) -> Result<Box<PluginText>> {
+/// Concrete, so the caller decides whether to box it as the `OcrEngine`
+/// seam.
+fn spawn_plugin_engine(name: &str) -> Result<Box<PluginText>> {
     let root = crate::paths::beside_exe("plugins");
     let found = discover::discover(&root);
     let (dir, m) = find_text_plugin(&found, name)?;
@@ -1990,10 +2021,10 @@ fn spawn_plugin_recogniser(name: &str) -> Result<Box<PluginText>> {
 /// Picks and spawns the engine.
 ///
 /// `None` picks the built-in.
-fn resolve_recogniser(ocr_engine: &str, enabled: &[String]) -> Option<Box<PluginText>> {
+fn resolve_plugin_engine(ocr_engine: &str, enabled: &[String]) -> Option<Box<PluginText>> {
     match resolve_engine(ocr_engine, enabled) {
         EngineChoice::Builtin => None,
-        EngineChoice::Plugin(name) => match spawn_plugin_recogniser(&name) {
+        EngineChoice::Plugin(name) => match spawn_plugin_engine(&name) {
             Ok(r) => Some(r),
             Err(e) => {
                 eprintln!("chibipop: OCR plugin \"{name}\" failed, falling back to builtin: {e:#}");
@@ -2037,37 +2068,15 @@ fn show_presentation(
     Ok((rect, content_h, view_h))
 }
 
-/// The add-note payload, exactly
-/// as `Controller::start_add`
-/// builds it: expr from written
-/// (else reading), first dict's
-/// blocks only when configured,
-/// and the captured sentence.
-///
-/// Empty expr = no top card.
+/// The add-note payload. Core owns
+/// the rule (ADR-0001); this is the
+/// `PopupView` shim the message loop
+/// calls.
 fn note_payload(
     view: &PopupView<'_>,
     first_dict_only: bool,
 ) -> (String, HashMap<String, String>) {
-    let Some(card) = view.presentation.top.as_ref() else {
-        return (String::new(), HashMap::new());
-    };
-    let expr = card
-        .written
-        .as_deref()
-        .or(card.reading.as_deref())
-        .unwrap_or("")
-        .to_string();
-    let blocks_to_send = if first_dict_only {
-        &card.blocks[..1.min(card.blocks.len())]
-    } else {
-        &card.blocks[..]
-    };
-    let mut fields = anki::fields_from_card(card, blocks_to_send);
-    if let Some(sentence) = &view.presentation.sentence {
-        fields.insert("sentence".to_string(), sentence.clone());
-    }
-    (expr, fields)
+    crate::controller::note_payload(view.presentation, first_dict_only)
 }
 
 /// PNG + optional Anki card.
@@ -2230,6 +2239,11 @@ struct Exec<'a> {
     main_tid: u32,
     /// OpenSettings, loop-handled.
     want_settings: &'a mut bool,
+    /// Set by the include_screenshot
+    /// flow: the screenshot worker
+    /// dispatches that add itself, so
+    /// `AddNote` only marks state.
+    screenshot_owns_add: &'a mut bool,
     /// Read-only here; the pump
     /// owns the writes.
     dupe_cache: &'a HashMap<String, bool>,
@@ -2410,6 +2424,14 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::AddNote { expr, fields } => {
+            // The include_screenshot flow already sent this add to the
+            // screenshot worker (PNG attached); the Controller still
+            // ran start_add for the in-flight state, repaint and button
+            // sync, and the answer arrives as WM_APP_SCREENSHOT_DONE.
+            if *x.screenshot_owns_add {
+                *x.screenshot_owns_add = false;
+                return None;
+            }
             let url = x.live.anki_url.clone();
             let deck = x.live.anki_deck.clone();
             let model = x.live.anki_model.clone();
@@ -2495,7 +2517,7 @@ struct LiveSettings {
     anki_deck: String,
     anki_model: String,
     anki_field_map: Vec<crate::config::FieldMapping>,
-    sentence_mode: String,
+    sentence_mode: crate::config::SentenceMode,
     static_region: Option<PhysRect>,
     static_region_key: String,
     show_static_overlay: bool,
@@ -2508,6 +2530,20 @@ struct LiveSettings {
     actions_ocr_clipboard_hotkey: Option<String>,
     include_screenshot: bool,
     first_dict_only: bool,
+}
+
+impl LiveSettings {
+    /// Where the static-region outline belongs, when it belongs
+    /// anywhere: static mode, the outline switched on, and a region the
+    /// user has actually drawn. Every place that shows or hides that
+    /// window asks this, so none of them can disagree.
+    fn static_overlay_region(&self) -> Option<PhysRect> {
+        if self.sentence_mode == crate::config::SentenceMode::Static && self.show_static_overlay {
+            self.static_region
+        } else {
+            None
+        }
+    }
 }
 
 /// Rebuilt on each change.
@@ -2543,7 +2579,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         } else {
             cfg.anki.field_map.clone()
         },
-        sentence_mode: cfg.anki.sentence_mode.clone(),
+        sentence_mode: cfg.anki.sentence_mode,
         static_region: cfg.anki.static_region.map(|a| PhysRect {
             x: a[0], y: a[1], w: a[2], h: a[3],
         }),
@@ -2576,7 +2612,7 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
         language: live.language.clone(),
         present_cfg: live.present_cfg.clone(),
         scan_display: live.scan_display,
-        sentence_mode: live.sentence_mode.clone(),
+        sentence_mode: live.sentence_mode,
         static_region: live.static_region,
         dicts: dicts.to_vec(),
     }
@@ -2618,14 +2654,13 @@ fn apply_live(
     }
     if let Some(sr) = sr_overlay {
         sr.set_capture_exclusion(live.exclude_from_capture);
-        if live.sentence_mode == "static" && live.show_static_overlay {
-            if let Some(region) = live.static_region {
+        match live.static_overlay_region() {
+            Some(region) => {
                 if let Err(e) = sr.show(region) {
                     eprintln!("chibipop: static overlay: {e:#}");
                 }
             }
-        } else {
-            sr.hide();
+            None => sr.hide(),
         }
     }
     capture_guard_active.store(
@@ -2868,6 +2903,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
             hotkey: Some("f9".to_string()),
+            hotkey_linux: None,
         });
 
         assert_eq!(

@@ -3,12 +3,13 @@
 //! channels; the platform bin supplies the two seams and a wake callback,
 //! and drives everything else from its own event loop.
 
+use crate::config::SentenceMode;
 use crate::controller::{LookupOutcome, RequestId};
 use crate::geom::{PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::present::{self, DictInfo, PresentConfig};
-use crate::text::layout::{CaptureSize, OcrLine};
+use crate::text::layout::{CaptureSize, OcrLine, Resolved};
 use crate::text::mask::CaptureMask;
 use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
@@ -59,10 +60,10 @@ pub struct WorkerSettings {
     pub language: String,
     pub present_cfg: PresentConfig,
     pub scan_display: ScanDisplay,
-    /// `"line"`, `"all"`, or `"static"` - how the Anki sentence field
-    /// is assembled (upstream 0.9.x sentence capture).
-    pub sentence_mode: String,
-    /// The user-drawn box `sentence_mode == "static"` reads from.
+    /// How the Anki sentence field is assembled (upstream 0.9.x
+    /// sentence capture).
+    pub sentence_mode: SentenceMode,
+    /// The user-drawn box [`SentenceMode::Static`] reads from.
     pub static_region: Option<PhysRect>,
     /// Refreshed by every edit.
     pub dicts: Vec<DictInfo>,
@@ -192,7 +193,7 @@ enum Pre {
 struct LookupState {
     present_cfg: PresentConfig,
     scan_display: ScanDisplay,
-    sentence_mode: String,
+    sentence_mode: SentenceMode,
     static_region: Option<PhysRect>,
     /// Refreshed by every Reload.
     dicts: Vec<DictInfo>,
@@ -364,7 +365,7 @@ fn resolve_trigger(
     state: &LookupState,
     hover: Hover,
 ) -> LookupOutcome {
-    if state.sentence_mode == "static" {
+    if state.sentence_mode == SentenceMode::Static {
         if let Some(region) = state.static_region {
             return resolve_static(source, dict, engine, state, hover, region);
         }
@@ -372,45 +373,25 @@ fn resolve_trigger(
         eprintln!("chibipop: static mode but no region set; using line mode");
     }
     let raw = source.resolve_at_tiled_scanned(hover.at, state.scan_display.captures, hover.mask);
-    let (resolved, mut scan, ocr_lines) = match raw {
+    let (resolved, scan, ocr_lines) = match raw {
         Ok((Some(r), scan, lines)) => (r, scan, lines),
         Ok((None, _, _)) => return LookupOutcome::Hide,
         Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
     };
-
-    let text = &resolved.span.text[resolved.span.cursor_byte_offset..];
-    let hits = match engine.run(dict, text) {
-        Ok(h) => h,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
-    };
-    if hits.is_empty() {
-        return LookupOutcome::Hide;
-    }
-
-    let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg);
-    let sentence = match state.sentence_mode.as_str() {
-        "all" => join_all_lines(&ocr_lines),
-        _ => extract_sentence_line(&resolved.span.text, resolved.span.cursor_byte_offset)
-            .to_string(),
-    };
-    presentation.sentence = Some(sentence);
-    let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
-    if state.scan_display.highlight {
-        if let Some(rect) = matched {
-            scan.push(ScanRect { rect, kind: ScanKind::Match });
+    let sentence = || match state.sentence_mode {
+        SentenceMode::All => join_all_lines(&ocr_lines),
+        // `Static` reaches here only with no region drawn.
+        SentenceMode::Line | SentenceMode::Static => {
+            extract_sentence_line(&resolved.span.text, resolved.span.cursor_byte_offset).to_string()
         }
-    }
-    LookupOutcome::Ready {
-        presentation: Box::new(presentation),
-        anchor: resolved.span.anchor,
-        orientation: resolved.orientation,
-        matched,
-        scan,
-    }
+    };
+    // The tiled path is the one with an overlay to draw on.
+    let outline = state.scan_display.highlight;
+    present_lookup(dict, engine, state, &resolved, sentence, scan, outline)
 }
 
-/// Static-region capture path (`sentence_mode == "static"`): one read
-/// of the user-drawn box, sentence = everything the box holds.
+/// Static-region capture path ([`SentenceMode::Static`]): one read of
+/// the user-drawn box, sentence = everything the box holds.
 fn resolve_static(
     source: &mut TextSource,
     dict: &dyn Dictionary,
@@ -426,7 +407,29 @@ fn resolve_static(
     let Some(resolved) = read.resolved else {
         return LookupOutcome::Hide;
     };
+    let lines = read.lines;
+    // Nothing to draw: this path has no capture boxes to show, so it
+    // grows no overlay and takes no match outline either.
+    present_lookup(dict, engine, state, &resolved, || join_all_lines(&lines), Vec::new(), false)
+}
 
+/// What both capture paths do once a span is resolved: look the text
+/// under the cursor up, present the hits, attach the Anki sentence, and
+/// outline the match.
+///
+/// The sentence is a closure because a hover that hits nothing must not
+/// pay for assembling one. `scan` is whatever rects the path already
+/// collected; the match joins them last - drawn over the capture boxes -
+/// when `outline_match` and a match rect exist.
+fn present_lookup(
+    dict: &dyn Dictionary,
+    engine: &LookupEngine,
+    state: &LookupState,
+    resolved: &Resolved,
+    sentence: impl FnOnce() -> String,
+    mut scan: Vec<ScanRect>,
+    outline_match: bool,
+) -> LookupOutcome {
     let text = &resolved.span.text[resolved.span.cursor_byte_offset..];
     let hits = match engine.run(dict, text) {
         Ok(h) => h,
@@ -437,14 +440,19 @@ fn resolve_static(
     }
 
     let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg);
-    presentation.sentence = Some(join_all_lines(&read.lines));
+    presentation.sentence = Some(sentence());
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
+    if outline_match {
+        if let Some(rect) = matched {
+            scan.push(ScanRect { rect, kind: ScanKind::Match });
+        }
+    }
     LookupOutcome::Ready {
         presentation: Box::new(presentation),
         anchor: resolved.span.anchor,
         orientation: resolved.orientation,
         matched,
-        scan: Vec::new(),
+        scan,
     }
 }
 
@@ -493,6 +501,10 @@ fn resolve_drilldown(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::lookup::deconj::Deconjugator;
+    use crate::lookup::model::{FakeDictionary, Sense};
+    use crate::text::layout::{Orientation, TextGeom};
+    use crate::text::TextSpan;
 
     fn ws(passes: u8) -> WorkerSettings {
         WorkerSettings {
@@ -504,7 +516,7 @@ mod tests {
             language: "ja".to_string(),
             present_cfg: Config::default().present_config(),
             scan_display: ScanDisplay { captures: false, highlight: false },
-            sentence_mode: "line".to_string(),
+            sentence_mode: SentenceMode::Line,
             static_region: None,
             dicts: Vec::new(),
         }
@@ -636,7 +648,7 @@ mod tests {
         LookupState {
             present_cfg: Config::default().present_config(),
             scan_display: ScanDisplay { captures: false, highlight: false },
-            sentence_mode: "line".to_string(),
+            sentence_mode: SentenceMode::Line,
             static_region: None,
             dicts,
         }
@@ -686,5 +698,117 @@ mod tests {
         take_reload(ws(2), Some(&reopen), &mut dict, &mut state);
 
         assert_eq!(vec![di(7, "StillHere")], dict.dicts().unwrap());
+    }
+
+    /// A dictionary that answers 食, and an engine to ask it with.
+    fn eating_dict() -> FakeDictionary {
+        let mut d = FakeDictionary::new();
+        d.add_dict(1, "FakeDict");
+        d.add_term("食", Some("食"), None, "", None, 10, 1);
+        d.add_entry(
+            10,
+            1,
+            vec![Sense {
+                glosses: vec!["to eat".to_string()],
+                glosses_html: Vec::new(),
+                pos: Vec::new(),
+                misc: Vec::new(),
+            }],
+        );
+        d
+    }
+
+    fn engine() -> LookupEngine {
+        LookupEngine::new(Deconjugator::new(Vec::new()))
+    }
+
+    /// One word under the cursor, with the geometry a match needs to be
+    /// outlined at all.
+    fn resolved(text: &str) -> Resolved {
+        let rect = PhysRect { x: 10, y: 20, w: 30, h: 40 };
+        Resolved {
+            span: TextSpan {
+                text: text.to_string(),
+                cursor_byte_offset: 0,
+                anchor: rect,
+                geom: vec![TextGeom { char_count: text.chars().count(), rect }],
+            },
+            orientation: Orientation::Horizontal,
+        }
+    }
+
+    /// The tail both capture paths share, on a path that draws an
+    /// overlay: the sentence it was handed rides along, and the match
+    /// joins the rects last, over the capture boxes.
+    #[test]
+    fn the_shared_tail_attaches_the_sentence_and_outlines_the_match() {
+        let state = state_with(vec![di(1, "FakeDict")]);
+        let hit = resolved("食");
+        let pass1 = vec![ScanRect { rect: hit.span.anchor, kind: ScanKind::Pass1 }];
+
+        let outcome = present_lookup(
+            &eating_dict(),
+            &engine(),
+            &state,
+            &hit,
+            || "食べた。".to_string(),
+            pass1,
+            true,
+        );
+
+        let LookupOutcome::Ready { presentation, matched, scan, .. } = outcome else {
+            panic!("a hit must present something")
+        };
+        assert_eq!(Some("食べた。".to_string()), presentation.sentence);
+        assert!(matched.is_some(), "a hit with geometry has a rect to outline");
+        assert_eq!(
+            vec![ScanKind::Pass1, ScanKind::Match],
+            scan.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            "the match draws last, over the capture boxes"
+        );
+    }
+
+    /// The static-region path draws no overlay, so nothing joins one -
+    /// and it still reports the rect the popup highlights with.
+    #[test]
+    fn the_shared_tail_grows_no_overlay_for_a_path_that_draws_none() {
+        let state = state_with(vec![di(1, "FakeDict")]);
+        let hit = resolved("食");
+
+        let outcome = present_lookup(
+            &eating_dict(),
+            &engine(),
+            &state,
+            &hit,
+            || "食".to_string(),
+            Vec::new(),
+            false,
+        );
+
+        let LookupOutcome::Ready { matched, scan, .. } = outcome else {
+            panic!("a hit must present something")
+        };
+        assert!(matched.is_some(), "the popup still gets its highlight rect");
+        assert!(scan.is_empty(), "an overlay nobody draws stays empty");
+    }
+
+    /// Nothing in the dictionary hides the popup - and a hover that hits
+    /// nothing never pays for assembling a sentence.
+    #[test]
+    fn the_shared_tail_hides_without_assembling_a_sentence_when_nothing_hits() {
+        let state = state_with(vec![di(1, "FakeDict")]);
+        let miss = resolved("ヽ");
+
+        let outcome = present_lookup(
+            &eating_dict(),
+            &engine(),
+            &state,
+            &miss,
+            || panic!("a miss must not assemble a sentence"),
+            Vec::new(),
+            true,
+        );
+
+        assert!(matches!(outcome, LookupOutcome::Hide));
     }
 }
