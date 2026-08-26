@@ -25,7 +25,7 @@ use anyhow::{bail, Context, Result};
 use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
 use calloop::timer::{TimeoutAction, Timer};
-use calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction};
+use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
 use calloop_wayland_source::WaylandSource;
 use chibipop::controller::{Command, Controller, ControllerConfig, Event, RequestId};
 use chibipop::geom::{PhysPoint, PhysRect};
@@ -132,6 +132,12 @@ pub(crate) struct App {
     capture_selection: capture_backend::Selection,
     /// Everything the portal retry needs to run again from here.
     portal_retry: Option<PortalRetry>,
+    /// Where a new source goes. The dwell watch is the one source this
+    /// daemon adds and drops at runtime, so the pump's own handle has
+    /// to be reachable from the state that decides to.
+    pump: LoopHandle<'static, App>,
+    /// The dwell re-check's timer while one is armed (ADR-0010).
+    dwell: Option<RegistrationToken>,
 }
 
 /// What a second consent attempt needs, kept so the retry is the same
@@ -408,11 +414,69 @@ impl App {
     }
 
     /// One Event through the Controller, and every Command it answers
-    /// with executed. Ticket 37 fills in the Anki rows.
+    /// with executed - then the dwell watch brought in line with what
+    /// is now on screen (ADR-0010). Ticket 42 fills in the Anki rows.
     fn feed(&mut self, event: Event) {
         for cmd in self.controller.handle(event) {
             self.execute(cmd);
         }
+        self.sync_dwell();
+    }
+
+    /// Whether the dwell re-check has anything to watch here and now.
+    fn dwell_wanted(&self) -> bool {
+        dwell_wanted(self.hold, self.controller.dwell_armed())
+    }
+
+    /// Arm the dwell watch when there is something to watch.
+    ///
+    /// Disarming is the timer's own job (see [`App::dwell_tick`]): a
+    /// source must not be removed from inside its own dispatch, and a
+    /// watch that retires on its next deadline still leaves an idle
+    /// daemon holding no timed source at all - which is what ADR-0010's
+    /// zero idle wakeups means on an event-driven cursor rung.
+    fn sync_dwell(&mut self) {
+        if self.dwell.is_some() || !self.dwell_wanted() {
+            return;
+        }
+        self.arm_dwell();
+    }
+
+    /// One dwell watch, from now. Unconditional: `sync_dwell` owns the
+    /// decision, and the tests arm one by hand because a popup with a
+    /// rect needs a compositor.
+    fn arm_dwell(&mut self) {
+        let timer = Timer::from_duration(budget::DWELL);
+        match self.pump.insert_source(timer, |_, _, app: &mut App| app.dwell_tick()) {
+            Ok(token) => {
+                self.dwell = Some(token);
+                if self.trace {
+                    self.log.diag("dwell: watch armed");
+                }
+            }
+            Err(e) => self.log.diag(&format!("dwell: no watch could be armed - {e}")),
+        }
+    }
+
+    /// One dwell deadline: re-ask the shown popup's own question, then
+    /// decide whether this watch is still wanted (ADR-0010).
+    ///
+    /// The re-grab races damage on the same deadline below the seams, so
+    /// an unchanged screen costs no copy and no OCR pass, and the
+    /// Controller re-presents nothing; only a change reaches the popup.
+    fn dwell_tick(&mut self) -> TimeoutAction {
+        if self.trace {
+            self.log.diag("dwell: deadline");
+        }
+        self.feed(Event::DwellElapsed);
+        if self.dwell_wanted() {
+            return TimeoutAction::ToDuration(budget::DWELL);
+        }
+        self.dwell = None;
+        if self.trace {
+            self.log.diag("dwell: nothing shown - watch retired");
+        }
+        TimeoutAction::Drop
     }
 
     fn execute(&mut self, cmd: Command) {
@@ -439,7 +503,7 @@ impl App {
                     scroll,
                     show_back,
                     // The Anki affordance's own state travels with
-                    // `SyncAnkiButton` (ticket 37); until then the slot
+                    // `SyncAnkiButton` (ticket 42); until then the slot
                     // is reserved only by the demo, which passes one.
                     anki: None,
                 });
@@ -467,7 +531,9 @@ impl App {
                     self.last_warning = Some(msg);
                 }
             }
-            other => self.log.diag(&format!("controller: {other:?} (no-op until ticket 37)")),
+            // The pointer rows (ticket 38) and the Anki rows (42) land
+            // here until those tickets execute them.
+            other => self.log.diag(&format!("controller: {other:?} (no-op)")),
         }
     }
 
@@ -686,9 +752,24 @@ impl App {
                 ));
                 self.dicts = dicts;
                 self.worker = Some(worker);
+                self.look_where_the_cursor_is();
             }
             Err(e) => self.log.diag(&format!("worker: unavailable - {e:#}")),
         }
+    }
+
+    /// One lookup at the cursor's present position, if it is known.
+    ///
+    /// The event rungs deliver a position when their session opens and
+    /// then only on movement (ADR-0003), so a daemon that came up with
+    /// the cursor already resting on a word has exactly one sample and
+    /// no pipeline to spend it on. Asking here is what makes live mode
+    /// true the moment it can be - the same reason a trigger press is
+    /// its own first cursor sample (ADR-0010).
+    fn look_where_the_cursor_is(&mut self) {
+        let Some(pos) = self.last_cursor else { return };
+        self.log.diag(&format!("lookup: asking where the cursor already is ({}, {})", pos.x, pos.y));
+        self.feed(Event::CursorMoved { pos });
     }
 
     /// The in-app retry ADR-0002 requires: ask the portal again.
@@ -775,6 +856,14 @@ impl CursorHandler for App {
                 self.hold = Some(Hold { output, ..hold });
             }
         }
+        // A sample with no pipeline behind it would spend the
+        // Controller's movement gate on a lookup nobody can answer -
+        // and say so once per sample. The newest position is kept
+        // instead, and `look_where_the_cursor_is` spends it the moment
+        // a pipeline exists.
+        if self.worker.is_none() {
+            return;
+        }
         self.feed(Event::CursorMoved { pos });
     }
 }
@@ -800,6 +889,17 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         log_lookups: config.debug.show_lookup_log,
         tick_ms: DISPATCH_TICK_MS,
     }
+}
+
+/// Whether the dwell re-check has anything to watch (ADR-0010), in two
+/// halves.
+///
+/// `armed` is the Controller's: live mode, a popup with a rect and no
+/// drill-down over it. `hold` is this daemon's own, because only it
+/// knows about the frozen grab - a hold's pixels predate the popup and
+/// cannot change, so trigger mode has no re-check by construction.
+fn dwell_wanted(hold: Option<Hold>, armed: bool) -> bool {
+    hold.is_none() && armed
 }
 
 fn on_off(on: bool) -> &'static str {
@@ -1049,6 +1149,8 @@ pub fn run(paths: Paths) -> Result<()> {
         state_dir: paths.state_dir.clone(),
         config_file: paths.config_file.clone(),
         signal: event_loop.get_signal(),
+        pump: event_loop.handle(),
+        dwell: None,
         cursor: CursorState::default(),
         controller: Controller::new(controller_config(&config)),
         trace,
@@ -1361,7 +1463,12 @@ mod tests {
     /// A screencopy session with no pipeline, which is what every test
     /// here wants: the promptless rung, so no test can wander into a
     /// portal dialog, and no OCR models are opened for a log assertion.
-    fn test_app(dir: &std::path::Path, log_file: &std::path::Path, event_loop: &EventLoop<App>) -> App {
+    fn test_app(
+        dir: &std::path::Path,
+        log_file: &std::path::Path,
+        // The pump's own lifetime, because `App` holds its handle.
+        event_loop: &EventLoop<'static, App>,
+    ) -> App {
         let capture = capture_backend::Selection::Backend(Backend::WlrScreencopy);
         let (worker_ping, _pings) = calloop::ping::make_ping().unwrap();
         App {
@@ -1371,6 +1478,8 @@ mod tests {
             config_file: dir.join("chibipop.toml"),
             config: chibipop::config::Config::default(),
             signal: event_loop.get_signal(),
+            pump: event_loop.handle(),
+            dwell: None,
             settings: SettingsChild::new(),
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
@@ -1704,6 +1813,350 @@ mod tests {
         app.handle_shortcut(shortcuts::Event::Note("trigger: v2 session /foo".to_string()));
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(written.contains("trigger: v2 session /foo"), "log was: {written}");
+    // -- live hover and the dwell re-check (ADR-0010) --
+
+    use chibipop::lookup::deconj::Deconjugator;
+    use chibipop::lookup::engine::LookupEngine;
+    use chibipop::lookup::model::{FakeDictionary, Sense};
+    use chibipop::text::layout::{OcrLine, OcrWord};
+    use chibipop::text::{Frame, OcrEngine, RegionCapture};
+    use chibipop::worker::WorkerParts;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Generous: never reached on a healthy run.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Where the fakes' hovers land, and the word they read.
+    const AT: PhysPoint = PhysPoint { x: 600, y: 300 };
+    const WORD: &str = "\u{98DF}";
+
+    /// One fake output: big enough to hold a read region, small enough
+    /// that a press-time full grab is a cheap allocation.
+    const FAKE_OUTPUT: i32 = 1000;
+
+    /// What the fake seams did, in order. One Vec rather than a channel
+    /// per seam: both run on the worker thread, so appending under one
+    /// lock is the order the pipeline actually took, and a received
+    /// result is the barrier that makes it complete.
+    type Seams = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    fn seams() -> Seams {
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
+    }
+
+    fn note(log: &Seams, line: &str) {
+        log.lock().expect("the seam log").push(line.to_string());
+    }
+
+    fn done(log: &Seams) -> Vec<String> {
+        log.lock().expect("the seam log").clone()
+    }
+
+    /// Canned pixels; every grab is logged and can be held open, so an
+    /// in-flight read is something a test can stand on.
+    struct FakeCapture {
+        log: Seams,
+        gate: Option<mpsc::Receiver<()>>,
+        entered: Option<mpsc::Sender<()>>,
+    }
+
+    impl RegionCapture for FakeCapture {
+        fn grab(&mut self, region: PhysRect) -> anyhow::Result<Frame> {
+            note(&self.log, "grab");
+            if let Some(tx) = &self.entered {
+                let _ = tx.send(());
+            }
+            if let Some(gate) = &self.gate {
+                gate.recv_timeout(TIMEOUT).expect("the test must release the gated grab");
+            }
+            Ok(Frame {
+                buf: vec![0u8; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "fake",
+                fallback: None,
+                unchanged: false,
+            })
+        }
+
+        fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
+            PhysRect {
+                x: p.x - FAKE_OUTPUT / 2,
+                y: p.y - FAKE_OUTPUT / 2,
+                w: FAKE_OUTPUT,
+                h: FAKE_OUTPUT,
+            }
+        }
+
+        fn begin_read(&mut self) {
+            note(&self.log, "begin_read");
+        }
+
+        fn end_read(&mut self) {
+            note(&self.log, "end_read");
+        }
+    }
+
+    /// One word over the whole grab, plus whether the pixels handed to
+    /// it had been masked: the capture's own are black and a mask fills
+    /// white (ADR-0008), so this is the mask itself, observed. Alpha is
+    /// not evidence - the upscale sets it opaque either way.
+    struct FakeOcr {
+        log: Seams,
+    }
+
+    impl OcrEngine for FakeOcr {
+        fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> anyhow::Result<Vec<OcrLine>> {
+            let masked = bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|px| px[0] == 0xFF && px[1] == 0xFF && px[2] == 0xFF);
+            note(&self.log, &format!("ocr masked={masked}"));
+            Ok(vec![OcrLine {
+                words: vec![OcrWord {
+                    text: WORD.to_string(),
+                    rect: PhysRect { x: 0, y: 0, w, h },
+                }],
+            }])
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+    }
+
+    /// The real core pipeline over those fakes: no screen, no OCR
+    /// models, no database, and every pass countable.
+    fn fake_worker(
+        gate: Option<mpsc::Receiver<()>>,
+        entered: Option<mpsc::Sender<()>>,
+    ) -> (Worker, Seams) {
+        let log = seams();
+        let capture_log = log.clone();
+        let ocr_log = log.clone();
+        let settings = worker::settings(&chibipop::config::Config::default(), &[]);
+        let (worker, _dicts) = Worker::spawn(
+            settings,
+            move || {
+                let mut dict = FakeDictionary::new();
+                dict.add_dict(1, "FakeDict");
+                dict.add_term(WORD, None, None, "", None, 10, 1);
+                dict.add_entry(
+                    10,
+                    1,
+                    vec![Sense {
+                        glosses: vec!["to eat".to_string()],
+                        glosses_html: Vec::new(),
+                        pos: Vec::new(),
+                        misc: Vec::new(),
+                    }],
+                );
+                Ok(WorkerParts {
+                    capture: Box::new(FakeCapture { log: capture_log, gate, entered }),
+                    ocr: Box::new(FakeOcr { log: ocr_log }),
+                    dict: Box::new(dict),
+                    reopen_dict: None,
+                    engine: LookupEngine::new(Deconjugator::new(Vec::new())),
+                })
+            },
+            || {},
+        )
+        .expect("the fake pipeline must start");
+        (worker, log)
+    }
+
+    /// The pipeline's answer, or a test failure. Receiving it is what
+    /// makes the seam log complete.
+    fn answer(app: &App) -> chibipop::worker::WorkerResult {
+        app.worker
+            .as_ref()
+            .expect("the pipeline")
+            .results()
+            .recv_timeout(TIMEOUT)
+            .expect("the pipeline must answer")
+    }
+
+    /// The non-negotiable core: a cursor sample becomes a lookup on the
+    /// sample. Nothing timed sits in between - no settle delay, no
+    /// velocity gate, no dispatch tick (ADR-0010).
+    #[test]
+    fn a_cursor_sample_dispatches_a_live_lookup_at_once() {
+        let dir = scratch("live");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.on_cursor_position(AT);
+        answer(&app);
+
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "one sample, one bracketed read"
+        );
+        assert_eq!(CaptureMode::Live, app.capture_mode(), "no hold: the grab is live");
+        assert!(app.dwell.is_none(), "a dispatch arms no timer of its own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An event rung delivers a position when its session opens and
+    /// then only on movement (ADR-0003), so a daemon that came up with
+    /// the cursor already resting on a word has exactly one sample -
+    /// and the pipeline is the last thing to exist. Spending that
+    /// sample on nothing would leave live mode silent until the mouse
+    /// moved, and would spend the Controller's movement gate too: the
+    /// same position asked twice is not a move.
+    #[test]
+    fn a_sample_that_arrives_before_the_pipeline_is_spent_once_it_is_up() {
+        let dir = scratch("earlysample");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        assert!(app.worker.is_none(), "no pipeline yet, as at startup");
+
+        app.on_cursor_position(AT);
+        // A rung may re-deliver the resting position (a session that
+        // reopens, an output that re-enters); none of those samples may
+        // reach the Controller while there is nothing to ask.
+        app.on_cursor_position(AT);
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(!written.contains("lookup:"), "nothing to ask yet: {written}");
+
+        // What `spawn_worker` does the moment a pipeline exists.
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+        app.look_where_the_cursor_is();
+        answer(&app);
+
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "the resting cursor gets its lookup - the gate was never spent"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live grab must not read our own popup; a hold's frozen grab
+    /// reads straight through it (ADR-0008/0010). The fake recogniser
+    /// reports the fill it was handed, so both halves are observed
+    /// rather than argued.
+    #[test]
+    fn a_live_lookup_masks_the_popup_and_a_hold_reads_through_it() {
+        let dir = scratch("livemask");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+        // Over the hovered point, as a placed popup can be.
+        let popup = PhysRect { x: AT.x - 40, y: AT.y - 40, w: 200, h: 120 };
+
+        app.execute(Command::RequestLookup { id: RequestId(1), point: AT, popup: Some(popup) });
+        answer(&app);
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=true", "end_read"],
+            "a live lookup masks the popup out of its own OCR input"
+        );
+
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(AT);
+        app.handle_request("trigger-down", Some(Verb::TriggerDown));
+        assert_eq!(CaptureMode::Frozen, app.capture_mode());
+        answer(&app);
+        // The press's own full grab, bracketed like any other read -
+        // then the hold's lookup, which touches no backend at all and
+        // masks nothing, because those pixels predate the popup.
+        assert_eq!(
+            done(&log)[4..],
+            ["begin_read", "grab", "end_read", "ocr masked=false"],
+            "the hold reads through the popup: {:?}",
+            done(&log)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Backpressure is the pacer: samples arriving behind an in-flight
+    /// read coalesce to the newest, and the daemon queues nothing of its
+    /// own (ADR-0010 - one in flight, latest-wins).
+    #[test]
+    fn samples_behind_an_in_flight_lookup_coalesce_to_the_newest() {
+        let dir = scratch("coalesce");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (worker, log) = fake_worker(Some(gate_rx), Some(entered_tx));
+        app.worker = Some(worker);
+
+        app.on_cursor_position(AT);
+        entered_rx.recv_timeout(TIMEOUT).expect("the first read must start");
+        // Both land while that read is held open.
+        app.on_cursor_position(PhysPoint { x: AT.x + 100, y: AT.y });
+        app.on_cursor_position(PhysPoint { x: AT.x + 200, y: AT.y });
+        gate_tx.send(()).unwrap();
+
+        let results = app.worker.as_ref().expect("the pipeline").results();
+        assert_eq!(RequestId(1), results.recv_timeout(TIMEOUT).unwrap().id);
+        entered_rx.recv_timeout(TIMEOUT).expect("the coalesced read must start");
+        gate_tx.send(()).unwrap();
+        assert_eq!(
+            RequestId(3),
+            results.recv_timeout(TIMEOUT).unwrap().id,
+            "the newest sample wins"
+        );
+        assert!(results.try_recv().is_err(), "the superseded sample never answers");
+        assert_eq!(
+            2,
+            done(&log).iter().filter(|line| *line == "grab").count(),
+            "three samples, two grabs: the middle one never captured"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The daemon's own half of the arming rule. A hold reads pixels
+    /// that cannot change, so trigger mode is never dwell-watched.
+    #[test]
+    fn a_frozen_hold_is_never_dwell_watched() {
+        let output = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
+        assert!(dwell_wanted(None, true), "a shown popup in live mode is watched");
+        assert!(!dwell_wanted(Some(Hold { output, latched: false }), true));
+        assert!(!dwell_wanted(Some(Hold { output, latched: true }), true));
+        assert!(!dwell_wanted(None, false), "nothing shown is nothing to watch");
+    }
+
+    /// A watch with nothing on screen asks the pipeline for nothing and
+    /// retires on its own deadline - which is what leaves an idle daemon
+    /// holding no timed source at all (ADR-0010's zero idle wakeups).
+    ///
+    /// Armed by hand: a popup with a rect needs a compositor, and the
+    /// Controller's half of the decision is core's own test.
+    #[test]
+    fn a_dwell_watch_with_nothing_shown_asks_nothing_and_retires() {
+        let dir = scratch("dwellidle");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.trace = true;
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.arm_dwell();
+        assert!(app.dwell.is_some(), "armed");
+        let escape = event_loop.get_signal();
+        let mut passes = 0;
+        event_loop
+            .run(Some(budget::DWELL), &mut app, |_| {
+                passes += 1;
+                if passes >= 3 {
+                    escape.stop();
+                }
+            })
+            .unwrap();
+
+        assert!(app.dwell.is_none(), "one deadline with nothing shown retires the watch");
+        assert!(done(&log).is_empty(), "and asks the pipeline for nothing");
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert_eq!(1, written.matches("dwell: deadline").count(), "log was: {written}");
+        assert!(written.contains("watch retired"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -90,6 +90,9 @@ pub enum Event {
     TriggerUp,
     /// A gate-accepted cursor sample.
     CursorMoved { pos: PhysPoint },
+    /// The dwell deadline passed with
+    /// the cursor still (ADR-0010).
+    DwellElapsed,
     /// The worker answered.
     LookupResult { id: RequestId, outcome: LookupOutcome },
     /// `ShowPopup` landed here.
@@ -289,6 +292,9 @@ pub struct Controller {
     pending_cursor: Option<PhysPoint>,
     /// Last point the gate accepted.
     last_accepted: Option<PhysPoint>,
+    /// Point of the newest lookup:
+    /// what a dwell re-check re-asks.
+    last_dispatch: Option<PhysPoint>,
     /// Trigger key held down.
     trigger_held: bool,
     /// The button's height, last tick.
@@ -309,6 +315,7 @@ impl Controller {
             awaiting: None,
             pending_cursor: None,
             last_accepted: None,
+            last_dispatch: None,
             trigger_held: false,
             button_h: 0,
             armed_ticks: 0,
@@ -353,6 +360,7 @@ impl Controller {
             }
             Event::TriggerUp => self.trigger_up(),
             Event::CursorMoved { pos } => self.cursor_moved(pos),
+            Event::DwellElapsed => self.dwell(),
             Event::LookupResult { id, outcome } => self.lookup_result(id, outcome),
             Event::PopupPlaced { rect, content_h, view_h } => {
                 self.popup_placed(rect, content_h, view_h)
@@ -566,7 +574,42 @@ impl Controller {
         }
         let popup = self.shown_popup();
         let id = self.next_request();
+        self.last_dispatch = Some(pos);
         vec![Command::RequestLookup { id, point: pos, popup }]
+    }
+
+    /// ADR-0010's dwell re-check: re-ask the question the shown popup
+    /// is the answer to, at the point that asked it.
+    ///
+    /// Deliberately past the freeze gate - the whole premise is that
+    /// the cursor has *not* moved and the screen under it may have. The
+    /// re-grab is damage-gated below the seams, so unchanged pixels
+    /// cost no OCR pass and come back as the same presentation, which
+    /// `ready` re-presents as nothing; a changed hit updates the popup
+    /// and a miss retracts it.
+    fn dwell(&mut self) -> Vec<Command> {
+        if !self.dwell_armed() {
+            return Vec::new();
+        }
+        let Some(pos) = self.last_dispatch else { return Vec::new() };
+        let popup = self.shown_popup();
+        let id = self.next_request();
+        vec![Command::RequestLookup { id, point: pos, popup }]
+    }
+
+    /// Whether a dwell re-check has anything to watch, which is what
+    /// the bin arms its dwell watch from: nothing shown must cost no
+    /// watch at all (ADR-0010's zero idle wakeups).
+    ///
+    /// Trigger mode has no re-check by construction - its frozen grab
+    /// cannot change - and a drill-down is not screen content: a
+    /// dialogue advancing behind one must not pop the user's stack.
+    pub fn dwell_armed(&self) -> bool {
+        matches!(self.cfg.trigger_mode, TriggerMode::Live)
+            && self
+                .surface
+                .as_ref()
+                .is_some_and(|s| s.placed.is_some() && s.history.is_empty())
     }
 
     /// Our own popup, if on screen.
@@ -868,8 +911,13 @@ mod tests {
     const POPUP: PhysRect = PhysRect { x: 100, y: 160, w: 300, h: 200 };
 
     fn ready(written: &str, anchor: PhysRect) -> Event {
+        ready_id(RequestId(1), written, anchor)
+    }
+
+    /// The same, answering one request.
+    fn ready_id(id: RequestId, written: &str, anchor: PhysRect) -> Event {
         Event::LookupResult {
-            id: RequestId(1),
+            id,
             outcome: LookupOutcome::Ready {
                 presentation: Box::new(presentation_of(written)),
                 anchor,
@@ -1148,6 +1196,131 @@ mod tests {
         assert!(c
             .handle(Event::CursorMoved { pos: PhysPoint { x: 151, y: below.y } })
             .is_empty());
+    }
+
+    // -- the dwell re-check --
+
+    /// The divergence in one test: the sticky region silences moves,
+    /// and the dwell re-check still asks (ADR-0010).
+    #[test]
+    fn a_dwell_re_asks_the_question_the_popup_answers() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        assert!(c.dwell_armed(), "a placed popup is what a dwell watches");
+        assert_eq!(
+            vec![Command::RequestLookup {
+                id: RequestId(2),
+                point: PhysPoint { x: 110, y: 110 },
+                // Live grabs mask our own popup out (ADR-0008).
+                popup: Some(POPUP),
+            }],
+            c.handle(Event::DwellElapsed)
+        );
+    }
+
+    /// The cursor drifting onto the popup must not become the dwell's
+    /// question: the mask would blank the popup's own text and the
+    /// re-check would retract the popup it is watching.
+    #[test]
+    fn a_dwell_asks_where_the_hover_was_not_where_the_cursor_drifted() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        // Accepted by the movement gate, silenced by the sticky region.
+        assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 300, y: 250 } }).is_empty());
+        assert_eq!(
+            vec![Command::RequestLookup {
+                id: RequestId(2),
+                point: PhysPoint { x: 110, y: 110 },
+                popup: Some(POPUP),
+            }],
+            c.handle(Event::DwellElapsed)
+        );
+    }
+
+    /// A parked cursor over empty screen is fully idle: no popup, no
+    /// re-check, nothing for the bin to keep armed.
+    #[test]
+    fn nothing_shown_is_never_re_checked() {
+        let mut c = Controller::new(cfg());
+        assert!(!c.dwell_armed());
+        assert!(c.handle(Event::DwellElapsed).is_empty());
+        // A hover with no answer yet is not a shown popup either.
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
+        assert!(!c.dwell_armed());
+        assert!(c.handle(Event::DwellElapsed).is_empty());
+    }
+
+    /// Unplaced is not shown: the popup's rect is what the mask needs,
+    /// so a re-check before `PopupPlaced` would grab the wrong question.
+    #[test]
+    fn a_popup_awaiting_its_rect_is_never_re_checked() {
+        let mut c = Controller::new(cfg());
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
+        c.handle(ready("\u{732B}", ANCHOR));
+        assert!(!c.dwell_armed());
+        assert!(c.handle(Event::DwellElapsed).is_empty());
+    }
+
+    /// Trigger mode reads a press-time grab, which cannot change:
+    /// there is no dwell re-check in it by construction (ADR-0010).
+    #[test]
+    fn trigger_mode_has_no_dwell_re_check() {
+        let mut c = Controller::new(hold_cfg());
+        c.handle(Event::TriggerDown);
+        shown(&mut c);
+        assert!(c.popup().is_some(), "the hold's popup is on screen");
+        assert!(!c.dwell_armed());
+        assert!(c.handle(Event::DwellElapsed).is_empty());
+    }
+
+    /// A drill-down is not screen content: dialogue advancing behind
+    /// one must not pop the stack the user navigated into.
+    #[test]
+    fn a_drill_down_is_never_re_checked() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        c.handle(Event::Clicked {
+            local: PhysPoint { x: 10, y: 10 },
+            hit: Some(HitAction::DrillDown("\u{732B}".into())),
+        });
+        c.handle(Event::LookupResult {
+            id: c.latest,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("\u{5B57}"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        assert!(!c.dwell_armed());
+        assert!(c.handle(Event::DwellElapsed).is_empty());
+        // Back to the hover's own card: watched again.
+        c.handle(Event::BackRequested);
+        c.handle(placed(POPUP, 200, 200));
+        assert!(c.dwell_armed());
+    }
+
+    /// The three answers a re-check can have. Same content re-presents
+    /// nothing - that is what makes a static screen free above the
+    /// grab; a change updates the popup; a miss retracts it.
+    #[test]
+    fn a_dwell_answer_presents_only_a_change() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        c.handle(Event::DwellElapsed);
+        assert!(
+            c.handle(ready_id(c.latest, "\u{732B}", ANCHOR)).is_empty(),
+            "the same card at the same anchor is not a redraw"
+        );
+
+        c.handle(Event::DwellElapsed);
+        let out = c.handle(ready_id(c.latest, "\u{98DF}\u{3079}\u{308B}", ANCHOR));
+        assert!(
+            out.iter().any(|cmd| matches!(cmd, Command::ShowPopup { .. })),
+            "advancing dialogue refreshes the popup: {out:?}"
+        );
+        c.handle(placed(POPUP, 200, 200));
+
+        c.handle(Event::DwellElapsed);
+        let out = c.handle(Event::LookupResult { id: c.latest, outcome: LookupOutcome::Hide });
+        assert!(out.contains(&Command::HidePopup), "a miss retracts it: {out:?}");
+        assert!(!c.dwell_armed(), "and the watch has nothing left to do");
     }
 
     // -- the placement round-trip --

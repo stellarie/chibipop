@@ -8,8 +8,9 @@
 //! - `CHIBIPOP_CURSOR_CHANNEL=auto|image-copy|portal|hyprctl|none` forces a
 //!   rung (or the empty ladder, to exercise the unsupported
 //!   diagnostic) instead of the capability-selected one.
-//! - `CHIBIPOP_CURSOR_TRACE=1` logs every position sample and poll
-//!   interval so cadence decay is observable in the logfile.
+//! - `CHIBIPOP_CURSOR_TRACE=1` logs every position sample, poll
+//!   interval and dwell deadline, so the whole ADR-0010 cadence -
+//!   decay included - is observable in the logfile.
 
 pub mod hyprctl;
 pub mod image_copy;
@@ -25,10 +26,13 @@ pub mod budget {
     /// Event-driven cursor rungs, cursor parked: nothing runs.
     pub const IDLE_WAKEUPS_PER_SEC: u32 = 0;
     /// Dwell re-check while a popup is shown (the 250 ms deadline).
-    /// Budgeted here per ADR-0010; the capture tickets (30/31)
-    /// consume it.
-    #[allow(dead_code)]
+    /// Budgeted here per ADR-0010; the capture tickets (30/31) race
+    /// damage on the same deadline, and the daemon's watch fires at it.
     pub const DWELL_MAX_WAKEUPS_PER_SEC: u32 = 4;
+    /// That budget as the deadline itself: one wakeup per period, and
+    /// no second number that could drift from the first.
+    pub const DWELL: Duration =
+        Duration::from_millis(1000 / DWELL_MAX_WAKEUPS_PER_SEC as u64);
     /// hyprctl rung: poll fast while the cursor moves...
     pub const POLL_ACTIVE: Duration = Duration::from_millis(20);
     /// ...and decay to a slow scan once it has been quiet...
@@ -267,6 +271,10 @@ mod tests {
     fn the_budget_is_the_adr_0010_one() {
         assert_eq!(0, budget::IDLE_WAKEUPS_PER_SEC);
         assert_eq!(4, budget::DWELL_MAX_WAKEUPS_PER_SEC);
+        assert_eq!(std::time::Duration::from_millis(250), budget::DWELL);
+        // The daemon's dwell watch and the wlr backend's damage race
+        // are one cadence, not two that happen to agree today.
+        assert_eq!(crate::capture::pacing::DWELL_DEADLINE, budget::DWELL);
         assert!(budget::POLL_ACTIVE < budget::POLL_IDLE);
         // The idle scan stays within ADR-0010's <= 7 wakeups/s.
         assert!(1000 / budget::POLL_IDLE.as_millis() <= 7);
