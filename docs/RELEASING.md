@@ -80,15 +80,35 @@ libstdc++.so.6  libgcc_s.so.1  libm.so.6  libc.so.6
 
 so a user needs glibc, libstdc++ and a Japanese font, and nothing else.
 
-**Runner floor: `ubuntu-22.04`, deliberately not `ubuntu-latest`.** The
+**Runner floor: `ubuntu-24.04`, deliberately not `ubuntu-latest`.** The
 Wayland/tray/OCR stack is pure Rust over a statically linked ONNX Runtime, so
-the runner's glibc is the only floor this binary imposes on a user's distro —
-build on the newest image and every image migration silently drops older
-distros. The pin is therefore the oldest ubuntu image GitHub still hosts, and
-moving it forward when that image retires is a deliberate bump of the
-supported-distro floor, made in a commit that says so. (`ci.yml`'s Linux
-*gate* is pinned separately and for a different reason — it only has to
-compile and test, not define anyone's floor.)
+the image's glibc and libstdc++ are the only floor this binary imposes on a
+user's distro — build on the newest image and every image migration silently
+drops older distros.
+
+The pin is not simply "the oldest image GitHub hosts", because that image
+cannot build this crate. `ubuntu-22.04` is still hosted and still schedules;
+it was tried, on this workflow, and the link fails: `ort`'s pinned prebuilt
+ONNX Runtime is a static archive compiled against a newer toolchain, so it
+needs `__isoc23_strtoull` and friends (glibc 2.38 — 22.04 has 2.35) and
+`_M_replace_cold` (libstdc++ from GCC 13 — 22.04 has 12). **The prebuilt sets
+the floor, not the runner catalogue**, and `ubuntu-24.04` is the oldest hosted
+image that satisfies it. Moving the pin forward when 24.04 retires is a
+deliberate bump of the supported-distro floor, made in a commit that says so.
+See ADR-0007's 2026-08-26 addendum.
+
+The release run prints the real numbers rather than a distro name — the
+highest versioned symbol the binary references from each library — so
+"does chibipop run on my machine" has an answer that does not require
+guessing:
+
+```
+objdump -T target/release/chibipop | grep -oE 'GLIBC_2\.[0-9]+'    | sort -uV | tail -1
+objdump -T target/release/chibipop | grep -oE 'GLIBCXX_3\.4\.[0-9]+' | sort -uV | tail -1
+```
+
+(`ci.yml`'s Linux *gate* is pinned separately and for a different reason — it
+only has to compile and test, not define anyone's floor.)
 
 The tarball is reproducible: sorted entries, no owners, one timestamp (the
 commit's), `gzip -n`. Repackaging the same commit twice gives the same bytes,

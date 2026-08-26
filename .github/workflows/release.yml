@@ -102,18 +102,29 @@ jobs:
           path: dist/chibipop-${{ needs.version.outputs.version }}-windows-x64.zip
           if-no-files-found: error
 
-  # ADR-0007's second release asset. Pinned to the oldest ubuntu image
-  # GitHub still hosts, not ubuntu-latest, and that is the whole point of
-  # the pin: the Wayland/tray/OCR stack is pure Rust plus a statically
-  # linked ONNX Runtime, so the runner's glibc is the only floor this
-  # binary imposes on a user's distro. Building on the oldest image keeps
-  # older distros viable without cross tooling; ubuntu-latest would raise
-  # the floor silently on every image migration. When this image is
-  # retired, moving the pin forward is a deliberate, documented bump of
-  # the supported-distro floor (docs/RELEASING.md).
+  # ADR-0007's second release asset. Pinned, not ubuntu-latest, and the
+  # pin is the point: the Wayland/tray/OCR stack is pure Rust over a
+  # statically linked ONNX Runtime, so the image's glibc and libstdc++ are
+  # the only floor this binary imposes on a user's distro, and
+  # ubuntu-latest would raise that floor silently on every image
+  # migration.
+  #
+  # ubuntu-24.04, not the older ubuntu-22.04 the ADR named. 22.04 is still
+  # hosted and still schedules - it was tried, on this workflow, and it
+  # cannot build this crate at all:
+  # https://github.com/unusualcrow/chibipop/actions/runs/32933219451
+  # `ort`'s pinned prebuilt ONNX Runtime is compiled against a newer
+  # toolchain than 22.04 ships, so linking the static archive there fails
+  # on `__isoc23_strtoull` and friends (glibc 2.38; 22.04 has 2.35) and on
+  # `_M_replace_cold` (libstdc++ from GCC 13; 22.04 has 12). The prebuilt,
+  # not the runner catalogue, is what sets the floor - so "oldest
+  # supported runner" means the oldest image `ort` can be linked on, and
+  # moving this pin forward when 24.04 retires is a deliberate, documented
+  # bump of the supported-distro floor (docs/RELEASING.md, ADR-0007
+  # addendum).
   linux:
     name: Build and package (Linux)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: version
 
     steps:
@@ -153,13 +164,17 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: scripts/package-linux.sh "$VERSION"
 
-      # Named on the record: the two floors this asset carries. `ldd`
-      # proves there is no libonnxruntime to bundle, and the glibc line is
-      # the oldest distro this build can run on.
+      # On the record, in every release run: what this asset actually
+      # demands of a user's machine. `ldd` proves there is no
+      # libonnxruntime to bundle (it is linked in), and the highest
+      # versioned symbol of each library is the real floor - a number,
+      # not a distro name, and the thing to quote when someone asks
+      # whether chibipop runs on their machine.
       - name: Floors
         run: |
           ldd target/release/chibipop
-          ldd --version | head -1
+          objdump -T target/release/chibipop | grep -oE 'GLIBC_2\.[0-9]+' | sort -uV | tail -1
+          objdump -T target/release/chibipop | grep -oE 'GLIBCXX_3\.4\.[0-9]+' | sort -uV | tail -1
 
       - uses: actions/upload-artifact@v4
         with:
