@@ -29,7 +29,9 @@ use iced::widget::{
     text_input,
 };
 use iced::{Element, Font, Length, Task, Theme};
+use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 /// Everything `super::run` resolved before the window opens.
 #[derive(Clone)]
@@ -88,8 +90,8 @@ struct App {
     exe: PathBuf,
     /// Mirrors the `.desktop` file, re-read after every toggle.
     autostart_on: bool,
-    /// System font families for the font combo.
-    fonts: Vec<String>,
+    /// The font combo's items; see [`font_items`].
+    fonts: Vec<Cow<'static, str>>,
     /// Text-edited numbers stay text until Apply parses them.
     capture_w: String,
     capture_h: String,
@@ -110,12 +112,7 @@ struct App {
 
 impl App {
     fn new(init: Init) -> App {
-        let mut fonts = system_families();
-        if !fonts.iter().any(|f| f == &init.form.font) {
-            // The configured literal always appears, resolvable or not
-            // (ADR-0012: no sentinel semantics).
-            fonts.insert(0, init.form.font.clone());
-        }
+        let fonts = font_items(&init.form.font);
         App {
             capture_w: init.form.capture_width.to_string(),
             capture_h: init.form.capture_height.to_string(),
@@ -289,7 +286,7 @@ enum Message {
     TriggerChord(String),
     PerChar(bool),
     ThemePicked(String),
-    FontPicked(String),
+    FontPicked(Cow<'static, str>),
     MaxWidth(u8),
     MaxHeight(u8),
     Summary(u16),
@@ -335,7 +332,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::TriggerChord(chord) => app.linux.trigger_key_linux = chord,
         Message::PerChar(on) => app.form.per_character_lookup = on,
         Message::ThemePicked(theme) => app.form.theme = theme,
-        Message::FontPicked(font) => app.form.font = font,
+        Message::FontPicked(font) => app.form.font = font.into_owned(),
         Message::MaxWidth(v) => app.form.max_width_percent = v,
         Message::MaxHeight(v) => app.form.max_height_percent = v,
         Message::Summary(v) => app.form.summary_chars = v as usize,
@@ -568,6 +565,7 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             .into(),
         );
     }
+    let font_now = selected_family(app);
 
     section(
         "Popup",
@@ -578,15 +576,11 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             ),
             labeled(
                 "Font",
-                pick_list(
-                    app.fonts.as_slice(),
-                    Some(app.form.font.clone()),
-                    |f: String| Message::FontPicked(f),
-                ),
+                pick_list(app.fonts.as_slice(), font_now.cloned(), Message::FontPicked),
             ),
-            // Kanji and kana beside the combo: the live proof that the
-            // system fallback renders Japanese.
-            labeled("Preview", text("日本語プレビュー: 辞書・漢字・かな")),
+            // Kanji and kana beside the combo, painted with the family
+            // just picked: the live proof that it renders Japanese.
+            labeled("Preview", text("日本語プレビュー: 辞書・漢字・かな").font(preview_font(font_now))),
             labeled(
                 "Max width (% of screen)",
                 row![
@@ -891,17 +885,53 @@ fn status_row(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Every installed family name, sorted and deduplicated. The JP-capable
-/// filter (ADR-0004's probe) arrives with the popup's font work; a full
-/// list never lies, it is just longer.
-fn system_families() -> Vec<String> {
+/// Every installed family name, sorted and deduplicated, owned by the
+/// process. The JP-capable filter (ADR-0004's probe) arrives with the
+/// popup's font work; a full list never lies, it is just longer.
+///
+/// A `static` because iced's [`iced::font::Family::Name`] takes a
+/// `&'static str`: the preview label has to name the family it paints
+/// with, and these names are the only honest source of one.
+static FAMILIES: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
-    let mut names: Vec<String> =
-        db.faces().map(|face| face.families[0].0.clone()).collect();
+    let mut names: Vec<String> = db.faces().map(|face| face.families[0].0.clone()).collect();
     names.sort();
     names.dedup();
     names
+});
+
+/// The font combo's items.
+///
+/// `Borrowed` is an installed family, so iced can be told to paint the
+/// preview with it. `Owned` is the configured literal that no installed
+/// face carries - it is still offered and still selected (ADR-0012: no
+/// sentinel semantics), it just has nothing to preview with.
+fn font_items(configured: &str) -> Vec<Cow<'static, str>> {
+    let mut items: Vec<Cow<'static, str>> =
+        FAMILIES.iter().map(|f| Cow::Borrowed(f.as_str())).collect();
+    if !items.iter().any(|f| f == configured) {
+        items.insert(0, Cow::Owned(configured.to_string()));
+    }
+    items
+}
+
+/// The combo item the form's font names.
+///
+/// [`font_items`] guarantees a hit for the font the window opened with;
+/// after that every write to `form.font` comes from a picked item, so
+/// `None` is unreachable and only means "nothing to preview with".
+fn selected_family(app: &App) -> Option<&Cow<'static, str>> {
+    app.fonts.iter().find(|f| f.as_ref() == app.form.font.as_str())
+}
+
+/// The family the preview paints with: the selection when an installed
+/// face carries the name, iced's default when none does.
+fn preview_font(selected: Option<&Cow<'static, str>>) -> Font {
+    match selected {
+        Some(Cow::Borrowed(name)) => Font::with_name(name),
+        _ => Font::DEFAULT,
+    }
 }
 
 /// The dictionary controls, driven the way iced drives them: one
@@ -938,7 +968,7 @@ mod tests {
             home: None,
             exe: PathBuf::from("/usr/bin/chibipop"),
             autostart_on: false,
-            fonts: vec!["Noto Sans".to_string()],
+            fonts: vec![Cow::Borrowed("Noto Sans")],
             capture_w: "480".to_string(),
             capture_h: "160".to_string(),
             selected_dict: None,
@@ -956,6 +986,49 @@ mod tests {
         std::fs::create_dir_all(dir.join("library")).unwrap();
         std::fs::create_dir_all(dir.join("run")).unwrap();
         dir
+    }
+
+    /// The regression: the preview label used to render in iced's
+    /// default font no matter what the combo said.
+    #[test]
+    fn picking_an_installed_family_repaints_the_preview_with_it() {
+        let dir = scratch("font");
+        let mut app = app(&dir);
+        app.fonts = font_items("DejaVu Sans");
+        let picked = app
+            .fonts
+            .iter()
+            .find(|f| matches!(f, Cow::Borrowed(_)))
+            .expect("no installed family to pick")
+            .clone();
+
+        let _ = update(&mut app, Message::FontPicked(picked.clone()));
+
+        assert_eq!(picked.as_ref(), app.form.font);
+        assert_eq!(
+            Font::with_name(match picked {
+                Cow::Borrowed(name) => name,
+                Cow::Owned(_) => unreachable!("filtered to Borrowed above"),
+            }),
+            preview_font(selected_family(&app)),
+            "the preview must name the family the combo shows"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A font the config names but no face carries stays selectable, and
+    /// the preview says so by falling back instead of naming a family
+    /// iced cannot resolve.
+    #[test]
+    fn an_uninstalled_configured_family_is_offered_and_previews_as_default() {
+        let dir = scratch("font_absent");
+        let mut app = app(&dir);
+        app.form.font = "No Such Family 12345".to_string();
+        app.fonts = font_items(&app.form.font);
+
+        assert_eq!(Some(&Cow::Owned(app.form.font.clone())), selected_family(&app));
+        assert_eq!(Font::DEFAULT, preview_font(selected_family(&app)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
