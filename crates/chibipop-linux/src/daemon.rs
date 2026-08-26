@@ -377,11 +377,21 @@ impl App {
         crate::capture::geometry::bounds_containing(&self.cursor.geometries(), at)
     }
 
-    /// The popup, from a Wayland dispatch. Those handlers only ever run
-    /// for objects the popup itself created, so its absence there is
-    /// impossible rather than merely unlikely.
+    /// The popup, from a Wayland dispatch. `run` always builds one -
+    /// a compositor with no layer shell still gets a popup, it just has
+    /// no shell to draw on (ticket 49), and a popup that cannot bind
+    /// `wl_compositor`/`wl_shm` at all ends startup before any handler
+    /// can run. The `Option` is what lets the daemon's own tests build
+    /// an `App` with no compositor behind it.
     pub(crate) fn popup_mut(&mut self) -> &mut Popup {
         self.popup.as_mut().expect("a popup dispatch arrived with no popup bound")
+    }
+
+    /// Is there a popup that can actually put a panel on screen? False
+    /// on stock GNOME, and the reason every draw path is gated rather
+    /// than assumed.
+    pub(crate) fn popup_can_draw(&self) -> bool {
+        self.popup.as_ref().is_some_and(Popup::available)
     }
 
     /// Move the popup's diagnostics into the log. The popup owns no
@@ -1222,12 +1232,16 @@ pub fn run(paths: Paths) -> Result<()> {
     // bare Hyprland) and must cost nothing. The registry it carries is
     // the daemon's own view of channel health, tray or no tray.
     let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
-    let mut statuses = ChannelStatuses::startup(capture_state, &selection);
+    let mut statuses = ChannelStatuses::startup(
+        capture_state,
+        &selection,
+        tray::status::popup_state(wayland::popup_shell_advertised(&globals)),
+    );
     // The trigger row's default is the always-bound socket; the ladder
     // above knows which rung actually owns the binding, and the tray
     // must be right the first time it is published.
     statuses.set(ChannelId::Trigger, trigger_state);
-    let (tray_handle, tray_diagnostics) = tray::spawn(statuses, tray_tx);
+    let (mut tray_handle, tray_diagnostics) = tray::spawn(statuses, tray_tx);
     for line in tray_diagnostics {
         log.diag(&line);
     }
@@ -1246,16 +1260,30 @@ pub fn run(paths: Paths) -> Result<()> {
     let registry = conn.display().get_registry(&queue.handle(), ());
 
     // The popup (ADR-0004). A compositor without the layer shell keeps
-    // the daemon up with a loud diagnostic rather than refusing to
-    // start: everything else - cursor, tray, settings - still works,
-    // and the capability report already named what is missing.
-    let popup = match Popup::bind(&globals_list, &queue.handle(), &config) {
-        Ok(popup) => Some(popup),
-        Err(e) => {
-            log.diag(&format!("popup: unavailable - {e:#}"));
-            None
+    // the daemon up: everything else - capture, cursor, trigger, tray,
+    // settings - still works, the capability report already named the
+    // missing global, and the Popup channel row says so where a user
+    // looks. What it must NOT do is drop the popup's other Wayland
+    // objects on the floor: their events keep arriving, and a handler
+    // with nothing behind it is a panic (ticket 49 found exactly that
+    // on a layer-shell-less session). So the popup is always built, and
+    // a bind error here is the fatal kind the report already called
+    // fatal.
+    let mut popup = Popup::bind(&globals_list, &queue.handle(), &config)
+        .context("binding the popup's Wayland globals")?;
+    for line in popup.drain_notes() {
+        log.diag(&line);
+    }
+    if !popup.available() {
+        log.diag(
+            "popup: unavailable - this compositor advertises no zwlr_layer_shell_v1, so the \
+             hover loop cannot show anything here; every other channel keeps running",
+        );
+        if tray_handle.set_channel(ChannelId::Popup, tray::status::popup_state(false)) {
+            log.diag(&format!("channel: {}", tray_handle.statuses().row(ChannelId::Popup)));
         }
-    };
+    }
+    let popup = Some(popup);
     let demo = Demo::from_env();
     if demo.armed {
         log.diag(&format!(
@@ -1347,7 +1375,7 @@ pub fn run(paths: Paths) -> Result<()> {
     // so every surface is created against known geometry; the second
     // roundtrip lets the initial configures arrive and each surface map
     // itself hidden before the pump starts.
-    if app.popup.is_some() {
+    if app.popup_can_draw() {
         app.popup_mut().map_all();
         app.flush_popup_notes();
         queue.roundtrip(&mut app).context("mapping the popup's layer surfaces")?;
@@ -1453,9 +1481,9 @@ pub fn run(paths: Paths) -> Result<()> {
 
     app.log.diag(&format!(
         "ready: pump running (cursor channel wired; popup {}; capture {}; tray {}; lookups {})",
-        match app.popup.as_ref().map(Popup::surface_count) {
+        match app.popup.as_ref().filter(|p| p.available()).map(Popup::surface_count) {
             Some(n) => format!("on {n} output(s)"),
-            None => "unavailable".to_string(),
+            None => "unavailable (no layer shell)".to_string(),
         },
         match app.capture_selection.backend() {
             Some(Backend::WlrScreencopy) => "wlr-screencopy",
@@ -1622,6 +1650,7 @@ mod tests {
             tray: TrayHandle::trayless(ChannelStatuses::startup(
                 tray::status::capture_state(&capture),
                 &cursor::Selection::Rung(cursor::Rung::HyprctlPoll),
+                tray::status::popup_state(true),
             )),
             worker: None,
             worker_setup: worker::Setup {
@@ -1662,6 +1691,38 @@ mod tests {
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(!written.contains("retrying the portal consent"), "log was: {written}");
         assert_eq!(before, app.tray.statuses().row(ChannelId::Capture));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the same guard, and the one that protects a
+    /// user who already said yes: a portal session that IS serving must
+    /// not be torn down and re-prompted just because something sent
+    /// `reload` (a settings Apply does, on every save). One consent per
+    /// grant is ADR-0002's whole bargain.
+    #[test]
+    fn reload_does_not_reprompt_a_serving_portal_session() {
+        let dir = scratch("noreprompt");
+        let log_file = dir.join("chibipop.log");
+
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        app.capture_selection = capture_backend::Selection::Backend(Backend::Portal);
+        app.portal_serving = true;
+        // A retry is armed, so nothing but `portal_serving` can be what
+        // holds the dialog back.
+        app.portal_retry =
+            Some(PortalRetry { state_dir: dir.clone(), globals: Vec::new(), cursor: None });
+        app.note_channel(ChannelId::Capture, ChannelState::up("portal ScreenCast + PipeWire"));
+
+        app.handle_request("reload", Some(Verb::Reload));
+
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert!(!written.contains("retrying the portal consent"), "log was: {written}");
+        assert_eq!(
+            "Capture: portal ScreenCast + PipeWire",
+            app.tray.statuses().row(ChannelId::Capture)
+        );
+        assert!(app.portal_retry.is_some(), "the retry hook must stay armed for a later denial");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

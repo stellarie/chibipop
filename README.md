@@ -183,10 +183,14 @@ GNOME is **best-effort**, and today that means something concrete:
 
 - **The popup cannot appear on stock GNOME.** chibipop draws its popup on the
   `wlr-layer-shell` protocol, which GNOME's compositor (Mutter) does not
-  implement. On GNOME, chibipop starts up, tells you exactly that — a clear
-  message naming the missing `zwlr_layer_shell_v1` capability, not a crash —
-  and stops there. The settings window still opens (it is an ordinary window),
-  but the hover-and-read loop does not run. If GNOME ever gains a way to place
+  implement. On GNOME, chibipop starts and keeps running, and tells you exactly
+  that — a startup message naming the missing `zwlr_layer_shell_v1` capability,
+  and a `Popup: unsupported — missing zwlr_layer_shell_v1` line in its
+  per-channel status, not a crash. Everything that does not need an overlay
+  surface still works: the settings window opens (it is an ordinary window),
+  the capture, cursor and trigger channels still resolve and report themselves,
+  and `chibipop ctl` still answers. What does not run is the hover-and-read
+  loop, because there is nowhere to draw it. If GNOME ever gains a way to place
   an overlay surface, the rest below is what its support looks like.
 - **Screen capture asks once.** GNOME has no promptless capture protocol, so
   chibipop uses the ScreenCast portal: one consent dialog on first launch
@@ -205,9 +209,13 @@ GNOME is **best-effort**, and today that means something concrete:
   dialog.
 - **No tray icon on stock GNOME.** GNOME removed tray (StatusNotifier) support;
   an extension such as *AppIndicator and KStatusNotifierItem Support* restores
-  it. chibipop is fully operable without the tray — everything the tray offers
-  (channel status, settings, quit) is reachable from the settings window and
-  the command line.
+  it. chibipop is fully operable without the tray: the settings window opens
+  with `chibipop settings` (or from the autostart entry's launcher), the
+  per-channel status is written to the daemon's log at startup and on every
+  change — `chibipop probe` prints the capability report those verdicts come
+  from — and stopping the daemon is a `SIGTERM` (`systemctl --user stop
+  chibipop` for the unit in [`extras/`](extras/), or `pkill chibipop`). The tray
+  is a convenience over those, never the only way to reach them.
 - **The popup cannot hide itself from screen sharing.** Hyprland and KDE offer
   ways to exclude chibipop's popup from third-party capture (chibipop shows
   you the snippet); GNOME has no equivalent, so on GNOME the popup would be

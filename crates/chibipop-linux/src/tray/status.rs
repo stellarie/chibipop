@@ -13,22 +13,30 @@
 use crate::capture::backend::{Backend, Selection as CaptureSelection};
 use crate::cursor::{Rung, Selection};
 
-/// One monitored input channel, in menu order.
+/// One monitored channel, in menu order: the three input channels, plus
+/// the popup surface that shows what they produce. The popup earns a row
+/// for the stock-GNOME case (ticket 49): a session with no layer shell
+/// has three perfectly healthy input channels and still cannot show a
+/// definition, and a tray that reads all-green there is the "silently
+/// half-works" failure this app refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelId {
     Capture,
     Cursor,
     Trigger,
+    Popup,
 }
 
 impl ChannelId {
-    pub const ALL: [ChannelId; 3] = [ChannelId::Capture, ChannelId::Cursor, ChannelId::Trigger];
+    pub const ALL: [ChannelId; 4] =
+        [ChannelId::Capture, ChannelId::Cursor, ChannelId::Trigger, ChannelId::Popup];
 
     pub fn label(self) -> &'static str {
         match self {
             ChannelId::Capture => "Capture",
             ChannelId::Cursor => "Cursor",
             ChannelId::Trigger => "Trigger",
+            ChannelId::Popup => "Popup",
         }
     }
 
@@ -37,6 +45,7 @@ impl ChannelId {
             ChannelId::Capture => 0,
             ChannelId::Cursor => 1,
             ChannelId::Trigger => 2,
+            ChannelId::Popup => 3,
         }
     }
 }
@@ -115,22 +124,38 @@ pub fn capture_state(selection: &CaptureSelection) -> ChannelState {
     }
 }
 
-/// All three channels. Fixed-size — the set of channels is the app's
-/// shape, not data.
+/// The popup channel's state. `advertised` is whether this session
+/// advertises `zwlr_layer_shell_v1` at all, which is the honest verdict
+/// available at startup - a bind that then fails anyway overwrites this
+/// row through [`ChannelStatuses::set`] with what actually went wrong.
+/// The down row names the global, because on stock GNOME that name is
+/// the whole answer to "why is nothing appearing".
+pub fn popup_state(advertised: bool) -> ChannelState {
+    if advertised {
+        ChannelState::up("wlr-layer-shell overlay surface")
+    } else {
+        ChannelState::down(format!("unsupported - missing {}", crate::wayland::LAYER_SHELL.interface))
+    }
+}
+
+/// Every channel. Fixed-size — the set of channels is the app's shape,
+/// not data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelStatuses {
-    states: [ChannelState; 3],
+    states: [ChannelState; 4],
 }
 
 impl ChannelStatuses {
     /// What the daemon knows once startup is done: `capture` is the
     /// already-resolved capture state (the daemon runs ADR-0002's
     /// selection and, for the portal backend, its eager consent before
-    /// publishing the tray), the cursor rung was just selected, and the
-    /// trigger is the always-bound control socket.
-    pub fn startup(capture: ChannelState, cursor: &Selection) -> ChannelStatuses {
+    /// publishing the tray), the cursor rung was just selected, the
+    /// trigger is the always-bound control socket, and `popup` is
+    /// whether the layer shell this session advertises can carry a
+    /// panel at all.
+    pub fn startup(capture: ChannelState, cursor: &Selection, popup: ChannelState) -> ChannelStatuses {
         ChannelStatuses {
-            states: [capture, cursor_state(cursor), ChannelState::up("control socket")],
+            states: [capture, cursor_state(cursor), ChannelState::up("control socket"), popup],
         }
     }
 
@@ -181,28 +206,61 @@ mod tests {
         capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy))
     }
 
+    /// A wlr session: the layer shell is right there.
+    fn shell() -> ChannelState {
+        popup_state(true)
+    }
+
     /// The daemon's startup knowledge, verbatim: the capture row names
-    /// the resolved backend, the trigger is the control socket, and the
-    /// cursor row names the selected rung's mechanism.
+    /// the resolved backend, the trigger is the control socket, the
+    /// cursor row names the selected rung's mechanism, and the popup row
+    /// names the shell that will carry the panel.
     #[test]
     fn startup_rows_name_what_the_daemon_knows() {
-        let statuses = ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::HyprctlPoll));
+        let statuses =
+            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::HyprctlPoll), shell());
         assert_eq!(
             vec![
                 "Capture: wlr-screencopy region capture".to_string(),
                 "Cursor: hyprctl cursorpos polling".to_string(),
                 "Trigger: control socket".to_string(),
+                "Popup: wlr-layer-shell overlay surface".to_string(),
             ],
             statuses.rows()
         );
+    }
+
+    /// Stock GNOME, as a tray host with the AppIndicator extension sees
+    /// it (ticket 49): capture, cursor and trigger can all be perfectly
+    /// healthy through the portals while the popup has nowhere to be
+    /// drawn, and an all-Active icon there would be a lie. The row names
+    /// the missing global, so the fix is legible without the log.
+    #[test]
+    fn a_session_without_the_layer_shell_shows_a_down_popup_row() {
+        let statuses = ChannelStatuses::startup(
+            capture_state(&CaptureSelection::Backend(Backend::Portal)),
+            &Selection::Rung(Rung::PortalMetadata),
+            popup_state(false),
+        );
+        assert_eq!(
+            "Popup: unsupported - missing zwlr_layer_shell_v1",
+            statuses.row(ChannelId::Popup)
+        );
+        assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status());
+        assert_eq!("Capture: portal ScreenCast + PipeWire", statuses.row(ChannelId::Capture));
+        assert_eq!("Cursor: portal ScreenCast cursor metadata", statuses.row(ChannelId::Cursor));
+        assert_eq!("Trigger: control socket", statuses.row(ChannelId::Trigger));
     }
 
     /// The ticket's headline contract: a down channel flips the SNI
     /// status to NeedsAttention, and recovery clears it.
     #[test]
     fn any_down_channel_needs_attention() {
-        let mut statuses =
-            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::ImageCopyCapture));
+        let mut statuses = ChannelStatuses::startup(
+            screencopy(),
+            &Selection::Rung(Rung::ImageCopyCapture),
+            shell(),
+        );
         assert_eq!(ksni::Status::Active, statuses.sni_status(), "all-up must be Active");
 
         assert!(statuses.set(ChannelId::Trigger, ChannelState::down("socket gone")));
@@ -217,8 +275,11 @@ mod tests {
     /// a capture row with the way back in it, and the icon says so.
     #[test]
     fn a_refused_capture_channel_shows_the_retry_and_needs_attention() {
-        let mut statuses =
-            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::ImageCopyCapture));
+        let mut statuses = ChannelStatuses::startup(
+            screencopy(),
+            &Selection::Rung(Rung::ImageCopyCapture),
+            shell(),
+        );
         assert_eq!(ksni::Status::Active, statuses.sni_status());
         assert!(statuses.set(
             ChannelId::Capture,
@@ -235,7 +296,7 @@ mod tests {
     fn unsupported_cursor_selection_maps_to_a_down_row() {
         let selection =
             Selection::Unsupported { missing: vec!["ext_image_copy_capture_manager_v1".to_string()] };
-        let statuses = ChannelStatuses::startup(screencopy(), &selection);
+        let statuses = ChannelStatuses::startup(screencopy(), &selection, shell());
         assert_eq!(
             "Cursor: unsupported - missing ext_image_copy_capture_manager_v1",
             statuses.row(ChannelId::Cursor)
@@ -248,7 +309,7 @@ mod tests {
     #[test]
     fn set_replaces_only_the_addressed_channel_and_reports_change() {
         let mut statuses =
-            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::HyprctlPoll));
+            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::HyprctlPoll), shell());
         let before_cursor = statuses.row(ChannelId::Cursor);
 
         assert!(statuses.set(ChannelId::Capture, ChannelState::up("wlr-screencopy")));
@@ -307,7 +368,7 @@ mod tests {
             missing: vec!["zwlr_screencopy_manager_v1".to_string()],
         });
         let statuses =
-            ChannelStatuses::startup(capture, &Selection::Rung(Rung::ImageCopyCapture));
+            ChannelStatuses::startup(capture, &Selection::Rung(Rung::ImageCopyCapture), shell());
         assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status());
         assert_eq!(
             "Capture: unsupported - missing zwlr_screencopy_manager_v1",
@@ -326,6 +387,7 @@ mod tests {
             let statuses = ChannelStatuses::startup(
                 capture_state(&selection),
                 &Selection::Rung(Rung::HyprctlPoll),
+                shell(),
             );
             let row = statuses.row(ChannelId::Capture);
             assert!(row.starts_with("Capture: "), "{row}");
