@@ -284,7 +284,7 @@ fn row(written: Option<&str>, reading: Option<&str>, summary: &str) -> Collapsed
 
 fn present(top: Option<Card>, collapsed: Vec<CollapsedRow>) -> Presentation {
     let all_cards = top.iter().cloned().collect();
-    Presentation { top, collapsed, all_cards }
+    Presentation { top, collapsed, all_cards, sentence: None }
 }
 
 /// 30px char boxes from x=100, like

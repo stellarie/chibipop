@@ -1,7 +1,8 @@
 //! Windows OCR recognition.
 
-use crate::geom::PhysRect;
-use crate::text::layout::{OcrLine, OcrWord};
+use chibipop::geom::PhysRect;
+use chibipop::text::layout::{OcrLine, OcrWord};
+use chibipop::text::recogniser::Recogniser;
 use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
 use windows::core::HSTRING;
@@ -181,8 +182,8 @@ impl chibipop::text::OcrEngine for WinrtOcr {
                 eprintln!("chibipop: no {language} recogniser; keeping {}", self.language);
             }
             LangAction::Swap => match make_engine(language) {
-                Ok(engine) => {
-                    self.engine = engine;
+                Ok(built) => {
+                    self.engine = built;
                     self.language = language.to_string();
                 }
                 Err(e) => eprintln!(
@@ -191,6 +192,23 @@ impl chibipop::text::OcrEngine for WinrtOcr {
                 ),
             },
         }
+    }
+}
+
+/// Upstream's plugin-parity metadata (0.9.x): the built-in engine
+/// answers the same questions a plugin adapter does, so engine
+/// selection can treat both uniformly.
+impl Recogniser for WinrtOcr {
+    fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+        recognise(&self.engine, buf, w, h)
+    }
+
+    fn name(&self) -> &str {
+        "windows-ocr"
+    }
+
+    fn provides_geometry(&self) -> bool {
+        true
     }
 }
 

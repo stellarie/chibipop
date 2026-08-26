@@ -153,6 +153,16 @@ pub struct TextSource {
 }
 
 impl TextSource {
+    /// The engine itself, for a bin to lend out between lookups (the
+    /// worker's `serve` hook): OCR backends are thread-affine, so a
+    /// one-off job (OCR-to-clipboard) must run on the thread that owns
+    /// this - it cannot build a second engine elsewhere.
+    pub fn engine(&self) -> &dyn OcrEngine {
+        self.ocr.as_ref()
+    }
+}
+
+impl TextSource {
     pub fn new(
         capture: Box<dyn RegionCapture>,
         ocr: Box<dyn OcrEngine>,
@@ -352,7 +362,7 @@ impl TextSource {
         cursor: PhysPoint,
         mask: CaptureMask,
     ) -> Result<Option<Resolved>> {
-        self.resolve_at_tiled_scanned(cursor, false, mask).map(|(r, _)| r)
+        self.resolve_at_tiled_scanned(cursor, false, mask).map(|(r, _, _)| r)
     }
 
     /// Tiled read + scan rects. One logical read: brackets the backend's
@@ -364,13 +374,14 @@ impl TextSource {
     /// wakeups for an answer the hold ignores.
     ///
     /// `mask` is what OCR must not read - our own popup, on a live grab
-    /// (ADR-0008) - and governs every pass of this one read.
+    /// (ADR-0008) - and governs every pass of this one read. The third
+    /// element is pass 1's OCR lines, for sentence capture (`"all"` mode).
     pub fn resolve_at_tiled_scanned(
         &mut self,
         cursor: PhysPoint,
         collect: bool,
         mask: CaptureMask,
-    ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
+    ) -> Result<(Option<Resolved>, Vec<ScanRect>, Vec<OcrLine>)> {
         let live = self.frozen.is_none();
         if live {
             self.capture.begin_read();
@@ -390,10 +401,10 @@ impl TextSource {
         cursor: PhysPoint,
         collect: bool,
         mask: CaptureMask,
-    ) -> Result<(Option<Resolved>, Vec<ScanRect>)> {
+    ) -> Result<(Option<Resolved>, Vec<ScanRect>, Vec<OcrLine>)> {
         let (lines, resolved) = self.resolve_at_verbose(cursor, mask)?;
         let mut scan = Vec::new();
-        let Some(first) = resolved else { return Ok((None, scan)) };
+        let Some(first) = resolved else { return Ok((None, scan, lines)) };
         if collect {
             scan.push(ScanRect {
                 rect: region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
@@ -404,7 +415,7 @@ impl TextSource {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan));
+            return Ok((Some(first), scan, lines));
         }
 
         // Pass 1's own kept tail; no re-read.
@@ -415,7 +426,7 @@ impl TextSource {
             if collect {
                 scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan));
+            return Ok((Some(first), scan, lines));
         };
         let head_chars = head.chars().count();
 
@@ -464,7 +475,7 @@ impl TextSource {
 
         let text = normalise(&format!("{head}{tail}"));
         if text.is_empty() {
-            return Ok((Some(first), scan));
+            return Ok((Some(first), scan, lines));
         }
         Ok((
             Some(Resolved {
@@ -478,6 +489,7 @@ impl TextSource {
                 orientation,
             }),
             scan,
+            lines,
         ))
     }
 
@@ -572,7 +584,10 @@ fn finish_grab(
 }
 
 /// Nearest-neighbour upscale by `factor`.
-fn upscale_by(src: &[u8], w: i32, h: i32, factor: i32) -> (Vec<u8>, i32, i32) {
+///
+/// `pub` for the platform bins' one-off actions (OCR-to-clipboard
+/// captures at 2x off the worker thread); lookups upscale in here.
+pub fn upscale_by(src: &[u8], w: i32, h: i32, factor: i32) -> (Vec<u8>, i32, i32) {
     let (w2, h2) = (w * factor, h * factor);
     let mut dst = vec![0u8; (w2 as usize) * (h2 as usize) * 4];
     for y in 0..h2 as usize {

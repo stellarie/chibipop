@@ -1,6 +1,6 @@
 //! The settings window's model.
 
-use crate::config::{Config, FieldMapping, TriggerMode};
+use crate::config::{Config, FieldMapping, OcrClipboardConfig, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
@@ -39,8 +39,13 @@ pub struct SettingsForm {
     pub scan_alphanumeric: bool,
     pub per_character_lookup: bool,
     pub ocr_language: String,
+    /// "builtin" or a plugin's name.
+    pub engine: String,
     pub show_scan_region: bool,
+    pub show_engine_log: bool,
+    pub show_adapter_log: bool,
     pub freq_names: Vec<String>,
+    pub freq_changed: bool,
     pub staged_adds: Vec<StagedAdd>,
     pub staged_removes: Vec<String>,
     pub library_empty: bool,
@@ -54,6 +59,16 @@ pub struct SettingsForm {
     pub anki_model: String,
     pub anki_add_key: String,
     pub field_map: Vec<FieldMapping>,
+    pub notify_on_add: bool,
+    pub sentence_mode: String,
+    pub static_region_key: String,
+    pub show_static_overlay: bool,
+    pub ocr_clipboard_key: String,
+    pub include_screenshot: bool,
+    /// Only the top dict's entry.
+    pub first_dict_only: bool,
+    /// Plugin names allowed to run.
+    pub enabled_plugins: Vec<String>,
 }
 
 /// An import waiting for Apply.
@@ -80,6 +95,7 @@ impl SettingsForm {
         }
         if kind == Kind::Frequency {
             self.freq_names.push(name.clone());
+            self.freq_changed = true;
         } else {
             self.dict_names.push(name.clone());
         }
@@ -89,6 +105,7 @@ impl SettingsForm {
 
     /// Stage a row for removal.
     pub fn stage_remove(&mut self, name: &str) {
+        let was_freq = self.freq_names.iter().any(|n| n == name);
         self.dict_names.retain(|n| n != name);
         self.freq_names.retain(|n| n != name);
         let staged = self.staged_adds.len();
@@ -96,6 +113,9 @@ impl SettingsForm {
         // Never reached the library.
         if self.staged_adds.len() == staged && !self.staged_removes.iter().any(|n| n == name) {
             self.staged_removes.push(name.to_string());
+        }
+        if was_freq {
+            self.freq_changed = true;
         }
     }
 
@@ -108,6 +128,7 @@ impl SettingsForm {
     pub fn clear_staged(&mut self) {
         self.staged_adds.clear();
         self.staged_removes.clear();
+        self.freq_changed = false;
     }
 
     /// Take what Apply wrote.
@@ -300,8 +321,12 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
         per_character_lookup: cfg.trigger.per_character_lookup,
         ocr_language: cfg.ocr.language.clone(),
+        engine: cfg.ocr.engine.clone(),
         show_scan_region: cfg.debug.show_scan_region,
+        show_engine_log: cfg.debug.show_engine_log,
+        show_adapter_log: cfg.debug.show_adapter_log,
         freq_names: Vec::new(),
+        freq_changed: false,
         staged_adds: Vec::new(),
         staged_removes: Vec::new(),
         library_empty: false,
@@ -312,6 +337,19 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_model: cfg.anki.model.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
         field_map: cfg.anki.field_map.clone(),
+        notify_on_add: cfg.anki.notify_on_add,
+        sentence_mode: cfg.anki.sentence_mode.clone(),
+        static_region_key: cfg.anki.static_region_key.clone(),
+        show_static_overlay: cfg.anki.show_static_overlay,
+        ocr_clipboard_key: cfg
+            .actions
+            .ocr_clipboard
+            .as_ref()
+            .and_then(|action| action.hotkey.clone())
+            .unwrap_or_default(),
+        include_screenshot: cfg.actions.screenshot.include_on_add,
+        first_dict_only: cfg.anki.first_dict_only,
+        enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
 
@@ -356,15 +394,32 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.ocr.scan_alphanumeric = form.scan_alphanumeric;
     out.trigger.per_character_lookup = form.per_character_lookup;
     out.ocr.language = form.ocr_language.clone();
+    out.ocr.engine = form.engine.clone();
     out.debug.show_scan_region = form.show_scan_region;
+    out.debug.show_engine_log = form.show_engine_log;
+    out.debug.show_adapter_log = form.show_adapter_log;
     out.anki.enabled = form.anki_enabled;
     out.anki.url = form.anki_url.clone();
     out.anki.deck = form.anki_deck.clone();
     out.anki.model = form.anki_model.clone();
     out.anki.add_key = form.anki_add_key.clone();
+    out.anki.notify_on_add = form.notify_on_add;
     if !form.field_map.is_empty() {
         out.anki.field_map = form.field_map.clone();
     }
+    out.anki.sentence_mode = form.sentence_mode.clone();
+    out.anki.static_region_key = form.static_region_key.clone();
+    out.anki.show_static_overlay = form.show_static_overlay;
+    out.anki.first_dict_only = form.first_dict_only;
+    out.actions.ocr_clipboard = if form.ocr_clipboard_key.is_empty() {
+        None
+    } else {
+        Some(OcrClipboardConfig {
+            hotkey: Some(form.ocr_clipboard_key.clone()),
+        })
+    };
+    out.actions.screenshot.include_on_add = form.include_screenshot;
+    out.plugins.enabled = form.enabled_plugins.clone();
     let full: Vec<String> =
         form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
     out.dictionaries.display_order =
@@ -701,11 +756,14 @@ mod tests {
         cfg.ocr.capture_height = 180;
         cfg.ocr.scan_alphanumeric = false;
         cfg.debug.show_scan_region = true;
+        cfg.debug.show_engine_log = true;
+        cfg.debug.show_adapter_log = true;
         cfg.anki.enabled = true;
         cfg.anki.url = "http://localhost:9999".into();
         cfg.anki.deck = "Mining".into();
         cfg.anki.model = "Custom".into();
         cfg.anki.add_key = "f2".into();
+        cfg.anki.notify_on_add = false;
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
     }
@@ -737,6 +795,127 @@ mod tests {
         let cfg = cfg_with(&[]);
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
+    }
+
+    #[test]
+    fn include_screenshot_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.include_on_add = true;
+        let form = from_config(&cfg, &dicts());
+        assert!(form.include_screenshot);
+        let out = apply_to(&form, &cfg);
+        assert!(out.actions.screenshot.include_on_add);
+    }
+
+    #[test]
+    fn include_on_add_defaults_to_false() {
+        let cfg = Config::default();
+        assert!(!cfg.actions.screenshot.include_on_add);
+        let form = from_config(&cfg, &dicts());
+        assert!(!form.include_screenshot);
+    }
+
+    #[test]
+    fn include_screenshot_false_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.include_on_add = false;
+        let form = from_config(&cfg, &dicts());
+        assert!(!form.include_screenshot);
+        let out = apply_to(&form, &cfg);
+        assert!(!out.actions.screenshot.include_on_add);
+    }
+
+    #[test]
+    fn include_screenshot_does_not_touch_hotkey() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.hotkey = "f10".into();
+        cfg.actions.screenshot.include_on_add = true;
+        let form = from_config(&cfg, &dicts());
+        let out = apply_to(&form, &cfg);
+        assert_eq!("f10", out.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn ocr_clipboard_key_round_trips_through_the_form() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".into()),
+        });
+
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("f9", form.ocr_clipboard_key);
+
+        let out = apply_to(&form, &cfg);
+        assert_eq!(
+            Some("f9".to_string()),
+            out.actions.ocr_clipboard.and_then(|a| a.hotkey)
+        );
+    }
+
+    #[test]
+    fn empty_ocr_clipboard_key_disables_the_action() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".into()),
+        });
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_clipboard_key.clear();
+
+        assert_eq!(None, apply_to(&form, &cfg).actions.ocr_clipboard);
+    }
+
+    #[test]
+    fn first_dict_only_defaults_to_false() {
+        let cfg = Config::default();
+        let form = from_config(&cfg, &dicts());
+        assert!(!form.first_dict_only);
+    }
+
+    #[test]
+    fn first_dict_only_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.first_dict_only = true;
+        let form = from_config(&cfg, &dicts());
+        assert!(form.first_dict_only);
+        let out = apply_to(&form, &cfg);
+        assert!(out.anki.first_dict_only);
+    }
+
+    #[test]
+    fn sentence_mode_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.sentence_mode = "all".to_string();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("all", form.sentence_mode);
+        let out = apply_to(&form, &cfg);
+        assert_eq!("all", out.anki.sentence_mode);
+    }
+
+    #[test]
+    fn sentence_mode_defaults_to_line_in_the_form() {
+        let cfg = Config::default();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("line", form.sentence_mode);
+    }
+
+    #[test]
+    fn static_region_key_round_trips_through_the_form() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.static_region_key = "alt+r".to_string();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("alt+r", form.static_region_key);
+        let out = apply_to(&form, &cfg);
+        assert_eq!("alt+r", out.anki.static_region_key);
+    }
+
+    #[test]
+    fn sentence_mode_static_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.sentence_mode = "static".to_string();
+        let form = from_config(&cfg, &dicts());
+        assert_eq!("static", form.sentence_mode);
+        let out = apply_to(&form, &cfg);
+        assert_eq!("static", out.anki.sentence_mode);
     }
 
     #[test]
@@ -852,6 +1031,46 @@ mod tests {
         cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
         assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+    }
+
+    #[test]
+    fn apply_to_carries_the_engine() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.engine = "meikiocr".to_string();
+        assert_eq!("meikiocr", apply_to(&form, &cfg).ocr.engine);
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_the_engine() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".to_string();
+        assert_eq!("meikiocr", from_config(&cfg, &dicts()).engine);
+        assert_eq!("builtin", from_config(&Config::default(), &dicts()).engine);
+    }
+
+    #[test]
+    fn apply_to_carries_enabled_plugins() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        form.enabled_plugins = vec!["meikiocr".to_string()];
+        assert_eq!(
+            vec!["meikiocr".to_string()],
+            apply_to(&form, &cfg).plugins.enabled
+        );
+    }
+
+    /// The other direction, on open.
+    #[test]
+    fn from_config_seeds_enabled_plugins() {
+        let mut cfg = Config::default();
+        cfg.plugins.enabled = vec!["meikiocr".to_string()];
+        assert_eq!(
+            vec!["meikiocr".to_string()],
+            from_config(&cfg, &dicts()).enabled_plugins
+        );
+        assert!(from_config(&Config::default(), &dicts()).enabled_plugins.is_empty());
     }
 
     #[test]
@@ -1035,6 +1254,7 @@ mod tests {
     fn a_fresh_form_stages_nothing() {
         let form = staged_form();
         assert!(!form.has_staged());
+        assert!(!form.freq_changed);
         assert!(form.freq_names.is_empty());
         assert!(!form.library_empty);
     }
@@ -1084,6 +1304,20 @@ mod tests {
 
         assert_eq!(vec!["FixtureFreq".to_string()], form.freq_names);
         assert_eq!(dicts_before, form.dict_names, "it is not a dictionary");
+    }
+
+    #[test]
+    fn staging_a_freq_add_sets_freq_changed() {
+        let mut form = staged_form();
+        assert_eq!(Some(Kind::Frequency), form.stage_add(&fixture("freq.zip")));
+        assert!(form.freq_changed);
+    }
+
+    #[test]
+    fn staging_a_term_add_does_not_set_freq_changed() {
+        let mut form = staged_form();
+        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert!(!form.freq_changed);
     }
 
     #[test]
@@ -1172,6 +1406,22 @@ mod tests {
         form.stage_remove("jiten_freq_global.zip");
         assert!(form.freq_names.is_empty());
         assert_eq!(vec!["jiten_freq_global.zip".to_string()], form.staged_removes);
+    }
+
+    #[test]
+    fn removing_a_freq_row_sets_freq_changed() {
+        let mut form = staged_form();
+        form.freq_names = vec!["FixtureFreq".into()];
+        form.stage_remove("FixtureFreq");
+        assert!(form.freq_changed);
+    }
+
+    #[test]
+    fn removing_a_term_row_does_not_set_freq_changed() {
+        let mut form = staged_form();
+        let name = form.dict_names[0].clone();
+        form.stage_remove(&name);
+        assert!(!form.freq_changed);
     }
 
     #[test]
@@ -1534,6 +1784,14 @@ mod tests {
         assert!(!form.has_staged());
         assert!(form.staged_adds.is_empty());
         assert!(form.staged_removes.is_empty());
+    }
+
+    #[test]
+    fn clear_staged_resets_freq_changed() {
+        let mut form = staged_form();
+        form.freq_changed = true;
+        form.clear_staged();
+        assert!(!form.freq_changed);
     }
 
     #[test]

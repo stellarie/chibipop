@@ -63,7 +63,10 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
         let bg = solid(theme.background);
         target.fill_path(&shape, &bg, FillRule::Winding, Transform::identity(), None);
     }
-    let sw = hairline(p.scale);
+    // The theme's border, already in physical pixels, and never
+    // thinner than a pixel: at the default 1.0 DIP this is exactly
+    // the hairline Windows strokes.
+    let sw = theme.border_width.max(1.0);
     let inset = sw / 2.0;
     if let Some(edge) = rounded(inset, inset, w - sw, h - sw, radius - inset) {
         let stroke = Stroke { width: sw, ..Stroke::default() };
@@ -89,6 +92,8 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
         let run = DrawRun {
             text: &elem.text,
             size: elem.font_size,
+            weight: elem.weight,
+            italic: elem.italic,
             max_w,
             color: elem.color,
             origin,
@@ -108,6 +113,8 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
             let run = DrawRun {
                 text: &painted.row.text,
                 size: theme.collapsed_size,
+                weight: theme.collapsed_weight,
+                italic: theme.collapsed_italic,
                 max_w: side.col_w,
                 color: painted.row.color,
                 origin: (side.col_x, painted.y),
@@ -142,6 +149,8 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
             text: &anki.label,
             font: &theme.font_name,
             size: theme.collapsed_size,
+            weight: theme.collapsed_weight,
+            italic: theme.collapsed_italic,
             max_w: rect.w,
         });
         let x = match measured {
@@ -151,6 +160,8 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
         let run = DrawRun {
             text: &anki.label,
             size: theme.collapsed_size,
+            weight: theme.collapsed_weight,
+            italic: theme.collapsed_italic,
             max_w: rect.w.max(1.0),
             color: anki.color,
             origin: (x, rect.y),
@@ -282,6 +293,8 @@ mod tests {
         text: String,
         size: f32,
         max_w: f32,
+        weight: u16,
+        italic: bool,
         color: Rgb,
         origin: (f32, f32),
     }
@@ -328,6 +341,8 @@ mod tests {
                 text: run.text.to_string(),
                 size: run.size,
                 max_w: run.max_w,
+                weight: run.weight,
+                italic: run.italic,
                 color: run.color,
                 origin: run.origin,
             });
@@ -355,6 +370,8 @@ mod tests {
             text: text.to_string(),
             color: (210, 212, 218),
             font_size: 15.0,
+            weight: 400,
+            italic: false,
             top_gap: 0.0,
             wrap_w: 176.0,
             align,
@@ -437,6 +454,51 @@ mod tests {
         let run = text.runs.first().expect("the corner run must be drawn");
         assert_eq!(150.0, run.origin.0, "the scene already right-aligned this box");
         assert_eq!(38.0, run.max_w, "and its width is the box, not the wrap width");
+    }
+
+    /// The scene decides the weight.
+    ///
+    /// A run painted in a weight core
+    /// did not measure it in would be
+    /// wrapped one way and drawn
+    /// another, and CSS emphasis would
+    /// reach the panel not at all.
+    #[test]
+    fn a_run_is_drawn_in_the_weight_and_style_the_scene_measured_it_in() {
+        let theme = Theme { collapsed_weight: 200, collapsed_italic: true, ..Theme::dark() };
+        let mut elem = text_elem("gloss", (12.0, 12.0), Align::Leading);
+        elem.weight = 700;
+        elem.italic = true;
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+        scene.side = Some(SidePanel {
+            origin_y: 12.0,
+            rule_x: 140.0,
+            rule_w: 1.0,
+            col_x: 152.0,
+            col_w: 42.0,
+            height: 60.0,
+            rows: vec![SideRow {
+                idx: Some(0),
+                text: "See also".to_string(),
+                color: theme.dimmed_text,
+                y: 0.0,
+                h: 18.0,
+            }],
+        });
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+
+        let gloss = text.runs.first().expect("the gloss must be drawn");
+        assert_eq!(700, gloss.weight);
+        assert!(gloss.italic);
+        // The side column is one
+        // format, the collapsed role's.
+        let side = text.runs.last().expect("a side row must be drawn");
+        assert_eq!(theme.collapsed_weight, side.weight);
+        assert!(side.italic);
     }
 
     #[test]

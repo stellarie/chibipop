@@ -23,6 +23,9 @@ chibipop-vX.Y.Z-windows-x64/
   data/deconjugator.json       required at runtime
   README.md
   LICENSE
+  plugins/meikiocr/plugin.toml
+  plugins/meikiocr/adapter.py
+  plugins/meikiocr/config.toml
 ```
 
 **The dictionary database is deliberately not in it.** It is 232 MiB, and it
@@ -32,6 +35,12 @@ once. That is the one step a downloaded binary cannot remove.
 
 `chibipop.toml` is not shipped either: it is written with defaults beside the
 executable on first run.
+
+**`plugins/meikiocr/` ships enabled by discovery.** It is the reference
+text-provider plugin, per spec section 10. Discovery adds it to the in-memory
+enabled list when its manifest parses successfully. `config.toml` holds the
+machine-specific meikiocr install path, the HF cache directory, and the ONNX
+thread cap — the user edits that file, never `adapter.py` or `plugin.toml`.
 
 ### The Linux tarball
 
@@ -234,8 +243,8 @@ install an icon into that theme's directories, so both depend on it.
 > run, and a tag would invite one. **v0.8.0 deletes that path**, which is what
 > makes the deadlock unreachable; see [`BACKLOG.md`](BACKLOG.md) §24.
 >
-> The release workflow would refuse a `v0.7.2` tag anyway now that `Cargo.toml`
-> reads `0.8.0`, but that is a backstop, not the reason.
+> The release workflow would refuse a `v0.7.2` tag anyway — `Cargo.toml`
+> is past that version, and the workflow checks the match.
 3. **Commit** the version bump.
 4. **Tag and push:**
    ```bash
@@ -291,14 +300,16 @@ exclude the foreign bin crate — see the workspace `Cargo.toml`):
 - `cargo test --workspace --exclude chibipop-linux` **three times** — the
   wheel accumulator's process-global
   statics produced an intermittent red once that a single run missed.
-- Clippy, asserting the accepted-error **count is exactly 2**. The repo
-  carries two accepted errors on purpose, so `-D warnings` always exits
-  non-zero; a third is the regression to catch, and an exit code cannot see
+- Clippy, asserting the accepted-error **count is exactly 1**. The repo
+  carries one accepted error on purpose, so `-D warnings` always exits
+  non-zero; a second is the regression to catch, and an exit code cannot see
   the difference. (It was 4 until 2026-08-09, when the hot-reload branch
-  deleted the loop that produced one of them, and 3 until 2026-08-25, when
-  the layout walk moved into core. This number moves; when it does,
-  `REGRESSION.md`'s tier 0 table and `ci.yml` move with it, in the same
-  commit.)
+  deleted the loop that produced one of them, 3 until 2026-08-25, when the
+  layout walk moved into core, and 2 until 2026-08-26, when the upstream
+  v0.9.x merge rewrote `deconj.rs` past its `useless_conversion` — that
+  merge's own three new `src/worker.rs` findings were refactored away, not
+  accepted. This number moves; when it does, `REGRESSION.md`'s tier 0 table
+  and `ci.yml` move with it, in the same commit.)
 - Clippy again with those suppressed, asserting **zero** other findings.
 - `cargo build --release --workspace --exclude chibipop-linux`.
 

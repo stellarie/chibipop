@@ -1,19 +1,22 @@
 //! Two threads: pump and worker.
 
 use crate::anki;
-use crate::config::Config;
+use crate::config::{resolve_engine, Config, EngineChoice};
 use crate::controller::{
     Command, Controller, ControllerConfig, Event, PopupView, TrayAction,
 };
 use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay};
 use crate::input::hooks::Hooks;
-use crate::library::{Library, Pending};
+use crate::library::{Kind, Library, Pending};
 use crate::lock::LibraryLock;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
+use crate::plugin::manifest::{Manifest, Role};
+use crate::plugin::text::PluginText;
+use crate::plugin::{discover, host};
 use crate::present::{DictInfo, Presentation, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
@@ -22,6 +25,7 @@ use crate::text::layout::CaptureSize;
 use crate::text::mask::CaptureMask;
 use crate::text::ocr::{recogniser_available, WinrtOcr};
 use crate::ui::overlay::Overlay;
+use crate::ui::static_overlay::StaticRegionOverlay;
 use crate::ui::layout::anki_button_label;
 use crate::ui::render::Renderer;
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
@@ -32,9 +36,9 @@ use crate::update;
 use crate::worker::{
     Hover, Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,9 +51,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetCursorPos, GetMessageW, IDC_HAND, IsDialogMessageW, IsWindowVisible,
-    KillTimer, LoadCursorW, PostQuitMessage, PostThreadMessageW, SetCursor, SetTimer, ShowWindow,
-    TranslateMessage, MSG, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
+    DispatchMessageW, GetCursorPos, GetMessageW, IsDialogMessageW, IsWindowVisible, KillTimer,
+    LoadCursorW, PostQuitMessage, PostThreadMessageW, SetCursor, SetTimer, ShowWindow,
+    TranslateMessage, IDC_HAND, MSG, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
     WM_TIMER,
 };
 
@@ -71,6 +75,8 @@ const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 /// Background save finished.
 const WM_APP_SAVED: u32 = WM_APP + 9;
 
+/// Screenshot worker finished.
+const WM_APP_SCREENSHOT_DONE: u32 = WM_APP + 11;
 /// Pending-cursor poll, ms.
 const DISPATCH_TICK_MS: u32 = 20;
 
@@ -84,11 +90,40 @@ const REBUILD_TICK_MS: u32 = 100;
 /// Over this, hooks stall.
 const APPLY_BUDGET_MS: u128 = 50;
 
+
 /// One dupe check's answer.
 struct AnkiDupeResult {
     gen: u64,
+    checked: Vec<String>,
     /// `None` = connection failed.
     dupes: Option<HashSet<String>>,
+}
+
+/// Partitions dupe refs.
+fn partition_dupes(
+    exprs: Vec<String>,
+    cache: &HashMap<String, bool>,
+) -> (HashSet<String>, Vec<String>, bool) {
+    let mut seen = HashSet::new();
+    let mut dupes = HashSet::new();
+    let mut uncached = Vec::new();
+    let mut cached_any = false;
+    for expr in exprs {
+        if !seen.insert(expr.clone()) {
+            continue;
+        }
+        match cache.get(&expr) {
+            Some(true) => {
+                cached_any = true;
+                dupes.insert(expr);
+            }
+            Some(false) => {
+                cached_any = true;
+            }
+            None => uncached.push(expr),
+        }
+    }
+    (dupes, uncached, cached_any)
 }
 
 /// One add-note's answer.
@@ -96,6 +131,7 @@ struct AddNoteResult {
     expr: String,
     err: Option<String>,
 }
+
 
 /// Settings alone, no tray.
 pub fn settings_only(
@@ -113,9 +149,9 @@ pub fn settings_only(
     let mut rebuild: Option<InFlight> = None;
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
+    let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) =
-        mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
+    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     // SAFETY: no preconditions.
     let tid = unsafe { GetCurrentThreadId() };
 
@@ -151,15 +187,17 @@ pub fn settings_only(
                 DispatchMessageW(&msg);
             }
         }
-        service_settings_click(&window, &settings_tx, &detect_tx, tid);
+        service_settings_click(&window, &settings_tx, &detect_tx, tid, &mut css_editor_so);
 
         // Tab switch -> detect.
         if let Some(tab) = window.take_tab_change() {
             window.switch_tab(tab);
             if tab == 3 {
                 spawn_detect(
-                    window.anki_url(), window.anki_model(),
-                    detect_tx.clone(), tid,
+                    window.anki_url(),
+                    window.anki_model(),
+                    detect_tx.clone(),
+                    tid,
                 );
             }
         }
@@ -174,7 +212,9 @@ pub fn settings_only(
             let Some(built) = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, &window)) else {
                 continue;
             };
-            let Some(flight) = rebuild.take() else { continue };
+            let Some(flight) = rebuild.take() else {
+                continue;
+            };
             // SAFETY: `tick` is this loop's own timer, set below.
             unsafe {
                 let _ = KillTimer(None, tick);
@@ -184,9 +224,9 @@ pub fn settings_only(
                 Ok(()) => {
                     keep_apply(&flight, &window);
                     let updated = pending.take().unwrap_or_else(|| cfg.clone());
-                    updated.save(config_path).with_context(|| {
-                        format!("saving settings to {}", config_path.display())
-                    })?;
+                    updated
+                        .save(config_path)
+                        .with_context(|| format!("saving settings to {}", config_path.display()))?;
                     println!("chibipop: rebuilt {}.", dict_path.display());
                     println!("chibipop: settings saved to {}.", config_path.display());
                     // New dictionary: start it.
@@ -215,9 +255,9 @@ pub fn settings_only(
                 let updated = settings::apply_to(&edited, &cfg);
                 // A font is not a rebuild.
                 if !edited.has_staged() {
-                    updated.save(config_path).with_context(|| {
-                        format!("saving settings to {}", config_path.display())
-                    })?;
+                    updated
+                        .save(config_path)
+                        .with_context(|| format!("saving settings to {}", config_path.display()))?;
                     println!("chibipop: settings saved to {}.", config_path.display());
                     println!("chibipop: restart chibipop for them to take effect.");
                     return Ok(());
@@ -241,12 +281,12 @@ pub fn settings_only(
 }
 
 /// The archive folder.
-fn library_dir() -> PathBuf {
+pub(crate) fn library_dir() -> PathBuf {
     crate::paths::beside_exe("library")
 }
 
 /// The form and the library.
-fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
+pub(crate) fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
     let form = settings::from_config(cfg, dicts);
     match Library::load(dir) {
         Ok(lib) => settings::with_library(form, &lib),
@@ -270,7 +310,11 @@ struct InFlight {
 fn start_rebuild(form: &SettingsForm, dir: &Path, out: &Path) -> Result<InFlight> {
     let lock = LibraryLock::acquire(dir)?;
     let (pending, rx) = stage_and_spawn(form, dir, out)?;
-    Ok(InFlight { pending, rx, _lock: lock })
+    Ok(InFlight {
+        pending,
+        rx,
+        _lock: lock,
+    })
 }
 
 /// Stage, then start the build.
@@ -355,18 +399,33 @@ fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: not applied: {e:#}");
 }
 
-/// Freq needs a rebuild.
-///
-/// CRLF: the box is an EDIT.
-fn frequency_notice(library: &Path, db: &Path) -> String {
-    format!(
-        "Frequency lists rank the words in every dictionary, so changing one needs the \
-         whole database rebuilt - chibipop cannot do that while it is running. Nothing was \
-         changed. Quit chibipop, then run this in a terminal, and start chibipop again \
-         when it finishes:\r\nchibipop build-dict --library \"{}\" --out \"{}\"",
-        library.display(),
-        db.display()
-    )
+/// Names the active OCR engine.
+fn engine_status_line(cfg: &Config) -> String {
+    match resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled) {
+        EngineChoice::Builtin => "Engine: Built-in (Windows OCR)".to_string(),
+        EngineChoice::Plugin(name) => format!("Engine: {name}"),
+        EngineChoice::FellBack(name) => {
+            format!("Engine: {name} (not found — using Built-in)")
+        }
+    }
+}
+
+/// Recent plugin stderr lines.
+fn adapter_status_line(cfg: &Config) -> String {
+    if !matches!(
+        resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled),
+        EngineChoice::Plugin(_)
+    ) {
+        return "Adapter log: no plugin engine active".to_string();
+    }
+    let log = host::engine_log_lines();
+    let start = log.len().saturating_sub(5);
+    let tail = &log[start..];
+    if tail.is_empty() {
+        "Adapter log: (no output yet)".to_string()
+    } else {
+        format!("Adapter log:\r\n{}", tail.join("\r\n"))
+    }
 }
 
 /// Say the library disagrees.
@@ -389,9 +448,11 @@ fn drifted(dir: &Path, db: &Path) -> Result<Option<String>> {
 fn read_source_hashes(db: &Path) -> Result<Option<String>> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("opening {} to read its source list", db.display()))?;
-    conn.query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
-        .optional()
-        .with_context(|| format!("reading source_hashes from {}", db.display()))
+    conn.query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| {
+        r.get(0)
+    })
+    .optional()
+    .with_context(|| format!("reading source_hashes from {}", db.display()))
 }
 
 /// Say nothing was changed.
@@ -401,12 +462,13 @@ fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
-/// A dictionary Apply deletes.
+/// What one removal deletes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Removal {
     name: String,
     dict_id: Option<i64>,
     file: Option<String>,
+    kind: Option<Kind>,
 }
 
 /// What one Apply must edit.
@@ -421,6 +483,8 @@ struct EditPlan {
 struct EditReport {
     added: Vec<String>,
     removed: Vec<String>,
+    freq_added: Vec<String>,
+    freq_removed: Vec<String>,
     failed: Vec<String>,
     dicts: Vec<DictInfo>,
 }
@@ -454,33 +518,34 @@ fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Does Apply touch a freq zip?
-///
-/// Those still need a rebuild.
-fn stages_frequency(form: &SettingsForm, dicts: &[DictInfo]) -> bool {
-    let added = form.staged_adds.iter().any(|a| form.freq_names.contains(&a.name));
-    let removed = form.staged_removes.iter().any(|name| {
-        !dicts.iter().any(|d| &d.name == name) && !form.unreadable.contains(name)
-    });
-    added || removed
-}
-
 /// Which rows and files change.
 fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPlan {
     let removals = form
         .staged_removes
         .iter()
-        .map(|name| Removal {
-            name: name.clone(),
-            dict_id: dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id),
-            file: lib
+        .map(|name| {
+            let entry = lib
                 .entries
                 .iter()
                 .find(|e| &e.name == name || &e.file == name)
-                .map(|e| e.file.clone()),
+                .cloned();
+            let kind = entry.as_ref().map(|e| e.kind);
+            Removal {
+                name: name.clone(),
+                dict_id: if kind == Some(Kind::Frequency) {
+                    None
+                } else {
+                    dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id)
+                },
+                file: entry.as_ref().map(|e| e.file.clone()),
+                kind,
+            }
         })
         .collect();
-    EditPlan { removals, additions: form.staged_adds.clone() }
+    EditPlan {
+        removals,
+        additions: form.staged_adds.clone(),
+    }
 }
 
 /// Count from this dictionary.
@@ -505,8 +570,14 @@ fn edit_status(report: &EditReport) -> String {
     if !report.added.is_empty() {
         parts.push(format!("Added {}.", report.added.join(", ")));
     }
+    if !report.freq_added.is_empty() {
+        parts.push(format!("Added frequency {}.", report.freq_added.join(", ")));
+    }
     if !report.removed.is_empty() {
         parts.push(format!("Removed {}.", report.removed.join(", ")));
+    }
+    if !report.freq_removed.is_empty() {
+        parts.push(format!("Removed frequency {}.", report.freq_removed.join(", ")));
     }
     if !report.failed.is_empty() {
         parts.push(format!("Not applied: {}.", report.failed.join("; ")));
@@ -545,6 +616,9 @@ fn apply_edits(
     for removal in &plan.removals {
         say(format!("Removing {}\u{2026}", removal.name));
         match remove_one(&mut conn, &mut lib, dir, &mut pending, removal) {
+            Ok(()) if removal.kind == Some(Kind::Frequency) => {
+                report.freq_removed.push(removal.name.clone())
+            }
             Ok(()) => report.removed.push(removal.name.clone()),
             Err(e) => report.failed.push(format!("{}: {e:#}", removal.name)),
         }
@@ -554,15 +628,68 @@ fn apply_edits(
     for add in &plan.additions {
         say(format!("Reading {}\u{2026}", add.name));
         match add_one(&mut conn, &mut lib, dir, &freqs, add, tx) {
-            Ok(name) => report.added.push(name),
+            Ok((name, Kind::Frequency)) => report.freq_added.push(name),
+            Ok((name, Kind::Term)) => report.added.push(name),
+            Ok((name, Kind::Unreadable)) => {
+                report.failed.push(format!("{}: {name} is unreadable", add.name))
+            }
             Err(e) => report.failed.push(format!("{}: {e:#}", add.name)),
         }
     }
 
-    lib.save(dir).with_context(|| format!("saving {}", dir.display()))?;
+    lib.save(dir)
+        .with_context(|| format!("saving {}", dir.display()))?;
     pending.commit()?;
     report.dicts = reader.dicts().context("re-reading dictionary identities")?;
     Ok(Box::new(report))
+}
+
+/// Reapplies ranks after edits.
+fn apply_edits_with_frequencies(
+    db: &Path,
+    dir: &Path,
+    form: &SettingsForm,
+    tx: &mpsc::Sender<EditMsg>,
+) -> Result<Box<EditReport>> {
+    if form.freq_changed {
+        validate_frequency_inputs(dir, form)?;
+    }
+    let report = apply_edits(db, dir, form, tx)?;
+    if !form.freq_changed {
+        return Ok(report);
+    }
+
+    let mut conn = open_writer(db)?;
+    let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let freqs = lib.freq_paths(dir);
+    let _ = tx.send(EditMsg::Status("Updating frequency rankings...".to_string()));
+    crate::dict::edit::reapply_frequencies(&mut conn, &freqs, &|text| {
+        let _ = tx.send(EditMsg::Status(text.to_string()));
+    })?;
+    Ok(report)
+}
+
+/// Validates frequency archives before edits.
+fn validate_frequency_inputs(dir: &Path, form: &SettingsForm) -> Result<()> {
+    let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let removed = settings::removed_files(form, &lib);
+    let mut freqs: Vec<PathBuf> = lib
+        .freq_paths(dir)
+        .into_iter()
+        .filter(|path| {
+            let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+                return true;
+            };
+            !removed.iter().any(|removed| removed == file)
+        })
+        .collect();
+    freqs.extend(
+        form.staged_adds
+            .iter()
+            .filter(|add| crate::library::kind_of(&add.source) == Kind::Frequency)
+            .map(|add| add.source.clone()),
+    );
+    crate::dict::build::load_freqs(&freqs).map(|_| ())
 }
 
 /// One dict: rows, then file.
@@ -574,20 +701,28 @@ fn remove_one(
     removal: &Removal,
 ) -> Result<()> {
     if let Some(dict_id) = removal.dict_id {
-        let archive = removal.file.as_ref().map(|f| dir.join(f)).unwrap_or_default();
+        let archive = removal
+            .file
+            .as_ref()
+            .map(|f| dir.join(f))
+            .unwrap_or_default();
         let done = crate::dict::edit::remove_dictionary(conn, dict_id, &archive)?;
         if done.dicts == 0 {
             anyhow::bail!("dictionary {dict_id} was no longer in the database");
         }
     }
     if let Some(file) = &removal.file {
-        lib.quarantine(dir, file).with_context(|| format!("removing {file}"))?;
+        if removal.kind == Some(Kind::Frequency) {
+            crate::dict::edit::forget_source(conn, &dir.join(file))?;
+        }
+        lib.quarantine(dir, file)
+            .with_context(|| format!("removing {file}"))?;
         pending.held(file.clone());
     }
     Ok(())
 }
 
-/// One archive: file, then rows.
+/// Imports one archive.
 fn add_one(
     conn: &mut Connection,
     lib: &mut Library,
@@ -595,11 +730,21 @@ fn add_one(
     freqs: &[PathBuf],
     add: &crate::settings::StagedAdd,
     tx: &mpsc::Sender<EditMsg>,
-) -> Result<String> {
+) -> Result<(String, Kind)> {
     let entry = lib
         .import(dir, &add.source)
         .with_context(|| format!("importing {}", add.source.display()))?;
     let path = dir.join(&entry.file);
+    if entry.kind == Kind::Frequency {
+        return match crate::dict::edit::record_source(conn, &path) {
+            Ok(()) => Ok((entry.name, entry.kind)),
+            Err(e) => {
+                lib.entries.retain(|x| x.file != entry.file);
+                let _ = std::fs::remove_file(&path);
+                Err(e)
+            }
+        };
+    }
     let base = crate::dict::edit::next_entry_id(conn)?;
     let on_progress = |line: &str| {
         if let Some(text) = crate::dict::progress::friendly(&rebased(line, base)) {
@@ -607,7 +752,7 @@ fn add_one(
         }
     };
     match crate::dict::edit::add_dictionary(conn, &path, freqs, &on_progress) {
-        Ok(done) => Ok(done.name),
+        Ok(done) => Ok((done.name, entry.kind)),
         Err(e) => {
             lib.entries.retain(|x| x.file != entry.file);
             let _ = std::fs::remove_file(&path);
@@ -626,7 +771,9 @@ fn pump_edit(rx: &mpsc::Receiver<EditMsg>, w: &SettingsWindow) -> Option<Result<
             Ok(EditMsg::Done(done)) => return Some(done),
             Err(mpsc::TryRecvError::Empty) => return None,
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Some(Err(anyhow!("the dictionary change ended without reporting")));
+                return Some(Err(anyhow!(
+                    "the dictionary change ended without reporting"
+                )));
             }
         }
     }
@@ -660,20 +807,21 @@ fn spawn_detect(
         let _ = tx.send((decks, models, fields));
         // SAFETY: wakes the pump.
         unsafe {
-            let _ = PostThreadMessageW(
-                tid, WM_APP_ANKI_DETECT,
-                WPARAM(0), LPARAM(0),
-            );
+            let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
         }
     });
 }
 
 /// Spawns the Anki/update op.
+///
+/// Returns true when a CSS editor
+/// was opened (caller must reload).
 fn service_settings_click(
     w: &SettingsWindow,
     tx: &mpsc::Sender<String>,
     detect_tx: &mpsc::Sender<(Vec<String>, Vec<String>, Vec<String>)>,
     tid: u32,
+    css_editor: &mut Option<crate::ui::editor::CssEditor>,
 ) {
     match w.take_click() {
         Some(SettingsClick::AnkiTest) => {
@@ -696,18 +844,12 @@ fn service_settings_click(
                     let _ = detect_tx.send((decks, models, fields));
                     // SAFETY: wakes the pump thread.
                     unsafe {
-                        let _ = PostThreadMessageW(
-                            tid, WM_APP_ANKI_DETECT,
-                            WPARAM(0), LPARAM(0),
-                        );
+                        let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
                     }
                 }
                 // SAFETY: wakes the pump thread.
                 unsafe {
-                    let _ = PostThreadMessageW(
-                        tid, WM_APP_SETTINGS,
-                        WPARAM(0), LPARAM(0),
-                    );
+                    let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
             });
         }
@@ -717,29 +859,27 @@ fn service_settings_click(
             thread::spawn(move || {
                 let msg = match update::check(env!("CARGO_PKG_VERSION")) {
                     Ok(None) => "You already have the latest version.".into(),
-                    Ok(Some(release)) => {
-                        match update::download_and_replace(&release) {
-                            Ok(()) => format!(
-                                "Updated to {}. Restart to use it.",
-                                release.tag,
-                            ),
-                            Err(e) => format!(
-                                "Update to {} failed: {e:#}",
-                                release.tag,
-                            ),
-                        }
-                    }
+                    Ok(Some(release)) => match update::download_and_replace(&release) {
+                        Ok(()) => format!("Updated to {}. Restart to use it.", release.tag,),
+                        Err(e) => format!("Update to {} failed: {e:#}", release.tag,),
+                    },
                     Err(e) => format!("Update check failed: {e:#}"),
                 };
                 let _ = tx.send(msg);
                 // SAFETY: wakes the pump thread.
                 unsafe {
-                    let _ = PostThreadMessageW(
-                        tid, WM_APP_SETTINGS,
-                        WPARAM(0), LPARAM(0),
-                    );
+                    let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
             });
+        }
+        Some(SettingsClick::CssEditor) => {
+            let css_path = crate::paths::beside_exe("popup.css");
+            let theme_name = w.read_theme_name();
+            let font = w.read_font_name();
+            match crate::ui::editor::CssEditor::open(&css_path, &theme_name, &font) {
+                Ok(ed) => *css_editor = Some(ed),
+                Err(e) => eprintln!("chibipop: CSS editor: {e:#}"),
+            }
         }
         None => {}
     }
@@ -753,21 +893,36 @@ fn worker_open(
     rules_path: PathBuf,
     language: String,
     guard: CaptureGuard,
+    // "builtin" or a plugin's name.
+    ocr_engine: String,
+    // Plugins allowed to run.
+    enabled_plugins: Vec<String>,
+    // One-off OCR jobs (OCR-to-clipboard), served between lookups.
+    ocr_request_rx: mpsc::Receiver<crate::action::OcrRequest>,
 ) -> impl FnOnce() -> Result<WorkerParts> + Send + 'static {
     move || {
-        let fallback = crate::config::default_ocr_language();
-        let substitute =
-            startup_language(&language, &fallback, || recogniser_available(&language));
-        let language = match substitute {
-            Some(sub) => {
-                eprintln!("chibipop: no {language} OCR recogniser installed; starting with {sub}");
-                sub
-            }
-            None => language,
-        };
+        // Resolved once, never saved.
+        let ocr: Box<dyn chibipop::text::OcrEngine> =
+            match resolve_recogniser(&ocr_engine, &enabled_plugins) {
+                Some(plugin) => plugin,
+                None => {
+                    let fallback = crate::config::default_ocr_language();
+                    let substitute =
+                        startup_language(&language, &fallback, || recogniser_available(&language));
+                    let language = match substitute {
+                        Some(sub) => {
+                            eprintln!(
+                                "chibipop: no {language} OCR recogniser installed; starting with {sub}"
+                            );
+                            sub
+                        }
+                        None => language,
+                    };
+                    Box::new(WinrtOcr::new(&language).context("creating the OCR text source")?)
+                }
+            };
         // Contract 3: DPI before GDI.
         let capture = WinCapture::new(Some(guard)).context("preparing screen capture")?;
-        let ocr = WinrtOcr::new(&language).context("creating the OCR text source")?;
         let dict = SqliteDictionary::open(&dict_path).with_context(|| {
             format!(
                 "opening {} - add dictionaries in the settings window",
@@ -778,7 +933,7 @@ fn worker_open(
         let engine = LookupEngine::new(Deconjugator::new(rules));
         Ok(WorkerParts {
             capture: Box::new(capture),
-            ocr: Box::new(ocr),
+            ocr,
             dict: Box::new(dict),
             // A finished rebuild restarts this whole process
             // (`start_run` on `Progress::Done`), so this worker never
@@ -786,17 +941,33 @@ fn worker_open(
             // to reopen.
             reopen_dict: None,
             engine,
+            // OCR-to-clipboard pixels, answered on this thread because
+            // the engine is thread-affine (upstream's OCR request loop).
+            serve: Some(Box::new(move |engine| {
+                while let Ok(request) = ocr_request_rx.try_recv() {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        engine
+                            .recognise(&request.bgra_buf, request.width, request.height)
+                            .map_err(|e| format!("{e:#}"))
+                    }))
+                    .unwrap_or_else(|_| Err("OCR worker panicked".to_string()));
+                    let _ = request.result_tx.send(result);
+                }
+            })),
         })
     }
 }
 
 /// Run until the user quits.
-pub fn run(
-    mut cfg: Config,
-    dict_path: &Path,
-    rules_path: &Path,
-    config_path: &Path,
-) -> Result<()> {
+pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
+    let plugins_root = crate::paths::beside_exe("plugins");
+    let found = crate::plugin::discover::discover(&plugins_root);
+    for name in crate::plugin::discover::text_provider_names(&found) {
+        if !cfg.plugins.enabled.contains(&name) {
+            cfg.plugins.enabled.push(name);
+        }
+    }
+
     // Nothing built yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
@@ -806,6 +977,9 @@ pub fn run(
     let db_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
 
+    // One-off OCR pixels for the worker's engine (OCR-to-clipboard);
+    // lookups ride the core Worker's own channels.
+    let (ocr_tx, ocr_request_rx) = mpsc::channel::<crate::action::OcrRequest>();
     // Unknown until Popup::create.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
     let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
@@ -828,6 +1002,9 @@ pub fn run(
                 main_tid,
                 request_tx: capture_guard_tx.clone(),
             },
+            cfg.ocr.engine.clone(),
+            cfg.plugins.enabled.clone(),
+            ocr_request_rx,
         ),
         // Worker pushed a result.
         move || unsafe {
@@ -845,18 +1022,24 @@ pub fn run(
             );
         }
         CaptureExclusion::DeliberatelyNotExcluded => {
-            println!("chibipop: capture exclusion disabled (exclude_from_capture = false in the config)");
+            println!(
+                "chibipop: capture exclusion disabled (exclude_from_capture = false in the config)"
+            );
             println!("chibipop: the popup IS recordable now - each capture briefly hides and reshows it,");
             println!("chibipop: so hovering keeps resolving the real text underneath, not its own");
         }
         CaptureExclusion::AttemptFailed => {
             eprintln!("chibipop: ============================================================");
             eprintln!("chibipop: WARNING: capture exclusion is NOT active for the popup window.");
-            eprintln!("chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,");
+            eprintln!(
+                "chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,"
+            );
             eprintln!("chibipop: even though exclude_from_capture = true. This was NOT requested.");
             eprintln!("chibipop: The capture guard below will still hide/reshow the popup around");
             eprintln!("chibipop: every capture, so lookups stay correct, at the cost of a flicker");
-            eprintln!("chibipop: this build did not expect to pay. Investigate why the OS refused.");
+            eprintln!(
+                "chibipop: this build did not expect to pay. Investigate why the OS refused."
+            );
             eprintln!("chibipop: ============================================================");
         }
     }
@@ -876,15 +1059,36 @@ pub fn run(
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
 
     // Spec D5: can diverge.
-    if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion) {
+    if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion)
+    {
         eprintln!("chibipop: ============================================================");
-        eprintln!("chibipop: WARNING: capture exclusion is NOT active for the scan overlay window.");
+        eprintln!(
+            "chibipop: WARNING: capture exclusion is NOT active for the scan overlay window."
+        );
         eprintln!("chibipop: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) was not accepted,");
         eprintln!("chibipop: even though exclude_from_capture = true. This was NOT requested.");
         eprintln!("chibipop: The capture guard below will still hide/reshow the overlay around");
         eprintln!("chibipop: every capture, so its outlines never land inside one, at the cost");
         eprintln!("chibipop: of a flicker this build did not expect to pay. Investigate why the OS refused.");
         eprintln!("chibipop: ============================================================");
+    }
+
+    // Static region outline.
+    let static_overlay = match StaticRegionOverlay::create(live.exclude_from_capture) {
+        Ok(o) => Some(o),
+        Err(e) => {
+            eprintln!(
+                "chibipop: the static region overlay could not be created: {e:#}"
+            );
+            None
+        }
+    };
+    if let (Some(ref ov), Some(region)) = (&static_overlay, live.static_region) {
+        if live.sentence_mode == "static" && live.show_static_overlay {
+            if let Err(e) = ov.show(region) {
+                eprintln!("chibipop: showing static region overlay failed: {e:#}");
+            }
+        }
     }
 
     // Never fatal - spec §5.
@@ -922,6 +1126,8 @@ pub fn run(
     let mut renderer =
         Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
     let mut theme = theme_from_config(&live.popup);
+    let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+    popup.set_alpha(alpha);
     if live.show_lookup_log {
         crate::ui::console::show();
     }
@@ -933,6 +1139,20 @@ pub fn run(
     }
     if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
         Hooks::set_add_hotkey(vk);
+    }
+    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
+        Hooks::set_action_hotkey(0, vk, mods);
+    }
+    match crate::config::parse_trigger_key(&live.static_region_key) {
+        Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
+        None => Hooks::set_action_hotkey(1, 0, 0),
+    }
+    if let Some(vk) = live
+        .actions_ocr_clipboard_hotkey
+        .as_deref()
+        .and_then(crate::config::parse_trigger_key)
+    {
+        Hooks::set_action_hotkey(2, vk, 0);
     }
 
     // No tray means no control.
@@ -948,8 +1168,7 @@ pub fn run(
     println!("chibipop: right-click the tray icon to change mode or quit.");
 
     // Spawned before dicts existed.
-    let (order, restrict) =
-        resolve_dict_filter(&cfg, &dicts, || configured_recogniser_runs(&cfg));
+    let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || configured_recogniser_runs(&cfg));
     live.present_cfg.dict_order = order;
     live.present_cfg.restrict_to_order = restrict;
     // Visible just before the Hide.
@@ -966,12 +1185,31 @@ pub fn run(
     let mut want_settings = false;
     // Rising/falling key edges.
     let mut trigger_was_held = false;
+    // Static overlay visibility.
+    let sr_prev_visible = std::cell::Cell::new(false);
+    let sr_hwnd = static_overlay.as_ref().map(StaticRegionOverlay::hwnd);
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
+    // Anki dupe answers, by expr.
+    let mut dupe_cache: HashMap<String, bool> = HashMap::new();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) =
-        mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
+    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
+    let mut css_editor: Option<crate::ui::editor::CssEditor> = None;
+    let (screenshot_tx, screenshot_rx) = mpsc::channel::<crate::action::ScreenshotCommand>();
+    let (screenshot_done_tx, screenshot_done_rx) =
+        mpsc::channel::<crate::action::ScreenshotResult>();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut region_selection = crate::action::selection::RegionSelection::new()?;
+    let mut action_registry = crate::action::ActionRegistry::new();
+    action_registry.register(Box::new(crate::action::screenshot::MiningContextScreenshot));
+    sync_ocr_clipboard_action(
+        &mut action_registry,
+        live.actions_ocr_clipboard_hotkey.as_deref(),
+    );
     // One writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
     // BACKLOG 7: no way in but this.
@@ -1001,9 +1239,7 @@ pub fn run(
                 CaptureGuardMsg::Hide { ack } => {
                     capture_guard_prev_visible.set(popup.is_visible());
                     let _ = popup.hide();
-                    btn_prev_visible.set(
-                        anki_button.as_ref().is_some_and(|b| b.is_visible()),
-                    );
+                    btn_prev_visible.set(anki_button.as_ref().is_some_and(|b| b.is_visible()));
                     if let Some(b) = &anki_button {
                         b.hide();
                     }
@@ -1014,6 +1250,13 @@ pub fn run(
                         // still live here. Both calls only read/set
                         // visibility - no other precondition applies.
                         overlay_prev_visible.set(unsafe { IsWindowVisible(hwnd).as_bool() });
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_HIDE);
+                        }
+                    }
+                    if let Some(hwnd) = sr_hwnd {
+                        // SAFETY: same as overlay above.
+                        sr_prev_visible.set(unsafe { IsWindowVisible(hwnd).as_bool() });
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_HIDE);
                         }
@@ -1032,6 +1275,14 @@ pub fn run(
                     if let Some(hwnd) = overlay_hwnd {
                         if overlay_prev_visible.get() {
                             // SAFETY: same handle, same guarantee as above.
+                            unsafe {
+                                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                            }
+                        }
+                    }
+                    if let Some(hwnd) = sr_hwnd {
+                        if sr_prev_visible.get() {
+                            // SAFETY: same as overlay.
                             unsafe {
                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                             }
@@ -1063,6 +1314,7 @@ pub fn run(
                     add_tx: &add_tx,
                     main_tid,
                     want_settings: &mut want_settings,
+                    dupe_cache: &dupe_cache,
                 },
             )
         };
@@ -1072,6 +1324,32 @@ pub fn run(
     // dictionaries were known.
     drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
 
+    // PNG encoding needs WinRT.
+    {
+        let rx = screenshot_rx;
+        let tx = screenshot_done_tx;
+        let tid = main_tid;
+        thread::spawn(move || {
+            // SAFETY: initialises the WinRT apartment for this
+            // thread; `RO_INIT_MULTITHREADED` is always valid
+            // and calling it on a thread that already has one is
+            // harmless (returns `RPC_E_CHANGED_MODE` which we
+            // discard).
+            unsafe {
+                let _ = windows::Win32::System::WinRT::RoInitialize(
+                    windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
+                );
+            }
+            for cmd in rx {
+                let result = handle_screenshot_save(cmd);
+                let _ = tx.send(result);
+                // SAFETY: wakes the pump thread.
+                unsafe {
+                    let _ = PostThreadMessageW(tid, WM_APP_SCREENSHOT_DONE, WPARAM(0), LPARAM(0));
+                }
+            }
+        });
+    }
     let mut msg = MSG::default();
 
     loop {
@@ -1099,16 +1377,13 @@ pub fn run(
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
             let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
-            service_settings_click(w, &settings_tx, &detect_tx, main_tid);
+            service_settings_click(w, &settings_tx, &detect_tx, main_tid, &mut css_editor);
 
             // Tab switch -> detect.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
                 if tab == 3 {
-                    spawn_detect(
-                        w.anki_url(), w.anki_model(),
-                        detect_tx.clone(), main_tid,
-                    );
+                    spawn_detect(w.anki_url(), w.anki_model(), detect_tx.clone(), main_tid);
                 }
             }
             if w.take_field_map_toggle() {
@@ -1155,11 +1430,217 @@ pub fn run(
             }
 
             if Hooks::take_add_hotkey() {
-                drive!(Event::AddRequested);
+                // include_screenshot (upstream 0.9.x): pick a region, save
+                // the PNG, and let the screenshot worker attach the card; a
+                // cancelled selection falls back to the plain add.
+                let payload = if live.include_screenshot {
+                    controller.popup().map(|view| {
+                        (note_payload(&view, live.first_dict_only), view.anki.connected)
+                    })
+                } else {
+                    None
+                };
+                match payload {
+                    Some(((expr, fields), anki_connected)) => {
+                        let _ = popup.hide();
+                        if let Some(b) = &anki_button {
+                            b.hide();
+                        }
+                        let rect = region_selection.run();
+                        if let Some(rect) = rect {
+                            if let Ok(cap) = crate::text::capture::capture_upscaled_by(rect, 1) {
+                                let word = crate::action::screenshot::sanitize_filename(&expr);
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let filename = format!("{word}_{now}.png");
+                                let ss_cfg = &cfg.actions.screenshot;
+                                let save_dir = if Path::new(&ss_cfg.save_dir).is_absolute() {
+                                    PathBuf::from(&ss_cfg.save_dir)
+                                } else {
+                                    exe_dir.join(&ss_cfg.save_dir)
+                                };
+                                let save_path = save_dir.join(filename);
+                                let cmd = crate::action::ScreenshotCommand {
+                                    bgra_buf: cap.buf,
+                                    width: cap.w,
+                                    height: cap.h,
+                                    save_path,
+                                    expr,
+                                    fields,
+                                    field_map: live.anki_field_map.clone(),
+                                    anki_url: live.anki_url.clone(),
+                                    anki_deck: live.anki_deck.clone(),
+                                    anki_model: live.anki_model.clone(),
+                                    anki_connected,
+                                };
+                                let _ = screenshot_tx.send(cmd);
+                            }
+                        } else {
+                            drive!(Event::AddRequested);
+                        }
+                        let _ = popup.show_without_activating();
+                        if let Some(b) = &anki_button {
+                            b.show_without_activating();
+                        }
+                    }
+                    None => {
+                        drive!(Event::AddRequested);
+                    }
+                }
+            }
+
+            // Static region hotkey (slot 1).
+            // Works in any sentence mode.
+            if Hooks::take_action_hotkey(1) {
+                let had_popup = controller.popup().is_some();
+                let _ = popup.hide();
+                if let Some(b) = &anki_button {
+                    b.hide();
+                }
+                if let Some(ov) = &static_overlay {
+                    ov.hide();
+                }
+                let rect = region_selection.run();
+                if let Some(rect) = rect {
+                    live.static_region = Some(rect);
+                    cfg.anki.static_region = Some([rect.x, rect.y, rect.w, rect.h]);
+                    save_in_background(
+                        &mut save_job,
+                        cfg.clone(),
+                        config_path.to_path_buf(),
+                        save_tx.clone(),
+                        main_tid,
+                    );
+                    if let Some(ov) = &static_overlay {
+                        if let Err(e) = ov.show(rect) {
+                            eprintln!("chibipop: showing static region overlay failed: {e:#}");
+                        }
+                    }
+                    // Fresh WorkerSettings ride the reload the
+                    // Controller answers this with.
+                    drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
+                    eprintln!(
+                        "chibipop: static region set to ({}, {}, {}x{})",
+                        rect.x, rect.y, rect.w, rect.h
+                    );
+                }
+                if had_popup {
+                    let _ = popup.show_without_activating();
+                    if let Some(b) = &anki_button {
+                        b.show_without_activating();
+                    }
+                }
+            }
+
+            // Action hotkey dispatch.
+            for slot in 0..crate::input::hooks::MAX_ACTION_SLOTS {
+                if slot == 1 {
+                    continue; // Handled above.
+                }
+                if !Hooks::take_action_hotkey(slot) {
+                    continue;
+                }
+                let had_popup = controller.popup().is_some();
+                if had_popup {
+                    let _ = popup.hide();
+                    if let Some(b) = &anki_button {
+                        b.hide();
+                    }
+                }
+
+                let outcome = {
+                    let view = controller.popup();
+                    let state = crate::action::AppState {
+                        popup_visible: had_popup,
+                        presentation: view.as_ref().map(|v| v.presentation),
+                        anchor: view.as_ref().map(|v| v.anchor),
+                        anki_connected: view.as_ref().is_some_and(|v| v.anki.connected),
+                    };
+                    let mut ctx = crate::action::ActionContext {
+                        selection: &mut region_selection,
+                        config: &cfg.actions,
+                        exe_dir: &exe_dir,
+                        screenshot_tx: &screenshot_tx,
+                        ocr_tx: &ocr_tx,
+                    };
+                    action_registry.dispatch(slot, &state, &mut ctx)
+                };
+
+                match outcome {
+                    Some(crate::action::ActionOutcome::ScreenshotCaptured {
+                        bgra_buf,
+                        width,
+                        height,
+                        save_dir,
+                    }) => {
+                        if let Some(view) = controller.popup() {
+                            let (expr, fields) = note_payload(&view, live.first_dict_only);
+                            let word = crate::action::screenshot::sanitize_filename(&expr);
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let filename = format!("{word}_{now}.png");
+                            let save_path = save_dir.join(filename);
+                            let cmd = crate::action::ScreenshotCommand {
+                                bgra_buf,
+                                width,
+                                height,
+                                save_path,
+                                expr,
+                                fields,
+                                field_map: live.anki_field_map.clone(),
+                                anki_url: live.anki_url.clone(),
+                                anki_deck: live.anki_deck.clone(),
+                                anki_model: live.anki_model.clone(),
+                                anki_connected: view.anki.connected,
+                            };
+                            let _ = screenshot_tx.send(cmd);
+                        }
+                    }
+                    Some(crate::action::ActionOutcome::Failed(msg)) => {
+                        eprintln!("chibipop: action failed: {msg}");
+                    }
+                    Some(crate::action::ActionOutcome::TextCaptured { text }) => {
+                        if let Err(e) = crate::clipboard::set_text(&text) {
+                            eprintln!("chibipop: copying OCR text failed: {e:#}");
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Restore after capture.
+                if had_popup {
+                    let _ = popup.show_without_activating();
+                    if let Some(b) = &anki_button {
+                        b.show_without_activating();
+                    }
+                }
+                sync_anki_button(anki_button.as_ref(), controller.popup(), &theme);
             }
 
             if Hooks::take_back() {
                 drive!(Event::BackRequested);
+            }
+
+            if let Some(ed) = &css_editor {
+                if let Some(crate::ui::editor::EditorOutcome::Applied) = ed.take_outcome() {
+                    theme = theme_from_config(&live.popup);
+                    if let Some(v) = controller.popup() {
+                        let _ = renderer.paint(
+                            v.presentation,
+                            &theme,
+                            v.scroll,
+                            v.show_back,
+                            live.side_panel,
+                        );
+                    }
+                }
+                if !ed.is_visible() {
+                    css_editor = None;
+                }
             }
 
             if let Some(w) = &settings {
@@ -1178,8 +1659,7 @@ pub fn run(
                             Ok(report) => {
                                 let report = *report;
                                 let status = edit_status(&report);
-                                let mut updated =
-                                    edit_cfg.take().unwrap_or_else(|| cfg.clone());
+                                let mut updated = edit_cfg.take().unwrap_or_else(|| cfg.clone());
                                 // Removals first: keys collide.
                                 for name in &report.removed {
                                     settings::dictionary_removed(&mut updated, name);
@@ -1193,13 +1673,24 @@ pub fn run(
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
                                 live = derive(&cfg);
-                                let (order, restrict) = resolve_dict_filter(
-                                    &cfg, &dicts, || configured_recogniser_runs(&cfg));
+                                let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || {
+                                    configured_recogniser_runs(&cfg)
+                                });
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
-                                apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(), &mut theme,
-                                           &capture_guard_active);
+                                sync_ocr_clipboard_action(
+                                    &mut action_registry,
+                                    live.actions_ocr_clipboard_hotkey.as_deref(),
+                                );
+                                apply_live(
+                                    &live,
+                                    &popup,
+                                    overlay.as_ref(),
+                                    anki_button.as_ref(),
+                                    static_overlay.as_ref(),
+                                    &mut theme,
+                                    &capture_guard_active,
+                                );
                                 // Kills stale results.
                                 drive!(Event::ConfigReloaded(Box::new(
                                     controller_config(&live),
@@ -1221,22 +1712,22 @@ pub fn run(
                             let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
-                            // Never half-apply.
-                            if edited.has_staged() && stages_frequency(&edited, &dicts) {
-                                w.set_status(&frequency_notice(&library, &db_path));
-                            } else if edited.has_staged() {
+                            if edited.has_staged() {
                                 match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
                                     Ok(lock) => {
                                         begin_apply(w);
                                         edit_cfg = Some(updated);
                                         let (etx, erx) = mpsc::channel::<EditMsg>();
-                                        edit = Some(EditFlight { rx: erx, _lock: lock });
+                                        edit = Some(EditFlight {
+                                            rx: erx,
+                                            _lock: lock,
+                                        });
                                         let db = db_path.clone();
                                         let dir = library.clone();
                                         thread::spawn(move || {
                                             let done =
-                                                apply_edits(&db, &dir, &edited, &etx);
+                                                apply_edits_with_frequencies(&db, &dir, &edited, &etx);
                                             let _ = etx.send(EditMsg::Done(done));
                                         });
                                         let ms = t0.elapsed().as_millis();
@@ -1250,30 +1741,53 @@ pub fn run(
                                 }
                             } else {
                                 live = derive(&updated);
-                                let (order, restrict) = resolve_dict_filter(
-                                    &updated, &dicts,
-                                    || configured_recogniser_runs(&updated));
+                                let (order, restrict) =
+                                    resolve_dict_filter(&updated, &dicts, || {
+                                        configured_recogniser_runs(&updated)
+                                    });
                                 live.present_cfg.dict_order = order;
                                 live.present_cfg.restrict_to_order = restrict;
-                                apply_live(&live, &popup, overlay.as_ref(),
-                                           anki_button.as_ref(), &mut theme,
-                                           &capture_guard_active);
+                                sync_ocr_clipboard_action(
+                                    &mut action_registry,
+                                    live.actions_ocr_clipboard_hotkey.as_deref(),
+                                );
+                                apply_live(
+                                    &live,
+                                    &popup,
+                                    overlay.as_ref(),
+                                    anki_button.as_ref(),
+                                    static_overlay.as_ref(),
+                                    &mut theme,
+                                    &capture_guard_active,
+                                );
                                 drive!(Event::ConfigReloaded(Box::new(
                                     controller_config(&live),
                                 )));
                                 let clamped = settings::clamp_notice(&edited, &updated);
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
-                                save_in_background(&mut save_job, updated,
-                                                   config_path.to_path_buf(),
-                                                   save_tx.clone(), main_tid);
+                                save_in_background(
+                                    &mut save_job,
+                                    updated,
+                                    config_path.to_path_buf(),
+                                    save_tx.clone(),
+                                    main_tid,
+                                );
+                                let mut status_parts = Vec::new();
                                 match &clamped {
                                     Some(notice) => {
                                         w.set_capture_fields(&cfg.ocr);
-                                        w.set_status(notice);
+                                        status_parts.push(notice.clone());
                                     }
-                                    None => w.set_status("Settings applied."),
+                                    None => status_parts.push("Settings applied.".to_string()),
                                 }
+                                if cfg.debug.show_engine_log {
+                                    status_parts.push(engine_status_line(&cfg));
+                                }
+                                if cfg.debug.show_adapter_log {
+                                    status_parts.push(adapter_status_line(&cfg));
+                                }
+                                w.set_status(&status_parts.join("\r\n"));
                                 let ms = t0.elapsed().as_millis();
                                 if ms > APPLY_BUDGET_MS {
                                     eprintln!(
@@ -1309,8 +1823,13 @@ pub fn run(
                 // is blocked (e.g. by anti-cheat).
                 let pos = cursor_pos;
                 let dominated = Hooks::poll_gate(pos);
-                if dominated { pos } else {
-                    PhysPoint { x: i32::MIN, y: i32::MIN }
+                if dominated {
+                    pos
+                } else {
+                    PhysPoint {
+                        x: i32::MIN,
+                        y: i32::MIN,
+                    }
                 }
             });
             if cursor.x != i32::MIN {
@@ -1327,12 +1846,22 @@ pub fn run(
             }
         } else if msg.message == WM_APP_ANKI {
             while let Ok(result) = anki_rx.try_recv() {
+                if let Some(found) = &result.dupes {
+                    for expr in &result.checked {
+                        dupe_cache.insert(expr.clone(), found.contains(expr));
+                    }
+                }
                 drive!(Event::DupesChecked { generation: result.gen, dupes: result.dupes });
             }
         } else if msg.message == WM_APP_ADD_NOTE {
             while let Ok(result) = add_rx.try_recv() {
                 if let Some(e) = &result.err {
                     eprintln!("chibipop: add to Anki failed: {e}");
+                } else {
+                    dupe_cache.insert(result.expr.clone(), true);
+                    if live.notify_on_add {
+                        tray.notify("chibipop", &format!("{} added", result.expr));
+                    }
                 }
                 let failed = result.err.is_some();
                 drive!(Event::NoteAdded { expr: result.expr, failed });
@@ -1352,14 +1881,27 @@ pub fn run(
         } else if msg.message == WM_APP_SAVED {
             while let Ok(result) = save_rx.try_recv() {
                 if let Err(e) = result {
-                    eprintln!("chibipop: could not save settings to {}: {e:#}",
-                              config_path.display());
+                    eprintln!(
+                        "chibipop: could not save settings to {}: {e:#}",
+                        config_path.display()
+                    );
                     if let Some(w) = &settings {
                         w.set_status(
                             "Settings applied, but could not be saved - \
                              they will be lost on restart.",
                         );
                     }
+                }
+            }
+        } else if msg.message == WM_APP_SCREENSHOT_DONE {
+            while let Ok(result) = screenshot_done_rx.try_recv() {
+                if let Some(e) = &result.err {
+                    eprintln!("chibipop: screenshot failed: {e}");
+                } else if !result.expr.is_empty() {
+                    if live.notify_on_add {
+                        tray.notify("chibipop", &format!("{} added", result.expr));
+                    }
+                    drive!(Event::NoteAdded { expr: result.expr, failed: false });
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
@@ -1412,6 +1954,58 @@ pub fn run(
     std::process::exit(0)
 }
 
+/// Finds a named text-provider.
+fn find_text_plugin<'a>(
+    found: &'a [(PathBuf, Result<Manifest>)],
+    name: &str,
+) -> Result<(&'a Path, &'a Manifest)> {
+    let hit = found.iter().find(|(dir, parsed)| {
+        parsed.as_ref().map(|m| m.name == name).unwrap_or(false)
+            || dir.file_name().map(|f| f == name).unwrap_or(false)
+    });
+    let Some((dir, parsed)) = hit else {
+        bail!("plugin \"{name}\" is not on disk");
+    };
+    let m = parsed
+        .as_ref()
+        .map_err(|e| anyhow!("plugin \"{name}\": {e:#}"))?;
+    if !m.roles.contains(&Role::TextProvider) {
+        bail!("plugin \"{name}\" is not a text-provider");
+    }
+    Ok((dir.as_path(), m))
+}
+
+/// Spawns one plugin process.
+///
+/// Concrete so the caller may
+/// coerce to either engine trait.
+fn spawn_plugin_recogniser(name: &str) -> Result<Box<PluginText>> {
+    let root = crate::paths::beside_exe("plugins");
+    let found = discover::discover(&root);
+    let (dir, m) = find_text_plugin(&found, name)?;
+    let h = host::spawn(m, dir).with_context(|| format!("starting plugin \"{name}\""))?;
+    Ok(Box::new(PluginText::new(h, m)))
+}
+
+/// Picks and spawns the engine.
+///
+/// `None` picks the built-in.
+fn resolve_recogniser(ocr_engine: &str, enabled: &[String]) -> Option<Box<PluginText>> {
+    match resolve_engine(ocr_engine, enabled) {
+        EngineChoice::Builtin => None,
+        EngineChoice::Plugin(name) => match spawn_plugin_recogniser(&name) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("chibipop: OCR plugin \"{name}\" failed, falling back to builtin: {e:#}");
+                None
+            }
+        },
+        EngineChoice::FellBack(name) => {
+            eprintln!("chibipop: OCR engine \"{name}\" is not enabled, falling back to builtin");
+            None
+        }
+    }
+}
 /// Measure, place, show, paint.
 #[allow(clippy::too_many_arguments)]
 fn show_presentation(
@@ -1437,9 +2031,88 @@ fn show_presentation(
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
-    renderer.paint(presentation, theme, scroll, show_back, side_panel)
+    renderer
+        .paint(presentation, theme, scroll, show_back, side_panel)
         .context("painting the popup")?;
     Ok((rect, content_h, view_h))
+}
+
+/// The add-note payload, exactly
+/// as `Controller::start_add`
+/// builds it: expr from written
+/// (else reading), first dict's
+/// blocks only when configured,
+/// and the captured sentence.
+///
+/// Empty expr = no top card.
+fn note_payload(
+    view: &PopupView<'_>,
+    first_dict_only: bool,
+) -> (String, HashMap<String, String>) {
+    let Some(card) = view.presentation.top.as_ref() else {
+        return (String::new(), HashMap::new());
+    };
+    let expr = card
+        .written
+        .as_deref()
+        .or(card.reading.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let blocks_to_send = if first_dict_only {
+        &card.blocks[..1.min(card.blocks.len())]
+    } else {
+        &card.blocks[..]
+    };
+    let mut fields = anki::fields_from_card(card, blocks_to_send);
+    if let Some(sentence) = &view.presentation.sentence {
+        fields.insert("sentence".to_string(), sentence.clone());
+    }
+    (expr, fields)
+}
+
+/// PNG + optional Anki card.
+fn handle_screenshot_save(
+    cmd: crate::action::ScreenshotCommand,
+) -> crate::action::ScreenshotResult {
+    let result = (|| -> anyhow::Result<()> {
+        std::fs::create_dir_all(cmd.save_path.parent().unwrap_or(Path::new(".")))?;
+        let png = crate::text::capture::encode_bgra_to_png(&cmd.bgra_buf, cmd.width, cmd.height)?;
+        std::fs::write(&cmd.save_path, &png)?;
+        if cmd.anki_connected && !cmd.expr.is_empty() {
+            let screenshot_field = cmd
+                .field_map
+                .iter()
+                .find(|m| m.source == "screenshot")
+                .map(|m| m.anki_field.clone());
+            let pic = screenshot_field.map(|field| {
+                use base64::Engine;
+                crate::anki::NotePicture {
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+                    filename: format!(
+                        "chibipop-screenshot-{}.png",
+                        cmd.save_path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ),
+                    fields: vec![field],
+                }
+            });
+            crate::anki::add_note_with_picture(
+                &cmd.anki_url,
+                &cmd.anki_deck,
+                &cmd.anki_model,
+                &cmd.fields,
+                &cmd.field_map,
+                pic.as_ref(),
+            )?;
+        }
+        Ok(())
+    })();
+    crate::action::ScreenshotResult {
+        expr: cmd.expr,
+        err: result.err().map(|e| format!("{e:#}")),
+    }
 }
 
 /// Relaunch with this argv.
@@ -1477,13 +2150,26 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     unsafe {
         // Never null, so never checked.
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut mi = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
         if GetMonitorInfoW(hmon, &mut mi).as_bool() {
             let rc = mi.rcWork;
-            PhysRect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top }
+            PhysRect {
+                x: rc.left,
+                y: rc.top,
+                w: rc.right - rc.left,
+                h: rc.bottom - rc.top,
+            }
         } else {
             eprintln!("chibipop: GetMonitorInfoW failed; placing against a 1920x1080 fallback");
-            PhysRect { x: 0, y: 0, w: 1920, h: 1080 }
+            PhysRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            }
         }
     }
 }
@@ -1522,6 +2208,7 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
         per_character_lookup: live.per_character_lookup,
         scroll_popup: live.scroll_popup,
         anki_enabled: live.anki_enabled,
+        first_dict_only: live.first_dict_only,
         summary_chars: live.summary_chars,
         log_lookups: live.show_lookup_log,
         tick_ms: DISPATCH_TICK_MS,
@@ -1543,6 +2230,9 @@ struct Exec<'a> {
     main_tid: u32,
     /// OpenSettings, loop-handled.
     want_settings: &'a mut bool,
+    /// Read-only here; the pump
+    /// owns the writes.
+    dupe_cache: &'a HashMap<String, bool>,
 }
 
 /// One Event, to quiescence.
@@ -1676,21 +2366,42 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::CheckDupes { generation, exprs } => {
+            let (cached_dupes, uncached, _) = partition_dupes(exprs, x.dupe_cache);
+            if uncached.is_empty() {
+                // All answered from cache;
+                // no thread, no connection.
+                let _ = x.anki_tx.send(AnkiDupeResult {
+                    gen: generation,
+                    checked: Vec::new(),
+                    dupes: Some(cached_dupes),
+                });
+                // SAFETY: wakes the pump.
+                unsafe {
+                    let _ = PostThreadMessageW(x.main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
+                }
+                return None;
+            }
             let url = x.live.anki_url.clone();
             let deck = x.live.anki_deck.clone();
             let model = x.live.anki_model.clone();
             let tx = x.anki_tx.clone();
             let main_tid = x.main_tid;
             thread::spawn(move || {
-                let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
+                let refs: Vec<&str> = uncached.iter().map(|s| s.as_str()).collect();
+                // The union: the controller
+                // replaces, never merges.
                 let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
-                    Ok(d) => Some(d),
+                    Ok(found) => {
+                        let mut all = cached_dupes;
+                        all.extend(found);
+                        Some(all)
+                    }
                     Err(e) => {
                         eprintln!("chibipop: dupe check failed: {e:#}");
                         None
                     }
                 };
-                let _ = tx.send(AnkiDupeResult { gen: generation, dupes });
+                let _ = tx.send(AnkiDupeResult { gen: generation, checked: uncached, dupes });
                 // SAFETY: wakes the pump.
                 unsafe {
                     let _ = PostThreadMessageW(main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
@@ -1752,6 +2463,13 @@ fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
         _ => Theme::dark(),
     };
     theme.font_name = popup.font.clone();
+    let css_path = crate::paths::beside_exe("popup.css");
+    if let Ok(css) = std::fs::read_to_string(&css_path) {
+        let errors = crate::ui::css::parse(&css, &mut theme);
+        for e in &errors {
+            eprintln!("chibipop: popup.css:{}: {}", e.line, e.message);
+        }
+    }
     theme
 }
 
@@ -1777,10 +2495,19 @@ struct LiveSettings {
     anki_deck: String,
     anki_model: String,
     anki_field_map: Vec<crate::config::FieldMapping>,
+    sentence_mode: String,
+    static_region: Option<PhysRect>,
+    static_region_key: String,
+    show_static_overlay: bool,
     trigger_mode: crate::config::TriggerMode,
     trigger_key: String,
     anki_add_key: String,
+    notify_on_add: bool,
     per_character_lookup: bool,
+    actions_screenshot_hotkey: String,
+    actions_ocr_clipboard_hotkey: Option<String>,
+    include_screenshot: bool,
+    first_dict_only: bool,
 }
 
 /// Rebuilt on each change.
@@ -1794,7 +2521,10 @@ fn derive(cfg: &Config) -> LiveSettings {
         },
         max_ocr_passes: cfg.ocr.max_ocr_passes,
         prefer_vertical: cfg.ocr.prefer_vertical,
-        capture: CaptureSize { w: cfg.ocr.capture_width, h: cfg.ocr.capture_height },
+        capture: CaptureSize {
+            w: cfg.ocr.capture_width,
+            h: cfg.ocr.capture_height,
+        },
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
         language: cfg.ocr.language.clone(),
         exclude_from_capture: cfg.popup.exclude_from_capture,
@@ -1813,10 +2543,25 @@ fn derive(cfg: &Config) -> LiveSettings {
         } else {
             cfg.anki.field_map.clone()
         },
+        sentence_mode: cfg.anki.sentence_mode.clone(),
+        static_region: cfg.anki.static_region.map(|a| PhysRect {
+            x: a[0], y: a[1], w: a[2], h: a[3],
+        }),
+        static_region_key: cfg.anki.static_region_key.clone(),
+        show_static_overlay: cfg.anki.show_static_overlay,
         trigger_mode: cfg.trigger.mode,
         trigger_key: cfg.trigger.trigger_key.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
+        notify_on_add: cfg.anki.notify_on_add,
         per_character_lookup: cfg.trigger.per_character_lookup,
+        actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
+        actions_ocr_clipboard_hotkey: cfg
+            .actions
+            .ocr_clipboard
+            .as_ref()
+            .and_then(|action| action.hotkey.clone()),
+        include_screenshot: cfg.actions.screenshot.include_on_add,
+        first_dict_only: cfg.anki.first_dict_only,
     }
 }
 
@@ -1831,6 +2576,8 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
         language: live.language.clone(),
         present_cfg: live.present_cfg.clone(),
         scan_display: live.scan_display,
+        sentence_mode: live.sentence_mode.clone(),
+        static_region: live.static_region,
         dicts: dicts.to_vec(),
     }
 }
@@ -1848,11 +2595,13 @@ fn capture_guard_needed(
 }
 
 /// Push settings to windows.
+#[allow(clippy::too_many_arguments)]
 fn apply_live(
     live: &LiveSettings,
     popup: &Popup,
     overlay: Option<&Overlay>,
     button: Option<&AnkiButton>,
+    sr_overlay: Option<&StaticRegionOverlay>,
     theme: &mut Theme,
     capture_guard_active: &AtomicBool,
 ) {
@@ -1867,6 +2616,18 @@ fn apply_live(
             b.hide();
         }
     }
+    if let Some(sr) = sr_overlay {
+        sr.set_capture_exclusion(live.exclude_from_capture);
+        if live.sentence_mode == "static" && live.show_static_overlay {
+            if let Some(region) = live.static_region {
+                if let Err(e) = sr.show(region) {
+                    eprintln!("chibipop: static overlay: {e:#}");
+                }
+            }
+        } else {
+            sr.hide();
+        }
+    }
     capture_guard_active.store(
         capture_guard_needed(
             popup.capture_exclusion(),
@@ -1876,6 +2637,8 @@ fn apply_live(
         Ordering::SeqCst,
     );
     *theme = theme_from_config(&live.popup);
+    let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+    popup.set_alpha(alpha);
     if live.show_lookup_log {
         crate::ui::console::show();
     } else {
@@ -1887,6 +2650,34 @@ fn apply_live(
     }
     if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
         Hooks::set_add_hotkey(vk);
+    }
+    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
+        Hooks::set_action_hotkey(0, vk, mods);
+    }
+    match crate::config::parse_trigger_key(&live.static_region_key) {
+        Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
+        None => Hooks::set_action_hotkey(1, 0, 0),
+    }
+    match live
+        .actions_ocr_clipboard_hotkey
+        .as_deref()
+        .and_then(crate::config::parse_trigger_key)
+    {
+        Some(vk) => Hooks::set_action_hotkey(2, vk, 0),
+        None => Hooks::set_action_hotkey(2, 0, 0),
+    }
+}
+
+/// Adds the action when a valid key exists.
+fn sync_ocr_clipboard_action(
+    registry: &mut crate::action::ActionRegistry,
+    hotkey: Option<&str>,
+) {
+    if hotkey.and_then(crate::config::parse_trigger_key).is_some() {
+        registry.register_at(
+            2,
+            Box::new(crate::action::ocr_clipboard::OcrClipboardAction),
+        );
     }
 }
 
@@ -1916,8 +2707,11 @@ fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
 }
 
 /// Some = substitute it.
-fn startup_language(configured: &str, fallback: &str, available: impl FnOnce() -> bool)
-    -> Option<String> {
+fn startup_language(
+    configured: &str,
+    fallback: &str,
+    available: impl FnOnce() -> bool,
+) -> Option<String> {
     if configured.eq_ignore_ascii_case(fallback) || available() {
         None
     } else {
@@ -1954,6 +2748,20 @@ fn resolve_dict_filter(
 mod tests {
     use super::*;
     use crate::config::PopupConfig;
+    #[test]
+    fn dupe_partition_uses_cached_results_and_deduplicates_refs() {
+        let cache = HashMap::from([
+            ("宿舎".to_string(), true),
+            ("駅".to_string(), false),
+        ]);
+        let (dupes, uncached, cached_any) = partition_dupes(
+            vec!["宿舎".into(), "宿舎".into(), "駅".into(), "猫".into()],
+            &cache,
+        );
+        assert_eq!(HashSet::from(["宿舎".to_string()]), dupes);
+        assert_eq!(vec!["猫".to_string()], uncached);
+        assert!(cached_any);
+    }
 
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
         PopupConfig {
@@ -1979,9 +2787,16 @@ mod tests {
 
     #[test]
     fn theme_selection_by_name_is_unaffected_by_the_font_field() {
-        assert_eq!(Theme::light().background, theme_from_config(&popup_config("light", "X")).background);
-        assert_eq!(Theme::dark().background, theme_from_config(&popup_config("anything-else", "X")).background);
+        assert_eq!(
+            Theme::light().background,
+            theme_from_config(&popup_config("light", "X")).background
+        );
+        assert_eq!(
+            Theme::dark().background,
+            theme_from_config(&popup_config("anything-else", "X")).background
+        );
     }
+
 
     #[test]
     fn derive_carries_every_popup_field() {
@@ -2049,6 +2864,19 @@ mod tests {
     }
 
     #[test]
+    fn derive_carries_the_ocr_clipboard_key() {
+        let mut cfg = Config::default();
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+            hotkey: Some("f9".to_string()),
+        });
+
+        assert_eq!(
+            Some("f9".to_string()),
+            derive(&cfg).actions_ocr_clipboard_hotkey
+        );
+    }
+
+    #[test]
     fn three_excluded_windows_leave_the_guard_disarmed() {
         assert!(!capture_guard_needed(
             CaptureExclusion::Excluded,
@@ -2087,7 +2915,11 @@ mod tests {
 
     #[test]
     fn a_window_that_was_never_created_cannot_need_the_guard() {
-        assert!(!capture_guard_needed(CaptureExclusion::Excluded, None, None));
+        assert!(!capture_guard_needed(
+            CaptureExclusion::Excluded,
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -2103,12 +2935,18 @@ mod tests {
         let mut cfg = Config::default();
         cfg.trigger.per_character_lookup = true;
         assert!(derive(&cfg).per_character_lookup);
-        assert!(!derive(&Config::default()).per_character_lookup, "must default off");
+        assert!(
+            !derive(&Config::default()).per_character_lookup,
+            "must default off"
+        );
     }
 
     #[test]
     fn a_startup_language_with_no_pack_falls_back_to_the_default() {
-        assert_eq!(Some("ja".to_string()), startup_language("ko", "ja", || false));
+        assert_eq!(
+            Some("ja".to_string()),
+            startup_language("ko", "ja", || false)
+        );
     }
 
     #[test]
@@ -2134,16 +2972,21 @@ mod tests {
         assert!(!asked);
     }
 
+
     fn di(id: i64, name: &str) -> crate::present::DictInfo {
-        crate::present::DictInfo { dict_id: id, name: name.to_string() }
+        crate::present::DictInfo {
+            dict_id: id,
+            name: name.to_string(),
+        }
     }
 
     #[test]
     fn the_active_language_selects_its_own_list() {
         let mut cfg = Config::default();
         cfg.ocr.language = "zh-Hans-CN".to_string();
-        cfg.dictionaries.per_language.insert(
-            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
         let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert_eq!(vec!["中日大辞典".to_string()], order);
@@ -2164,8 +3007,9 @@ mod tests {
     fn a_list_matching_nothing_installed_falls_back() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["Typoo".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["Typoo".to_string()]);
         let dicts = [di(1, "大辞林　第四版")];
         let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert!(!restrict, "all patterns missed, so do not restrict");
@@ -2176,8 +3020,9 @@ mod tests {
     fn a_substituted_recogniser_ignores_the_language_list() {
         let mut cfg = Config::default();
         cfg.ocr.language = "zh-Hans-CN".to_string();
-        cfg.dictionaries.per_language.insert(
-            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
         let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || false);
         assert_eq!(cfg.dictionaries.display_order, order);
@@ -2188,7 +3033,9 @@ mod tests {
     fn an_empty_list_does_not_restrict() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert("ja".to_string(), Vec::new());
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), Vec::new());
         let dicts = [di(1, "大辞林　第四版")];
         let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
         assert!(!restrict);
@@ -2226,7 +3073,9 @@ mod tests {
 
     fn dict_rows(db: &Path) -> Vec<(i64, String)> {
         let conn = rusqlite::Connection::open(db).unwrap();
-        let mut stmt = conn.prepare("SELECT dict_id, name FROM dict ORDER BY dict_id").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT dict_id, name FROM dict ORDER BY dict_id")
+            .unwrap();
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         rows.map(std::result::Result::unwrap).collect()
     }
@@ -2267,6 +3116,8 @@ mod tests {
         EditReport {
             added: added.iter().map(|s| (*s).to_string()).collect(),
             removed: removed.iter().map(|s| (*s).to_string()).collect(),
+            freq_added: Vec::new(),
+            freq_removed: Vec::new(),
             failed: failed.iter().map(|s| (*s).to_string()).collect(),
             dicts: Vec::new(),
         }
@@ -2278,12 +3129,16 @@ mod tests {
         let (dir, _guard) = edit_scratch("legacy_mode");
         let legacy = dir.join("legacy.sqlite");
         let conn = rusqlite::Connection::open(&legacy).unwrap();
-        conn.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE t(x);").unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE t(x);")
+            .unwrap();
         drop(conn);
 
         let err = open_writer(&legacy).expect_err("a delete-mode file must be refused");
         let msg = format!("{err:#}");
-        assert!(msg.contains("delete"), "the message must name the mode found: {msg}");
+        assert!(
+            msg.contains("delete"),
+            "the message must name the mode found: {msg}"
+        );
         assert!(msg.contains("WAL"), "the message must name WAL: {msg}");
     }
 
@@ -2301,14 +3156,20 @@ mod tests {
     fn the_writer_never_creates_a_missing_database() {
         let (dir, _guard) = edit_scratch("no_create");
         let missing = dir.join("absent.sqlite");
-        assert!(open_writer(&missing).is_err(), "a missing database must not open");
+        assert!(
+            open_writer(&missing).is_err(),
+            "a missing database must not open"
+        );
         assert!(!missing.exists(), "opening must not create the file");
     }
 
     /// Absolute ids read wrong.
     #[test]
     fn progress_counts_from_the_dictionary_being_added() {
-        assert_eq!("progress  4997 / ?", rebased("progress  365000 / ?", 360004));
+        assert_eq!(
+            "progress  4997 / ?",
+            rebased("progress  365000 / ?", 360004)
+        );
         assert_eq!(
             Some("4,997 entries\u{2026}".to_string()),
             crate::dict::progress::friendly(&rebased("progress  365000 / ?", 360004))
@@ -2322,54 +3183,108 @@ mod tests {
 
     #[test]
     fn a_line_that_is_not_progress_survives_rebasing() {
-        assert_eq!("building  creating index", rebased("building  creating index", 360004));
+        assert_eq!(
+            "building  creating index",
+            rebased("building  creating index", 360004)
+        );
         assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
     }
 
-    /// A freq zip has no dict row.
     #[test]
-    fn adding_a_frequency_archive_is_refused() {
-        let mut form = staged_form(&[(Path::new("freq.zip"), "JA Freq")], &[]);
-        form.freq_names = vec!["JA Freq".to_string()];
-        assert!(stages_frequency(&form, &[]));
-    }
-
-    #[test]
-    fn adding_a_term_dictionary_stays_incremental() {
-        let form = staged_form(&[(Path::new("terms.zip"), "FixtureTerms")], &[]);
-        assert!(!stages_frequency(&form, &[]));
-    }
-
-    #[test]
-    fn removing_a_row_the_database_never_had_is_refused() {
-        let form = staged_form(&[], &["JA Freq"]);
-        assert!(stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
-    }
-
-    #[test]
-    fn a_refused_frequency_change_names_the_builder_and_both_paths() {
-        let notice = frequency_notice(
-            Path::new(r"C:\a\library"),
-            Path::new(r"C:\a\data\chibipop.sqlite"),
+    fn a_mixed_frequency_apply_reapplies_in_place() {
+        let (dir, _guard) = edit_scratch("mixed_frequency");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        let mut form = settings::from_config(&Config::default(), &[]);
+        assert_eq!(
+            Some(crate::library::Kind::Frequency),
+            form.stage_add(&fixture("freq.zip"))
         );
-        assert!(notice.contains("Nothing was changed."), "{notice}");
-        assert!(notice.contains("\r\nchibipop build-dict"), "the command needs its own line");
-        assert!(notice.contains("--library \"C:\\a\\library\""), "{notice}");
-        assert!(notice.contains("--out \"C:\\a\\data\\chibipop.sqlite\""), "{notice}");
+        assert_eq!(
+            Some(crate::library::Kind::Term),
+            form.stage_add(&fixture("terms.zip"))
+        );
+        let (tx, rx) = mpsc::channel::<EditMsg>();
+        let report =
+            apply_edits_with_frequencies(&db, &library, &form, &tx).expect("the apply must work");
+
+        assert_eq!(vec!["FixtureTerms".to_string()], report.added);
+        assert_eq!(vec!["FixtureFreq".to_string()], report.freq_added);
+        assert!(report.removed.is_empty());
+        assert!(report.freq_removed.is_empty());
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(library.join("freq.zip").exists());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let freq: i64 = conn
+            .query_row("SELECT freq FROM term WHERE surface = ?1", ["食べる"], |r| r.get(0))
+            .unwrap();
+        assert_eq!(7, freq);
+        assert_eq!(None, drifted(&library, &db).unwrap());
+        assert!(rx.try_iter().any(|message| {
+            matches!(message, EditMsg::Status(text) if text == "Updating frequency rankings...")
+        }));
     }
 
     #[test]
-    fn removing_an_installed_dictionary_stays_incremental() {
-        let form = staged_form(&[], &["\u{5927}\u{8f9e}\u{6797}"]);
-        assert!(!stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+    fn a_frequency_removal_reapplies_nulls_in_place() {
+        let (dir, _guard) = edit_scratch("remove_frequency");
+        let library = dir.join("library");
+        let db = built_db(&dir, &library);
+        std::fs::copy(fixture("freq.zip"), library.join("freq.zip")).unwrap();
+        let lib = Library::load(&library).unwrap();
+        let mut form = settings::with_library(settings::from_config(&Config::default(), &[]), &lib);
+        form.stage_remove("FixtureFreq");
+
+        let (tx, rx) = mpsc::channel::<EditMsg>();
+        let report =
+            apply_edits_with_frequencies(&db, &library, &form, &tx).expect("the removal must work");
+
+        assert!(report.added.is_empty());
+        assert!(report.removed.is_empty());
+        assert_eq!(vec!["FixtureFreq".to_string()], report.freq_removed);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(!library.join("freq.zip").exists());
+        assert_eq!(1, report.dicts.len());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let ranked: i64 = conn
+            .query_row("SELECT COUNT(*) FROM term WHERE freq IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(0, ranked);
+        assert_eq!(None, drifted(&library, &db).unwrap());
+        assert!(rx.try_iter().any(|message| {
+            matches!(message, EditMsg::Status(text) if text == "Updating frequency rankings...")
+        }));
     }
 
-    /// A broken zip has no dict row.
     #[test]
-    fn removing_an_unreadable_file_stays_incremental() {
-        let mut form = staged_form(&[], &["broken.zip"]);
-        form.unreadable = vec!["broken.zip".to_string()];
-        assert!(!stages_frequency(&form, &[di(1, "\u{5927}\u{8f9e}\u{6797}")]));
+    fn a_term_only_form_does_not_mark_frequency_changes() {
+        let form = staged_form(&[(&fixture("terms.zip"), "FixtureTerms")], &[]);
+        assert!(!form.freq_changed);
+    }
+
+    #[test]
+    fn engine_status_names_a_running_plugin() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".into();
+        cfg.plugins.enabled = vec!["meikiocr".into()];
+        assert_eq!("Engine: meikiocr", engine_status_line(&cfg));
+    }
+
+    #[test]
+    fn engine_status_names_the_builtin() {
+        assert_eq!(
+            "Engine: Built-in (Windows OCR)",
+            engine_status_line(&Config::default())
+        );
+    }
+
+    #[test]
+    fn engine_status_names_a_missing_plugin() {
+        let mut cfg = Config::default();
+        cfg.ocr.engine = "meikiocr".into();
+        let s = engine_status_line(&cfg);
+        assert!(s.contains("meikiocr"), "{s}");
+        assert!(s.contains("not found"), "{s}");
     }
 
     #[test]
@@ -2411,14 +3326,23 @@ mod tests {
     #[test]
     fn the_status_names_what_failed_beside_what_worked() {
         let s = edit_status(&report_of(&["New"], &[], &["Bad: the zip is corrupt"]));
-        assert!(s.contains("New"), "the applied change must still be named: {s}");
+        assert!(
+            s.contains("New"),
+            "the applied change must still be named: {s}"
+        );
         assert!(s.contains("Bad"), "the failure must be named: {s}");
-        assert!(s.contains("the zip is corrupt"), "the reason must be named: {s}");
+        assert!(
+            s.contains("the zip is corrupt"),
+            "the reason must be named: {s}"
+        );
     }
 
     #[test]
     fn a_change_that_did_nothing_says_so() {
-        assert_eq!("No dictionary changed.", edit_status(&report_of(&[], &[], &[])));
+        assert_eq!(
+            "No dictionary changed.",
+            edit_status(&report_of(&[], &[], &[]))
+        );
     }
 
     /// The release's whole point.
@@ -2438,7 +3362,11 @@ mod tests {
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(2, report.dicts.len(), "{:?}", report.dicts);
         assert_eq!(2, dict_rows(&db).len());
-        assert_eq!(before * 2, entry_count(&db), "every entry must be kept and doubled");
+        assert_eq!(
+            before * 2,
+            entry_count(&db),
+            "every entry must be kept and doubled"
+        );
         assert!(
             rx.try_iter().any(|m| matches!(m, EditMsg::Status(_))),
             "the edit must report progress"
@@ -2471,29 +3399,45 @@ mod tests {
         assert_eq!(vec!["extra.zip".to_string()], report.removed);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(1, dict_rows(&db).len());
-        assert_eq!(kept, entry_count(&db), "the other dictionary must be untouched");
-        assert!(!library.join("extra.zip").exists(), "the archive must be gone");
-        assert!(!library.join(".removed").exists(), "nothing may stay quarantined");
+        assert_eq!(
+            kept,
+            entry_count(&db),
+            "the other dictionary must be untouched"
+        );
+        assert!(
+            !library.join("extra.zip").exists(),
+            "the archive must be gone"
+        );
+        assert!(
+            !library.join(".removed").exists(),
+            "nothing may stay quarantined"
+        );
         assert_eq!(1, report.dicts.len());
     }
 
-    /// Task 4's guard, from here.
     #[test]
-    fn a_refused_addition_leaves_no_trace_in_the_library() {
-        let (dir, _guard) = edit_scratch("refused_add");
+    fn a_frequency_addition_stays_out_of_dictionary_rows() {
+        let (dir, _guard) = edit_scratch("add_frequency");
         let library = dir.join("library");
         let db = built_db(&dir, &library);
         let before = entry_count(&db);
-        let form = staged_form(&[(&fixture("freq.zip"), "FixtureFreq")], &[]);
+        let mut form = settings::from_config(&Config::default(), &[]);
+        assert_eq!(
+            Some(crate::library::Kind::Frequency),
+            form.stage_add(&fixture("freq.zip"))
+        );
 
         let (tx, _rx) = mpsc::channel::<EditMsg>();
-        let report = apply_edits(&db, &library, &form, &tx).expect("the apply must report");
+        let report = apply_edits_with_frequencies(&db, &library, &form, &tx)
+            .expect("the frequency apply must work");
 
         assert!(report.added.is_empty(), "{:?}", report.added);
-        assert_eq!(1, report.failed.len(), "{:?}", report.failed);
-        assert!(!library.join("freq.zip").exists(), "the imported copy must be removed");
+        assert_eq!(vec!["FixtureFreq".to_string()], report.freq_added);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(library.join("freq.zip").exists());
         assert_eq!(before, entry_count(&db));
         assert_eq!(1, dict_rows(&db).len());
+        assert_eq!(None, drifted(&library, &db).unwrap());
     }
 
     /// Refuse before it moves.
@@ -2522,6 +3466,7 @@ mod tests {
     }
 
 
+
     /// Never the last dictionary.
     #[test]
     fn an_apply_that_would_empty_the_library_is_refused() {
@@ -2545,8 +3490,13 @@ mod tests {
         let library = dir.join("library");
         let db = built_db(&dir, &library);
 
-        let raw = read_source_hashes(&db).unwrap().expect("build-dict records what it read");
-        assert!(raw.contains(r#""name": "terms.zip""#), "json.dumps spacing: {raw}");
+        let raw = read_source_hashes(&db)
+            .unwrap()
+            .expect("build-dict records what it read");
+        assert!(
+            raw.contains(r#""name": "terms.zip""#),
+            "json.dumps spacing: {raw}"
+        );
         assert_eq!(None, drifted(&library, &db).unwrap(), "the two agree");
     }
 
@@ -2558,7 +3508,9 @@ mod tests {
         let db = built_db(&dir, &library);
         std::fs::copy(fixture("freq.zip"), library.join("freq.zip")).unwrap();
 
-        let text = drifted(&library, &db).unwrap().expect("a dropped-in archive is drift");
+        let text = drifted(&library, &db)
+            .unwrap()
+            .expect("a dropped-in archive is drift");
 
         assert!(text.contains("freq.zip"), "{text}");
         assert!(text.contains("chibipop build-dict --library"), "{text}");

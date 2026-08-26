@@ -134,6 +134,10 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
             captures: config.debug.show_scan_region,
             highlight: config.popup.highlight_match,
         },
+        sentence_mode: config.anki.sentence_mode.clone(),
+        // The static-region overlay is a Windows surface; on Linux a
+        // "static" mode falls through to line mode with a warning.
+        static_region: None,
         dicts: dicts.to_vec(),
     }
 }
@@ -182,6 +186,7 @@ pub fn spawn(
                 // daemon outlives its rebuilds and never restarts.
                 reopen_dict: Some(Box::new(move || open_dict(&reopen_db))),
                 engine: LookupEngine::new(deconjugator()),
+                serve: None,
             })
         },
         move || ping.ping(),

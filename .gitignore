@@ -18,3 +18,8 @@ __pycache__/
 /docs/adr/
 /docs/agents/
 /.scratch/
+# Local-only scripts.
+/scripts/
+
+# Project memory - local only.
+/MEMORY.md

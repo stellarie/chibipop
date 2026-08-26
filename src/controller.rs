@@ -167,6 +167,9 @@ pub struct ControllerConfig {
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
     pub anki_enabled: bool,
+    /// Send only the first dictionary's glossary block to Anki
+    /// (upstream 0.9.x "first dict only").
+    pub first_dict_only: bool,
     pub summary_chars: usize,
     pub log_lookups: bool,
     /// The bin's dispatch tick, ms.
@@ -271,6 +274,8 @@ struct Surface {
 /// What the bin may read back.
 pub struct PopupView<'a> {
     pub popup: PhysRect,
+    /// The hovered glyph's box, for actions that gate on it.
+    pub anchor: PhysRect,
     pub scroll: i32,
     pub content_h: i32,
     pub view_h: i32,
@@ -332,6 +337,7 @@ impl Controller {
         let p = s.placed.as_ref()?;
         Some(PopupView {
             popup: p.popup,
+            anchor: s.anchor,
             scroll: s.scroll,
             content_h: p.content_h,
             view_h: p.view_h,
@@ -497,7 +503,15 @@ impl Controller {
             .or(card.reading.as_deref())
             .unwrap_or("")
             .to_string();
-        let fields = crate::anki::fields_from_card(card, &card.blocks);
+        let blocks_to_send = if self.cfg.first_dict_only {
+            &card.blocks[..1.min(card.blocks.len())]
+        } else {
+            &card.blocks[..]
+        };
+        let mut fields = crate::anki::fields_from_card(card, blocks_to_send);
+        if let Some(sentence) = &s.presentation.sentence {
+            fields.insert("sentence".to_string(), sentence.clone());
+        }
         if s.anki.adding || s.anki.added.contains(&expr) {
             return Vec::new();
         }
@@ -892,6 +906,7 @@ mod tests {
             per_character_lookup: false,
             scroll_popup: true,
             anki_enabled: false,
+            first_dict_only: false,
             summary_chars: 60,
             log_lookups: false,
             tick_ms: 20,
@@ -914,6 +929,7 @@ mod tests {
             top: Some(card(written)),
             collapsed: Vec::new(),
             all_cards: Vec::new(),
+            sentence: None,
         }
     }
 

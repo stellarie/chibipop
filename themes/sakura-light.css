@@ -1,0 +1,76 @@
+/* chibipop popup theme */
+/* Sakura Light — pink accents on clean white. */
+/* Best on: light base theme. */
+
+/* Panel background, border, shape */
+.popup {
+  background-color: #faf6f8;
+  border-color: #e0c8d0;
+  border-radius: 12px;
+  border-width: 1px;
+  padding: 12px;
+  font-family: "Noto Sans JP";
+  opacity: 0.95;
+}
+
+/* Main word */
+.headword {
+  color: #2a1420;
+  font-size: 20px;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Kana reading */
+.reading {
+  color: #804060;
+  font-size: 15px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Definition text */
+.body {
+  color: #3a2030;
+  font-size: 15px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Dictionary name label */
+.dict-label {
+  color: #c06088;
+  font-size: 13px;
+  font-weight: bold;
+  font-style: normal;
+}
+
+/* Frequency badge */
+.frequency {
+  color: #a08898;
+  font-size: 12px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Other results (collapsed) */
+.collapsed {
+  color: #705060;
+  font-size: 13px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Frequency, POS tags */
+.dimmed {
+  color: #a090a0;
+  font-size: 13px;
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Horizontal rule */
+.separator {
+  color: #e0c8d0;
+  height: 1px;
+}

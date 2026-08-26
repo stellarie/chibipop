@@ -1,5 +1,6 @@
 //! Editing a live database.
 
+use crate::dict::frequency::lookup_freq;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -83,8 +84,72 @@ pub fn add_dictionary(
     })
 }
 
+/// Updates every term rank.
+pub fn reapply_frequencies(
+    conn: &mut Connection,
+    freqs: &[PathBuf],
+    on_progress: &dyn Fn(&str),
+) -> Result<u64> {
+    let table = crate::dict::build::load_freqs(freqs)?;
+    let tx = conn
+        .transaction()
+        .context("opening the frequency update transaction")?;
+
+    if table.is_empty() {
+        let changed = tx
+            .execute("UPDATE term SET freq = NULL WHERE freq IS NOT NULL", [])
+            .context("clearing term frequencies")?;
+        let changed = u64::try_from(changed).context("frequency update count overflowed")?;
+        refresh_stats(&tx)?;
+        tx.commit().context("committing frequency updates")?;
+        return Ok(changed);
+    }
+
+    let rows: Vec<(i64, String, Option<String>, Option<String>)> = {
+        let mut query = tx
+            .prepare("SELECT rowid, surface, written, reading FROM term")
+            .context("preparing the term frequency query")?;
+        let mapped = query
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
+            })
+            .context("querying term frequencies")?;
+        mapped
+            .collect::<rusqlite::Result<_>>()
+            .context("reading term frequencies")?
+    };
+    let mut update = tx
+        .prepare("UPDATE term SET freq = ?1 WHERE rowid = ?2")
+        .context("preparing the frequency update")?;
+    let mut processed = 0_u64;
+
+    for (rowid, surface, written, reading) in rows {
+        let term = written.as_deref().unwrap_or(&surface);
+        let rank = lookup_freq(&table, term, reading.as_deref());
+        update
+            .execute(params![rank, rowid])
+            .with_context(|| format!("updating term row {rowid}"))?;
+        processed = processed
+            .checked_add(1)
+            .context("frequency update count overflowed")?;
+        if processed.is_multiple_of(1000) {
+            on_progress(&format!("Updated {processed} frequency rows…"));
+        }
+    }
+
+    drop(update);
+    refresh_stats(&tx)?;
+    tx.commit().context("committing frequency updates")?;
+    Ok(processed)
+}
+
 /// Adds one archive to meta.
-fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
+pub fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
     let record = serde_json::to_value(crate::dict::build::source_hash(archive)?)
         .context("encoding the source record")?;
     let raw: Option<String> = conn
@@ -145,7 +210,7 @@ fn delete_rows(conn: &Connection, table: &str, dict_id: i64) -> Result<usize> {
 }
 
 /// Drops one archive from meta.
-fn forget_source(conn: &Connection, archive: &Path) -> Result<usize> {
+pub fn forget_source(conn: &Connection, archive: &Path) -> Result<usize> {
     let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let raw: Option<String> = conn
         .query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
@@ -185,15 +250,57 @@ mod tests {
     }
 
     fn fixture_db(test_name: &str) -> (Connection, TempDbGuard) {
+        let freqs = [fixture("freq.zip")];
+        fixture_db_with_freqs(test_name, &freqs)
+    }
+
+    fn fixture_db_with_freqs(
+        test_name: &str,
+        freqs: &[PathBuf],
+    ) -> (Connection, TempDbGuard) {
         let dir = std::env::temp_dir().join("chibipop_edit_test");
         let _ = std::fs::create_dir_all(&dir);
         let out = dir.join(format!("t_{}_{test_name}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let guard = TempDbGuard(out.clone());
         let terms = [fixture("terms.zip")];
-        let freqs = [fixture("freq.zip")];
-        crate::dict::build::build(&terms, &freqs, &out, &|_| {}).unwrap();
+        crate::dict::build::build(&terms, freqs, &out, &|_| {}).unwrap();
         (Connection::open(&out).unwrap(), guard)
+    }
+
+    #[test]
+    fn reapply_frequencies_updates_all_terms() {
+        let (mut conn, _guard) = fixture_db_with_freqs("reapply_updates", &[]);
+        let freqs = [fixture("freq.zip")];
+
+        let count = reapply_frequencies(&mut conn, &freqs, &|_| {}).unwrap();
+
+        assert_eq!(5, count);
+        let freq: i64 = conn
+            .query_row("SELECT freq FROM term WHERE surface = ?1", ["食べる"], |r| r.get(0))
+            .unwrap();
+        assert_eq!(7, freq);
+    }
+
+    #[test]
+    fn reapply_frequencies_with_empty_list_nulls_everything() {
+        let (mut conn, _guard) = fixture_db("reapply_clears");
+
+        reapply_frequencies(&mut conn, &[], &|_| {}).unwrap();
+
+        let ranked: i64 = conn
+            .query_row("SELECT COUNT(*) FROM term WHERE freq IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(0, ranked);
+    }
+
+    #[test]
+    fn reapply_frequencies_on_empty_db_is_a_no_op() {
+        let (mut conn, _guard) = fixture_db("reapply_empty");
+        conn.execute("DELETE FROM term", []).unwrap();
+        let freqs = [fixture("freq.zip")];
+
+        assert_eq!(0, reapply_frequencies(&mut conn, &freqs, &|_| {}).unwrap());
     }
 
     fn add_dict(conn: &Connection, dict_id: i64) {

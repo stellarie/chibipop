@@ -62,6 +62,48 @@ static ANKI_ADD_ARMED: AtomicBool = AtomicBool::new(false);
 /// One hotkey press, banked.
 static PENDING_ADD: AtomicBool = AtomicBool::new(false);
 
+/// Action hotkey slot count.
+pub const MAX_ACTION_SLOTS: usize = 8;
+
+/// Action hotkey vkcodes.
+static ACTION_VK: [AtomicU16; MAX_ACTION_SLOTS] = [
+    AtomicU16::new(0),
+    AtomicU16::new(0),
+    AtomicU16::new(0),
+    AtomicU16::new(0),
+    AtomicU16::new(0),
+    AtomicU16::new(0),
+    AtomicU16::new(0),
+    AtomicU16::new(0),
+];
+
+/// Action hotkey modifiers.
+static ACTION_MODS: [AtomicU8; MAX_ACTION_SLOTS] = [
+    AtomicU8::new(0),
+    AtomicU8::new(0),
+    AtomicU8::new(0),
+    AtomicU8::new(0),
+    AtomicU8::new(0),
+    AtomicU8::new(0),
+    AtomicU8::new(0),
+    AtomicU8::new(0),
+];
+
+/// One action press per slot.
+static PENDING_ACTION: [AtomicBool; MAX_ACTION_SLOTS] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
+
+/// True during region select.
+static SELECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Set when history is non-empty.
 static BACK_ARMED: AtomicBool = AtomicBool::new(false);
 
@@ -116,6 +158,48 @@ fn add_hotkey_hit(down: bool, vk: u16) -> bool {
         && ANKI_ADD_ARMED.load(Ordering::SeqCst)
 }
 
+/// Live Ctrl/Shift/Alt bitmask.
+fn current_modifiers() -> u8 {
+    let mut m = 0u8;
+    // SAFETY: no preconditions.
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        if (GetAsyncKeyState(0x11) as u16 & 0x8000) != 0 {
+            m |= crate::config::MOD_CTRL;
+        }
+        if (GetAsyncKeyState(0x10) as u16 & 0x8000) != 0 {
+            m |= crate::config::MOD_SHIFT;
+        }
+        if (GetAsyncKeyState(0x12) as u16 & 0x8000) != 0 {
+            m |= crate::config::MOD_ALT;
+        }
+    }
+    m
+}
+
+/// Fires when vk+mods match.
+fn action_hotkey_hit(down: bool, vk: u16, mods: u8) -> bool {
+    if !down {
+        return false;
+    }
+    for i in 0..MAX_ACTION_SLOTS {
+        let want_vk = ACTION_VK[i].load(Ordering::SeqCst);
+        if want_vk == 0 {
+            continue;
+        }
+        if vk == want_vk && mods == ACTION_MODS[i].load(Ordering::SeqCst) {
+            PENDING_ACTION[i].store(true, Ordering::SeqCst);
+            return true;
+        }
+    }
+    false
+}
+
+/// Region select in progress?
+fn selection_active() -> bool {
+    SELECTION_ACTIVE.load(Ordering::SeqCst)
+}
+
 /// Does this event match the key?
 fn matches_trigger(vk: u16, target: u16) -> bool {
     if vk == target {
@@ -139,6 +223,9 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     let p = PhysPoint { x: data.pt.x, y: data.pt.y };
 
+    if selection_active() {
+        return;
+    }
     if !mode_currently_eligible() {
         return;
     }
@@ -169,6 +256,7 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     if add_hotkey_hit(down, vk) {
         PENDING_ADD.store(true, Ordering::SeqCst);
     }
+    action_hotkey_hit(down, vk, current_modifiers());
     if down && vk == VK_ESCAPE && BACK_ARMED.load(Ordering::SeqCst) {
         PENDING_BACK.store(true, Ordering::SeqCst);
     }
@@ -412,6 +500,28 @@ impl Hooks {
         }
         open
     }
+
+    /// Sets an action hotkey slot.
+    pub fn set_action_hotkey(slot: usize, vk: u16, modifiers: u8) {
+        if slot < MAX_ACTION_SLOTS {
+            ACTION_VK[slot].store(vk, Ordering::SeqCst);
+            ACTION_MODS[slot].store(modifiers, Ordering::SeqCst);
+        }
+    }
+
+    /// Takes slot's pending fire.
+    pub fn take_action_hotkey(slot: usize) -> bool {
+        if slot < MAX_ACTION_SLOTS {
+            PENDING_ACTION[slot].swap(false, Ordering::SeqCst)
+        } else {
+            false
+        }
+    }
+
+    /// Sets the selection flag.
+    pub fn set_selection_active(active: bool) {
+        SELECTION_ACTIVE.store(active, Ordering::SeqCst);
+    }
 }
 
 impl Drop for Hooks {
@@ -645,6 +755,56 @@ mod tests {
 
         assert!(!Hooks::take_add_hotkey(), "a different key must not arm it");
         Hooks::set_add_armed(false);
+    }
+
+    #[test]
+    fn action_hotkey_fires_on_matching_key_and_mods() {
+        let _g = add_hotkey_guard();
+        Hooks::set_action_hotkey(0, 0x53, 0b011);
+        let _ = Hooks::take_action_hotkey(0);
+        assert!(action_hotkey_hit(true, 0x53, 0b011));
+        assert!(Hooks::take_action_hotkey(0));
+    }
+
+    #[test]
+    fn action_hotkey_ignores_wrong_modifiers() {
+        let _g = add_hotkey_guard();
+        Hooks::set_action_hotkey(0, 0x53, 0b011);
+        let _ = Hooks::take_action_hotkey(0);
+        assert!(!action_hotkey_hit(true, 0x53, 0b001));
+        assert!(!Hooks::take_action_hotkey(0));
+    }
+
+    #[test]
+    fn action_hotkey_ignores_wrong_key() {
+        let _g = add_hotkey_guard();
+        Hooks::set_action_hotkey(0, 0x53, 0b011);
+        let _ = Hooks::take_action_hotkey(0);
+        assert!(!action_hotkey_hit(true, 0x41, 0b011));
+        assert!(!Hooks::take_action_hotkey(0));
+    }
+
+    #[test]
+    fn action_hotkey_take_is_one_shot() {
+        let _g = add_hotkey_guard();
+        Hooks::set_action_hotkey(0, 0x53, 0);
+        let _ = Hooks::take_action_hotkey(0);
+        PENDING_ACTION[0].store(true, Ordering::SeqCst);
+        assert!(Hooks::take_action_hotkey(0));
+        assert!(!Hooks::take_action_hotkey(0));
+    }
+
+    #[test]
+    fn action_hotkey_out_of_bounds_returns_false() {
+        assert!(!Hooks::take_action_hotkey(99));
+    }
+
+    #[test]
+    fn selection_active_suppresses_mouse_moves() {
+        Hooks::set_selection_active(true);
+        assert!(selection_active());
+        Hooks::set_selection_active(false);
+        assert!(!selection_active());
     }
 
     // ---- back (Escape) ----

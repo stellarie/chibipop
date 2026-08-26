@@ -30,11 +30,15 @@ pub struct Config {
     pub popup: PopupConfig,
     pub dictionaries: DictionariesConfig,
     #[serde(default)]
+    pub plugins: PluginsConfig,
+    #[serde(default)]
     pub ocr: OcrConfig,
     #[serde(default)]
     pub debug: DebugConfig,
     #[serde(default)]
     pub anki: AnkiConfig,
+    #[serde(default)]
+    pub actions: ActionsConfig,
 }
 
 /// `[trigger]`.
@@ -289,6 +293,14 @@ pub struct DictionariesConfig {
     pub per_language: BTreeMap<String, Vec<String>>,
 }
 
+/// `[plugins]`, optional.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PluginsConfig {
+    /// Plugin names allowed to run.
+    #[serde(default)]
+    pub enabled: Vec<String>,
+}
+
 /// `[ocr]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrConfig {
@@ -312,6 +324,9 @@ pub struct OcrConfig {
     /// OCR recogniser language tag.
     #[serde(default = "default_ocr_language")]
     pub language: String,
+    /// "builtin" or a plugin's name.
+    #[serde(default = "default_ocr_engine")]
+    pub engine: String,
 }
 
 /// 1: tiling is off by default.
@@ -331,6 +346,10 @@ fn default_scan_alphanumeric() -> bool {
     true
 }
 
+fn default_ocr_engine() -> String {
+    "builtin".to_string()
+}
+
 impl Default for OcrConfig {
     fn default() -> OcrConfig {
         OcrConfig {
@@ -340,6 +359,7 @@ impl Default for OcrConfig {
             capture_height: default_capture_height(),
             scan_alphanumeric: default_scan_alphanumeric(),
             language: default_ocr_language(),
+            engine: default_ocr_engine(),
         }
     }
 }
@@ -355,6 +375,29 @@ impl OcrConfig {
     }
 }
 
+/// A resolved OCR engine choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineChoice {
+    /// The Windows built-in engine.
+    Builtin,
+    /// An enabled plugin, by name.
+    Plugin(String),
+    /// Named, but not enabled/found.
+    FellBack(String),
+}
+
+/// Picks the engine from config.
+pub fn resolve_engine(engine: &str, enabled: &[String]) -> EngineChoice {
+    if engine == "builtin" {
+        return EngineChoice::Builtin;
+    }
+    if enabled.iter().any(|e| e == engine) {
+        EngineChoice::Plugin(engine.to_string())
+    } else {
+        EngineChoice::FellBack(engine.to_string())
+    }
+}
+
 /// `[debug]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
@@ -366,6 +409,12 @@ pub struct DebugConfig {
     /// A console of each hover.
     #[serde(default)]
     pub show_lookup_log: bool,
+    /// Name the active engine.
+    #[serde(default)]
+    pub show_engine_log: bool,
+    /// Show the adapter's log.
+    #[serde(default)]
+    pub show_adapter_log: bool,
 }
 
 /// Maps one field to Anki.
@@ -392,9 +441,27 @@ pub struct AnkiConfig {
     /// Same shortcut on Linux, in portal syntax.
     #[serde(default = "default_anki_add_key_linux")]
     pub add_key_linux: String,
+    /// Tray balloon on add.
+    #[serde(default = "default_notify_on_add")]
+    pub notify_on_add: bool,
     /// Which fields go where.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
+    /// "line", "all", or "static".
+    #[serde(default = "default_sentence_mode")]
+    pub sentence_mode: String,
+    /// Set the static region.
+    #[serde(default = "default_static_region_key")]
+    pub static_region_key: String,
+    /// [x, y, w, h] if set.
+    #[serde(default)]
+    pub static_region: Option<[i32; 4]>,
+    /// Teal border visible.
+    #[serde(default = "default_show_static_overlay")]
+    pub show_static_overlay: bool,
+    /// Only the top dict's entry.
+    #[serde(default)]
+    pub first_dict_only: bool,
 }
 
 /// Default Anki URL.
@@ -423,6 +490,26 @@ fn default_anki_add_key_linux() -> String {
     "ALT+A".to_string()
 }
 
+/// On by default.
+fn default_notify_on_add() -> bool {
+    true
+}
+
+/// Default sentence mode.
+fn default_sentence_mode() -> String {
+    "line".to_string()
+}
+
+/// Default static region key.
+fn default_static_region_key() -> String {
+    String::new()
+}
+
+/// Overlay on by default.
+fn default_show_static_overlay() -> bool {
+    true
+}
+
 /// The Lapis field mapping.
 fn default_field_map() -> Vec<FieldMapping> {
     vec![
@@ -443,9 +530,105 @@ impl Default for AnkiConfig {
             model: default_anki_model(),
             add_key: default_anki_add_key(),
             add_key_linux: default_anki_add_key_linux(),
+            notify_on_add: default_notify_on_add(),
             field_map: default_field_map(),
+            sentence_mode: default_sentence_mode(),
+            static_region_key: default_static_region_key(),
+            static_region: None,
+            show_static_overlay: default_show_static_overlay(),
+            first_dict_only: false,
         }
     }
+}
+
+/// Ctrl modifier bit.
+pub const MOD_CTRL: u8 = 0b001;
+/// Shift modifier bit.
+pub const MOD_SHIFT: u8 = 0b010;
+/// Alt modifier bit.
+pub const MOD_ALT: u8 = 0b100;
+
+/// `[actions]` section.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionsConfig {
+    #[serde(default = "default_actions_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub screenshot: ScreenshotConfig,
+    #[serde(default)]
+    pub ocr_clipboard: Option<OcrClipboardConfig>,
+}
+
+/// `[actions.screenshot]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenshotConfig {
+    #[serde(default = "default_screenshot_hotkey")]
+    pub hotkey: String,
+    #[serde(default = "default_screenshot_save_dir")]
+    pub save_dir: String,
+    #[serde(default)]
+    pub include_on_add: bool,
+}
+
+/// `[actions.ocr_clipboard]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct OcrClipboardConfig {
+    /// Empty or absent disables the action.
+    #[serde(default)]
+    pub hotkey: Option<String>,
+}
+
+/// On by default.
+fn default_actions_enabled() -> bool {
+    true
+}
+
+/// Default screenshot hotkey.
+fn default_screenshot_hotkey() -> String {
+    "ctrl+shift+s".to_string()
+}
+
+/// Default save folder.
+fn default_screenshot_save_dir() -> String {
+    "screenshots".to_string()
+}
+
+
+impl Default for ActionsConfig {
+    fn default() -> ActionsConfig {
+        ActionsConfig {
+            enabled: default_actions_enabled(),
+            screenshot: ScreenshotConfig::default(),
+            ocr_clipboard: None,
+        }
+    }
+}
+
+impl Default for ScreenshotConfig {
+    fn default() -> ScreenshotConfig {
+        ScreenshotConfig {
+            hotkey: default_screenshot_hotkey(),
+            save_dir: default_screenshot_save_dir(),
+            include_on_add: false,
+        }
+    }
+}
+
+/// VK + mods, from a string.
+pub fn parse_hotkey(s: &str) -> Option<(u16, u8)> {
+    let parts: Vec<&str> = s.split('+').collect();
+    let (key, mod_parts) = parts.split_last()?;
+    let mut mods = 0u8;
+    for part in mod_parts {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods |= MOD_CTRL,
+            "shift" => mods |= MOD_SHIFT,
+            "alt" => mods |= MOD_ALT,
+            _ => return None,
+        }
+    }
+    let vk = parse_trigger_key(key)?;
+    Some((vk, mods))
 }
 
 impl Default for Config {
@@ -474,9 +657,11 @@ impl Default for Config {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
                 per_language: BTreeMap::new(),
             },
+            plugins: PluginsConfig::default(),
             ocr: OcrConfig::default(),
             debug: DebugConfig::default(),
             anki: AnkiConfig::default(),
+            actions: ActionsConfig::default(),
         }
     }
 }
@@ -1015,6 +1200,127 @@ mod tests {
     #[test]
     fn anki_add_key_defaults_to_a() {
         assert_eq!("a", Config::default().anki.add_key);
+    }
+
+    #[test]
+    fn notify_on_add_defaults_to_true() {
+        assert!(Config::default().anki.notify_on_add);
+    }
+
+    #[test]
+    fn sentence_mode_defaults_to_line() {
+        assert_eq!("line", Config::default().anki.sentence_mode);
+    }
+
+    #[test]
+    fn static_region_key_defaults_to_empty() {
+        assert_eq!("", Config::default().anki.static_region_key);
+    }
+
+    #[test]
+    fn show_static_overlay_defaults_to_true() {
+        assert!(Config::default().anki.show_static_overlay);
+    }
+
+    #[test]
+    fn first_dict_only_defaults_to_false() {
+        assert!(!Config::default().anki.first_dict_only);
+    }
+
+    #[test]
+    fn first_dict_only_round_trips() {
+        let p = tmp("first_dict_only_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.first_dict_only = true;
+        c.save(&p).unwrap();
+        assert!(load_or_create(&p).unwrap().anki.first_dict_only);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The bare-serde-default trap.
+    #[test]
+    fn an_anki_section_without_first_dict_only_still_defaults_off() {
+        let p = tmp("anki_no_first_dict_only");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nenabled = true\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-first_dict_only config must load");
+        assert!(!c.anki.first_dict_only, "a missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn static_region_defaults_to_none() {
+        assert_eq!(None, Config::default().anki.static_region);
+    }
+
+    #[test]
+    fn static_region_round_trips() {
+        let p = tmp("static_region_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.static_region = Some([100, 800, 1200, 200]);
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(Some([100, 800, 1200, 200]), back.anki.static_region);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn static_region_key_round_trips() {
+        let p = tmp("static_key_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.static_region_key = "alt+r".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!("alt+r", back.anki.static_region_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn static_region_key_empty_survives_round_trip() {
+        let p = tmp("static_key_empty_rt");
+        let _ = std::fs::remove_file(&p);
+        let c = Config::default();
+        c.save(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("static_region_key = \"\""));
+        assert!(!text.contains("static_region_key = \"r\""));
+        assert_eq!("", load_or_create(&p).unwrap().anki.static_region_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_config_with_static_region_key_r_still_loads() {
+        let p = tmp("static_key_legacy");
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nstatic_region_key = \"r\"\n",
+        )).unwrap();
+        assert_eq!("r", load_or_create(&p).unwrap().anki.static_region_key);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn sentence_mode_static_round_trips() {
+        let p = tmp("sentence_static_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.sentence_mode = "static".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!("static", back.anki.sentence_mode);
+        let _ = std::fs::remove_file(&p);
     }
 
     /// Guards the shipped default.
@@ -1590,5 +1896,198 @@ mod tests {
         let ocr = OcrConfig { language: "en".to_string(), ..OcrConfig::default() };
         assert_eq!(Some("en"), ocr.unsupported_language());
         assert_eq!("en", ocr.language, "the value itself is untouched");
+    }
+
+    // ---- plugin engine ----
+
+    #[test]
+    fn builtin_is_the_default_engine() {
+        let c = Config::default();
+        assert_eq!(c.ocr.engine, "builtin");
+    }
+
+    #[test]
+    fn an_engine_naming_a_plugin_that_is_not_enabled_falls_back() {
+        let chosen = resolve_engine("manga-ocr", &["meikiocr".to_string()]);
+        assert_eq!(chosen, EngineChoice::FellBack("manga-ocr".into()));
+    }
+
+    #[test]
+    fn an_enabled_plugin_is_chosen() {
+        let chosen = resolve_engine("meikiocr", &["meikiocr".to_string()]);
+        assert_eq!(chosen, EngineChoice::Plugin("meikiocr".into()));
+    }
+
+    /// Builtin never needs the list.
+    #[test]
+    fn builtin_wins_even_with_plugins_enabled() {
+        let chosen = resolve_engine("builtin", &["meikiocr".to_string()]);
+        assert_eq!(chosen, EngineChoice::Builtin);
+    }
+
+    #[test]
+    fn an_unknown_engine_falls_back_with_no_plugins_enabled() {
+        let chosen = resolve_engine("meikiocr", &[]);
+        assert_eq!(chosen, EngineChoice::FellBack("meikiocr".into()));
+    }
+
+    #[test]
+    fn plugins_enabled_defaults_to_empty() {
+        assert!(Config::default().plugins.enabled.is_empty());
+    }
+
+    #[test]
+    fn plugins_enabled_round_trips() {
+        let p = tmp("plugins_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.plugins.enabled = vec!["meikiocr".to_string()];
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(vec!["meikiocr".to_string()], back.plugins.enabled);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A missing section must load.
+    #[test]
+    fn a_config_without_plugins_section_still_loads() {
+        let p = tmp("no_plugins_section");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\", \"Jitendex\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-plugins config must load");
+        assert!(c.plugins.enabled.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn ocr_engine_round_trips() {
+        let p = tmp("engine_rt");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.ocr.engine = "meikiocr".to_string();
+        c.save(&p).unwrap();
+        assert_eq!("meikiocr", load_or_create(&p).unwrap().ocr.engine);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The bare-serde-default trap.
+    #[test]
+    fn an_ocr_section_without_engine_still_defaults_to_builtin() {
+        let p = tmp("ocr_no_engine");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[ocr]\nmax_ocr_passes = 1\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-engine config must load");
+        assert_eq!("builtin", c.ocr.engine, "a missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn parse_hotkey_single_key() {
+        let (vk, mods) = parse_hotkey("a").unwrap();
+        assert_eq!(0x41, vk);
+        assert_eq!(0, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_ctrl_shift_s() {
+        let (vk, mods) = parse_hotkey("ctrl+shift+s").unwrap();
+        assert_eq!(0x53, vk);
+        assert_eq!(0b011, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_alt_f10() {
+        let (vk, mods) = parse_hotkey("alt+f10").unwrap();
+        assert_eq!(0x79, vk);
+        assert_eq!(0b100, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_case_insensitive() {
+        let (vk, mods) = parse_hotkey("Ctrl+Shift+S").unwrap();
+        assert_eq!(0x53, vk);
+        assert_eq!(0b011, mods);
+    }
+
+    #[test]
+    fn parse_hotkey_garbage() {
+        assert!(parse_hotkey("garbage+garbage").is_none());
+    }
+
+    #[test]
+    fn parse_hotkey_empty() {
+        assert!(parse_hotkey("").is_none());
+    }
+
+    #[test]
+    fn actions_config_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.actions.enabled);
+        assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
+        assert_eq!("screenshots", cfg.actions.screenshot.save_dir);
+        assert_eq!(None, cfg.actions.ocr_clipboard);
+    }
+
+    #[test]
+    fn ocr_clipboard_hotkey_round_trips() {
+        let mut cfg = Config::default();
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("ctrl+shift+o".into()),
+        });
+        let text = toml::to_string(&cfg).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            Some(OcrClipboardConfig {
+                hotkey: Some("ctrl+shift+o".to_string()),
+            }),
+            loaded.actions.ocr_clipboard
+        );
+    }
+
+    /// No `[actions]` section.
+    #[test]
+    fn actions_config_missing_section_uses_defaults() {
+        let toml = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n",
+        );
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.actions.enabled);
+        assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn field_map_screenshot_source_resolves() {
+        let map = [
+            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
+            FieldMapping { anki_field: "Context".into(), source: "screenshot".into() },
+        ];
+        let found = map.iter()
+            .find(|m| m.source == "screenshot")
+            .map(|m| m.anki_field.clone());
+        assert_eq!(Some("Context".to_string()), found);
+    }
+
+    #[test]
+    fn field_map_without_screenshot_returns_none() {
+        let map = [
+            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
+            FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
+        ];
+        let found = map.iter()
+            .find(|m| m.source == "screenshot")
+            .map(|m| m.anki_field.clone());
+        assert_eq!(None, found);
     }
 }

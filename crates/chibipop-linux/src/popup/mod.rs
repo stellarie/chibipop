@@ -43,6 +43,11 @@ pub struct DrawRun<'a> {
     pub text: &'a str,
     /// Physical pixels, already scaled.
     pub size: f32,
+    /// The scene's weight, 100-900 on
+    /// DirectWrite's scale: cosmic-text
+    /// takes the same numbers.
+    pub weight: u16,
+    pub italic: bool,
     /// The wrap width the scene measured this run at.
     pub max_w: f32,
     pub color: Rgb,
@@ -64,15 +69,23 @@ pub trait PanelText: chibipop::ui::layout::TextMeasure {
 /// The theme in device pixels at `scale`.
 ///
 /// Core layout carries one pixel space and no scale factor, so the
-/// scale enters here, once: font sizes, padding and the corner radius
-/// are the theme's logical values multiplied out. Colours and the
-/// family are untouched.
+/// scale enters here, once: every length the theme carries - all seven
+/// per-role font sizes, the padding, the corner radius, the rule and
+/// the border - is the theme's logical value multiplied out. Colours,
+/// weights, styles and the family are untouched: none of them is a
+/// length.
 pub fn physical_theme(theme: &Theme, scale: f64) -> Theme {
     let s = scale as f32;
     Theme {
         headword_size: theme.headword_size * s,
+        reading_size: theme.reading_size * s,
         body_size: theme.body_size * s,
+        dict_label_size: theme.dict_label_size * s,
         collapsed_size: theme.collapsed_size * s,
+        dimmed_size: theme.dimmed_size * s,
+        frequency_size: theme.frequency_size * s,
+        separator_height: theme.separator_height * s,
+        border_width: theme.border_width * s,
         padding: ((theme.padding as f64) * scale).round() as i32,
         corner_radius: ((theme.corner_radius as f64) * scale).round() as i32,
         ..theme.clone()
@@ -135,6 +148,49 @@ mod tests {
         assert_eq!(18, phys.corner_radius);
         assert_eq!(base.background, phys.background);
         assert_eq!(base.font_name, phys.font_name);
+    }
+
+    /// Every role's own size, and the
+    /// two hairlines the theme carries:
+    /// a length left logical here is a
+    /// length painted too small on a
+    /// scaled output.
+    #[test]
+    fn the_physical_theme_scales_every_length_the_theme_carries() {
+        // Distinct values, so no field
+        // can pass by borrowing another
+        // role's number.
+        let base = Theme {
+            headword_size: 20.0,
+            reading_size: 17.0,
+            body_size: 15.0,
+            dict_label_size: 13.0,
+            collapsed_size: 12.0,
+            dimmed_size: 11.0,
+            frequency_size: 9.0,
+            separator_height: 3.0,
+            border_width: 2.0,
+            ..Theme::dark()
+        };
+        let phys = physical_theme(&base, 2.0);
+        assert_eq!(40.0, phys.headword_size);
+        assert_eq!(34.0, phys.reading_size);
+        assert_eq!(30.0, phys.body_size);
+        assert_eq!(26.0, phys.dict_label_size);
+        assert_eq!(24.0, phys.collapsed_size);
+        assert_eq!(22.0, phys.dimmed_size);
+        assert_eq!(18.0, phys.frequency_size);
+        assert_eq!(6.0, phys.separator_height);
+        assert_eq!(4.0, phys.border_width);
+    }
+
+    /// A weight is not a length.
+    #[test]
+    fn the_physical_theme_leaves_weight_and_style_alone() {
+        let base = Theme { headword_weight: 700, reading_italic: true, ..Theme::dark() };
+        let phys = physical_theme(&base, 1.5);
+        assert_eq!(700, phys.headword_weight);
+        assert!(phys.reading_italic);
     }
 
     #[test]

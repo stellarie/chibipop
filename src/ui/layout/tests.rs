@@ -22,8 +22,23 @@ const LINE_H: f32 = 2.0;
 /// and at what width.
 #[derive(Default)]
 struct FakeMeasure {
-    /// `(text, size, max_w)`, in order.
-    asked: Vec<(String, f32, f32)>,
+    /// Every run asked for, in order.
+    asked: Vec<Asked>,
+}
+
+/// One run a measurer was handed.
+///
+/// The whole `MeasureRun`, minus the
+/// font: a test asserts what layout
+/// asked for, at what width, in what
+/// weight and style.
+#[derive(Debug, Clone, PartialEq)]
+struct Asked {
+    text: String,
+    size: f32,
+    weight: u16,
+    italic: bool,
+    max_w: f32,
 }
 
 /// `(advance, units per line, units)`.
@@ -35,7 +50,13 @@ fn wrap(run: MeasureRun<'_>) -> (f32, usize, usize) {
 
 impl TextMeasure for FakeMeasure {
     fn measure(&mut self, run: MeasureRun<'_>) -> Result<Metrics, MeasureError> {
-        self.asked.push((run.text.to_string(), run.size, run.max_w));
+        self.asked.push(Asked {
+            text: run.text.to_string(),
+            size: run.size,
+            weight: run.weight,
+            italic: run.italic,
+            max_w: run.max_w,
+        });
         let (advance, per_line, units) = wrap(run);
         let lines = units.div_ceil(per_line).max(1);
         Ok(Metrics {
@@ -101,7 +122,12 @@ fn one_card(pos: &[&str], freq: Option<i64>) -> Presentation {
         blocks: vec![block("Jitendex", &["chatting"])],
         match_len: 2,
     };
-    Presentation { top: Some(card.clone()), collapsed: vec![], all_cards: vec![card] }
+    Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+    }
 }
 
 fn with_collapsed() -> Presentation {
@@ -128,6 +154,7 @@ fn with_collapsed() -> Presentation {
             },
         ],
         all_cards: vec![card],
+        sentence: None,
     }
 }
 
@@ -155,6 +182,62 @@ fn find(s: &PopupScene, kind: ElemKind) -> &SceneElem {
         .iter()
         .find(|e| e.kind == kind)
         .unwrap_or_else(|| panic!("no {} element in the scene", kind.as_str()))
+}
+
+/// A scene under `theme`, plus every
+/// run the walk measured for it.
+fn measured(theme: &Theme, p: &Presentation, side: bool) -> (PopupScene, Vec<Asked>) {
+    let mut m = FakeMeasure::default();
+    let s = scene(
+        &SceneRequest {
+            presentation: p,
+            theme,
+            max_w: 424.0,
+            max_h: 4000.0,
+            show_back: true,
+            side_panel: side,
+            anki: None,
+        },
+        &mut m,
+    )
+    .expect("FakeMeasure never refuses a run");
+    (s, m.asked)
+}
+
+/// A theme with no two roles alike.
+///
+/// Every per-role size, weight and
+/// style distinct, so a run's role is
+/// readable off the run itself. Only
+/// `body` keeps the default 15.0, to
+/// prove `reading` stopped borrowing
+/// it.
+fn roled_theme() -> Theme {
+    Theme {
+        headword_size: 21.0,
+        reading_size: 17.0,
+        dict_label_size: 11.0,
+        collapsed_size: 12.0,
+        dimmed_size: 9.0,
+        frequency_size: 7.0,
+        headword_weight: 700,
+        reading_weight: 300,
+        body_weight: 500,
+        dict_label_weight: 600,
+        collapsed_weight: 200,
+        dimmed_weight: 100,
+        frequency_weight: 800,
+        reading_italic: true,
+        dimmed_italic: true,
+        ..Theme::dark()
+    }
+}
+
+/// The run measured for `text`.
+fn asked_for<'a>(runs: &'a [Asked], text: &str) -> &'a Asked {
+    runs.iter()
+        .find(|a| a.text == text)
+        .unwrap_or_else(|| panic!("{text:?} was never measured"))
 }
 
 // ---- wrapping ----
@@ -188,6 +271,7 @@ fn a_run_too_wide_for_the_column_wraps_onto_more_lines() {
         }),
         collapsed: vec![],
         all_cards: vec![],
+        sentence: None,
     };
     // 100px column, 7.5px per unit:
     // 13 per line, 120 units -> 10.
@@ -214,6 +298,7 @@ fn a_run_that_exactly_fills_the_column_stays_on_one_line() {
         }),
         collapsed: vec![],
         all_cards: vec![],
+        sentence: None,
     };
     let s = laid_out(&p, 124.0, 4000.0, false, false);
     let gloss = s.elems.iter().find(|e| e.text == exact).unwrap();
@@ -293,7 +378,7 @@ fn inline_collapsed_rows_open_with_a_separator_rule() {
     let s = laid_out(&with_collapsed(), 424.0, 4000.0, false, false);
     let sep = find(&s, ElemKind::Separator);
     assert_eq!(SEPARATOR_MARGIN, sep.top_gap);
-    assert_eq!(SEPARATOR_THICKNESS, sep.rect.h);
+    assert_eq!(Theme::dark().separator_height, sep.rect.h);
     assert_eq!(s.content_w, sep.rect.w);
     assert!(sep.text.is_empty());
     assert_eq!(0, sep.lines);
@@ -500,6 +585,7 @@ fn a_kana_only_headword_drills_nowhere() {
         }),
         collapsed: vec![],
         all_cards: vec![],
+        sentence: None,
     };
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     assert!(!s.hits.iter().any(|h| matches!(h.action, HitAction::DrillDown(_))));
@@ -632,7 +718,7 @@ fn layout_measures_each_run_at_the_width_it_reports() {
     )
     .unwrap();
     let runs: Vec<(String, f32)> =
-        m.asked.iter().map(|(t, _, w)| (t.clone(), *w)).collect();
+        m.asked.iter().map(|a| (a.text.clone(), a.max_w)).collect();
     for elem in &s.elems {
         if elem.kind == ElemKind::Separator {
             continue;
@@ -676,7 +762,7 @@ fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
     match &elems[0] {
         Elem::Corner(line) => {
             assert_eq!("freq 7671", line.text);
-            assert_eq!(theme.dimmed_text, line.color);
+            assert_eq!(theme.frequency_text, line.color);
         }
         _ => panic!("the frequency corner must be the first element"),
     }
@@ -702,7 +788,154 @@ fn part_of_speech_is_dimmed_metadata_not_body_text() {
     assert_eq!("noun · suru", pos.text);
     assert_eq!(theme.dimmed_text, pos.color);
     assert_ne!(theme.body_text, pos.color, "POS must not read as body text");
-    assert_eq!(theme.collapsed_size, pos.size);
+    assert_eq!(theme.dimmed_size, pos.size);
+}
+
+/// Every role owns its own metrics.
+///
+/// The sizes the roles used to borrow
+/// from each other: `reading` took
+/// `body_size`, POS and the dictionary
+/// label both took `collapsed_size`,
+/// and the frequency corner took
+/// `collapsed_size` and `dimmed_text`.
+#[test]
+fn each_role_takes_its_own_size() {
+    let theme = roled_theme();
+    let (elems, _) = build_elements(&one_card(&["noun"], Some(7671)), &theme, true, false);
+    let text_of = |want: &str| -> &Line {
+        elems
+            .iter()
+            .find_map(|e| match e {
+                Elem::Text(line) if line.text.contains(want) => Some(line),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no text line holding {want:?}"))
+    };
+    let corner = elems
+        .iter()
+        .find_map(|e| match e {
+            Elem::Corner(line) => Some(line),
+            _ => None,
+        })
+        .expect("a ranked entry draws a corner");
+    assert_eq!(theme.frequency_size, corner.size);
+    assert_eq!(theme.reading_size, text_of("ざつだん").size);
+    assert_eq!(theme.dimmed_size, text_of("noun").size);
+    assert_eq!(theme.dict_label_size, text_of("Jitendex").size);
+    assert_eq!(theme.body_size, text_of("chatting").size);
+}
+
+/// Weight and style travel with size.
+#[test]
+fn each_role_takes_its_own_weight_and_style() {
+    let theme = roled_theme();
+    let (_, runs) = measured(&theme, &one_card(&["noun"], Some(7671)), false);
+
+    let freq = asked_for(&runs, "freq 7671");
+    assert_eq!((theme.frequency_weight, theme.frequency_italic), (freq.weight, freq.italic));
+    let head = asked_for(&runs, "雑談");
+    assert_eq!((theme.headword_weight, theme.headword_italic), (head.weight, head.italic));
+    let reading = asked_for(&runs, "ざつだん");
+    assert_eq!((theme.reading_weight, true), (reading.weight, reading.italic));
+    let pos = asked_for(&runs, "noun");
+    assert_eq!((theme.dimmed_weight, true), (pos.weight, pos.italic));
+    let label = asked_for(&runs, "Jitendex");
+    assert_eq!((theme.dict_label_weight, theme.dict_label_italic), (label.weight, label.italic));
+    let gloss = asked_for(&runs, "chatting");
+    assert_eq!((theme.body_weight, theme.body_italic), (gloss.weight, gloss.italic));
+    let back = asked_for(&runs, "\u{2190} Back");
+    assert_eq!((theme.dict_label_weight, theme.dict_label_italic), (back.weight, back.italic));
+}
+
+/// The painter needs them too.
+#[test]
+fn the_scene_carries_each_run_s_weight_and_style() {
+    let theme = roled_theme();
+    let (s, _) = measured(&theme, &with_collapsed(), false);
+    let head = find(&s, ElemKind::Headword);
+    assert_eq!(theme.headword_weight, head.weight);
+    assert!(!head.italic);
+    let row = find(&s, ElemKind::Collapsed);
+    assert_eq!(theme.collapsed_weight, row.weight);
+    // A rule has no text to weight.
+    let sep = find(&s, ElemKind::Separator);
+    assert_eq!(REGULAR_WEIGHT, sep.weight);
+    assert!(!sep.italic);
+}
+
+/// The side column is one format.
+#[test]
+fn the_side_column_measures_at_the_collapsed_role() {
+    let theme = roled_theme();
+    let (_, runs) = measured(&theme, &with_collapsed(), true);
+    for text in ["See also", "雑音", "雑誌"] {
+        let run = asked_for(&runs, text);
+        assert_eq!(theme.collapsed_size, run.size);
+        assert_eq!(theme.collapsed_weight, run.weight);
+        assert_eq!(theme.collapsed_italic, run.italic);
+    }
+}
+
+/// The default theme must measure
+/// exactly as it did before roles
+/// carried weight: regular, upright,
+/// and the sizes the goldens hold.
+#[test]
+fn the_default_theme_measures_every_run_regular_and_upright() {
+    let theme = Theme::dark();
+    let (_, runs) = measured(&theme, &with_collapsed(), true);
+    assert!(!runs.is_empty());
+    for run in &runs {
+        assert_eq!(REGULAR_WEIGHT, run.weight, "{:?} is not regular", run.text);
+        assert!(!run.italic, "{:?} is not upright", run.text);
+    }
+}
+
+/// And at the sizes they measured at
+/// before the roles split apart.
+///
+/// The geometry goldens
+/// (`crates/chibipop-windows/tests/goldens/geometry`) are an
+/// exact-equality gate over these numbers: 13px metadata, 15px body,
+/// 20px headword, a 1px rule. Both default themes hold every role at
+/// the size it used to borrow, so the goldens survived the split - and
+/// a default that drifts must re-bless them, which is what this test
+/// says out loud.
+#[test]
+fn both_default_themes_keep_every_role_at_its_pre_split_size() {
+    for theme in [Theme::dark(), Theme::light()] {
+        assert_eq!(20.0, theme.headword_size);
+        assert_eq!(theme.body_size, theme.reading_size, "reading borrowed body_size");
+        assert_eq!(15.0, theme.body_size);
+        for (role, size) in [
+            ("dict_label", theme.dict_label_size),
+            ("dimmed", theme.dimmed_size),
+            ("frequency", theme.frequency_size),
+        ] {
+            assert_eq!(theme.collapsed_size, size, "{role} borrowed collapsed_size");
+        }
+        assert_eq!(13.0, theme.collapsed_size);
+        assert_eq!(SEPARATOR_THICKNESS, theme.separator_height, "the rule was a 1px const");
+        assert_eq!(1.0, theme.border_width);
+    }
+}
+
+/// The rule the theme sets, and the
+/// one it does not: `separator_height`
+/// is the horizontal rule between
+/// blocks, never the side column's
+/// vertical one.
+#[test]
+fn the_theme_sets_the_separator_height_but_not_the_side_rule() {
+    let theme = Theme { separator_height: 3.0, ..Theme::dark() };
+    let (s, _) = measured(&theme, &with_collapsed(), false);
+    let sep = find(&s, ElemKind::Separator);
+    assert_eq!(3.0, sep.rect.h);
+    assert_eq!(3.0, sep.advance, "the walk stacks the themed height");
+
+    let (side, _) = measured(&theme, &with_collapsed(), true);
+    assert_eq!(SEPARATOR_THICKNESS, side.side.unwrap().rule_w);
 }
 
 /// 大辞林 has no POS markup.

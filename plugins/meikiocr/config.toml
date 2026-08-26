@@ -1,0 +1,21 @@
+# chibipop meikiocr plugin configuration.
+# Edit this file for your machine. Do not edit adapter.py or plugin.toml.
+
+# Folder to add to Python's import path so `import meikiocr` resolves.
+# Point this at your meikiocr install, e.g. its venv's site-packages:
+#   meikiocr_path = 'C:\Users\you\tools\meikiocr\.venv\Lib\site-packages'
+# Leave empty if the "python" plugin.toml starts already has meikiocr
+# installed. Prefer single quotes for Windows paths, like plugin.toml does:
+# double-quoted backslashes are not read as TOML escapes here.
+meikiocr_path = ""
+
+# HuggingFace cache directory holding meikiocr's downloaded ONNX models.
+# Leave empty to use an "hf-cache" folder next to this file.
+hf_home = ""
+
+# ONNX Runtime inference threads meikiocr is capped to.
+threads = 4
+
+# Enable meikiocr's internal debug log (box detection, NMS).
+# Produces heavy output — use for diagnosing one scan, not always-on.
+# debug = 1

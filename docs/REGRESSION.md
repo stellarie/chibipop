@@ -57,15 +57,19 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 
 ## Tier 0 — the automated gate (~2 min, no screen)
 
-**This tier is the CI contract.** The commands below are unchanged since 2026-07-29 and are what
+**The three `cargo` lines are the CI contract.** They are unchanged since 2026-07-29 and are what
 `.github/workflows/ci.yml` runs; the numbers beside them were last re-measured on **2026-08-11**.
 Two of them are `grep -c` counts rather than exit codes, and that is deliberate — see the note
 under the table. CI additionally passes `--color never` and runs the suite three times; both of
 those are explained in the callouts below, and neither is optional there.
 
+**The first two lines are local setup and are not in `ci.yml`** — checked, not assumed. That
+distinction matters for the stray-killing line, because CI has no chibipop installed and this
+machine has two.
+
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
-powershell -NoProfile -Command "Stop-Process -Name chibipop -Force -ErrorAction SilentlyContinue"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.Name -eq 'chibipop.exe' -and \$_.ExecutablePath -like '*\target\*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
 cargo test --workspace --exclude chibipop-linux 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
 cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
 cargo build --release --workspace --exclude chibipop-linux 2>&1 | grep -E "^error|Finished"
@@ -77,10 +81,29 @@ Windows crate — the exact under-coverage this tier exists to catch. Both bins 
 `chibipop`, so link-producing commands must exclude the foreign bin crate (collision);
 check-shaped clippy spans the whole workspace unexcluded.
 
+> [!caution] Never kill chibipop by name on this machine — three different things answer to it
+> The preflight above used to be `Stop-Process -Name chibipop -Force`. **`-Name` is not
+> selective**, and as of 2026-08-18 three separate binaries are all called `chibipop.exe`:
+>
+> | Path | What it is | Killing it costs |
+> |---|---|---|
+> | `C:\Users\Stella\Documents\chibipop-latest` | the real install — config, dictionary library, a 256 MB database | closes the program the user is actually using |
+> | `C:\Users\Stella\Documents\chibipop-nightly` | where branch builds land, seeded 2026-08-18 | closes a build under test |
+> | `<repo>\target\debug` and `target\release` | test children and leftover strays | nothing — this is the only class worth killing |
+>
+> The replacement filters on `ExecutablePath` so it reaches **only** the third row. Verified
+> rather than reasoned: the `*\target\*` pattern was evaluated against all three paths (false,
+> false, true), a real `plugin-echo sleeper` started from `target\debug` was listed by a dry run
+> and then killed by the live command, and the command exits **0** when there is nothing to kill,
+> which `Get-Process -Name … -ErrorAction SilentlyContinue` does **not** do.
+>
+> The same rule governs the wedge callout further down this page: **kill by pid, or by path —
+> never by name.** Those two places are saying one thing, not two.
+
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **885** total across **6** targets, 1 ignored (873 → 893 → 885 on 2026-08-17; see below) |
-| Clippy | **exactly 2** accepted errors (was 3; see below) |
+| Rust tests | **all green**, **1010** total across **8** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system; see below) |
+| Clippy | **exactly 1** accepted error (was 2; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
@@ -94,10 +117,35 @@ that is the difference between the two rows and it is deliberate.
 > `golden_corpus` (`tests/golden.rs:31-34`) early-returns when `data/chibipop.sqlite` is absent,
 > printing `SKIP golden_corpus: … not built` and asserting **nothing**. It is reported as `ok`, not
 > as ignored, so **every total on this page includes one test that did not run** on any tree without
-> a built database — which is every fresh clone and every worktree. The `1 ignored` beside the total
-> is a *different* test. This is pre-existing and is recorded here rather than fixed: making the
+> a built database — which is every fresh clone and every worktree. The ignored tests beside the
+> total are *different* tests. This is pre-existing and is recorded here rather than fixed: making the
 > skip visible in the count means either failing the suite on a clone or teaching the `awk` to
 > subtract, and both are their own change.
+
+> [!warning] `cargo test --lib` reports 910 / 1, which looks like the full figure
+> Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
+> runs the library target only and omits the five integration-test targets:
+> `golden_corpus` (1 passed), `ocr_fixture` (2 passed), `plugin_host` (7 passed), `rebuild`
+> (8 passed), `png_cost` (0 passed, 1 ignored). The partial run reports **910 passed, 1
+> ignored**, and that figure is close enough to the true **928 passed, 2 ignored** to read as a
+> whole-suite result — which is why the trap works. A partial run does not announce itself as
+> partial. **Both figures confirmed by independent re-runs on 2026-08-18.**
+>
+> **Reconfirmed 2026-08-19, from a single bare `cargo test`.** Neither figure needed a separate
+> `--lib` run: bare `cargo test`'s own per-target output prints the lib target's result
+> (`910 passed; 0 failed; 1 ignored`) as one of its eight lines, on the way to the same run's
+> whole-suite **928**. No sixth move — the scrollable-settings-window plan added no test to any
+> target, lib included.
+>
+> **The lib figure has now moved five times: 891 to 895, 895 to 899, 899 to 906, 906 to 907, and
+> 907 to 910 this one.** Task 7 added four unit tests for `Strikes` in `src/plugin/strikes.rs`;
+> Task 8 added seven for `estimate_offset` and `span_from_lines` in `src/plugin/text.rs`, then one
+> more in its own fix round; Task 9 added three for `discover` in `src/plugin/discover.rs`. The
+> first two touch no I/O at all; Task 9's do — real temp-directory files, written and read back —
+> and they land in the lib target exactly the same, because what decides that is `#[cfg(test)]`
+> inside `src/` versus a file under `tests/`, never whether the test does I/O. The lesson is
+> unchanged and is the reason this callout exists: a stale lib figure looks exactly like a current
+> whole-suite figure, whether it moved recently or not.
 
 **A lower number is not automatically a finding either — it is a debt to explain.** The
 772 → 794 entry below is the first on this page where a round *deleted* tests, and the honest
@@ -227,25 +275,31 @@ owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that
 `LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
 before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
 
-**The two accepted clippy errors — re-baselined 2026-08-25 (ticket 27 moved the popup's layout
-walk into core as `PopupScene`, deleting the `layout_pass` site in the Windows bin crate):**
+**The one accepted clippy error — re-baselined 2026-08-26 (the upstream v0.9.x merge rewrote
+`deconj.rs` past its `useless_conversion` site; the three findings that same merge carried into
+`src/worker.rs` were refactored away rather than accepted — a `ServeHook` alias for the `serve`
+hook's boxed closure, and a `LookupState` bundle for the five reload-replaced locals that
+`take_reload` and `resolve_trigger` used to pass one at a time):**
 
 | Lint | Site |
 |---|---|
-| `useless_conversion` — explicit `.into_iter()` in an `IntoIterator` argument | `src/lookup/deconj.rs:78` |
-| `too_many_arguments` (8/7) | `src/lookup/model.rs:86` |
+| `too_many_arguments` (8/7) — `add_term` | `src/lookup/model.rs:86` |
 
-It was **4** until 2026-08-09, and **3** until 2026-08-25. The fourth was `while_let_loop`, on `worker_main`'s trigger drain;
-the hot-reload branch replaced that loop with an explicit `drain` (a `Reload` message must never be
-swallowed by newest-wins coalescing), so the lint went with it. That is a legitimate 4 → 3, not a
-suppression — the count went **down** because the code did.
+It was **4** until 2026-08-09, **3** until 2026-08-25, and **2** until 2026-08-26. The fourth was
+`while_let_loop`, on `worker_main`'s trigger drain; the hot-reload branch replaced that loop with an
+explicit `drain` (a `Reload` message must never be swallowed by newest-wins coalescing), so the lint
+went with it. The third was `layout_pass` in the Windows bin crate, deleted when ticket 27 moved the
+popup's layout walk into core as `PopupScene`. The second was `useless_conversion` at
+`src/lookup/deconj.rs:78`, gone with upstream's own rewrite of that function. Each of those is a
+legitimate step down, not a suppression — the count went **down** because the code did, and no
+`#[allow]` was added for any of them.
 
 Since the 2026-08-24 workspace split the CI gate counts rendered **warnings from a plain clippy
 run** (no `-D warnings`) instead of error lines: denying warnings turns core's accepted findings
 into hard errors, the core lib produces no rmeta, and the dependent `chibipop-windows` crate never
 gets linted — its accepted finding would silently vanish from the count. Left as warnings, every
 target lints, cargo deduplicates repeat diagnostics across targets, and one workspace-wide run
-renders each finding exactly once. Same baseline, same number: **3**.
+renders each finding exactly once. Same baseline, same number: **1**.
 
 > [!warning] The clippy line changed on 2026-07-29, because the old one could not fail
 > It used to be `grep -cE "^error: (doc list|explicit call|this function|this loop)"` —
@@ -297,9 +351,282 @@ Three runs at each number, identical each time; six targets splitting 874 + 0 + 
 **0 failed**, the same **1 ignored**. Clippy did not move: **3** raw, **0** on the bin target.
 `golden_corpus` ran rather than skipping, because this checkout has a built `data/chibipop.sqlite`.
 
-**Why counts, not exit status.** The repo carries two accepted clippy errors; a plain
-`-D warnings` run therefore always exits non-zero, and CI must assert the count is **2** rather than
-that clippy passed. A 3rd is a real regression — most often a field added by one commit and read by
+**885 → 886 is a re-baseline, not a finding.** Task 2 of the plugin-system round deleted the
+unreachable, single-pass `TextSource` trait and replaced it with `TextProvider`
+(`src/text/provider.rs`), which `OcrTextSource` implements over the multi-pass
+`resolve_at_tiled_scanned` and which `src/app.rs`'s `resolve_trigger` now calls through the
+trait at both its call sites — the first design left the trait itself unreachable a second time,
+caught before landing, and widened to carry `TextRead { resolved, scan }` rather than a bare
+`TextSpan` so the one real call site could actually reach it. It added one test,
+`text::provider::tests::a_provider_is_usable_as_a_trait_object`, and removed none. Repeated runs,
+all **886**: seven targets splitting 875 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the same
+**2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh,
+not assumed.
+
+**886 → 893 is a re-baseline, not a finding.** Task 3 of the plugin-system round adds
+`src/plugin/manifest.rs` and `src/plugin/mod.rs`: pure parsing of `plugin.toml` into a
+`Manifest`, rejecting an unsupported protocol, an unknown role, a claimed role with no
+matching section, an empty `provides` list, and ambient mode (protocol 1 runs no ambient
+plugin). It added seven tests and removed none; the module is new, self-contained, and
+referenced from nowhere else yet — no other file changed. Repeated runs, all **893**:
+seven targets splitting 882 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the same **2 ignored**.
+Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not assumed.
+
+**893 → 897 is a re-baseline, not a finding.** Task 4 of the plugin-system round adds
+`src/plugin/version.rs`: pure protocol negotiation, `agree(offered, picked, declared)`,
+validating picked is in offered and matches manifest protocol, refusing with messages
+naming the numbers involved. It added four tests and removed none; the module is new,
+self-contained, and referenced from nowhere else yet — no other file changed. Repeated
+runs all **897**: seven targets splitting 886 + 0 + 1 + 2 + 0 + 8 + 0, **0 failed**, the
+same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted
+fresh, not assumed.
+
+**897 → 902 is a re-baseline, not a finding.** Task 5 of the plugin-system round adds
+`src/plugin/proto.rs`: the wire-protocol serde types (`Hello`, `Ready`, `Caps`,
+`RecogniseParams`, `Rect`, `RecogniseResult`, `Line`, `Word`) and a `request()` helper that
+frames one JSON-RPC-shaped line, newline-terminated. `Cargo.toml` gains `base64 = "0.22"`;
+it was already in `Cargo.lock` at `0.22.1`, pulled in transitively via `ureq`/`ureq-proto`,
+so the lock file's only change is that one line marking it a direct dependency of `chibipop`,
+confirmed by diff. It added five tests and removed none; the module is new, self-contained,
+and referenced from nowhere else yet beyond its registration in `src/plugin/mod.rs` — no
+other file changed. Repeated runs, all **902**: seven targets splitting 891 + 0 + 1 + 2 + 0
++ 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the
+bin target — both counted fresh, not assumed.
+
+**902 → 906 is a re-baseline, not a finding.** Task 6 of the plugin-system round adds
+`src\plugin\host.rs` and `src\plugin\echo.rs`. The host spawns one plugin process, runs the
+`hello` handshake, sends numbered requests, enforces a per-call deadline, and kills the child
+from both `shutdown` and `Drop`. `echo.rs` is a fixture plugin with four modes — `ok`, `crash`,
+`hang`, `garbage` — reached through a hidden `plugin-echo` subcommand on the main binary, which
+is why these tests need no Python and no second crate. They are this round's first
+**integration** tests, so they land in a **new eighth target**, `tests\plugin_host.rs`, and
+`cargo test --lib` cannot see a single one of them: the lib figure is still **891**. Two runs,
+both **906**: eight targets splitting 891 + 0 + 1 + 2 + 4 + 0 + 8 + 0, **0 failed**, the same
+**2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh,
+not assumed.
+
+**906 → 907 is a fix round on that same task, and the single new test is the whole point of it.**
+Review found that the host wrote to the child's stdin **on the calling thread**, with no timeout:
+a bare `write_all` inside `call`. A plugin that stops draining its stdin blocks that thread
+uninterruptibly, and `text/recognise` carries a base64 PNG — orders of magnitude past what a pipe
+buffers. **The four existing tests could not catch it, and the reason is worth keeping:** the
+`hang` fixture reads its line *before* it parks, and every payload those tests send is `{}`. The
+suite proved the read path was interruptible while never once exercising the write path. Four
+changes closed it — stdin moved onto its own writer thread fed by a channel; the deadline became a
+total budget for the call rather than a per-message gap, which also bounds a plugin that chatters
+faster than the deadline and could otherwise loop `call` forever; `call` drains stale lines before
+it sends; and `shutdown` inspects `kill()` instead of discarding it, so a failed kill is never
+followed by a blocking `wait()`. Two runs, both **907**: eight targets splitting 891 + 0 + 1 + 2 +
+5 + 0 + 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the
+bin target — both counted fresh, not assumed.
+
+**907 → 909 is the second fix round on Task 6, and both new tests belong to one change.**
+`Child::kill()` is `TerminateProcess`: it kills one process, not a tree. A plugin reached through
+a `.cmd` shim, or a Python plugin that spawns a worker, left an orphan behind — and that orphan
+**inherits the plugin's stdout write handle**, so the host's reader thread never sees EOF. A
+leaked process *and* a leaked thread, from one `shutdown`. The host now creates a Windows **job
+object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assigns the child to it immediately after
+`spawn`, and closes the job handle in `shutdown` — after `kill()` and `wait()`, so the one
+process it can reap deterministically is reaped through its own handle before the job sweeps
+whatever that process started. `Cargo.toml` gains the `Win32_System_JobObjects` feature;
+`Win32_Security`, which `CreateJobObjectW` also needs, was already there for `CreateMutexW`.
+The new `tree` fixture mode spawns a grandchild and reports its pid, and
+`dropping_the_host_kills_the_grandchild_too` holds an `OpenProcess` handle across the drop — which
+also stops Windows recycling the pid — then polls `GetExitCodeProcess`. Three runs, all **909**:
+eight targets splitting 891 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the same **2 ignored**.
+Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not assumed.
+
+**909 → 913 is the third fix round on Task 6, and the four new tests are unit tests.** Review found
+that closing the unbounded-queue defect in round 1 had only closed half of it. `call` drained the
+reader channel at its top, but the *writer* channel was never drained at all: against a plugin that
+stops reading its stdin, every timed-out call left its base64 PNG queued forever and nothing bounded
+the total. **The fix is not `sync_channel`** — a bounded sender blocks when it is full, and a
+blocking send on the calling thread is the original round-1 defect coming back through the other
+door. Instead the queue was replaced by a **single slot**, which is what the protocol actually
+needs: `call` takes `&mut self`, so at most one request is ever outstanding. A second request
+replaces a stale one rather than queueing behind it, and `call` clears the slot on every error
+path, because a request whose caller has given up has no reader. The slot is guarded by a mutex and
+a condvar, and `shutdown` closes it so an idle writer thread cannot be stranded holding the pipe.
+The four unit tests cover replacement, the drain, a closed outbox refusing work, and the wake on
+close. Three runs, all **913**: eight targets splitting 895 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0
+failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
+counted fresh, not assumed.
+
+**913 → 917 is Task 7, and all four new tests are unit tests.** `src/plugin/strikes.rs` adds
+`Strikes`, a small state machine with no I/O: `record(bool)` counts consecutive failures, any
+success resets the count to zero, and the count reaching the configured limit disables the plugin
+and returns a notice built from the last recorded error — once. A second call after disabling
+short-circuits on the `disabled` flag and returns `None`, and that guard is the fourth test's whole
+point: `the_notice_fires_exactly_once` was confirmed to fail, at its second assertion, when the
+guard is removed, so it is not a green assertion that merely happens to pass. The other three cover
+two failures not disabling, the third disabling and naming the error, and a success resetting the
+count. Repeated runs, all **917**: eight targets splitting 899 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0
+failed**, the same **2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both
+counted fresh, not assumed.
+
+**917 → 924 is Task 8, and all seven new tests are unit tests.** `src/plugin/text.rs` adds two pure
+functions plus the `PluginText` struct. `estimate_offset` is the text-only downgrade's proportional
+cursor-to-byte estimate (spec 7.2): it turns a cursor x into a char index by position across the
+line's screen region, then reads that char's byte offset back out of `char_indices()` — never a
+byte index computed by hand — so every return value is either `0` or something `char_indices()`
+already proved to be a boundary. `the_estimate_always_returns_a_char_boundary` sweeps every x from
+0 to 699 across and past both edges of a five-char CJK line and asserts `is_char_boundary` at each
+one; it holds by construction, and no input was found that breaks it. `span_from_lines` turns a
+plugin's `RecogniseResult` into chibipop's `TextSpan`: with a `words` array it maps each word's
+image-local rect back to screen space through `region` and `scale` and finds the hovered word by x;
+with `words: None` (the text-only tier) it falls back to `estimate_offset` and returns empty
+geometry. `PluginText::new` and `disabled()` also land, holding a live `Host` and a `Strikes`
+counter. **No `impl TextProvider for PluginText` in this task, by explicit ruling** — `resolve_at`
+needs a capture that lives on the worker thread, and a stub impl whose only method always errors
+would type-check as a working provider and fail at run time instead of build time; the follow-up
+task adds the impl together with the capture.
+
+**The struct as specified did not clear its own gate.** The task brief's Step 4 code makes every
+field `pub(crate)`, expecting — per `docs/BACKLOG.md` item 10 — that no `dead_code` warning could
+fire because the enclosing struct is `pub` in a lib-and-bin crate. Measured, not assumed:
+`cargo build --all-targets` on that literal code reports fields `host`, `name`, `geometry`,
+`language`, and `timeout` are never read, and `cargo clippy --all-targets --all-features -- -D
+warnings` promotes it to an `error` line that neither `-A` allow-list covers, so the raw count went
+**3 → 4** and the bin-target count went **0 → 4**. Item 10's exemption is about `pub` items
+reachable from the crate root — functions, and the struct itself — and does not extend to a
+`pub(crate)` field on that struct: such a field is invisible outside the crate regardless of the
+struct's own visibility, so the compiler can and does prove it unread. This is the collision the
+"why counts, not exit status" note further down this page already warns about — a field added by
+one commit and read by the next — except here the next commit is deliberately deferred to a
+follow-up task. The fix widened the five unread fields to `pub`, leaving `strikes` at `pub(crate)`
+since `disabled()` already reads it, and was verified to restore all three: no `dead_code` warning,
+clippy raw **3**, bin-target **0**. Not silenced with `#[allow]`.
+
+Three runs, all **924**: eight targets splitting 906 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the
+same **2 ignored**. Clippy, measured after the field-visibility fix: **3** raw, **0** on the bin
+target — both counted fresh, not assumed.
+
+**924 → 925 is a fix round on Task 8, and the one new test is the whole point of it.** Review
+found that `span_from_lines`'s geometry-path offset was not char-safe. The loop sums
+`w.text.len()` across words to find how far into `line.text` the cursor's byte offset sits, and
+that sum is only correct if `line.text` is exactly the concatenation of the words that precede
+it. It is not, in general: OCR can report a line that contains a character no word box covers —
+punctuation, a missed glyph, anything the per-word pass dropped but the per-line pass kept. That
+gap's byte width is never added to the sum, so the offset can undercount and land inside a later
+multi-byte character instead of at its start. **Falsified before it was fixed:** the new test
+builds `"宿舎xに戻る"` with two words, `宿舎` and `に戻る`, and no word for the ASCII `x` between
+them; against the unfixed code it failed on the very first swept `x`, at `off=15`, one byte short
+of the true end of line — squarely inside `る`'s three-byte encoding. The fix clamps the offset to
+`line.text.len()` and then walks it back while `!is_char_boundary`, placed at the one point after
+the loop where both exits (the early `break` on a hit, and falling through with no hit) already
+converge, so a future change to either exit cannot reintroduce the bug on just one of them. Three
+runs, all **925**: eight targets splitting 907 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the same
+**2 ignored**. Clippy did not move: **3** raw, **0** on the bin target — both counted fresh, not
+assumed.
+
+**925 → 928 is a re-baseline for Task 9, not a finding.** `src/plugin/discover.rs` is new:
+`discover(root) -> Vec<(PathBuf, Result<Manifest>)>` walks the plugin folders under `root`,
+parses each `plugin.toml` it finds, and lists a broken manifest beside its error instead of
+dropping it — a filter here would make `plugin list`'s per-failure reason impossible. `src/plugin/cli.rs`
+is also new (`list`, `test_one`), and `chibipop plugin list` / `chibipop plugin test` are wired into
+`src/main.rs`, but none of that carries its own unit test — it was proven for real in Step 6, not
+in the suite; see the task report. Three tests, all new, none rewritten: a missing root returns
+empty rather than erroring; a directory with one good and one broken manifest reports both, the
+second as `Err`; a directory holding a subfolder with no `plugin.toml` skips it without moving the
+count. All three passed unmodified from the brief, traced by hand against `std::fs::read_dir` and
+the existing `manifest::parse` before running. Three runs, all **928**: eight targets splitting
+910 + 0 + 1 + 2 + 7 + 0 + 8 + 0, **0 failed**, the same **2 ignored**. Clippy did not move: **3**
+raw, **0** on the bin target — both counted fresh, not assumed, all three accepted errors still at
+their original sites (`deconj.rs:78`, `model.rs:78`, `render.rs:699`), none in the three files this
+task touched.
+
+**928 → 928 across the whole scrollable-settings-window plan (`9425cdf`..`e0a5c09`, Tasks 0-6,
+2026-08-18/19) — not a finding, and worth recording precisely because it stayed flat.** Seven tasks
+touched `src/ui/settings_window.rs`, and Task 0 added a new `audit.rs`; none added or removed a
+test, by explicit instruction in every brief, since the count is treated as an exact baseline on
+this branch rather than a floor. Each task's own report measured **928 passed, 0 failed, 2 ignored,
+8 targets** after its own commit, and the doc round that closes the plan (`docs/BACKLOG.md` §11-12)
+re-ran a bare `cargo test` once more against the plan's tip (`e0a5c09`) rather than trust seven
+separate reports: still **928**, the same eight-way split, **910 + 0 + 1 + 2 + 7 + 0 + 8 + 0** —
+identical to the row directly above, control included, since neither round touched a test. Clippy
+was not re-run in the doc round; no `src/` file changed there, and no task in the plan reported the
+raw-3/bin-0 counts moving either.
+
+**979 → 1010 is a re-baseline, not a finding.** It is the action-system branch, nine tasks on
+top of v0.9.0 (`18e464d`). `git diff 18e464d..HEAD -- src/` adds **31** `#[test]` and removes
+**none** — exactly the gap. Per task: +3 (action registry), +8 (config/hotkey parsing), +6 (hooks
+slots), +0 (refactor), +2 (Anki picture), +6 (filename sanitizer), +6 (selection geometry) = 31.
+Task 8 (integration wiring) added 0 — the feature requires tier-1 manual testing, not unit tests.
+Three runs, all **1010**: eight targets splitting 998 + 0 + 1 + 2 + 7 + 0 + 0 + 2, **0 failed**,
+the same **3 ignored**. Clippy did not move: **3** raw, at the same three sites (`deconj.rs:78`,
+`model.rs:86`, `render.rs:699`).
+
+> [!warning] A red `dropping_the_host_kills_the_grandchild_too` **wedges the whole run**, and the
+> test binary is not the thing that hangs
+> Observed twice while falsifying this test, at 600 s and 300 s. The suite finishes and prints
+> `FAILED` on time; what stops is everything downstream of it. The surviving grandchild —
+> `chibipop.exe plugin-echo sleeper` — inherited the fixture's stderr, which is the test binary's,
+> which is `cargo`'s, which is whatever pipe the run was piped into. `cargo` and the test binary
+> both exit; the pipe's reader never sees EOF because the orphan still holds a write handle.
+>
+> **The cure is to kill that one pid, not to kill the pipeline.** Both times, `Stop-Process -Id
+> <the pid in the failure message>` released the hung command instantly. The failure message
+> carries the pid for exactly this reason.
+>
+> **Kill by pid, never `-Name chibipop`.** Three binaries answer to that name on this machine —
+> the real install at `Documents\chibipop-latest`, the branch-build target at
+> `Documents\chibipop-nightly`, and the test children under `target\`. `-Name` takes all three.
+> If you need the broad sweep rather than one pid, use the path-filtered preflight at the top of
+> this tier, which reaches only the third. The caution callout up there has the table.
+>
+> This is the leak the job object exists to stop, one process further out than the reader thread,
+> and it is the reason to prefer redirecting a falsification run to a **file** rather than piping
+> it.
+>
+> **It is also what the spawn-to-assign race costs, and that is the point of recording the race.**
+> `Host` assigns the child to its job immediately after `Command::spawn`, but the two are not
+> atomic. A plugin that forks inside that window leaves a grandchild outside the job, and the job
+> close will not sweep it. The consequence is not an abstract leak: it is exactly the wedge
+> described above — a run that prints its result and then hangs for as long as anyone waits.
+> Closing the window needs `PROC_THREAD_ATTRIBUTE_JOB_LIST` and a raw `CreateProcess`.
+
+> [!warning] Two `plugin_host` tests must **fail**, never hang — and they guard different pipes
+> `a_hang_times_out_without_killing_the_test` wedges a plugin that has already read its request.
+> `a_deaf_plugin_times_out_instead_of_blocking_the_writer` wedges one that never reads at all,
+> and sends it 256 KiB. Both assert the caller gets an error saying `deadline`.
+>
+> They are green because **each pipe is owned by its own thread** and `call` touches neither. A
+> `read_line` on the child cannot be interrupted; neither can a `write_all` into a full pipe, and
+> a Windows anonymous pipe buffers only a few kilobytes. `call` waits on a channel with
+> `recv_timeout` against a **single budget for the whole call**, so it returns on time whichever
+> pipe is stuck.
+>
+> **The read test alone did not cover this, and that is the lesson.** It reads its line before it
+> parks, and every other test sends `{}` — small enough for the pipe buffer to swallow whole. The
+> write path was never exercised until the deaf test existed, and when it finally was, the
+> `write_all` that used to live in `call` blocked **forever**: 90 s with no result line, the test
+> binary and its child both alive. The payload is 256 KiB so the exact buffer size cannot matter.
+>
+> **If this target ever stops rather than fails, a reader or writer thread is the suspect — do
+> not wrap the test in a timeout to make the symptom go away.** In the running app
+> this call sits on the worker thread. That alone does not freeze anything: the **main** thread
+> owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`. The danger is second-hand, and item 24 of
+> `docs/BACKLOG.md` is the precedent — a worker whose closure had already finished, a `join()` on
+> the main thread that never returned, zero messages pumped, and the user's machine frozen twice.
+> A plugin call that can block forever is one `join()` away from being that bug again.
+> The whole target runs in about **1.6 s**. A `plugin_host` run measured in minutes is the tell.
+
+**Every `plugin_host` test starts a real `chibipop.exe`, and one starts two.** `Host` kills the
+child from `Drop` as well as `shutdown`, so a panicking or early-returning test still reaps its
+process, and closing the job handle sweeps anything that process started. After a run, **no
+`chibipop.exe` should remain whose path is under `target\`**. Check the path, not just the name —
+an install being open is normal and is not a stray:
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chibipop.exe' } |
+  Select-Object ProcessId, ExecutablePath
+```
+
+A survivor under `target\` means a path reached neither exit.
+
+**Why counts, not exit status.** The repo carries one accepted clippy error; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **1** rather than
+that clippy passed. A 2nd is a real regression — most often a field added by one commit and read by
 the next, which is why a task that adds a field must be the task that reads it.
 
 The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
@@ -1182,6 +1509,456 @@ the duplicate guard, not a broken hotkey. Hover a different word to re-test.
 > **Artefact worth knowing:** `probe` reads whatever is on screen, chibipop's own popup included.
 > One probe came back reading `xué・Xi` off the popup covering the line. Dismiss it before you probe
 > underneath.
+
+### 1.23 Real text inside the PNG-encode bracket — **added 2026-08-17, not run**
+
+**Why this exists.** The plugin system sends captures to a plugin as base64 PNG. `tests/png_cost.rs`
+measured the encode against three synthetic buffers and produced a **bracket**, not an answer:
+
+| Buffer | Bytes | p95 |
+|---|---|---|
+| `uniform`, best case | 1,163 | **4.98 ms** |
+| `text_like`, two-tone | 2,423 | 4.93 ms |
+| `noisy`, worst case | 600,516 | **21.09 ms** |
+
+About **4.7 ms is fixed WinRT overhead**, independent of content. Real screen text sits somewhere
+between 4.98 and 21.09 ms, and no synthetic buffer can say where. **Only a real capture can.**
+
+The work proceeded on the ruling that the encode is paid only by plugin users, whose engines run
+100–300 ms anyway. This step is what confirms or withdraws that.
+
+**Run it while you are here for any other tier 1 item.** It needs no separate session.
+
+**Steps**
+
+1. Put `docs/fixtures/ocr-corpus.html` full-screen at 2560×1080.
+2. Capture the JA line J1 region with `probe --at <x>,<y> --region 500,100 --dump`.
+3. Encode that real buffer through `encode_png` and record the byte count and p95.
+
+**Pass** when the real byte count and p95 land inside the bracket above, and the p95 is **under
+10 ms**. Record the number here either way.
+
+**Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen spec
+section 6 and consider the length-prefixed binary frame named in spec section 12.
+
+### 1.24 Provider trait, no behaviour change — **added 2026-08-17, not run**
+
+**Provider trait, no behaviour change.** Hover a word on `docs/fixtures/ocr-corpus.html` line J1.
+The popup text, the resolved word and the highlight rect must match what the same hover produced
+before this branch. Record the rect. `union_chars` on 宿舎 measured `x=176 y=123 w=56 h=30` on
+2026-08-17.
+
+### 1.25 `chibipop plugin` CLI exit codes — **added 2026-08-18, run**
+
+**Why this exists.** The design spec's section 11 asks for a tier 1 item that runs
+`chibipop plugin test` against the reference plugin and confirms a non-zero exit for a
+deliberately broken response. It never landed while the nine build tasks ran — the CLI is the
+branch's only user-facing surface, and it had no tier 1 coverage at all until now. (The spec is a
+working note under the gitignored `docs/superpowers/`, not published with the repo.)
+
+**Setup — two plugin directories beside the binary under test.** Plugins live in a `plugins`
+folder next to `chibipop.exe`. Create:
+
+```toml
+# plugins/echo/plugin.toml — a working fixture
+name = "echo"
+version = "0.1.0"
+protocol = 1
+command = "<absolute path to this same chibipop.exe>"
+args = ["plugin-echo", "ok"]
+roles = ["text-provider"]
+
+[text_provider]
+provides_geometry = true
+languages = ["ja"]
+timeout_ms = 2000
+```
+
+```toml
+# plugins/broken/plugin.toml — deliberately invalid: no `command` field
+name = "broken"
+version = "0.1.0"
+protocol = 1
+roles = ["text-provider"]
+
+[text_provider]
+provides_geometry = true
+```
+
+`plugin-echo` is chibipop's own hidden fixture command. Pointing a manifest's `command` at the
+binary under test, with `args = ["plugin-echo", "ok"]`, needs no second binary to build.
+`docs/fixtures/plugin-sample.png` is a real 8×8 PNG already in the repo — no image setup needed.
+
+**Steps.** Run each of these five in order and check the exit code, not just the message.
+
+1. `chibipop plugin list` names `broken` as `REFUSED` with the real reason and lists `echo` clean.
+2. `chibipop plugin test echo --image docs/fixtures/plugin-sample.png` — the working fixture.
+3. `chibipop plugin test broken --image docs/fixtures/plugin-sample.png` — the same broken
+   manifest, this time matched by its directory name rather than a parsed one.
+4. `chibipop plugin test nosuchplugin --image docs/fixtures/plugin-sample.png` — a name nothing
+   declares.
+5. `chibipop plugin test echo --image docs/fixtures/does-not-exist.png` — an image path that does
+   not resolve.
+
+| # | Expect |
+|---|---|
+| 1 | exit **1** |
+| 2 | exit **0** |
+| 3 | exit **1** |
+| 4 | exit **2** |
+| 5 | exit **2** |
+
+**Measured 2026-08-18** against a release build at this commit, from the repo root:
+
+```
+$ ./target/release/chibipop.exe plugin list
+broken               REFUSED  reading plugin.toml: TOML parse error at line 1, column 1
+  |
+1 | name = "broken"
+  | ^
+missing field `command`
+
+echo                 0.1.0    protocol 1  roles [TextProvider]
+$ echo $?
+1
+
+$ ./target/release/chibipop.exe plugin test echo --image docs/fixtures/plugin-sample.png
+handshake ok in 50.0411ms: echo
+recognise ok in 142.2µs, 1 line(s)
+  line 0: "宿舎"  words 1
+$ echo $?
+0
+
+$ ./target/release/chibipop.exe plugin test broken --image docs/fixtures/plugin-sample.png
+plugin "broken": reading plugin.toml: TOML parse error at line 1, column 1
+  |
+1 | name = "broken"
+  | ^
+missing field `command`
+
+$ echo $?
+1
+
+$ ./target/release/chibipop.exe plugin test nosuchplugin --image docs/fixtures/plugin-sample.png
+no plugin named "nosuchplugin" under C:\Users\Stella\chibipop\.claude\worktrees\plugin-system\target\release\plugins
+$ echo $?
+2
+
+$ ./target/release/chibipop.exe plugin test echo --image docs/fixtures/does-not-exist.png
+reading docs/fixtures/does-not-exist.png: The system cannot find the file specified. (os error 2)
+$ echo $?
+2
+```
+
+**Pass** when all five exit codes match the table above. **Fail** on any mismatch.
+
+**One exit code, several causes — read the message, not just the number.** Exit **1** covers a
+broken manifest (scenario 3), a spawn failure, a handshake or call failure, and a geometry-claim
+mismatch (BACKLOG item 35) alike. The code alone never says which one regressed.
+
+**Cleanup.** Delete the `plugins` folder created for setup. It ships with no release package,
+`target/` is gitignored regardless, and nothing else in the tree depends on it.
+
+### 1.26 The scrollable settings window — added 2026-08-19, not run
+
+**Why this exists.** Tasks 3-6 of the scrollable-settings-window plan (`BACKLOG.md` §11-12) each
+verified their own piece during the build, against a standalone binary and a synthetically shrunk
+viewport — real measurements, but never run together as one pass, and never against a live window
+at real display scaling. This collects them into one checklist so a future change to this window
+has one page to run rather than four task reports to re-read.
+
+> [!warning] Not run as written. Read the per-step notes for what already has build-time evidence
+> and what is genuinely unexercised. Step 6 cannot be automated at all; step 7 was deliberately
+> deferred and is owed — see `progress.md`'s log for why.
+
+**Setup.** `./target/release/chibipop.exe settings`. The window is not user-resizable — its size is
+always computed from content and clamped to the work area by `fit_to` — so step 1's shrunk-window
+half, and steps 2-4 and 6 in full, need the viewport shorter than its tallest tab's content before
+there is anything to test. Two ways to
+get there: run step 7 first (150% scaling makes `fit_to`'s own clamp bite for real), or resize the
+window from a second process with `SetWindowPos`, which is what Tasks 4 and 5 did throughout the
+build — see their reports for the exact call shape. Either way, **resize the window, not the scroll
+info**: a scroll range written in from outside is read back by the writer, never by chibipop, so
+every scroll clamps to 0 for a reason that has nothing to do with the window under test (Task 4's
+trap, hit once during the build).
+
+1. **Every tab shows Apply at the same y.** Switch through all four tabs at the window's natural
+   size and read the `y` of the control with id **100** (`Apply & Restart`) on each —
+   `chibipop settings --audit` reports this directly, as `rect.y`, without opening a visible window
+   at all. Expect the **same y on all four**. Measured during the build, natural size: **548, 548,
+   548, 548**. Repeat after using Setup to shrink the window by 200px: expect again the same y on
+   all four, lower than before. Measured during the build: **348, 348, 348, 348**.
+2. **A tab taller than the viewport gets a scrollbar; a shorter one does not.** At natural size no
+   tab can ever exceed the viewport — the viewport is built from the same cross-tab `max()` that
+   governs the window, so this is a structural guarantee, not a per-machine measurement — and no
+   scrollbar should appear on any tab. Shrink the window below the tallest tab's content height
+   (Setup) and switch to that tab: a vertical scrollbar appears and the client area narrows by
+   `SM_CXVSCROLL`. Measured during the build: client width **470 → 453** (17px) the moment the bar
+   appeared. Switch to a tab shorter than the shrunk viewport: the bar disappears again.
+3. **The wheel scrolls the content, and clamps at both ends without drift.** With the window shrunk
+   (Setup) and a tall tab selected, hover the content pane and turn the wheel. One notch should move
+   the content **three lines** — measured during the build, one line is 20px logical, so one notch
+   is 60px. Keep scrolling past the end: the content must stop at the true maximum and go no
+   further. Measured during the build, 40 consecutive line-downs drove it to exactly the clamped
+   maximum and no further, and 80 line-ups symmetrically returned to exactly the top — over-scrolling
+   past either end does not drift past it, and repeating the same sequence reproduced the same
+   numbers every time.
+4. **Switching tabs resets the scroll position to the top.** Scroll a tab down, click a different
+   tab, then click back. The first tab must be back at its top position, not where it was left.
+   Measured during the build: a tab scrolled to its maximum returned to position 0 on re-selection.
+5. **Every control on every tab is where it was, and still responds — the reparenting check.** This
+   is Task 3's own verification and is worth re-running after any further change to this file: on
+   each tab, operate a control with a visible effect (the Hold key radio enabling the trigger-key
+   button on General; selecting a row in the Dictionaries lists to enable Move up/down; expanding
+   the Anki field map) and confirm it responds, not silently swallowed by the viewport or content
+   pane. Measured during the build with `ChildWindowFromPointEx`, resolved against the window tree
+   rather than the desktop: **0 of 26/21/23/21/68** controls swallowed across General, Dictionaries,
+   OCR/Debug, Anki and Anki expanded. `chibipop settings --audit`'s `tab_ring` / `tab_ring_reverse`,
+   diffed against a known-good dump, is the fast version of this same check, though it proves the
+   Tab-key ring rather than the mouse-hit path.
+6. **Drag the scrollbar thumb by hand.** With the window shrunk (Setup) and the bar visible, grab
+   the thumb and drag it up and down. The content must track the drag smoothly and stay wherever it
+   is released. **This step cannot be automated or verified synthetically, and that is a property of
+   the mechanism, not of this harness.** `WM_VSCROLL` with `SB_THUMBTRACK` reads `nTrackPos`, a
+   field only the scroll bar's own thumb-drag code ever sets — Task 4 confirmed a synthetic
+   `WM_VSCROLL` correctly does nothing, because it cannot populate that field. A human at the
+   keyboard is the only instrument that can exercise this arm.
+7. **At 150% display scaling, the Apply row is reachable on every tab.** Change Windows display
+   scaling to 150%, restart chibipop, and repeat steps 1-4. Apply must be visible or reachable by
+   scrolling on every tab, never clipped off the bottom of the screen with no way down to it.
+   **This step is owed, not run.** It was deliberately not attempted anywhere in this plan — display
+   scaling is a system-wide setting, not something to flip while oniichan was away from the
+   keyboard. `BACKLOG.md` §11 records that headroom at 150% was already thin before this plan; this
+   is the step that confirms whether the fix actually holds there.
+
+**What was measured during the build, for context — not a substitute for running this.** Steps 1-2
+came from Task 5, step 5 from Task 3, steps 3-4 from Task 4, each against a standalone, throwaway
+binary and config — never oniichan's install — with the window pinned off-screen or driven by
+`PostMessage`/`SetWindowPos` rather than a real mouse. None of it was run as this checklist, end to
+end, on a live window with a human watching. That is what actually running this item still buys,
+and step 6 cannot be bought any other way.
+
+### 1.27 Live-Apply engine switching transitions — added 2026-08-19, not run
+
+**Why this exists.** Tasks 4–6 of the plugin-system round wired plugin discovery, loading, hosting,
+and state tracking. Task 7 added the `Strikes` counter, which disables a plugin after three
+consecutive failures and raises a notice naming it — a live notification on the worker thread that
+the running recogniser has changed. All five observable transitions below touch the engine field of
+a running worker, which `apply_settings` (`src/text/ocr.rs:311`) does not know about yet. This
+checklist captures the five transitions a future hot-swap wiring must preserve. Each one is a
+hover observed with the resolved word recorded — **"it should work" is not evidence**.
+
+> [!warning] Hot-swap is not wired — what is and is not verifiable today
+> `WorkerSettings` and `derive()` carry no engine field yet. Live hot-swap of the running recogniser
+> is **not implemented**. What *is* observable today:
+>
+> - Steps 1 and 2: Plugin enable and selection with a fresh lookup on each Apply.
+> - Step 3: Reverting to Built-in.
+> - The part of step 4 where the plugin disables itself *without* an Apply — the `Strikes` counter
+>   fires on the worker thread and makes `PluginText::recognise` return errors permanently, failing
+>   silently on all subsequent hovers with no auto-revert to Built-in.
+>
+> What *cannot* be verified today (steps 4 and 5's auto-revert and popup notice are not implemented;
+> hot-swap and the notice feature will ship together):
+>
+> - Step 2's "the next hover uses it" after an Apply that *merely* changes the engine selection,
+>   with no crash or new plugin-enable to trigger a forced reload. Apply would have to swap the
+>   recogniser while it runs; that is not implemented.
+> - Step 4's revert: the auto-revert to Built-in, and the popup notice naming the disabled plugin,
+>   are future work. Currently when `Strikes` disables the plugin on the worker thread, all hovers
+>   fail silently with no notice.
+> - Step 5's notice: no popup notice exists for plugin failures. Errors go to stderr only.
+> - Neither step can show that an Apply-while-popup-visible case lands the change in the live
+>   instance instead of queuing it until a fresh lookup.
+
+**Setup.** `./target/release/chibipop.exe run`. Open Settings, go to **OCR / Debug** tab. Have a
+corpus page (Japanese text) ready to hover.
+
+1. **Enable a plugin.** In the **Plugin** listbox, select an available plugin (if any are listed
+   under "Available plugins") and click **Enable**. The status line must show the plugin starting,
+   then **Ready**. Record it started without crashing and reported its state.
+
+2. **Select it as the engine.** Switch to the **OCR language** dropdown and select the plugin as
+   the engine (it will be listed by name). Press Apply. Hover a word in your corpus **on the same
+   line and orientation the test used for step 1**. The next hover must use the plugin's
+   recogniser, not Windows OCR. Compare the word resolved, the hit-rank order, or the match box —
+   anything that differs between the two engines. **This step requires hot-swap: an Apply that
+   merely changes the engine selection must make the next hover use it. Without hot-swap, this
+   half is blocked.**
+
+3. **Select Built-in again.** In the **OCR language** dropdown, select Built-in and press Apply.
+   Hover the same text. It must use Windows OCR and resolve the same word you got in step 1
+   (if step 1 resolved anything). The revert is silent — no notice, no restart.
+
+4. **Disable an enabled plugin while it is the engine.** *(The auto-revert to Built-in and popup
+   notice described below are not yet implemented. Currently the plugin disables and all hovers fail
+   silently. These will ship with hot-swap.)* Leave the engine set to that plugin. Press Apply to
+   confirm the setting, then hover and exhaust it: three hovers must each raise an error (any error,
+   from the plugin). The third error fires the `Strikes` counter on the worker thread. The plugin
+   disables itself **without an Apply** — you will see no notice in the window, but the internal
+   disable fires. On the fourth hover, chibipop must revert to Built-in **and raise a notice** on
+   the popup saying the plugin failed and was disabled. Record the plugin name in the notice. **The
+   first three errors are the test; the notice is the observable that proves the revert.** The revert
+   happens on the worker thread, not on an Apply; this is what `Strikes` exists for.
+
+   **Critical detail:** the disable happens on the worker thread with no coordination to the UI.
+   A future hot-swap wiring must ensure that an Apply-while-disabled case does not resurrect the
+   plugin or leave the UI and the worker out of sync. As written this step exercises neither
+   (`Strikes` fires and disables; a manual Apply to change the engine lands after it). The gap
+   is owed and is recorded here rather than hidden.
+
+5. **Three failures in a row, auto-disable and notice.** *(The popup notice is not yet implemented.
+   Currently the plugin disables and hovers fail silently. This will ship with hot-swap.)* Select a
+   plugin that is not the current engine (to avoid step 4's behavior). Leave the settings window
+   alone — do not Apply. On the main window or corpus page, use `chibipop.exe plugin test <name>`
+   from the command line to send three errors to the running instance *without* any Apply in between.
+   The `Strikes` counter must fire, the plugin must disable itself, and a fresh hover with any
+   engine (plugin or Built-in) must show the notice **once** on the popup — "Plugin <name> failed 3
+   times; disabled." The notice must **not** reappear on the next hover. Repeat the command and
+   confirm it still disables once per three failures, not persistently. The disabled flag must survive
+   an Apply (the plugin stays off unless re-enabled by hand in the UI), and the `Strikes` counter
+   must reset when a lookup succeeds. Do not re-enable the plugin during this step — that is a
+   separate case.
+
+### 1.28 Fresh install with discovered meikiocr — added 2026-08-19, not run
+
+**Why this exists.** `scripts/blank-copy.ps1` now seeds the whole `plugins/`
+tree on every fresh install (this round's deploy fix, §1 of the same plan).
+`plugins/meikiocr` therefore ships even to installs that never asked for a
+plugin. This item verifies that discovery makes it available and checks its
+Enable box without starting it while the built-in engine remains selected.
+
+**Setup.** Seed a **scratch** folder — never `Documents\chibipop-latest` or `chibipop-nightly` —
+with `pwsh -File scripts/blank-copy.ps1 -Destination <empty folder>`. Do not
+create or hand-edit `chibipop.toml` first: the point is the true first-run
+path, before any config exists. `plugins/meikiocr` will be on disk (seeded).
+
+1. `<folder>\chibipop.exe run` starts with no errors or plugin warnings. The
+   built-in engine remains selected, so discovery extends the in-memory enabled
+   list without spawning a plugin. The stderr startup line reads
+   `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
+   `src/text/ocr.rs:275`).
+2. `chibipop.exe settings` opens with **five tabs**: General, Dictionaries, OCR / Debug, Anki,
+   Plugins (`src/ui/settings_window.rs:2484-2508`).
+3. The **OCR engine** dropdown on OCR / Debug lists **"Built-in (Windows OCR)"**
+   and **"meikiocr"**. The list is `["builtin"]` extended by
+   `discovered_text_providers(found)` (`src/ui/settings_window.rs`), which
+   includes every successfully parsed discovered text-provider.
+4. The **Plugins** tab does not say "No plugins found" here. `discover()` finds
+   `plugins/meikiocr` and lists one row: **"meikiocr 0.1.0"**, status
+   **"Enabled"**, with the **Enable** checkbox checked. The state comes from the
+   in-memory config extended before `settings_only`; it is not read from disk.
+   "No plugins found in `<path>`." remains valid only when `plugins/` is empty
+   or missing.
+5. OCR works normally: hover Japanese text on screen and confirm it resolves through the popup, same
+   as any pre-plugin build.
+6. No `[meikiocr-adapter]` line appears anywhere in stderr. The built-in engine
+   is still selected, so discovery has not spawned the adapter process.
+7. The first-run TOML may still contain an empty `enabled` list because the
+   discovery extension is in memory. Applying the checked plugin row saves its
+   name; reopening settings then reads the saved list. Both states resolve the
+   same way at startup because discovery extends the loaded config again.
+
+**Pass** when all seven hold with `plugins/meikiocr` discovered on disk: the
+provider is visible in the dropdown, its checkbox is checked, the built-in
+engine still runs until selected, and no adapter starts prematurely.
+
+### 1.29 Per-engine live regression — added 2026-08-19, not run
+
+**Why this exists.** 1.28 proves discovery surfaces the plugin while the
+built-in engine remains selected. This is the opposite proof: with meikiocr
+selected, do the two OCR engines agree on the same fixture, and does
+naming a broken engine string fail safely instead of hanging or crashing. The engine is picked once,
+at worker-thread startup (`resolve_recogniser`, `src/app.rs:1936-1955`; "Resolved once, never saved"
+— hot-swap is not wired, see 1.27), so every engine change below needs a real restart of
+`chibipop.exe run`, never a Settings Apply.
+
+**Setup.** meikiocr installed and importable (`plugins/meikiocr/config.toml`'s `meikiocr_path`
+points at its venv — refreshing via `blank-copy.ps1` now keeps that file, which is the point of this
+round's §1 fix). `chibipop.toml` at the install root carries:
+
+```toml
+[plugins]
+enabled = ["meikiocr"]
+```
+
+Fixture: `docs/fixtures/live/01-japanese-modern.html` ("01 — modern" in `docs/LIVE-SUITE.md`),
+recognizer language `ja`. `m26` is the 26px baseline line — "学生は図書館で新しい辞書を借りました。",
+the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J1.
+
+1. **Built-in.** `[ocr]` has no `engine` key, or `engine = "builtin"`. Restart
+   (`chibipop.exe run`). Open page 01, hover `m26`, record the resolved word. Confirm the stderr
+   startup line reads `chibipop: OCR engine: windows-ocr`.
+2. **meikiocr.** Set `engine = "meikiocr"` under `[ocr]`. Restart. Open page 01, hover the same spot
+   on `m26`, record the resolved word. Confirm the stderr startup line reads
+   `chibipop: OCR engine: meikiocr` (`PluginText::name()` returns the manifest's own `name`,
+   `src/plugin/text.rs:98,149-151`). Confirm adapter lines appear on stderr: the adapter process
+   prints them itself (`adapter.py`'s `log()`, `:90-92`) and chibipop's stderr reader relays every
+   line unconditionally (`src/plugin/host.rs:206-217`) — the `show_adapter_log` debug checkbox only
+   echoes a status string inside the Settings window (`src/app.rs:1537-1539`); it does not gate this
+   passthrough. Expect, once at process start, `[meikiocr-adapter] loaded in <N>s provider=...
+   threads=4` and a `warm-up <N>ms` line (`adapter.py:132-139`), then on the hover itself
+   `[meikiocr-adapter] recognise <N>ms 1 line(s)` (`adapter.py:291-292`).
+
+   | | Built-in (windows-ocr) | meikiocr |
+   |---|---|---|
+   | Word resolved at `m26` | | |
+   | Startup line seen | | |
+   | `[meikiocr-adapter]` lines seen | n/a | |
+
+3. **Compare.** Both hovers land on the same screen coordinates on the same line, so both engines
+   should resolve the same word — 学生 or 図書館, depending on exactly where within the line the
+   cursor sits. A difference between the two is the finding to record, not a failure to explain away.
+4. **Fallback — unknown engine name.** Leave `enabled = ["meikiocr"]`. Set `engine = "nonexistent"`.
+   Restart. `resolve_engine("nonexistent", ["meikiocr"])` (`src/config.rs:274-283`) matches neither
+   `"builtin"` nor the enabled list, so it returns `EngineChoice::FellBack("nonexistent")` — a path
+   that never touches plugin discovery or spawning at all. Confirm:
+   - stderr prints the fallback warning, naming the missing engine, verbatim:
+     `chibipop: OCR engine "nonexistent" is not enabled, falling back to builtin`
+     (`src/app.rs:1949-1951`).
+   - chibipop starts anyway, on Windows OCR.
+   - the startup line reads `chibipop: OCR engine: windows-ocr`.
+   - hovering works normally.
+
+   **This is a different message from a plugin that fails to spawn.** A name that *is* in `enabled`
+   but can't start (bad path, crashed process, wrong role) instead prints `chibipop: OCR plugin
+   "<name>" failed, falling back to builtin: <reason>` (`src/app.rs:1942-1944`) — the same safe
+   landing, a different cause. Read the message; do not infer the cause from "it fell back" alone.
+
+**Pass** when both engines resolve a recorded word at `m26`, all three startup lines match verbatim,
+`[meikiocr-adapter]` lines appear only while meikiocr is the engine, and the fallback case starts
+clean on Windows OCR with the exact warning quoted above.
+
+### 1.30 Screenshot action — added 2026-08-24, not run
+
+With `chibipop run` live and a popup visible (hover a Japanese word):
+
+1. Press the screenshot hotkey (`Ctrl+Shift+S` by default). The screen dims and a crosshair
+   cursor appears over the full virtual desktop.
+2. Click and drag to select a region. The selected area stays un-dimmed with a white border.
+   Release the mouse button.
+3. A PNG is saved to `screenshots/` beside the exe. The filename is
+   `{word}_{unix_seconds}.png` where `{word}` is the mined expression sanitized for the
+   filesystem. Verify the file exists and opens as a valid image showing the selected region.
+4. If Anki is connected: a card is created with the word, reading, and glossary, plus a context
+   image attached to the configured field (default `Context`). Verify the card in Anki — the
+   Context field should contain an `<img src="chibipop-screenshot-...">` tag, and the image
+   should be in the collection media folder.
+5. **Esc during selection** — the overlay closes, the popup returns unchanged, no file is saved.
+6. **Right-click during selection** — same as Esc.
+7. **Accidental click (drag < 5px)** — treated as cancel.
+8. **Without a popup visible**, the hotkey does nothing (silently ignored).
+9. **After the screenshot**, the popup shows the word as "added" (the Anki button state updates),
+   and pressing the regular Anki add key on the same word hits `allowDuplicate: false` — not a
+   bug, expected behavior.
+10. **Hot reload**: change `actions.screenshot.hotkey` in `chibipop.toml`, press Apply in
+    Settings. The new hotkey works, the old one does not. **PID unchanged.**
+
+**Pass** when the PNG is saved, the Anki card carries the image, Esc/right-click/tiny-drag all
+cancel cleanly, the hotkey is inert without a popup, and Apply re-registers the binding without
+a restart.
+
+---
 
 ## Tier 2 — mostly automatable (~5 min)
 

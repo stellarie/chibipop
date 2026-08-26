@@ -35,6 +35,11 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+use windows::Graphics::Imaging::{
+    BitmapAlphaMode, BitmapEncoder, BitmapPixelFormat, SoftwareBitmap,
+};
+use windows::Security::Cryptography::CryptographicBuffer;
+use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream};
 
 
 /// First; else DPI-scaled.
@@ -227,6 +232,27 @@ fn capture_region(region: PhysRect) -> Result<Frame> {
         Ok(_) => bitblt_after(region, "DXGI frame was one flat colour".to_string()),
         Err(e) => bitblt_after(region, format!("{e:#}")),
     }
+}
+
+/// One-shot capture + nearest-neighbour upscale by `factor`; BGRA.
+///
+/// For the main thread's actions (mining screenshot, OCR-to-clipboard):
+/// each call captures fresh via this thread's own DXGI/BitBlt path -
+/// the worker's `WinCapture` is thread-affine and unreachable here.
+pub fn capture_upscaled_by(region: PhysRect, factor: i32) -> Result<Frame> {
+    let cap = capture_region(region)?;
+    let need = (region.w as usize)
+        .checked_mul(region.h as usize)
+        .and_then(|n| n.checked_mul(4))
+        .context("region too large")?;
+    if cap.buf.len() < need {
+        anyhow::bail!("capture is short: {} < {need}", cap.buf.len());
+    }
+    if factor <= 1 {
+        return Ok(cap);
+    }
+    let (buf, w, h) = chibipop::text::source::upscale_by(&cap.buf, region.w, region.h, factor);
+    Ok(Frame { buf, w, h, ..cap })
 }
 
 /// BitBlt, remembering DXGI's reason.
@@ -630,6 +656,37 @@ pub fn cursor_position() -> Result<PhysPoint> {
     let mut p = POINT::default();
     unsafe { GetCursorPos(&mut p).context("GetCursorPos")? };
     Ok(PhysPoint { x: p.x, y: p.y })
+}
+
+/// BGRA pixels to PNG bytes.
+pub fn encode_bgra_to_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
+    let ibuffer =
+        CryptographicBuffer::CreateFromByteArray(bgra).context("wrapping the pixel buffer")?;
+    // 32bpp BGRA; alpha is junk.
+    let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
+        &ibuffer,
+        BitmapPixelFormat::Bgra8,
+        w,
+        h,
+        BitmapAlphaMode::Ignore,
+    )
+    .context("building a SoftwareBitmap from the capture")?;
+
+    let stream = InMemoryRandomAccessStream::new().context("opening a PNG stream")?;
+    let encoder = BitmapEncoder::CreateAsync(BitmapEncoder::PngEncoderId()?, &stream)
+        .and_then(|op| op.join())
+        .context("creating the PNG encoder")?;
+    encoder.SetSoftwareBitmap(&bitmap).context("handing the encoder its pixels")?;
+    encoder.FlushAsync().and_then(|op| op.join()).context("encoding the PNG")?;
+
+    let size = u32::try_from(stream.Size().context("sizing the PNG")?)
+        .context("the encoded PNG does not fit in a read")?;
+    let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0)?)
+        .context("reading the PNG back")?;
+    reader.LoadAsync(size).and_then(|op| op.join()).context("reading the PNG back")?;
+    let mut out = vec![0u8; size as usize];
+    reader.ReadBytes(&mut out).context("reading the PNG back")?;
+    Ok(out)
 }
 
 #[cfg(test)]

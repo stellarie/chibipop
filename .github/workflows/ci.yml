@@ -78,8 +78,8 @@ jobs:
       # cargo prefixes every diagnostic with an ANSI escape and `^error` never
       # matches. That silently counted 0 and this gate had never once run.
       #
-      # The repo carries two accepted clippy findings. CI must assert the
-      # COUNT is 2 - a third is a real regression. Counting every rendered
+      # The repo carries one accepted clippy finding. CI must assert the
+      # COUNT is 1 - a second is a real regression. Counting every rendered
       # warning (minus cargo's per-target "generated N warnings" summaries)
       # instead of matching known lint TEXTS, which is blind to any new lint -
       # that is how a dead-code regression got through on 2026-07-31. See
@@ -92,26 +92,31 @@ jobs:
       # per-package run does not help: clippy lints workspace-member
       # dependencies with the same flags). Left as warnings, every target
       # lints, cargo deduplicates repeat diagnostics across targets, and one
-      # workspace-wide run renders each finding exactly once. The two:
-      # lookup/deconj.rs useless_conversion and lookup/model.rs
-      # too_many_arguments, both in core.
+      # workspace-wide run renders each finding exactly once. The one:
+      # lookup/model.rs add_term too_many_arguments, in core.
       #
       # Was 4 until 2026-08-09 (the hot-reload branch removed worker_main's
       # `while_let_loop` site), then 3 until 2026-08-25: ticket 27 moved the
       # layout walk into core as `PopupScene`, and chibipop-windows'
       # ui/render.rs `layout_pass` - the third finding - no longer exists.
+      # Then 2 until 2026-08-26, when the upstream v0.9.x merge brought a
+      # deconj.rs rewrite that no longer has the `useless_conversion` site.
+      # That same merge ported three new findings into src/worker.rs (a
+      # `type_complexity` serve field and two long argument lists); they were
+      # refactored away rather than accepted - a `ServeHook` alias and a
+      # `LookupState` bundle - so the count did not go up.
       # This number is a baseline, not a constant: when it moves, say in the
       # commit message whether it is a finding or a re-baseline, and move
       # docs/REGRESSION.md's table with it.
-      - name: Clippy - exactly two accepted findings
+      - name: Clippy - exactly one accepted finding
         shell: bash
         run: |
           raw=$(cargo clippy --workspace --color never --all-targets --all-features 2>&1)
           n=$(printf '%s\n' "$raw" | grep -E "^warning" | grep -vcE "generated [0-9]+ warning" || true)
           echo "accepted clippy findings: $n"
-          if [ "$n" -ne 2 ]; then
+          if [ "$n" -ne 1 ]; then
             printf '%s\n' "$raw"
-            echo "::error::expected exactly 2 accepted clippy findings, got $n"
+            echo "::error::expected exactly 1 accepted clippy finding, got $n"
             exit 1
           fi
 
@@ -206,19 +211,20 @@ jobs:
       # Same warning-count mechanics as tier0 (see the long comment there;
       # --color never is load-bearing). The count is per-platform after the
       # workspace split (ADR-0007): on Linux the windows crate cfg-stubs to
-      # nothing, so its render.rs finding does not exist here and the
-      # baseline is core's two - lookup/deconj.rs useless_conversion and
-      # lookup/model.rs too_many_arguments. The Linux crate's accepted
-      # count is zero and must stay zero.
-      - name: Clippy - exactly two accepted findings
+      # nothing, so its render.rs finding does not exist here - and since the
+      # v0.9.x merge fixed lookup/deconj.rs's useless_conversion, the
+      # baseline is core's one remaining finding, lookup/model.rs
+      # too_many_arguments. The Linux crate's accepted count is zero and
+      # must stay zero.
+      - name: Clippy - exactly one accepted finding
         shell: bash
         run: |
           raw=$(cargo clippy --workspace --color never --all-targets --all-features 2>&1)
           n=$(printf '%s\n' "$raw" | grep -E "^warning" | grep -vcE "generated [0-9]+ warning" || true)
           echo "accepted clippy findings: $n"
-          if [ "$n" -ne 2 ]; then
+          if [ "$n" -ne 1 ]; then
             printf '%s\n' "$raw"
-            echo "::error::expected exactly 2 accepted clippy findings, got $n"
+            echo "::error::expected exactly 1 accepted clippy finding, got $n"
             exit 1
           fi
 

@@ -8,7 +8,7 @@ pub mod ocr;
 // re-exported so the modules above keep addressing them as `crate::text::…`,
 // unchanged by the workspace split.
 pub use chibipop::text::{
-    layout, mask, Frame, RegionCapture, SettingsSnapshot, TextSource, TextSpan,
+    layout, mask, recogniser, Frame, RegionCapture, SettingsSnapshot, TextSource, TextSpan,
 };
 
 /// The Windows capture upscale: WinRT OCR misreads small text at

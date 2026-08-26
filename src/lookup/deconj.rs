@@ -75,7 +75,7 @@ impl Deconjugator {
                 }
             }
 
-            processed.extend(novel.into_iter());
+            processed.extend(novel);
             novel = new_novel;
         }
 

@@ -13,11 +13,17 @@
 // Everything is Win32: on a foreign target this lib is intentionally empty
 // (see main.rs — the whole package cfg-stubs so --workspace builds anywhere).
 #[cfg(windows)]
+pub mod action;
+#[cfg(windows)]
 pub mod app;
+#[cfg(windows)]
+pub mod clipboard;
 #[cfg(windows)]
 pub mod input;
 #[cfg(windows)]
 pub mod lock;
+#[cfg(windows)]
+pub mod plugin;
 #[cfg(windows)]
 pub mod rebuild;
 #[cfg(windows)]

@@ -1,0 +1,13 @@
+name = "meikiocr"
+version = "0.1.0"
+protocol = 1
+command = "python"
+args = ["-u", "adapter.py"]
+roles = ["text-provider"]
+
+[text_provider]
+provides_geometry = true
+languages = ["ja"]
+# The 1.3 s model load is paid in the handshake, which has its own 5 s budget.
+# This budget covers inference only: 65 ms for a hover crop, 400 ms full page.
+timeout_ms = 1500

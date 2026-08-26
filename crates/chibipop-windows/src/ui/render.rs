@@ -43,11 +43,24 @@ use windows_numerics::Vector2;
 /// The layout goldens' capture side.
 pub mod geometry;
 
-/// One font's formats, by size.
+/// Cached by font+size+weight+style.
 #[derive(Default)]
 struct FormatCache {
     font: String,
-    by_size: HashMap<u32, IDWriteTextFormat>,
+    by_key: HashMap<u64, IDWriteTextFormat>,
+}
+
+/// Packs size+weight+style into a key.
+///
+/// A format is immutable once created,
+/// so the cache has to key on every
+/// axis a run can vary on, not just
+/// the size it used to.
+fn format_key(size: f32, weight: u16, italic: bool) -> u64 {
+    let s = size.to_bits() as u64;
+    let w = (weight as u64) << 32;
+    let i = if italic { 1u64 << 48 } else { 0 };
+    s | w | i
 }
 
 /// DirectWrite, as a text engine.
@@ -69,24 +82,36 @@ impl Text {
         Ok(Text { dwrite, formats: RefCell::default() })
     }
 
-    /// One format per font and size.
-    fn format(&self, font: &str, size: f32) -> windows::core::Result<IDWriteTextFormat> {
-        let key = size.to_bits();
+    /// One format per font, size,
+    /// weight and style.
+    fn format(
+        &self,
+        font: &str,
+        size: f32,
+        weight: u16,
+        italic: bool,
+    ) -> windows::core::Result<IDWriteTextFormat> {
+        let key = format_key(size, weight, italic);
         {
             let cache = self.formats.borrow();
             if cache.font == font {
-                if let Some(f) = cache.by_size.get(&key) {
+                if let Some(f) = cache.by_key.get(&key) {
                     return Ok(f.clone());
                 }
             }
         }
 
+        let style = if italic {
+            DWRITE_FONT_STYLE_ITALIC
+        } else {
+            DWRITE_FONT_STYLE_NORMAL
+        };
         let created = unsafe {
             self.dwrite.CreateTextFormat(
                 &HSTRING::from(font),
                 None,
-                DWRITE_FONT_WEIGHT_REGULAR,
-                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_WEIGHT(weight as i32),
+                style,
                 DWRITE_FONT_STRETCH_NORMAL,
                 size,
                 w!("ja-JP"),
@@ -96,28 +121,25 @@ impl Text {
         let mut cache = self.formats.borrow_mut();
         if cache.font != font {
             cache.font = font.to_string();
-            cache.by_size.clear();
+            cache.by_key.clear();
         }
-        cache.by_size.insert(key, created.clone());
+        cache.by_key.insert(key, created.clone());
         Ok(created)
     }
 
     /// One wrapped layout.
     ///
-    /// The one shaping call in the
-    /// bin: measure and paint both
-    /// come through here, so a run
-    /// is never wrapped two ways.
-    fn layout(
-        &self,
-        text: &str,
-        font: &str,
-        size: f32,
-        max_w: f32,
-    ) -> windows::core::Result<IDWriteTextLayout> {
-        let format = self.format(font, size)?;
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe { self.dwrite.CreateTextLayout(&wide, &format, max_w.max(1.0), f32::MAX) }
+    /// The one shaping call in the bin:
+    /// measure and paint both come
+    /// through here, and through the
+    /// same `MeasureRun`, so a run is
+    /// never wrapped two ways nor
+    /// painted in a weight it was not
+    /// measured in.
+    fn layout(&self, run: MeasureRun<'_>) -> windows::core::Result<IDWriteTextLayout> {
+        let format = self.format(run.font, run.size, run.weight, run.italic)?;
+        let wide: Vec<u16> = run.text.encode_utf16().collect();
+        unsafe { self.dwrite.CreateTextLayout(&wide, &format, run.max_w.max(1.0), f32::MAX) }
     }
 
     /// Borrows it as a `TextMeasure`.
@@ -140,10 +162,7 @@ fn refused(e: windows::core::Error) -> MeasureError {
 
 impl TextMeasure for Measurer<'_> {
     fn measure(&mut self, run: MeasureRun<'_>) -> std::result::Result<Metrics, MeasureError> {
-        let layout = self
-            .0
-            .layout(run.text, run.font, run.size, run.max_w)
-            .map_err(refused)?;
+        let layout = self.0.layout(run).map_err(refused)?;
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut m) }.map_err(refused)?;
         Ok(Metrics { w: m.width, h: m.height, lines: m.lineCount })
@@ -155,10 +174,7 @@ impl TextMeasure for Measurer<'_> {
         at: &[u32],
         out: &mut Vec<GlyphBox>,
     ) -> std::result::Result<(), MeasureError> {
-        let layout = self
-            .0
-            .layout(run.text, run.font, run.size, run.max_w)
-            .map_err(refused)?;
+        let layout = self.0.layout(run).map_err(refused)?;
         for &offset in at {
             let mut px = 0.0f32;
             let mut py = 0.0f32;
@@ -252,7 +268,11 @@ impl Renderer {
 
     fn dpi_scale(&self) -> f32 {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
-        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+        if dpi == 0 {
+            1.0
+        } else {
+            dpi as f32 / 96.0
+        }
     }
 
     /// Finds the action at (x, y).
@@ -346,7 +366,10 @@ impl Renderer {
 
     /// Creates or resizes it.
     fn ensure_target(&mut self, w: i32, h: i32) -> Result<()> {
-        let size = D2D_SIZE_U { width: w.max(1) as u32, height: h.max(1) as u32 };
+        let size = D2D_SIZE_U {
+            width: w.max(1) as u32,
+            height: h.max(1) as u32,
+        };
 
         if let Some(target) = &self.target {
             unsafe { target.Resize(&size) }.context("ID2D1HwndRenderTarget::Resize")?;
@@ -371,8 +394,11 @@ impl Renderer {
             pixelSize: size,
             presentOptions: D2D1_PRESENT_OPTIONS_NONE,
         };
-        let target = unsafe { self.d2d_factory.CreateHwndRenderTarget(&rt_props, &hwnd_props) }
-            .context("ID2D1Factory::CreateHwndRenderTarget")?;
+        let target = unsafe {
+            self.d2d_factory
+                .CreateHwndRenderTarget(&rt_props, &hwnd_props)
+        }
+        .context("ID2D1Factory::CreateHwndRenderTarget")?;
         self.target = Some(target);
         Ok(())
     }
@@ -394,7 +420,9 @@ impl Renderer {
             .expect("ensure_target must run before paint_once");
 
         unsafe { target.BeginDraw() };
-        let scope = DrawScope { target: Some(target) };
+        let scope = DrawScope {
+            target: Some(target),
+        };
 
         let draw_result: windows::core::Result<()> = (|| {
             unsafe {
@@ -402,14 +430,19 @@ impl Renderer {
 
                 let bg_brush = target.CreateSolidColorBrush(&color_f(theme.background), None)?;
                 let panel = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: 0.0, top: 0.0, right: w as f32, bottom: h as f32 },
+                    rect: D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: w as f32,
+                        bottom: h as f32,
+                    },
                     radiusX: theme.corner_radius as f32,
                     radiusY: theme.corner_radius as f32,
                 };
                 target.FillRoundedRectangle(&panel, &bg_brush);
 
                 let border_brush = target.CreateSolidColorBrush(&color_f(theme.border), None)?;
-                target.DrawRoundedRectangle(&panel, &border_brush, 1.0, None);
+                target.DrawRoundedRectangle(&panel, &border_brush, theme.border_width, None);
             }
 
             for painted in scene.visible(scroll as f32, h as f32) {
@@ -434,12 +467,17 @@ impl Renderer {
                     let brush = unsafe {
                         target.CreateSolidColorBrush(&color_f(painted.row.color), None)
                     }?;
-                    let layout = self.text.layout(
-                        &painted.row.text,
-                        &theme.font_name,
-                        theme.collapsed_size,
-                        side.col_w,
-                    )?;
+                    // One format for the
+                    // whole column, the
+                    // collapsed role's.
+                    let layout = self.text.layout(MeasureRun {
+                        text: &painted.row.text,
+                        font: &theme.font_name,
+                        size: theme.collapsed_size,
+                        weight: theme.collapsed_weight,
+                        italic: theme.collapsed_italic,
+                        max_w: side.col_w,
+                    })?;
                     unsafe {
                         target.DrawTextLayout(
                             Vector2 { X: side.col_x, Y: painted.y },
@@ -502,9 +540,14 @@ impl Renderer {
             return Ok(());
         }
 
-        let layout =
-            self.text
-                .layout(&elem.text, &theme.font_name, elem.font_size, elem.wrap_w)?;
+        let layout = self.text.layout(MeasureRun {
+            text: &elem.text,
+            font: &theme.font_name,
+            size: elem.font_size,
+            weight: elem.weight,
+            italic: elem.italic,
+            max_w: elem.wrap_w,
+        })?;
         if elem.align == Align::Trailing {
             unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
         }
@@ -546,5 +589,11 @@ impl Drop for DrawScope<'_> {
 }
 
 fn color_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
-    D2D1_COLOR_F { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
+    D2D1_COLOR_F {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a: 1.0,
+    }
 }
+

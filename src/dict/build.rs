@@ -178,7 +178,7 @@ fn build_into(
 }
 
 /// Merges the freq archives.
-pub(crate) fn load_freqs(freqs: &[PathBuf]) -> Result<FreqTable> {
+pub fn load_freqs(freqs: &[PathBuf]) -> Result<FreqTable> {
     let mut table = FreqTable::new();
     for fa in freqs {
         // Per archive, then overwrite.

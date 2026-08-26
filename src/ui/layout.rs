@@ -24,11 +24,22 @@ const SECTION_GAP: f32 = 10.0;
 const CORNER_GAP: f32 = 8.0;
 /// Gap around the rule.
 const SEPARATOR_MARGIN: f32 = 10.0;
+/// The side column's vertical rule.
+///
+/// Not `Theme::separator_height`: that
+/// themes the horizontal rule between
+/// blocks, and a height cannot set the
+/// width of a vertical one.
 const SEPARATOR_THICKNESS: f32 = 1.0;
 /// Fixed "See also" column width.
 const SIDE_PANEL_W: f32 = 110.0;
 /// Gap before the side panel.
 const SIDE_GAP: f32 = 12.0;
+/// DirectWrite's regular weight.
+///
+/// What a rule carries: it has no text
+/// to weight, and zero is no weight.
+const REGULAR_WEIGHT: u16 = 400;
 
 /// A colour, as `Theme` carries it.
 pub type Rgb = (u8, u8, u8);
@@ -42,6 +53,9 @@ pub struct MeasureRun<'a> {
     /// Family name, from the theme.
     pub font: &'a str,
     pub size: f32,
+    /// DirectWrite weight, 100-900.
+    pub weight: u16,
+    pub italic: bool,
     /// Wrap width. A measurer that
     /// cannot wrap at zero clamps it
     /// itself; the scene reports the
@@ -188,6 +202,12 @@ pub struct SceneElem {
     pub color: Rgb,
     /// Zero for `Separator`.
     pub font_size: f32,
+    /// DirectWrite weight, 100-900.
+    ///
+    /// `REGULAR_WEIGHT` for a rule,
+    /// which has no text to weight.
+    pub weight: u16,
+    pub italic: bool,
     /// Gap added above this element.
     pub top_gap: f32,
     /// Wrap width the text was given.
@@ -421,13 +441,15 @@ pub fn scene(
     for elem in &elems {
         let advance = match elem {
             Elem::Separator { top_gap } => {
-                let h = SEPARATOR_THICKNESS;
+                let h = theme.separator_height;
                 y += top_gap;
                 out.push(SceneElem {
                     kind: ElemKind::Separator,
                     text: String::new(),
                     color: theme.separator,
                     font_size: 0.0,
+                    weight: REGULAR_WEIGHT,
+                    italic: false,
                     top_gap: *top_gap,
                     wrap_w: content_w,
                     align: Align::Leading,
@@ -450,6 +472,8 @@ pub fn scene(
                     text: line.text.clone(),
                     color: line.color,
                     font_size: line.size,
+                    weight: line.weight,
+                    italic: line.italic,
                     top_gap: line.top_gap,
                     wrap_w: content_w,
                     align: Align::Trailing,
@@ -570,6 +594,8 @@ pub fn scene(
                 text: &label,
                 font,
                 size: theme.collapsed_size,
+                weight: theme.collapsed_weight,
+                italic: theme.collapsed_italic,
                 max_w: w,
             })?;
             Some(AnkiSlot {
@@ -609,6 +635,8 @@ fn text_elem(
         text: line.text.clone(),
         color: line.color,
         font_size: line.size,
+        weight: line.weight,
+        italic: line.italic,
         top_gap: line.top_gap,
         wrap_w,
         align: Align::Leading,
@@ -620,7 +648,14 @@ fn text_elem(
 }
 
 fn run<'a>(font: &'a str, line: &'a Line, max_w: f32) -> MeasureRun<'a> {
-    MeasureRun { text: &line.text, font, size: line.size, max_w }
+    MeasureRun {
+        text: &line.text,
+        font,
+        size: line.size,
+        weight: line.weight,
+        italic: line.italic,
+        max_w,
+    }
 }
 
 /// The "See also" column's geometry.
@@ -633,7 +668,16 @@ fn side_panel(
 ) -> Result<SidePanel, MeasureError> {
     let font = theme.font_name.as_str();
     let size = theme.collapsed_size;
-    let heading = MeasureRun { text: SIDE_HEADING, font, size, max_w: SIDE_PANEL_W };
+    let weight = theme.collapsed_weight;
+    let italic = theme.collapsed_italic;
+    let heading = MeasureRun {
+        text: SIDE_HEADING,
+        font,
+        size,
+        weight,
+        italic,
+        max_w: SIDE_PANEL_W,
+    };
     let head = m.measure(heading)?;
 
     let mut rows = Vec::with_capacity(entries.len() + 1);
@@ -651,6 +695,8 @@ fn side_panel(
             text: &entry.text,
             font,
             size,
+            weight,
+            italic,
             max_w: SIDE_PANEL_W,
         })?;
         rows.push(SideRow {
@@ -726,6 +772,9 @@ struct Line {
     size: f32,
     /// Extra space above this line.
     top_gap: f32,
+    /// DirectWrite weight, 100-900.
+    weight: u16,
+    italic: bool,
 }
 
 enum Elem {
@@ -769,6 +818,8 @@ fn build_elements(
             color: theme.dict_label_text,
             size: theme.collapsed_size,
             top_gap: 0.0,
+            weight: theme.dict_label_weight,
+            italic: theme.dict_label_italic,
         }));
     }
 
@@ -777,9 +828,11 @@ fn build_elements(
         if let Some(freq) = card.freq {
             out.push(Elem::Corner(Line {
                 text: format!("freq {freq}"),
-                color: theme.dimmed_text,
-                size: theme.collapsed_size,
+                color: theme.frequency_text,
+                size: theme.frequency_size,
                 top_gap: 0.0,
+                weight: theme.frequency_weight,
+                italic: theme.frequency_italic,
             }));
         }
 
@@ -795,6 +848,8 @@ fn build_elements(
                     color: theme.headword_text,
                     size: theme.headword_size,
                     top_gap: if show_back { LINE_GAP } else { 0.0 },
+                    weight: theme.headword_weight,
+                    italic: theme.headword_italic,
                 },
             });
         }
@@ -805,8 +860,10 @@ fn build_elements(
                 out.push(Elem::Text(Line {
                     text: reading.to_string(),
                     color: theme.reading_text,
-                    size: theme.body_size,
+                    size: theme.reading_size,
                     top_gap: LINE_GAP,
+                    weight: theme.reading_weight,
+                    italic: theme.reading_italic,
                 }));
             }
         }
@@ -815,8 +872,10 @@ fn build_elements(
             out.push(Elem::Text(Line {
                 text: card.pos.join(" · "),
                 color: theme.dimmed_text,
-                size: theme.collapsed_size,
+                size: theme.dimmed_size,
                 top_gap: LINE_GAP,
+                weight: theme.dimmed_weight,
+                italic: theme.dimmed_italic,
             }));
         }
 
@@ -824,8 +883,10 @@ fn build_elements(
             out.push(Elem::Text(Line {
                 text: block.dict_name.clone(),
                 color: theme.dict_label_text,
-                size: theme.collapsed_size,
+                size: theme.dict_label_size,
                 top_gap: SECTION_GAP,
+                weight: theme.dict_label_weight,
+                italic: theme.dict_label_italic,
             }));
             if !block.glosses.is_empty() {
                 out.push(Elem::Text(Line {
@@ -833,6 +894,8 @@ fn build_elements(
                     color: theme.body_text,
                     size: theme.body_size,
                     top_gap: LINE_GAP,
+                    weight: theme.body_weight,
+                    italic: theme.body_italic,
                 }));
             }
         }
@@ -869,6 +932,8 @@ fn build_elements(
                     color: theme.collapsed_text,
                     size: theme.collapsed_size,
                     top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
+                    weight: theme.collapsed_weight,
+                    italic: theme.collapsed_italic,
                 }));
             }
         }

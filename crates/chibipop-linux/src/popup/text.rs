@@ -29,8 +29,8 @@
 
 use chibipop::ui::layout::{GlyphBox, MeasureError, MeasureRun, Metrics, TextMeasure};
 use cosmic_text::{
-    fontdb, Attrs, Buffer, Color, Family, FontSystem, Metrics as CosmicMetrics, Shaping, SwashCache,
-    Wrap,
+    fontdb, Attrs, Buffer, Color, Family, FontSystem, Metrics as CosmicMetrics, Shaping, Style,
+    SwashCache, Weight, Wrap,
 };
 use tiny_skia::{PixmapMut, PremultipliedColorU8};
 
@@ -168,8 +168,8 @@ impl TextEngine {
     ///
     /// An associated function, not a method, so a caller can hand it
     /// `&mut self.fonts` while still holding `&self.family`.
-    fn shape(fonts: &mut FontSystem, text: &str, family: &str, size: f32, max_w: f32) -> Buffer {
-        let size = size.max(MIN_SIZE);
+    fn shape(fonts: &mut FontSystem, run: Shaped<'_>) -> Buffer {
+        let size = run.size.max(MIN_SIZE);
         let mut buffer = Buffer::new_empty(CosmicMetrics::new(size, size * LINE_HEIGHT));
         // No height bound: shape every wrapped line, not just the ones
         // that would fit a viewport. Core culls off-panel runs itself
@@ -178,21 +178,81 @@ impl TextEngine {
         // The width clamp is the same one DirectWrite gets on Windows: a
         // measurer that cannot wrap at zero clamps itself, and the scene
         // still reports the width it asked for.
-        buffer.set_size(Some(max_w.max(1.0)), None);
+        buffer.set_size(Some(run.max_w.max(1.0)), None);
         // Words first, glyphs when a "word" cannot fit alone. Japanese
         // has no spaces, so the segmenter treats runs of ideographs as
         // their own words and this behaves like CJK line breaking; the
         // glyph fallback is what keeps a long Latin headword inside a
         // narrow panel.
         buffer.set_wrap(Wrap::WordOrGlyph);
-        buffer.set_text(
-            text,
-            &Attrs::new().family(Family::Name(family)),
-            Shaping::Advanced,
-            None,
-        );
+        // Weight and style are the theme's, per role (CSS theming):
+        // fontdb weights are the same 100-900 numbers DirectWrite
+        // takes, so the scene's number travels unconverted. A family
+        // with no bold or italic face still shapes - fontdb picks the
+        // nearest weight it has, and cosmic-text does not synthesize -
+        // so a missing face costs the emphasis, never the run.
+        let attrs = Attrs::new()
+            .family(Family::Name(run.family))
+            .weight(Weight(run.weight))
+            .style(if run.italic { Style::Italic } else { Style::Normal });
+        buffer.set_text(run.text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(fonts, false);
         buffer
+    }
+}
+
+/// What [`TextEngine::shape`] needs.
+///
+/// A `MeasureRun` and a `DrawRun` differ only in where the family comes
+/// from - the scene's theme when measuring, the resolved family when
+/// painting - so both funnel through this and hit one shaping path.
+#[derive(Debug, Clone, Copy)]
+struct Shaped<'a> {
+    text: &'a str,
+    family: &'a str,
+    size: f32,
+    weight: u16,
+    italic: bool,
+    max_w: f32,
+}
+
+impl<'a> Shaped<'a> {
+    /// One run to measure, as the scene
+    /// named it.
+    fn measuring(run: MeasureRun<'a>) -> Shaped<'a> {
+        Shaped {
+            text: run.text,
+            family: run.font,
+            size: run.size,
+            weight: run.weight,
+            italic: run.italic,
+            max_w: run.max_w,
+        }
+    }
+
+    /// One run to paint, in the family
+    /// the config resolved to.
+    fn painting(run: DrawRun<'a>, family: &'a str) -> Shaped<'a> {
+        Shaped {
+            text: run.text,
+            family,
+            size: run.size,
+            weight: run.weight,
+            italic: run.italic,
+            max_w: run.max_w,
+        }
+    }
+
+    /// One coverage probe.
+    ///
+    /// Regular and upright: a probe
+    /// asks which face answers for a
+    /// character, and a family's bold
+    /// or italic face - if it has one -
+    /// covers what its regular one
+    /// does.
+    fn probing(text: &'a str, family: &'a str, size: f32, max_w: f32) -> Shaped<'a> {
+        Shaped { text, family, size, weight: Weight::NORMAL.0, italic: false, max_w }
     }
 }
 
@@ -210,7 +270,7 @@ impl TextMeasure for TextEngine {
     /// `.notdef`, which measures like any other glyph. Tofu is reported
     /// once at startup by [`TextEngine::probe`], not per run.
     fn measure(&mut self, run: MeasureRun<'_>) -> Result<Metrics, MeasureError> {
-        let buffer = TextEngine::shape(&mut self.fonts, run.text, run.font, run.size, run.max_w);
+        let buffer = TextEngine::shape(&mut self.fonts, Shaped::measuring(run));
         let mut w = 0.0f32;
         let mut lines = 0u32;
         for line in buffer.layout_runs() {
@@ -231,7 +291,7 @@ impl TextMeasure for TextEngine {
         at: &[u32],
         out: &mut Vec<GlyphBox>,
     ) -> Result<(), MeasureError> {
-        let buffer = TextEngine::shape(&mut self.fonts, run.text, run.font, run.size, run.max_w);
+        let buffer = TextEngine::shape(&mut self.fonts, Shaped::measuring(run));
         let h = line_height(run.size);
         // Exactly one box per offset, in order: core zips these 1:1 with
         // the kanji of a headword to build per-character hit targets, so
@@ -245,8 +305,8 @@ impl TextMeasure for TextEngine {
 
 impl PanelText for TextEngine {
     fn draw_run(&mut self, run: DrawRun<'_>, target: &mut PixmapMut<'_>) {
-        let mut buffer =
-            TextEngine::shape(&mut self.fonts, run.text, &self.family, run.size, run.max_w);
+        let shaped = Shaped::painting(run, &self.family);
+        let mut buffer = TextEngine::shape(&mut self.fonts, shaped);
         let (r, g, b) = run.color;
         // The glyph raster is already snapped to the pixel grid by
         // cosmic-text, so the wrap box's own origin is too; a fractional
@@ -389,7 +449,7 @@ fn ending_len(rest: &str) -> usize {
 fn covers(fonts: &mut FontSystem, family: &str, text: &str) -> bool {
     // Wide enough that nothing wraps; the probe only cares about glyph
     // ids, but a wrap would not change them anyway.
-    let buffer = TextEngine::shape(fonts, text, family, 16.0, 1024.0);
+    let buffer = TextEngine::shape(fonts, Shaped::probing(text, family, 16.0, 1024.0));
     let mut any = false;
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
@@ -613,14 +673,52 @@ mod tests {
     }
 
     fn run<'a>(text: &'a str, size: f32, max_w: f32) -> MeasureRun<'a> {
-        MeasureRun { text, font: JP, size, max_w }
+        MeasureRun { text, font: JP, size, weight: 400, italic: false, max_w }
     }
 
-    /// The face a glyph actually came from, as fontdb names it.
-    fn face_of(engine: &mut TextEngine, text: &str, family: &str) -> Option<String> {
-        let buffer = TextEngine::shape(&mut engine.fonts, text, family, 20.0, 400.0);
+    /// The same run, in `weight`.
+    fn heavy<'a>(text: &'a str, size: f32, max_w: f32, weight: u16) -> MeasureRun<'a> {
+        MeasureRun { weight, ..run(text, size, max_w) }
+    }
+
+    /// The face a shaped run's glyphs came from, as fontdb names it.
+    fn face_of_shape(engine: &mut TextEngine, shaped: Shaped<'_>) -> Option<String> {
+        let buffer = TextEngine::shape(&mut engine.fonts, shaped);
         let id = buffer.layout_runs().flat_map(|line| line.glyphs.iter()).map(|g| g.font_id).next()?;
         engine.fonts.db().face(id).map(|face| face.post_script_name.clone())
+    }
+
+    fn face_of(engine: &mut TextEngine, text: &str, family: &str) -> Option<String> {
+        face_of_shape(engine, Shaped::probing(text, family, 20.0, 400.0))
+    }
+
+    /// Does `family` ship a bold face?
+    fn ships_bold(engine: &TextEngine, family: &str) -> bool {
+        engine.fonts.db().faces().any(|face| {
+            face.weight == Weight::BOLD
+                && face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family))
+        })
+    }
+
+    /// A themed weight reaches the shaper.
+    ///
+    /// What core's per-role weights buy on Linux: a bold role has to
+    /// resolve to the family's bold face, not be quietly shaped regular
+    /// the way every run was before CSS theming. Skipped when the
+    /// family ships one weight, since fontdb then answers with the
+    /// nearest face it has and there is nothing to tell apart.
+    #[test]
+    fn a_bold_run_shapes_in_the_familys_bold_face() {
+        let Some(mut engine) = jp_engine() else { return };
+        if !ships_bold(&engine, JP) {
+            eprintln!("skipping: {JP} ships no bold face");
+            return;
+        }
+        let regular = face_of_shape(&mut engine, Shaped::measuring(run(PROBE_TEXT, 20.0, 400.0)));
+        let bold =
+            face_of_shape(&mut engine, Shaped::measuring(heavy(PROBE_TEXT, 20.0, 400.0, 700)));
+        assert!(regular.is_some(), "the probe text must shape");
+        assert_ne!(regular, bold, "a bold role must not shape in the regular face");
     }
 
     /// The one invariant ADR-0004 built this whole module around: with
@@ -854,6 +952,8 @@ mod tests {
                 DrawRun {
                     text: PROBE_TEXT,
                     size: 20.0,
+                    weight: 400,
+                    italic: false,
                     max_w: 200.0,
                     color: (255, 255, 255),
                     origin,

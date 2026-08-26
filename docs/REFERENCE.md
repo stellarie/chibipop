@@ -31,6 +31,7 @@ dictionary, ranked in filename order. Roughly 70 seconds.
 |---|---|
 | `chibipop run` | The popup application. |
 | `chibipop settings` | The settings window alone — no popup, no hooks, no OCR. |
+| `chibipop settings --audit` | Dumps the settings window's control tree as JSON and exits. No visible window; for diffing a layout change. |
 | `chibipop lookup 食べた` | Dictionary lookup only. No screen, no OCR. |
 | `chibipop probe --at 1200,400` | One point, every stage printed: capture region → OCR lines and word boxes → resolved span → ranked hits → match box. Tells apart "OCR saw nothing" from "OCR saw text but nothing near the cursor". |
 | `chibipop watch` | Follows the cursor and prints a lookup whenever the hovered word changes. Ctrl-C to stop. |
@@ -126,6 +127,17 @@ memory figures in [`REGRESSION.md`](REGRESSION.md) were taken with `watch` at
 for a few seconds. Note `probe` always draws both, being the diagnostic view;
 the app on shipped defaults draws only the match box, so a real hover shows
 one box where `probe` shows several.
+
+`chibipop settings --audit` opens the settings window off-screen and hidden,
+and prints one JSON document — `{"dumps": [...]}` — instead of showing
+anything: one dump per tab, plus a fifth for the Anki tab with its field map
+expanded. Each dump carries the client size and every control's `id`,
+`parent_id`, `class`, `text`, `rect` (`x`/`y`/`w`/`h`), `visible`, `enabled`
+and `tabstop`, plus the Tab-key ring in both directions (`tab_ring`,
+`tab_ring_reverse`). It sends no input and draws no pixel, so two builds can
+be compared with a plain line diff on their output — a clean diff after a
+change that should not move anything is the evidence, not an argument.
+`--dict` and `--config` are inherited from `settings`.
 
 ### Paths
 

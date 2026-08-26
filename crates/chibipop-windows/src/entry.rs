@@ -69,6 +69,9 @@ enum Command {
         dict: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Dump the tree as JSON.
+        #[arg(long)]
+        audit: bool,
     },
     /// Print lookups on hover.
     Watch {
@@ -98,6 +101,40 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Discover or test plugins.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
+    /// Test fixture plugin.
+    #[command(hide = true)]
+    PluginEcho {
+        #[arg(default_value = "ok")]
+        mode: String,
+    },
+    /// Manual action testing.
+    Action {
+        #[command(subcommand)]
+        cmd: ActionCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// List discovered plugins.
+    List,
+    /// Send one test request.
+    Test {
+        name: String,
+        #[arg(long)]
+        image: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ActionCmd {
+    /// Test the selection overlay.
+    TestSelection,
 }
 
 pub fn run() -> Result<()> {
@@ -141,7 +178,15 @@ pub fn run() -> Result<()> {
             };
 
             let capture = probe_capture_size();
-            let mut source = chibipop_windows::text::text_source(
+            // Built by hand (not `text_source`) so the probe can name
+            // the engine: core's `OcrEngine` seam carries no metadata.
+            let win_ocr = chibipop_windows::text::ocr::WinrtOcr::new("ja")?;
+            let engine_name =
+                chibipop::text::recogniser::Recogniser::name(&win_ocr).to_string();
+            let win_cap = chibipop_windows::text::capture::WinCapture::new(None)?;
+            let mut source = chibipop::text::TextSource::new(
+                Box::new(win_cap),
+                Box::new(win_ocr),
                 SettingsSnapshot {
                     max_passes: tiles,
                     upscale: UPSCALE,
@@ -149,8 +194,7 @@ pub fn run() -> Result<()> {
                     capture,
                     scan_alphanumeric: true,
                 },
-                "ja",
-            )?;
+            );
             let region_was_default = region.is_none();
             let region = match region {
                 None => chibipop::text::layout::region_around(cursor, false, capture),
@@ -200,6 +244,7 @@ pub fn run() -> Result<()> {
                     (read.lines, read.resolved, read.source, read.fallback)
                 }
             };
+            println!("engine:  {engine_name}");
             match &dxgi_error {
                 Some(why) => println!("capture: {source_used}  (dxgi: {why})"),
                 None => println!("capture: {source_used}"),
@@ -265,7 +310,7 @@ pub fn run() -> Result<()> {
             let mut tiled_scan: Option<Vec<chibipop::geom::ScanRect>> = None;
             if region_was_default && tiles > 1 {
                 // No popup on screen in `probe`: nothing to mask.
-                let (tiled, scan) =
+                let (tiled, scan, _) =
                     source.resolve_at_tiled_scanned(cursor, show_region.is_some(), MASKLESS)?;
                 match tiled {
                     None => println!("\ntiled:   nothing resolved"),
@@ -375,10 +420,10 @@ pub fn run() -> Result<()> {
                 println!();
             }
         }
-        Command::Settings { dict, config } => {
+        Command::Settings { dict, config, audit } => {
             let dict = dict_path(dict);
             let config_path = config.unwrap_or_else(default_config_path);
-            let cfg = chibipop::config::load_or_create(&config_path)
+            let mut cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
             // Only for the dict names.
             //
@@ -390,6 +435,16 @@ pub fn run() -> Result<()> {
                 })?;
                 dictionary.dicts().context("reading dictionary identities")?
             };
+            if audit {
+                return chibipop_windows::ui::audit::run(&cfg, &dicts);
+            }
+            let plugins_root = chibipop::paths::beside_exe("plugins");
+            let found = chibipop_windows::plugin::discover::discover(&plugins_root);
+            for name in chibipop_windows::plugin::discover::text_provider_names(&found) {
+                if !cfg.plugins.enabled.contains(&name) {
+                    cfg.plugins.enabled.push(name);
+                }
+            }
             chibipop_windows::app::settings_only(cfg, &dicts, &config_path, &dict)
         }
         Command::Run { dict, rules, config } => {
@@ -449,6 +504,28 @@ pub fn run() -> Result<()> {
             );
             Ok(())
         }
+        Command::Plugin { cmd } => {
+            let root = chibipop::paths::beside_exe("plugins");
+            let code = match cmd {
+                PluginCmd::List => chibipop_windows::plugin::cli::list(&root),
+                PluginCmd::Test { name, image } => {
+                    chibipop_windows::plugin::cli::test_one(&root, &name, &image)
+                }
+            };
+            std::process::exit(code);
+        }
+        Command::PluginEcho { mode } => chibipop_windows::plugin::echo::run(&mode),
+        Command::Action { cmd } => match cmd {
+            ActionCmd::TestSelection => {
+                chibipop_windows::text::capture::init_dpi_awareness()?;
+                let mut sel = chibipop_windows::action::selection::RegionSelection::new()?;
+                match sel.run() {
+                    Some(r) => println!("selected: x={} y={} w={} h={}", r.x, r.y, r.w, r.h),
+                    None => println!("cancelled"),
+                }
+                Ok(())
+            }
+        },
     }
 }
 

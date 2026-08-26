@@ -186,11 +186,80 @@ pub fn add_note(
         .context("addNote did not return a note ID")
 }
 
+/// One image to attach.
+pub struct NotePicture {
+    pub data_base64: String,
+    pub filename: String,
+    /// Anki fields to embed it in.
+    pub fields: Vec<String>,
+}
+
+/// Builds an addNote request.
+fn build_add_note_body(
+    deck: &str,
+    model: &str,
+    fields: &HashMap<String, String>,
+    field_map: &[crate::config::FieldMapping],
+    picture: Option<&NotePicture>,
+) -> serde_json::Value {
+    let mut note = serde_json::json!({
+        "deckName": deck,
+        "modelName": model,
+        "fields": mapped_fields(fields, field_map),
+        "options": { "allowDuplicate": false },
+    });
+    if let Some(pic) = picture {
+        note["picture"] = serde_json::json!([{
+            "data": pic.data_base64,
+            "filename": pic.filename,
+            "fields": pic.fields,
+        }]);
+    }
+    serde_json::json!({
+        "action": "addNote",
+        "version": VERSION,
+        "params": { "note": note },
+    })
+}
+
+/// Adds a note with a picture.
+pub fn add_note_with_picture(
+    url: &str,
+    deck: &str,
+    model: &str,
+    fields: &HashMap<String, String>,
+    field_map: &[crate::config::FieldMapping],
+    picture: Option<&NotePicture>,
+) -> Result<i64> {
+    if !field_map_routes(field_map, "expression") {
+        anyhow::bail!(
+            "field_map has no entry mapping the \"expression\" source, so the \
+             looked-up word would never reach Anki - fix the mapping in \
+             Settings, Anki tab"
+        );
+    }
+    let body = build_add_note_body(deck, model, fields, field_map, picture);
+    let resp = post(url, &body)?;
+    resp.get("result")
+        .and_then(|r| r.as_i64())
+        .context("addNote did not return a note ID")
+}
+
 /// Minimal escaping for text placed into an HTML-destined Anki field
 /// (currently just the dictionary name, which is arbitrary text pulled from
 /// the Yomitan archive's index.json).
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// One dict's glosses, numbered.
+fn plain_dict_group(b: &crate::present::GlossBlock) -> String {
+    let numbered = b.glosses.iter()
+        .enumerate()
+        .map(|(i, g)| format!("{}. {g}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("[{}]\n{numbered}", b.dict_name)
 }
 
 /// Fields from a card.
@@ -206,24 +275,22 @@ pub fn fields_from_card(
         .unwrap_or("")
         .to_string();
     let glossary = blocks.iter()
-        .map(|b| {
-            let joined = b.glosses.join("; ");
-            format!("{}: {joined}", b.dict_name)
-        })
+        .map(plain_dict_group)
         .collect::<Vec<_>>()
-        .join("\n");
-    // HTML-formatted counterpart of `glossary`, for a field mapped to a
-    // rich-text Anki field. `\n` is a no-op in most Anki field CSS, so
-    // blocks are joined with `<br>` here instead - the one place this
-    // rendering has to differ from the plain-text one to actually display
-    // right, rather than just carrying markup through.
+        .join("\n\n");
+    // \n is a no-op; use <li> tags.
     let glossary_html = blocks.iter()
         .map(|b| {
-            let joined = b.glosses_html.join("; ");
-            format!("{}: {joined}", escape_html(&b.dict_name))
+            let items: String = b.glosses_html.iter()
+                .map(|g| format!("<li>{g}</li>"))
+                .collect();
+            format!(
+                "<b>{}</b><ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>",
+                escape_html(&b.dict_name)
+            )
         })
         .collect::<Vec<_>>()
-        .join("<br>");
+        .join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">");
     let mut fields = HashMap::from([
         ("expression".to_string(), expression),
         ("reading".to_string(), reading),
@@ -266,11 +333,11 @@ mod tests {
         assert_eq!(Some(&"猫".to_string()), f.get("expression"));
         assert_eq!(Some(&"ねこ".to_string()), f.get("reading"));
         assert_eq!(
-            Some(&"大辞林: ネコ科の哺乳類。\nJitendex: cat; feline".to_string()),
+            Some(&"[大辞林]\n1. ネコ科の哺乳類。\n\n[Jitendex]\n1. cat\n2. feline".to_string()),
             f.get("glossary"),
         );
         assert_eq!(
-            Some(&"大辞林: ネコ科の<b>哺乳類</b>。<br>Jitendex: cat; <i>feline</i>".to_string()),
+            Some(&"<b>大辞林</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>ネコ科の<b>哺乳類</b>。</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>Jitendex</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li><li><i>feline</i></li></ol>".to_string()),
             f.get("glossary_html"),
         );
         assert_eq!(Some(&"42".to_string()), f.get("frequency"));
@@ -293,9 +360,100 @@ mod tests {
         }];
         let f = fields_from_card(&card, &blocks);
         assert_eq!(
-            Some(&"A &amp; B &lt;dict&gt;: cat".to_string()),
+            Some(&"<b>A &amp; B &lt;dict&gt;</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
             f.get("glossary_html"),
         );
+    }
+
+    #[test]
+    fn glossary_html_wraps_one_dictionary_in_a_list_with_no_divider() {
+        let card = crate::present::Card {
+            written: Some("猫".into()),
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 1,
+        };
+        let blocks = vec![crate::present::GlossBlock {
+            dict_name: "Wenlin".into(),
+            glosses: vec!["supper".into(), "dinner".into()],
+            glosses_html: vec!["supper".into(), "dinner".into()],
+        }];
+        let f = fields_from_card(&card, &blocks);
+        let html = f.get("glossary_html").unwrap();
+        assert_eq!(
+            "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li><li>dinner</li></ol>",
+            html,
+        );
+        assert!(!html.contains("<hr"), "single dict has no divider");
+    }
+
+    #[test]
+    fn glossary_html_separates_multiple_dictionaries_with_a_divider() {
+        let card = crate::present::Card {
+            written: Some("猫".into()),
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 1,
+        };
+        let blocks = vec![
+            crate::present::GlossBlock {
+                dict_name: "Wenlin".into(),
+                glosses: vec!["supper".into()],
+                glosses_html: vec!["supper".into()],
+            },
+            crate::present::GlossBlock {
+                dict_name: "CC-CEDICT".into(),
+                glosses: vec!["evening meal".into()],
+                glosses_html: vec!["evening meal".into()],
+            },
+        ];
+        let f = fields_from_card(&card, &blocks);
+        let html = f.get("glossary_html").unwrap();
+        assert_eq!(
+            "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>evening meal</li></ol>",
+            html,
+        );
+        assert_eq!(1, html.matches("<hr").count(), "one divider, none trailing");
+        assert!(html.ends_with("</ol>"), "no divider after last dict");
+    }
+
+    #[test]
+    fn glossary_separates_dictionaries_with_headers_and_dividers() {
+        let card = crate::present::Card {
+            written: Some("犬".into()),
+            reading: Some("いぬ".into()),
+            pos: vec![],
+            freq: None,
+            blocks: vec![],
+            match_len: 1,
+        };
+        let blocks = vec![
+            crate::present::GlossBlock {
+                dict_name: "大辞林".into(),
+                glosses: vec!["イヌ科の哺乳類。".into()],
+                glosses_html: vec!["イヌ科の哺乳類。".into()],
+            },
+            crate::present::GlossBlock {
+                dict_name: "Jitendex".into(),
+                glosses: vec!["dog".into()],
+                glosses_html: vec!["dog".into()],
+            },
+        ];
+        let f = fields_from_card(&card, &blocks);
+
+        let glossary = f.get("glossary").unwrap();
+        assert!(glossary.contains("[大辞林]"));
+        assert!(glossary.contains("[Jitendex]"));
+        assert!(glossary.contains("\n\n"), "blank line between groups");
+
+        let html = f.get("glossary_html").unwrap();
+        assert!(html.contains("<b>大辞林</b>"));
+        assert!(html.contains("<b>Jitendex</b>"));
+        assert!(html.contains("<hr"), "divider between groups");
     }
 
     #[test]
@@ -461,5 +619,38 @@ mod tests {
         ];
         let err = add_note("not-a-url", "Default", "Lapis", &fields, &field_map).unwrap_err();
         assert!(format!("{err:#}").contains("expression"));
+    }
+
+    #[test]
+    fn add_note_with_picture_includes_picture_array() {
+        let fields = HashMap::from([("expression".to_string(), "宿舎".to_string())]);
+        let field_map = vec![crate::config::FieldMapping {
+            anki_field: "Expression".into(),
+            source: "expression".into(),
+        }];
+        let pic = NotePicture {
+            data_base64: "iVBOR...".to_string(),
+            filename: "chibipop-screenshot-test.png".to_string(),
+            fields: vec!["Context".to_string()],
+        };
+        let body = build_add_note_body("Default", "Lapis", &fields, &field_map, Some(&pic));
+        let note = &body["params"]["note"];
+        assert!(note["picture"].is_array());
+        let pic_entry = &note["picture"][0];
+        assert_eq!("iVBOR...", pic_entry["data"].as_str().unwrap());
+        assert_eq!("chibipop-screenshot-test.png", pic_entry["filename"].as_str().unwrap());
+        assert_eq!("Context", pic_entry["fields"][0].as_str().unwrap());
+    }
+
+    #[test]
+    fn add_note_with_picture_none_omits_picture() {
+        let fields = HashMap::from([("expression".to_string(), "宿舎".to_string())]);
+        let field_map = vec![crate::config::FieldMapping {
+            anki_field: "Expression".into(),
+            source: "expression".into(),
+        }];
+        let body = build_add_note_body("Default", "Lapis", &fields, &field_map, None);
+        let note = &body["params"]["note"];
+        assert!(note.get("picture").is_none());
     }
 }

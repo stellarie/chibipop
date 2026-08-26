@@ -1158,6 +1158,7 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
         anki_enabled: config.anki.enabled,
+        first_dict_only: config.anki.first_dict_only,
         summary_chars: config.popup.summary_chars,
         log_lookups: config.debug.show_lookup_log,
         tick_ms: DISPATCH_TICK_MS,
@@ -2307,6 +2308,7 @@ mod tests {
                     dict: Box::new(dict),
                     reopen_dict: None,
                     engine: LookupEngine::new(Deconjugator::new(Vec::new())),
+                    serve: None,
                 })
             },
             || {},
@@ -2790,6 +2792,7 @@ mod tests {
                     }),
                     collapsed: Vec::new(),
                     all_cards: Vec::new(),
+                    sentence: None,
                 }),
                 anchor,
                 orientation: Orientation::Horizontal,

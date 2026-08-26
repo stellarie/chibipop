@@ -122,6 +122,8 @@ fn settings() -> WorkerSettings {
         language: "ja".to_string(),
         present_cfg: chibipop::config::Config::default().present_config(),
         scan_display: ScanDisplay { captures: false, highlight: false },
+        sentence_mode: "line".to_string(),
+        static_region: None,
         dicts: Vec::new(),
     }
 }
@@ -144,6 +146,7 @@ fn spawn(
                 ocr: Box::new(FakeOcr { log: log_tx, text, panics }),
                 dict: Box::new(dict()),
                 reopen_dict: None,
+                serve: None,
                 engine: LookupEngine::new(Deconjugator::new(Vec::new())),
             })
         },
@@ -255,6 +258,7 @@ fn spawn_dwelling() -> (Worker, mpsc::Receiver<String>) {
                 }),
                 dict: Box::new(dict()),
                 reopen_dict: None,
+                serve: None,
                 engine: LookupEngine::new(Deconjugator::new(Vec::new())),
             })
         },
@@ -455,6 +459,7 @@ fn wake_fires_after_each_result() {
                 }),
                 dict: Box::new(dict()),
                 reopen_dict: None,
+                serve: None,
                 engine: LookupEngine::new(Deconjugator::new(Vec::new())),
             })
         },
@@ -598,6 +603,7 @@ fn a_reload_reopens_the_dictionary_the_worker_reads() {
                 dict: Box::new(dict_named("BeforeTheRebuild")),
                 // What the settings process's rename leaves behind.
                 reopen_dict: Some(Box::new(|| Ok(Box::new(dict_named("AfterTheRebuild"))))),
+                serve: None,
                 engine: LookupEngine::new(Deconjugator::new(Vec::new())),
             })
         },

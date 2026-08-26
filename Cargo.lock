@@ -501,7 +501,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chibipop"
-version = "0.8.2"
+version = "0.9.3"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "chibipop-linux"
-version = "0.8.2"
+version = "0.9.3"
 dependencies = [
  "anyhow",
  "calloop 0.14.4",
@@ -541,13 +541,16 @@ dependencies = [
 
 [[package]]
 name = "chibipop-windows"
-version = "0.8.2"
+version = "0.9.3"
 dependencies = [
  "anyhow",
+ "base64",
  "chibipop",
  "clap",
  "rusqlite",
+ "serde",
  "serde_json",
+ "toml",
  "windows 0.62.2",
  "windows-future",
  "windows-numerics",
