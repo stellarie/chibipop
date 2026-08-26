@@ -153,12 +153,20 @@ pub struct TextSource {
 }
 
 impl TextSource {
-    /// The engine itself, for a bin to lend out between lookups (the
-    /// worker's `serve` hook): OCR backends are thread-affine, so a
-    /// one-off job (OCR-to-clipboard) must run on the thread that owns
-    /// this - it cannot build a second engine elsewhere.
-    pub fn engine(&self) -> &dyn OcrEngine {
-        self.ocr.as_ref()
+    /// OCR pixels the caller already holds, for a bin to run between
+    /// lookups (the worker's `serve` hook): OCR backends are
+    /// thread-affine, so a one-off job (OCR-to-clipboard) must run on
+    /// the thread that owns this one - it cannot build a second engine
+    /// elsewhere. A passthrough rather than a lent-out `&dyn OcrEngine`,
+    /// so the facade stays the only way to the seam.
+    pub fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+        self.ocr.recognise(bgra, w, h)
+    }
+
+    /// Which engine reads this source's pixels, for a diagnostic to name
+    /// (`probe`'s report).
+    pub fn engine_name(&self) -> &str {
+        self.ocr.name()
     }
 }
 
@@ -1301,5 +1309,21 @@ mod tests {
         assert_eq!(runs.get(), 1);
         source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("second read");
         assert_eq!(runs.get(), 1, "the same box of one frozen frame is the same words");
+    }
+
+    /// The `serve` hook's passthrough (ticket 11): pixels the caller
+    /// already holds reach the engine as they are - no capture, no
+    /// upscale, no mask - so a one-off job never needs the seam itself.
+    #[test]
+    fn a_one_off_recognise_hands_the_callers_pixels_to_the_engine_untouched() {
+        let (source, seen) = recording(vec![PhysRect { x: 0, y: 0, w: 4, h: 4 }]);
+        let buf: Vec<u8> = (0..16u8).collect();
+
+        let lines = source.recognise(&buf, 2, 2).expect("the engine answers");
+
+        assert_eq!(1, lines.len(), "the engine's own lines come back");
+        let seen = seen.borrow().clone().expect("the engine must have been asked");
+        assert_eq!((buf, 2, 2), seen, "unscaled, unmasked, exactly what was handed over");
+        assert_eq!("recording", source.engine_name(), "and the facade names it");
     }
 }

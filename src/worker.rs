@@ -15,11 +15,6 @@ use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
-
-/// How often a worker with a `serve` hook wakes to look for one-off
-/// jobs while no trigger arrives (upstream's OCR_REQUEST_POLL).
-const SERVE_POLL: Duration = Duration::from_millis(20);
 
 /// One hover: where the cursor is, and what its grab must not read.
 #[derive(Clone, Copy)]
@@ -47,6 +42,11 @@ pub enum TriggerKind {
     Freeze(PhysPoint),
     /// Trigger release: drop the frozen frame, grabs go live again.
     Thaw,
+    /// A wake, and nothing else: the `serve` hook has a job waiting and
+    /// the worker is blocked on this channel (see [`ServeNudge`]).
+    ///
+    /// Answers nothing and changes nothing, so its `id` is never read.
+    Serve,
 }
 
 /// What the worker owns.
@@ -102,9 +102,9 @@ pub struct WorkerResult {
 /// is what serves the new dictionary, and this is the reopen.
 pub type ReopenDict = Box<dyn Fn() -> Result<Box<dyn Dictionary>>>;
 
-/// A between-lookups job runner, lent the thread-affine OCR engine
-/// (see `WorkerParts::serve`).
-pub type ServeHook = Box<dyn FnMut(&dyn OcrEngine)>;
+/// A between-lookups job runner, lent the OCR facade (see
+/// `WorkerParts::serve`).
+pub type ServeHook = Box<dyn FnMut(&TextSource)>;
 
 /// What the bin supplies, built on the worker thread.
 ///
@@ -124,10 +124,16 @@ pub struct WorkerParts {
     /// dictionary still answers, a dropped one answers nothing.
     pub reopen_dict: Option<ReopenDict>,
     pub engine: LookupEngine,
-    /// Lends the OCR engine out between lookups, polled every
-    /// [`SERVE_POLL`]: a one-off OCR job (OCR-to-clipboard) must run on
-    /// this thread because engines are thread-affine. `None` costs
-    /// nothing - the worker blocks on its trigger channel as before.
+    /// Runs one-off jobs against the OCR facade between lookups: a job
+    /// (OCR-to-clipboard) must run on this thread because engines are
+    /// thread-affine.
+    ///
+    /// Called once per wake, immediately before the worker blocks on its
+    /// trigger channel - never on a timer. The queue the hook drains is
+    /// the bin's own, and the worker cannot see it, so the producer must
+    /// queue the job and then wake the worker with [`ServeNudge`];
+    /// ADR-0010's idle budget is 0 wakeups/s and a poll would spend it
+    /// on nothing. `None` costs nothing.
     pub serve: Option<ServeHook>,
 }
 
@@ -173,6 +179,39 @@ impl Worker {
     /// Where results come out; drained on `wake`.
     pub fn results(&self) -> &mpsc::Receiver<WorkerResult> {
         &self.result_rx
+    }
+
+    /// A handle for waking this worker's `serve` hook.
+    ///
+    /// Cheap to clone; whoever queues one-off OCR jobs holds one.
+    pub fn serve_nudge(&self) -> ServeNudge {
+        ServeNudge(self.trigger_tx.clone())
+    }
+}
+
+/// Wakes a worker that has a `serve` job waiting.
+///
+/// The worker blocks on its trigger channel indefinitely, and the job
+/// queue is the bin's - so queueing pixels is only half of handing them
+/// over. Queue first, then nudge: the hook runs before the worker blocks
+/// again, so a nudge swallowed by a batch that was already in flight
+/// still leaves a hook run behind it.
+#[derive(Clone)]
+pub struct ServeNudge(mpsc::Sender<Trigger>);
+
+impl ServeNudge {
+    /// Wake the worker.
+    pub fn nudge(&self) {
+        // A worker that is gone is not this call's error to report: the
+        // job's own result channel says so, to the caller waiting on it.
+        let _ = self.0.send(Trigger { kind: TriggerKind::Serve, id: RequestId(0) });
+    }
+
+    /// A nudge with no worker behind it, for a caller assembled without
+    /// a pipeline (a bin's test context): the job is queued and never
+    /// served, which is the honest answer when nothing owns an engine.
+    pub fn disconnected() -> Self {
+        ServeNudge(mpsc::channel().0)
     }
 }
 
@@ -239,6 +278,8 @@ fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<
         TriggerKind::Reload(s) => pre.push(Pre::Reload(*s)),
         TriggerKind::Freeze(at) => pre.push(Pre::Freeze(at)),
         TriggerKind::Thaw => pre.push(Pre::Thaw),
+        // A wake, already spent by arriving.
+        TriggerKind::Serve => {}
         _ => hover = Some(t),
     };
     take(first);
@@ -289,25 +330,14 @@ fn worker_main(
 
     // Sender dropped: shutdown.
     loop {
-        // With a `serve` hook the wait is a poll, so a one-off OCR job
-        // queued while the cursor is still never waits on a hover.
-        let first = match &mut serve {
-            Some(hook) => match trigger_rx.recv_timeout(SERVE_POLL) {
-                Ok(first) => first,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    hook(source.engine());
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            },
-            None => match trigger_rx.recv() {
-                Ok(first) => first,
-                Err(_) => break,
-            },
-        };
+        // Anything the bin queued for the hook runs before we block, so
+        // a nudge that a batch swallowed mid-lookup cannot leave its job
+        // waiting - and an idle worker with a hook installed still
+        // blocks, it does not poll (ADR-0010).
         if let Some(hook) = &mut serve {
-            hook(source.engine());
+            hook(&source);
         }
+        let Ok(first) = trigger_rx.recv() else { break };
         let (hover, pre) = drain(first, &trigger_rx);
         for change in pre {
             match change {
@@ -343,7 +373,10 @@ fn worker_main(
                     &state.present_cfg,
                     text,
                 ),
-                TriggerKind::Reload(_) | TriggerKind::Freeze(_) | TriggerKind::Thaw => {
+                TriggerKind::Reload(_)
+                | TriggerKind::Freeze(_)
+                | TriggerKind::Thaw
+                | TriggerKind::Serve => {
                     LookupOutcome::Failed("a state change reached the hover path".to_string())
                 }
             }

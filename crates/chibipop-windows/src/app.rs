@@ -942,11 +942,12 @@ fn worker_open(
             reopen_dict: None,
             engine,
             // OCR-to-clipboard pixels, answered on this thread because
-            // the engine is thread-affine (upstream's OCR request loop).
-            serve: Some(Box::new(move |engine| {
+            // the engine is thread-affine, and through the facade
+            // because the seam is core's (upstream's OCR request loop).
+            serve: Some(Box::new(move |source| {
                 while let Ok(request) = ocr_request_rx.try_recv() {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        engine
+                        source
                             .recognise(&request.bgra_buf, request.width, request.height)
                             .map_err(|e| format!("{e:#}"))
                     }))
@@ -1011,6 +1012,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             let _ = PostThreadMessageW(main_tid, WM_APP_RESULT, WPARAM(0), LPARAM(0));
         },
     )?;
+
+    // Queueing pixels and waking the worker that reads them are one act
+    // (the worker blocks, it does not poll for jobs).
+    let ocr_jobs = crate::action::OcrJobs::new(ocr_tx, worker.serve_nudge());
 
     let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
@@ -1586,7 +1591,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         config: &cfg.actions,
                         exe_dir: &exe_dir,
                         screenshot_tx: &screenshot_tx,
-                        ocr_tx: &ocr_tx,
+                        ocr_jobs: ocr_jobs.clone(),
                     };
                     action_registry.dispatch(slot, &state, &mut ctx)
                 };

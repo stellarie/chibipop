@@ -24,14 +24,12 @@ impl Action for OcrClipboardAction {
         };
         let cap = capture::capture_upscaled_by(region, 2)?;
         let (result_tx, result_rx) = mpsc::channel();
-        ctx.ocr_tx
-            .send(OcrRequest {
-                bgra_buf: cap.buf,
-                width: cap.w,
-                height: cap.h,
-                result_tx,
-            })
-            .context("sending OCR request")?;
+        ctx.ocr_jobs.send(OcrRequest {
+            bgra_buf: cap.buf,
+            width: cap.w,
+            height: cap.h,
+            result_tx,
+        })?;
         let lines = result_rx
             .recv()
             .context("OCR worker ended before returning text")?

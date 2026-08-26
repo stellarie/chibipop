@@ -10,7 +10,7 @@ use chibipop::lookup::model::{FakeDictionary, Sense};
 use chibipop::present::DictInfo;
 use chibipop::text::layout::{CaptureSize, OcrLine, OcrWord};
 use chibipop::text::mask::{CaptureMask, CaptureMode};
-use chibipop::text::{Frame, OcrEngine, RegionCapture};
+use chibipop::text::{Frame, OcrEngine, RegionCapture, TextSource};
 use chibipop::worker::{Hover, Trigger, TriggerKind, Worker, WorkerParts, WorkerSettings};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -638,4 +638,131 @@ fn a_reload_reopens_the_dictionary_the_worker_reads() {
         "AfterTheRebuild", top.blocks[0].dict_name,
         "the reopened database's identities must win over the bin's stale list"
     );
+}
+
+// -- the `serve` hook: one-off OCR jobs between lookups (tickets 09/11) --
+
+/// One-off pixels, as the Windows bin's OCR-to-clipboard queues them.
+struct Job {
+    bgra: Vec<u8>,
+    w: i32,
+    h: i32,
+    done: mpsc::Sender<Result<Vec<OcrLine>, String>>,
+}
+
+/// A worker with a `serve` hook over the fakes.
+///
+/// The hook logs every run and drains the job queue through the facade
+/// it is handed - it never sees the engine (ticket 11), and the queue is
+/// the bin's, invisible to the worker.
+fn spawn_serving(
+    gate: Option<mpsc::Receiver<()>>,
+    entered_tx: Option<mpsc::Sender<()>>,
+) -> (Worker, mpsc::Sender<Job>, mpsc::Receiver<String>) {
+    let (log_tx, log_rx) = mpsc::channel::<String>();
+    let capture_log = log_tx.clone();
+    let hook_log = log_tx.clone();
+    let (job_tx, job_rx) = mpsc::channel::<Job>();
+    let (worker, _dicts) = Worker::spawn(
+        settings(),
+        move || {
+            Ok(WorkerParts {
+                capture: Box::new(FakeCapture { log: capture_log, gate, entered_tx }),
+                ocr: Box::new(FakeOcr { log: log_tx, text: Some("食".to_string()), panics: false }),
+                dict: Box::new(dict()),
+                reopen_dict: None,
+                serve: Some(Box::new(move |source: &TextSource| {
+                    let _ = hook_log.send("serve".to_string());
+                    while let Ok(job) = job_rx.try_recv() {
+                        let lines = source
+                            .recognise(&job.bgra, job.w, job.h)
+                            .map_err(|e| format!("{e:#}"));
+                        let _ = job.done.send(lines);
+                    }
+                })),
+                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
+            })
+        },
+        || {},
+    )
+    .expect("the worker must start with a serve hook installed");
+    (worker, job_tx, log_rx)
+}
+
+/// One pixel's worth of BGRA, and somewhere to answer.
+fn job() -> (Job, mpsc::Receiver<Result<Vec<OcrLine>, String>>) {
+    let (done, done_rx) = mpsc::channel();
+    (Job { bgra: vec![0u8; 4], w: 1, h: 1, done }, done_rx)
+}
+
+/// The worker runs its hook once before blocking, so a test that wants
+/// to observe the *next* run waits that one out first.
+fn wait_for_a_hook_run(log_rx: &mpsc::Receiver<String>) {
+    assert_eq!(
+        Some("serve".to_string()),
+        log_rx.recv_timeout(TIMEOUT).ok(),
+        "the hook must run before the worker blocks"
+    );
+}
+
+/// Ticket 09/11 together: a queued job wakes a worker that is blocked -
+/// no poll to catch it - and the hook reads the pixels through the
+/// facade, on the worker's own thread, with no trigger in sight.
+#[test]
+fn a_nudged_job_wakes_a_blocked_worker_and_is_read_through_the_facade() {
+    let (worker, jobs, log_rx) = spawn_serving(None, None);
+    wait_for_a_hook_run(&log_rx);
+    let (job, answered) = job();
+
+    jobs.send(job).unwrap();
+    worker.serve_nudge().nudge();
+
+    let lines = answered
+        .recv_timeout(TIMEOUT)
+        .expect("the nudge must wake the worker")
+        .expect("the facade must answer");
+    assert_eq!("食", lines[0].words[0].text);
+    assert!(events(&log_rx).contains(&"ocr".to_string()), "the worker's own engine read it");
+    assert!(
+        worker.results().try_recv().is_err(),
+        "a nudge is not a lookup: it must answer nothing"
+    );
+}
+
+/// ADR-0010's idle budget, and the reason ticket 09 exists: with a hook
+/// installed and nothing queued, the worker blocks. The 20 ms poll it
+/// replaced would have logged ~15 hook runs over this window.
+#[test]
+fn an_idle_worker_with_a_serve_hook_never_wakes_itself() {
+    let (_worker, _jobs, log_rx) = spawn_serving(None, None);
+    wait_for_a_hook_run(&log_rx);
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert!(events(&log_rx).is_empty(), "an idle worker must do nothing at all");
+}
+
+/// The wake that must not be lost: a job queued while a lookup is in
+/// flight is served when that lookup ends, before the worker blocks
+/// again - so a nudge a drained batch swallows still costs nothing.
+#[test]
+fn a_job_queued_during_a_lookup_is_served_before_the_worker_blocks_again() {
+    let (release_tx, gate) = mpsc::channel::<()>();
+    let (entered_tx, entered) = mpsc::channel::<()>();
+    let (worker, jobs, log_rx) = spawn_serving(Some(gate), Some(entered_tx));
+    wait_for_a_hook_run(&log_rx);
+
+    worker.trigger().send(hover(1)).unwrap();
+    entered.recv_timeout(TIMEOUT).expect("the worker must reach the gated grab");
+    let (job, answered) = job();
+    jobs.send(job).unwrap();
+    worker.serve_nudge().nudge();
+    release_tx.send(()).unwrap();
+
+    assert!(matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }), "the hover answers");
+    let lines = answered
+        .recv_timeout(TIMEOUT)
+        .expect("the job must be served when the lookup ends")
+        .expect("the facade must answer");
+    assert_eq!("食", lines[0].words[0].text);
 }

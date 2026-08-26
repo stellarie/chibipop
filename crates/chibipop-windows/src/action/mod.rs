@@ -7,7 +7,8 @@ pub mod selection;
 use crate::geom::PhysRect;
 use crate::present::Presentation;
 use crate::text::layout::OcrLine;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chibipop::worker::ServeNudge;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -36,7 +37,8 @@ pub struct ActionContext<'a> {
     pub config: &'a crate::config::ActionsConfig,
     pub exe_dir: &'a Path,
     pub screenshot_tx: &'a mpsc::Sender<ScreenshotCommand>,
-    pub ocr_tx: &'a mpsc::Sender<OcrRequest>,
+    /// Owned: it is two channel senders, cloned per dispatch.
+    pub ocr_jobs: OcrJobs,
 }
 
 /// Pixels sent to the worker's OCR owner.
@@ -45,6 +47,31 @@ pub struct OcrRequest {
     pub width: i32,
     pub height: i32,
     pub result_tx: mpsc::Sender<std::result::Result<Vec<OcrLine>, String>>,
+}
+
+/// The one-off OCR queue, and the worker's nudge.
+///
+/// The worker owns the only OCR engine (they are thread-affine) and runs
+/// this queue from its `serve` hook - but it blocks on its own trigger
+/// channel and cannot see this one, so queueing pixels is only half of
+/// handing them over. One type, so the two halves cannot come apart.
+#[derive(Clone)]
+pub struct OcrJobs {
+    tx: mpsc::Sender<OcrRequest>,
+    nudge: ServeNudge,
+}
+
+impl OcrJobs {
+    pub fn new(tx: mpsc::Sender<OcrRequest>, nudge: ServeNudge) -> Self {
+        OcrJobs { tx, nudge }
+    }
+
+    /// Queue pixels, then wake the worker to read them.
+    pub fn send(&self, request: OcrRequest) -> Result<()> {
+        self.tx.send(request).context("sending OCR request")?;
+        self.nudge.nudge();
+        Ok(())
+    }
 }
 
 impl ActionContext<'_> {
@@ -57,7 +84,9 @@ impl ActionContext<'_> {
             config: Box::leak(Box::new(crate::config::ActionsConfig::default())),
             exe_dir: Path::new("."),
             screenshot_tx: Box::leak(Box::new(tx)),
-            ocr_tx: Box::leak(Box::new(mpsc::channel().0)),
+            // No worker behind it: a queued job is never served, which
+            // is what a test without one wants.
+            ocr_jobs: OcrJobs::new(mpsc::channel().0, ServeNudge::disconnected()),
         }
     }
 }

@@ -188,7 +188,7 @@ pub fn run() -> Result<()> {
                 },
                 "ja",
             )?;
-            let engine_name = chibipop::text::OcrEngine::name(source.engine()).to_string();
+            let engine_name = source.engine_name().to_string();
             let region_was_default = region.is_none();
             let region = match region {
                 None => chibipop::text::layout::region_around(cursor, false, capture),
