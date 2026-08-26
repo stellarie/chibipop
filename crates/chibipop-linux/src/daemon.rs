@@ -673,9 +673,24 @@ impl App {
                 ));
                 self.dicts = dicts;
                 self.worker = Some(worker);
+                self.look_where_the_cursor_is();
             }
             Err(e) => self.log.diag(&format!("worker: unavailable - {e:#}")),
         }
+    }
+
+    /// One lookup at the cursor's present position, if it is known.
+    ///
+    /// The event rungs deliver a position when their session opens and
+    /// then only on movement (ADR-0003), so a daemon that came up with
+    /// the cursor already resting on a word has exactly one sample and
+    /// no pipeline to spend it on. Asking here is what makes live mode
+    /// true the moment it can be - the same reason a trigger press is
+    /// its own first cursor sample (ADR-0010).
+    fn look_where_the_cursor_is(&mut self) {
+        let Some(pos) = self.last_cursor else { return };
+        self.log.diag(&format!("lookup: asking where the cursor already is ({}, {})", pos.x, pos.y));
+        self.feed(Event::CursorMoved { pos });
     }
 
     /// The in-app retry ADR-0002 requires: ask the portal again.
@@ -761,6 +776,14 @@ impl CursorHandler for App {
                 self.freeze_at(pos, output);
                 self.hold = Some(Hold { output, ..hold });
             }
+        }
+        // A sample with no pipeline behind it would spend the
+        // Controller's movement gate on a lookup nobody can answer -
+        // and say so once per sample. The newest position is kept
+        // instead, and `look_where_the_cursor_is` spends it the moment
+        // a pipeline exists.
+        if self.worker.is_none() {
+            return;
         }
         self.feed(Event::CursorMoved { pos });
     }
@@ -1584,7 +1607,9 @@ mod tests {
     impl OcrEngine for FakeOcr {
         fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> anyhow::Result<Vec<OcrLine>> {
             let masked = bgra
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|px| px[0] == 0xFF && px[1] == 0xFF && px[2] == 0xFF);
             note(&self.log, &format!("ocr masked={masked}"));
             Ok(vec![OcrLine {
@@ -1670,6 +1695,38 @@ mod tests {
         );
         assert_eq!(CaptureMode::Live, app.capture_mode(), "no hold: the grab is live");
         assert!(app.dwell.is_none(), "a dispatch arms no timer of its own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An event rung delivers a position when its session opens and
+    /// then only on movement (ADR-0003), so a daemon that came up with
+    /// the cursor already resting on a word has exactly one sample -
+    /// and the pipeline is the last thing to exist. Spending that
+    /// sample on nothing would leave live mode silent until the mouse
+    /// moved, and would spend the Controller's movement gate too: the
+    /// same position asked twice is not a move.
+    #[test]
+    fn a_sample_that_arrives_before_the_pipeline_is_spent_once_it_is_up() {
+        let dir = scratch("earlysample");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        assert!(app.worker.is_none(), "no pipeline yet, as at startup");
+
+        app.on_cursor_position(AT);
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(!written.contains("lookup:"), "nothing to ask yet: {written}");
+
+        // What `spawn_worker` does the moment a pipeline exists.
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+        app.look_where_the_cursor_is();
+        answer(&app);
+
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "the resting cursor gets its lookup"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
