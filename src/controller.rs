@@ -341,6 +341,16 @@ impl Controller {
         })
     }
 
+    /// The Anki affordance's state, placed or not.
+    ///
+    /// [`Controller::popup`] answers only once a rect is known, but a
+    /// bin that paints the affordance *into* the popup rather than
+    /// beside it needs this state to raster the very first frame
+    /// (ADR-0004).
+    pub fn anki(&self) -> Option<&AnkiPopupState> {
+        self.surface.as_ref().map(|s| &s.anki)
+    }
+
     /// A popup exists, placed or not.
     pub fn is_shown(&self) -> bool {
         self.surface.is_some()
@@ -1601,6 +1611,31 @@ mod tests {
         c.handle(placed(POPUP, 200, 200));
         assert!(c.handle(Event::AddRequested).is_empty());
         assert!(c.popup().expect("placed").anki.added.contains("\u{732B}"));
+    }
+
+    /// A bin that paints the affordance *into* the popup has to know
+    /// the state before the first raster - which is before any rect
+    /// exists, and therefore before `popup()` answers at all.
+    #[test]
+    fn the_anki_state_reads_back_before_the_popup_has_a_rect() {
+        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        assert!(c.anki().is_none(), "nothing shown is nothing to paint");
+
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
+        let id = c.latest;
+        c.handle(ready_id(id, "\u{732B}", ANCHOR));
+        assert!(c.popup().is_none(), "no rect has come back yet");
+
+        let anki = c.anki().expect("a popup on its way still carries Anki state");
+        assert!(anki.enabled, "the feature is on");
+        assert!(anki.checking, "a fresh popup's first frame is already checking");
+
+        c.handle(placed(POPUP, 200, 200));
+        c.handle(Event::NoteAdded { expr: "\u{732B}".into(), failed: false });
+        assert!(
+            c.anki().expect("still shown").added.contains("\u{732B}"),
+            "and it follows the add lifecycle, rect or no rect"
+        );
     }
 
     #[test]

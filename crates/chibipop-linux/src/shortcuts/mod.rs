@@ -306,8 +306,8 @@ pub enum Action {
     /// both trigger sources, so a portal press and a `ctl trigger-down`
     /// cannot drift apart.
     Verb(Verb),
-    /// The Controller's `AddRequested`. The AnkiConnect call itself is
-    /// ticket 42's; this rung only says the user asked.
+    /// The Controller's `AddRequested` — the same Event the in-panel
+    /// slot raises, so both reach one AnkiConnect flow.
     Add,
     /// Nothing to do.
     Nothing,

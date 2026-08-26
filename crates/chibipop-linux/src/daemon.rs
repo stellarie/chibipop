@@ -32,6 +32,7 @@ use chibipop::geom::{PhysPoint, PhysRect};
 use chibipop::present::DictInfo;
 use chibipop::text::mask::{CaptureMask, CaptureMode};
 use chibipop::worker::{Hover, Trigger, TriggerKind, Worker};
+use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -119,6 +120,10 @@ pub(crate) struct App {
     worker_setup: worker::Setup,
     /// The wake the worker thread pings when a result is queued.
     worker_ping: calloop::ping::Ping,
+    /// Where an AnkiConnect call's answer comes back. The calls are
+    /// blocking HTTP on their own threads, so the pump hears about
+    /// them the way it hears about the Worker: as an event (ADR-0001).
+    anki_tx: calloop::channel::Sender<AnkiOutcome>,
     /// Dictionary identities the pipeline last reported.
     dicts: Vec<DictInfo>,
     /// Trigger mode's hold, while one is held (ADR-0010).
@@ -141,6 +146,46 @@ pub(crate) struct App {
     pump: LoopHandle<'static, App>,
     /// The dwell re-check's timer while one is armed (ADR-0010).
     dwell: Option<RegistrationToken>,
+}
+
+/// One AnkiConnect call, as handed to the thread that will make it.
+enum AnkiCall {
+    Dupes { generation: u64, exprs: Vec<String> },
+    Add { expr: String, fields: HashMap<String, String> },
+}
+
+/// One AnkiConnect answer, as it comes back to the pump.
+///
+/// Failures travel as text rather than being printed where they
+/// happen: the log lives on the pump thread.
+enum AnkiOutcome {
+    /// `Err` = AnkiConnect refused, or is not running at all.
+    Dupes { generation: u64, dupes: Result<HashSet<String>, String> },
+    Added { expr: String, note: Result<i64, String> },
+}
+
+impl AnkiCall {
+    /// The blocking half, off the pump.
+    fn run(self, anki: &chibipop::config::AnkiConfig) -> AnkiOutcome {
+        match self {
+            AnkiCall::Dupes { generation, exprs } => {
+                let refs: Vec<&str> = exprs.iter().map(String::as_str).collect();
+                let dupes =
+                    chibipop::anki::find_duplicates(&anki.url, &anki.deck, &anki.model, &refs);
+                AnkiOutcome::Dupes { generation, dupes: dupes.map_err(|e| format!("{e:#}")) }
+            }
+            AnkiCall::Add { expr, fields } => {
+                let note = chibipop::anki::add_note(
+                    &anki.url,
+                    &anki.deck,
+                    &anki.model,
+                    &fields,
+                    &anki.field_map,
+                );
+                AnkiOutcome::Added { expr, note: note.map_err(|e| format!("{e:#}")) }
+            }
+        }
+    }
 }
 
 /// What a second consent attempt needs, kept so the retry is the same
@@ -242,9 +287,9 @@ impl App {
                 ));
                 match shortcuts::action(id, activated) {
                     shortcuts::Action::Verb(verb) => self.apply_verb(verb),
-                    // The keyboard path to the Anki affordance. The
-                    // AnkiConnect call behind it is ticket 42's; this
-                    // rung's whole job is to say the user asked.
+                    // The keyboard path to the Anki affordance: the
+                    // same Event the in-panel slot raises, so both
+                    // reach one AnkiConnect flow (ADR-0003).
                     shortcuts::Action::Add => self.feed(Event::AddRequested),
                     shortcuts::Action::Nothing => {}
                 }
@@ -441,8 +486,8 @@ impl App {
                     self.feed(Event::Clicked { local, hit });
                 }
                 // Core reserves the slot and the painter fills it
-                // (ADR-0004); the AnkiConnect side of this is ticket
-                // 42's, so the receipt is logged where it lands.
+                // (ADR-0004); the Controller decides whether a click
+                // on it is an add at all.
                 popup::Interaction::Anki { local } => {
                     self.log.diag(&format!(
                         "pointer: click at panel {},{} -> the Anki slot",
@@ -522,7 +567,7 @@ impl App {
 
     /// One Event through the Controller, and every Command it answers
     /// with executed - then the dwell watch brought in line with what
-    /// is now on screen (ADR-0010). Ticket 42 fills in the Anki rows.
+    /// is now on screen (ADR-0010).
     fn feed(&mut self, event: Event) {
         for cmd in self.controller.handle(event) {
             self.execute(cmd);
@@ -616,16 +661,18 @@ impl App {
                     anchor,
                     scroll,
                     show_back,
-                    // The Anki affordance's own state travels with
-                    // `SyncAnkiButton` (ticket 42); until then the slot
-                    // is reserved only by the demo, which passes one.
-                    anki: None,
+                    // The slot is painted into the panel here, not
+                    // hung beside it as on Windows (ADR-0004), so
+                    // every raster carries the affordance's own state.
+                    anki: self.controller.anki().cloned(),
                 });
             }
             Command::RepaintPopup { scroll, show_back } => {
+                let anki = self.controller.anki().cloned();
                 let req = self.popup.as_ref().and_then(Popup::request).map(|req| ShowRequest {
                     scroll,
                     show_back,
+                    anki,
                     ..req.clone()
                 });
                 if let Some(req) = req {
@@ -653,8 +700,17 @@ impl App {
                     self.last_warning = Some(msg);
                 }
             }
-            // The pointer rows (ticket 38) and the Anki rows (42) land
-            // here until those tickets execute them.
+            Command::SyncAnkiButton => self.sync_anki_slot(),
+            Command::CheckDupes { generation, exprs } => {
+                self.spawn_anki(AnkiCall::Dupes { generation, exprs });
+            }
+            Command::AddNote { expr, fields } => {
+                self.spawn_anki(AnkiCall::Add { expr, fields });
+            }
+            // The arming rows (`Set*Armed`, `SetCursorShape`) come off
+            // the Windows dispatch tick, which this daemon does not
+            // have: nothing here is armed per tick, because nothing
+            // here hooks the seat (ADR-0003, ADR-0010).
             other => self.log.diag(&format!("controller: {other:?} (no-op)")),
         }
     }
@@ -693,6 +749,83 @@ impl App {
         if let Some(result) = freshest {
             self.feed(Event::LookupResult { id: result.id, outcome: result.outcome });
         }
+    }
+
+    /// One AnkiConnect call, off the pump.
+    ///
+    /// Every one of them is a blocking `ureq` request to a server that
+    /// may not be running at all, so none may happen on this thread: a
+    /// two-second connect timeout here would be two seconds of frozen
+    /// popup. The answer comes back as an event, like the Worker's
+    /// (ADR-0001).
+    fn spawn_anki(&mut self, call: AnkiCall) {
+        let anki = self.config.anki.clone();
+        let tx = self.anki_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("chibipop-anki".to_string())
+            .spawn(move || {
+                let _ = tx.send(call.run(&anki));
+            });
+        if let Err(e) = spawned {
+            self.log.diag(&format!("anki: no thread for the AnkiConnect call - {e}"));
+        }
+    }
+
+    /// One AnkiConnect answer, back on the pump thread.
+    ///
+    /// The lines carry counts and note ids and never the expression
+    /// itself: what the user read is screen content, and diagnostics
+    /// are not opted in to (ADR-0006).
+    fn handle_anki(&mut self, outcome: AnkiOutcome) {
+        match outcome {
+            AnkiOutcome::Dupes { generation, dupes } => {
+                let dupes = match dupes {
+                    Ok(dupes) => {
+                        self.log.diag(&format!(
+                            "anki: dupe check answered - {} of the popup's expressions are already in the deck",
+                            dupes.len()
+                        ));
+                        Some(dupes)
+                    }
+                    Err(e) => {
+                        self.log.diag(&format!("anki: dupe check failed - {e}"));
+                        None
+                    }
+                };
+                self.feed(Event::DupesChecked { generation, dupes });
+            }
+            AnkiOutcome::Added { expr, note } => {
+                let failed = match note {
+                    Ok(id) => {
+                        self.log.diag(&format!("anki: card added as note {id}"));
+                        false
+                    }
+                    Err(e) => {
+                        self.log.diag(&format!("anki: adding the card failed - {e}"));
+                        true
+                    }
+                };
+                self.feed(Event::NoteAdded { expr, failed });
+            }
+        }
+    }
+
+    /// The Anki affordance's state moved.
+    ///
+    /// Windows has a button window of its own to place, hide and
+    /// repaint; here the slot is part of the panel (ADR-0004), so every
+    /// paint above already carries the current state and this only has
+    /// to catch a state that moved after the last raster.
+    fn sync_anki_slot(&mut self) {
+        // Nothing shown is nothing to reconcile: retracting is
+        // `HidePopup`'s job, and the request left on the surface must
+        // never be re-shown from here.
+        let Some(want) = self.controller.anki().cloned() else { return };
+        let req = self.popup.as_ref().and_then(Popup::request);
+        let Some(req) = req.filter(|req| req.anki.as_ref() != Some(&want)).cloned() else {
+            return;
+        };
+        self.show_popup(&ShowRequest { anki: Some(want), ..req });
     }
 
     /// Measure, place, raster, commit — then tell the Controller where
@@ -1062,6 +1195,22 @@ impl AsFd for Listening {
     }
 }
 
+/// The AnkiConnect answer channel, registered on the pump.
+///
+/// One helper rather than two call sites: the tests build an `App`
+/// too, and an answer that reached no `Event` would make the whole add
+/// lifecycle - adding, added, failed - untestable.
+fn anki_channel(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sender<AnkiOutcome>> {
+    let (tx, rx) = calloop::channel::channel::<AnkiOutcome>();
+    pump.insert_source(rx, |event, _, app: &mut App| {
+        if let calloop::channel::Event::Msg(outcome) = event {
+            app.handle_anki(outcome);
+        }
+    })
+    .map_err(|e| anyhow::anyhow!("registering the AnkiConnect answer channel: {e}"))?;
+    Ok(tx)
+}
+
 pub fn run(paths: Paths) -> Result<()> {
     let display = wayland::display_name()?;
     let runtime_dir = paths.runtime_dir()?;
@@ -1273,6 +1422,9 @@ pub fn run(paths: Paths) -> Result<()> {
     let (worker_ping, worker_pings) =
         calloop::ping::make_ping().context("creating the worker wake")?;
 
+    // AnkiConnect's answers, from the threads that made the calls.
+    let anki_tx = anki_channel(&event_loop.handle())?;
+
     let mut app = App {
         log,
         stub: StubState::default(),
@@ -1300,6 +1452,7 @@ pub fn run(paths: Paths) -> Result<()> {
             db: paths.data_dir.join("chibipop.sqlite"),
         },
         worker_ping,
+        anki_tx,
         dicts: Vec::new(),
         hold: None,
         last_warning: None,
@@ -1630,6 +1783,7 @@ mod tests {
                 db: dir.join("chibipop.sqlite"),
             },
             worker_ping,
+            anki_tx: anki_channel(&event_loop.handle()).expect("the anki answer channel"),
             dicts: Vec::new(),
             hold: None,
             last_warning: None,
@@ -2292,6 +2446,377 @@ mod tests {
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert_eq!(1, written.matches("dwell: deadline").count(), "log was: {written}");
         assert!(written.contains("watch retired"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- AnkiConnect (ticket 42) --
+
+    use std::io::{Read, Write};
+
+    /// A fake AnkiConnect.
+    ///
+    /// The seam under test is a socket, not a trait: `chibipop::anki`
+    /// speaks plain HTTP through `ureq`, and mirroring the Windows bin
+    /// exactly means the daemon's calls really do leave the process.
+    /// So this is the far end of the wire, and it remembers every
+    /// request body - which is how a test can assert on the deck, the
+    /// model and the fields that were actually sent.
+    struct FakeAnki {
+        url: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl FakeAnki {
+        /// Answers `replies` requests, then closes.
+        fn start(replies: usize) -> FakeAnki {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+            let url = format!("http://{}", listener.local_addr().expect("the bound address"));
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = seen.clone();
+            std::thread::spawn(move || {
+                for _ in 0..replies {
+                    let Ok((mut stream, _)) = listener.accept() else { return };
+                    let request: serde_json::Value =
+                        serde_json::from_str(&read_body(&mut stream)).unwrap_or(serde_json::Value::Null);
+                    let reply = canned_reply(&request);
+                    recorded.lock().expect("the request log").push(request);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                }
+            });
+            FakeAnki { url, seen }
+        }
+
+        fn seen(&self) -> Vec<serde_json::Value> {
+            self.seen.lock().expect("the request log").clone()
+        }
+    }
+
+    /// One HTTP request's body, by its `Content-Length`.
+    fn read_body(stream: &mut std::net::TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut byte = [0u8; 1];
+        // Headers first: read one byte at a time so the body is not
+        // swallowed into a buffer this function cannot give back.
+        while !raw.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => raw.push(byte[0]),
+                _ => return String::new(),
+            }
+        }
+        let headers = String::from_utf8_lossy(&raw).to_lowercase();
+        let len = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = vec![0u8; len];
+        if stream.read_exact(&mut body).is_err() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&body).to_string()
+    }
+
+    /// AnkiConnect v6's answer to the two actions the popup makes.
+    ///
+    /// `canAddNotes` refuses the first note and accepts the rest, so a
+    /// test has exactly one known duplicate to assert on.
+    fn canned_reply(request: &serde_json::Value) -> String {
+        match request.get("action").and_then(|a| a.as_str()) {
+            Some("canAddNotes") => {
+                let notes = request
+                    .get("params")
+                    .and_then(|p| p.get("notes"))
+                    .and_then(|n| n.as_array())
+                    .map_or(0, Vec::len);
+                let flags: Vec<&str> =
+                    (0..notes).map(|i| if i == 0 { "false" } else { "true" }).collect();
+                format!("{{\"result\":[{}],\"error\":null}}", flags.join(","))
+            }
+            Some("addNote") => "{\"result\":1729,\"error\":null}".to_string(),
+            _ => "{\"result\":null,\"error\":null}".to_string(),
+        }
+    }
+
+    /// Point the daemon at the fake and turn the feature on.
+    fn anki_at(app: &mut App, url: &str) {
+        app.config.anki.enabled = true;
+        app.config.anki.url = url.to_string();
+        app.config.anki.deck = "Mining".to_string();
+        app.config.anki.model = "Lapis".to_string();
+        app.controller = Controller::new(controller_config(&app.config));
+    }
+
+    /// Pump until `wanted` is in the log or `budget` passes are spent,
+    /// then hand the log back.
+    ///
+    /// An AnkiConnect answer crosses a thread and a calloop channel, so
+    /// there is nothing to assert on until the pump has dispatched it -
+    /// and a test that expects *no* answer has to spend a budget to be
+    /// worth anything.
+    fn pump_until(
+        event_loop: &mut EventLoop<'static, App>,
+        app: &mut App,
+        log_file: &std::path::Path,
+        wanted: &str,
+        budget: u32,
+    ) -> String {
+        let escape = event_loop.get_signal();
+        let mut passes = 0;
+        let mut written = String::new();
+        event_loop
+            .run(Some(Duration::from_millis(50)), app, |_| {
+                passes += 1;
+                written = std::fs::read_to_string(log_file).unwrap_or_default();
+                if written.contains(wanted) || passes >= budget {
+                    escape.stop();
+                }
+            })
+            .unwrap();
+        written
+    }
+
+    /// The dupe check the Controller orders when a popup lands: it must
+    /// reach the real AnkiConnect action, carrying the configured deck
+    /// and model, and its answer must come back to the pump.
+    #[test]
+    fn a_dupe_check_goes_out_over_http_and_its_answer_comes_back() {
+        let dir = scratch("ankidupes");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let anki = FakeAnki::start(1);
+        anki_at(&mut app, &anki.url);
+
+        app.execute(Command::CheckDupes {
+            generation: 7,
+            exprs: vec![WORD.to_string(), "\u{732B}".to_string()],
+        });
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: dupe check", 60);
+
+        let seen = anki.seen();
+        assert_eq!(1, seen.len(), "one check, one request: {seen:?}");
+        assert_eq!(Some("canAddNotes"), seen[0]["action"].as_str());
+        let notes = seen[0]["params"]["notes"].as_array().expect("the notes");
+        assert_eq!(2, notes.len(), "one note per expression: {notes:?}");
+        assert_eq!(Some("Mining"), notes[0]["deckName"].as_str());
+        assert_eq!(Some("Lapis"), notes[0]["modelName"].as_str());
+        assert!(
+            written.contains("anki: dupe check answered - 1 of the popup's expressions"),
+            "the fake refuses the first note, so exactly one is a duplicate: {written}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The add itself: the Anki button and the `anki-add` shortcut both
+    /// end here, and this is the call that creates the card. The fields
+    /// must arrive mapped by `anki.field_map`, exactly as on Windows.
+    #[test]
+    fn an_add_creates_the_note_through_the_configured_field_map() {
+        let dir = scratch("ankiadd");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let anki = FakeAnki::start(1);
+        anki_at(&mut app, &anki.url);
+
+        let mut fields = HashMap::new();
+        fields.insert("expression".to_string(), WORD.to_string());
+        fields.insert("reading".to_string(), "\u{305F}\u{3079}".to_string());
+        app.execute(Command::AddNote { expr: WORD.to_string(), fields });
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
+
+        let seen = anki.seen();
+        assert_eq!(1, seen.len(), "one add, one request: {seen:?}");
+        assert_eq!(Some("addNote"), seen[0]["action"].as_str());
+        let note = &seen[0]["params"]["note"];
+        assert_eq!(Some("Mining"), note["deckName"].as_str());
+        assert_eq!(Some("Lapis"), note["modelName"].as_str());
+        assert_eq!(
+            Some(WORD),
+            note["fields"]["Expression"].as_str(),
+            "the default map routes expression -> Expression: {note}"
+        );
+        assert!(written.contains("anki: card added as note 1729"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Anki not running is the common case, and it must cost one line
+    /// and nothing else: no panic, no pump stalled on a dead socket.
+    #[test]
+    fn an_ankiconnect_that_is_not_listening_is_one_line() {
+        let dir = scratch("ankidown");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        // A port that was bound and let go: nothing is listening on it.
+        let dead = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+            probe.local_addr().expect("the bound address")
+        };
+        anki_at(&mut app, &format!("http://{dead}"));
+
+        app.execute(Command::AddNote { expr: WORD.to_string(), fields: HashMap::new() });
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: adding the card", 60);
+
+        assert!(written.contains("anki: adding the card failed"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Both entry points are the same guarded Event: with nothing on
+    /// screen there is nothing to add, and neither the shortcut nor a
+    /// click on the slot may reach the network. This is the Windows
+    /// enable rule - the button is not there, and the hotkey is not
+    /// armed - arrived at through the Controller instead of a hook.
+    #[test]
+    fn an_add_with_nothing_shown_asks_ankiconnect_for_nothing() {
+        let dir = scratch("ankiunarmed");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let anki = FakeAnki::start(1);
+        anki_at(&mut app, &anki.url);
+
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::AnkiAdd,
+            activated: true,
+        });
+        app.pointer_interactions(vec![popup::Interaction::Anki {
+            local: PhysPoint { x: 10, y: 10 },
+        }]);
+        // Long enough for a request to have been made, had one been.
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: ", 8);
+
+        assert!(anki.seen().is_empty(), "no popup, no card: {:?}", anki.seen());
+        assert!(!written.contains("anki: "), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A popup the Controller believes is on screen.
+    ///
+    /// Driven straight into the Controller because the real placement
+    /// round-trip needs a compositor to answer `PopupPlaced`, and what
+    /// is under test below is the path from a shortcut press to the
+    /// AnkiConnect call - not the layer surface.
+    fn place_a_popup(app: &mut App) {
+        use chibipop::present::{Card, Presentation};
+        use chibipop::text::layout::Orientation;
+
+        let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
+        let out = app.controller.handle(Event::CursorMoved { pos: AT });
+        let id = out
+            .iter()
+            .find_map(|cmd| match cmd {
+                Command::RequestLookup { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("a live sample dispatches a lookup");
+        app.controller.handle(Event::LookupResult {
+            id,
+            outcome: chibipop::controller::LookupOutcome::Ready {
+                presentation: Box::new(Presentation {
+                    top: Some(Card {
+                        written: Some(WORD.to_string()),
+                        reading: None,
+                        pos: Vec::new(),
+                        freq: None,
+                        blocks: Vec::new(),
+                        match_len: 1,
+                    }),
+                    collapsed: Vec::new(),
+                    all_cards: Vec::new(),
+                }),
+                anchor,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        app.controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 100, y: 150, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+        assert!(app.controller.popup().is_some(), "the Controller must think it is shown");
+    }
+
+    /// The `anki-add` portal shortcut creates a card for the current
+    /// lookup. The press cannot be synthesized here - the portal rung
+    /// needs an app id and a real key - so it enters where the portal
+    /// thread's events enter, and the card it produces is asserted on
+    /// the wire.
+    #[test]
+    fn the_anki_add_shortcut_creates_a_card_for_the_shown_lookup() {
+        let dir = scratch("ankishortcut");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let anki = FakeAnki::start(1);
+        anki_at(&mut app, &anki.url);
+        place_a_popup(&mut app);
+
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::AnkiAdd,
+            activated: true,
+        });
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
+
+        let seen = anki.seen();
+        assert_eq!(1, seen.len(), "one press, one card: {seen:?}");
+        assert_eq!(Some("addNote"), seen[0]["action"].as_str());
+        assert_eq!(
+            Some(WORD),
+            seen[0]["params"]["note"]["fields"]["Expression"].as_str(),
+            "the card is the lookup that is on screen: {seen:?}"
+        );
+        assert!(written.contains("anki: card added as note 1729"), "log was: {written}");
+
+        // The release is not a second add (`Action::Nothing`), and the
+        // Controller refuses a repeat of one it already added.
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::AnkiAdd,
+            activated: false,
+        });
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::AnkiAdd,
+            activated: true,
+        });
+        pump_until(&mut event_loop, &mut app, &log_file, "never logged", 4);
+        assert_eq!(1, anki.seen().len(), "one card, however often it is asked for");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Anki off is the affordance gone: no dupe check when the popup
+    /// lands, and a press that reaches nothing - the same rule the
+    /// Windows button and its hotkey follow.
+    #[test]
+    fn anki_disabled_never_reaches_ankiconnect() {
+        let dir = scratch("ankioff");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let anki = FakeAnki::start(1);
+        anki_at(&mut app, &anki.url);
+        app.config.anki.enabled = false;
+        app.controller = Controller::new(controller_config(&app.config));
+        place_a_popup(&mut app);
+
+        app.handle_shortcut(shortcuts::Event::Fired {
+            id: shortcuts::ShortcutId::AnkiAdd,
+            activated: true,
+        });
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: ", 8);
+
+        assert!(anki.seen().is_empty(), "anki off, nothing on the wire: {:?}", anki.seen());
+        assert!(!written.contains("anki: "), "log was: {written}");
+        assert!(
+            !app.controller.anki().expect("shown").enabled,
+            "and the affordance's own state says so, which is what hides the slot"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
