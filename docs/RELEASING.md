@@ -2,13 +2,27 @@
 
 ## What a release is
 
-One zip, `chibipop-vX.Y.Z-windows-x64.zip`, containing:
+Two assets, one per platform.
+
+```
+chibipop-vX.Y.Z-windows-x64.zip
+chibipop-vX.Y.Z-linux-x64.tar.gz
+```
+
+**Both names are a forever contract.** Every shipped binary's update check
+parses asset names off `releases/latest` (ADR-0007), so the `chibipop-v`
+prefix and the `-windows-x64.zip` / `-linux-x64.tar.gz` suffixes cannot
+change shape — not even to look tidier. `scripts/package-linux.sh` refuses a
+version that would not produce a parseable name.
+
+The zip contains:
 
 ```
 chibipop-vX.Y.Z-windows-x64/
   chibipop.exe                 the application
   data/deconjugator.json       required at runtime
   README.md
+  LICENSE
 ```
 
 **The dictionary database is deliberately not in it.** It is 232 MiB, and it
@@ -18,6 +32,67 @@ once. That is the one step a downloaded binary cannot remove.
 
 `chibipop.toml` is not shipped either: it is written with defaults beside the
 executable on first run.
+
+### The Linux tarball
+
+Same shape, plus what a Wayland install needs (ADR-0007). One `tar xzf` is
+the whole installation:
+
+```
+chibipop-vX.Y.Z-linux-x64/
+  chibipop                     the application
+  data/deconjugator.json       required at runtime
+  README.md
+  LICENSE
+  models/meiki/                the OCR engine's three ONNX models, ~46 MiB
+    meiki.text.detect.v0.1.960x544.onnx
+    meiki.text.rec.v0.960x32.onnx
+    meiki.text.rec.v0.vertical.32x480.onnx
+    SHA256SUMS.txt
+    LICENSE.md                 the weights are LGPL-3.0; shipping them
+                               without this would be a licence violation
+  extras/                      session integration for setups the settings
+    README.md                  window's Autostart checkbox does not cover
+    chibipop.desktop
+    chibipop.service
+    hyprland.conf
+```
+
+`models/meiki` sits beside the binary because that is the first place
+`models::locate()` looks, and the layout is not folklore:
+`crates/chibipop-linux/tests/tarball_layout.rs` builds the real asset,
+extracts it, and asks the binary's own search where the models are. The
+digests are verified twice — once by `scripts/package-linux.sh` as it stages
+them (a mismatch fails the release) and once by the binary when the OCR
+engine opens (a mismatch refuses the engine rather than recognising with
+something else).
+
+**The tarball works with no network and no first-run download.** There is no
+`libonnxruntime.so` in it and no rpath: on linux-x64 `ort`'s pinned
+`download-binaries` prebuilt is a *static* archive, so ONNX Runtime is inside
+`chibipop` (which is why the binary is ~62 MB). ADR-0009 was written
+expecting a shared library beside the binary; see its 2026-08-26 addendum.
+`ldd` on the shipped binary names the entire floor:
+
+```
+libstdc++.so.6  libgcc_s.so.1  libm.so.6  libc.so.6
+```
+
+so a user needs glibc, libstdc++ and a Japanese font, and nothing else.
+
+**Runner floor: `ubuntu-22.04`, deliberately not `ubuntu-latest`.** The
+Wayland/tray/OCR stack is pure Rust over a statically linked ONNX Runtime, so
+the runner's glibc is the only floor this binary imposes on a user's distro —
+build on the newest image and every image migration silently drops older
+distros. The pin is therefore the oldest ubuntu image GitHub still hosts, and
+moving it forward when that image retires is a deliberate bump of the
+supported-distro floor, made in a commit that says so. (`ci.yml`'s Linux
+*gate* is pinned separately and for a different reason — it only has to
+compile and test, not define anyone's floor.)
+
+The tarball is reproducible: sorted entries, no owners, one timestamp (the
+commit's), `gzip -n`. Repackaging the same commit twice gives the same bytes,
+so "is this the asset the workflow built" is a `sha256sum`.
 
 ## Cutting one
 
@@ -45,9 +120,15 @@ executable on first run.
    git tag v0.1.0
    git push origin main --tags
    ```
-5. The **Release** workflow builds, packages and creates a **draft** release.
-6. **Open the draft**, download the zip, unzip it somewhere clean, and check
-   `chibipop.exe run` starts. Then publish.
+5. The **Release** workflow builds both assets and creates one **draft**
+   release carrying both. The tag/`Cargo.toml` check runs first, on its own
+   tiny job, so a mismatched tag costs no build runners; the draft is created
+   last, from artifacts, so a release never exists with only half its assets.
+6. **Open the draft, unpack both assets somewhere clean, and run them.**
+   - Windows: unzip, `chibipop.exe run` starts.
+   - Linux: `tar xzf`, then `./chibipop probe` and `./chibipop run` — the log
+     must say `worker: pipeline up`, which is the OCR engine finding and
+     digesting `models/meiki` beside the binary. Then publish.
 7. **Refresh the latest-build copy** so `Documents\chibipop-latest` runs the
    version you just shipped:
    ```powershell
@@ -58,6 +139,17 @@ executable on first run.
 
 Step 6 is not ceremony. Nothing in CI can hover over Japanese text, so the
 first real exercise of a release build is a human doing it.
+
+**Rehearsing the packaging without a tag.** A tag is permanent and a draft is
+awkward to unpublish, so the Release workflow also takes a
+`workflow_dispatch` on any branch: it runs the same jobs and the same script,
+uploads both assets as workflow artifacts, and creates nothing. Locally, the
+Linux half is one command — no workflow needed:
+
+```bash
+cargo build --release --workspace --exclude chibipop-windows
+scripts/package-linux.sh v0.8.2        # -> dist/chibipop-v0.8.2-linux-x64.tar.gz
+```
 
 ## What CI enforces
 
@@ -80,8 +172,11 @@ exclude the foreign bin crate — see the workspace `Cargo.toml`):
 - Clippy again with those suppressed, asserting **zero** other findings.
 - `cargo build --release --workspace --exclude chibipop-linux`.
 
-The release workflow additionally refuses to build if the tag disagrees with
-`Cargo.toml`.
+`.github/workflows/release.yml` runs a subset of the same gates on the tag
+itself — tests on both platforms, plus ADR-0009's OCR quality gate on the
+Linux job — and refuses to build at all if the tag disagrees with
+`Cargo.toml`. It is not a second CI: pushing a tag on a commit CI has not
+already gated is the mistake it cannot save you from.
 
 ### What CI cannot do
 

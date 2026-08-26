@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # A packaging rehearsal. A tag is permanent and a draft release is
+  # awkward to unpublish, but "does the asset actually extract and run"
+  # is a question worth answering before either exists - so a dispatch on
+  # any branch builds both assets, uploads them as workflow artifacts,
+  # and creates nothing. Same steps, same script, no release.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,9 +17,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Build and package
+  # One grep, before either build runner spins up. A tag that disagrees
+  # with Cargo.toml ships a binary whose --version lies about which build
+  # it is; cheaper to catch here than in a bug report, and cheaper still
+  # than after two release builds.
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match Cargo.toml
+        id: v
+        shell: bash
+        run: |
+          crate=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            echo "tag $tag, Cargo.toml $crate"
+            if [ "$tag" != "$crate" ]; then
+              echo "::error::tag v$tag does not match Cargo.toml version $crate"
+              exit 1
+            fi
+          else
+            # A dispatch runs off a branch, so there is no tag to disagree
+            # with anything; Cargo.toml is the only version there is.
+            echo "dispatch: packaging v$crate off $GITHUB_REF_NAME"
+          fi
+          echo "version=v$crate" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Build and package (Windows)
     runs-on: windows-latest
+    needs: version
 
     steps:
       - uses: actions/checkout@v4
@@ -22,20 +60,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-
-      # A tag that disagrees with Cargo.toml ships a binary whose --version
-      # lies about which build it is. Cheaper to catch here than in a bug
-      # report.
-      - name: Tag must match Cargo.toml
-        shell: bash
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          crate=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
-          echo "tag $tag, Cargo.toml $crate"
-          if [ "$tag" != "$crate" ]; then
-            echo "::error::tag v$tag does not match Cargo.toml version $crate"
-            exit 1
-          fi
 
       # Tagging a red commit is the one mistake a release process must not
       # make quietly.
@@ -56,8 +80,10 @@ jobs:
       # Yomitan archives - in the settings window, with no toolchain.
       - name: Assemble
         shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          name="chibipop-${GITHUB_REF_NAME}-windows-x64"
+          name="chibipop-$VERSION-windows-x64"
           echo "PKG=$name" >> "$GITHUB_ENV"
           mkdir -p "dist/$name/data"
           cp target/release/chibipop.exe "dist/$name/"
@@ -70,15 +96,107 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "dist/$env:PKG" -DestinationPath "dist/$env:PKG.zip"
 
-      # Draft on purpose: a published release is hard to unpublish, and the
-      # zip is worth opening once before anyone downloads it. Drop --draft
-      # here to publish straight away.
-      - name: Publish as a draft
-        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chibipop-${{ needs.version.outputs.version }}-windows-x64
+          path: dist/chibipop-${{ needs.version.outputs.version }}-windows-x64.zip
+          if-no-files-found: error
+
+  # ADR-0007's second release asset. Pinned to the oldest ubuntu image
+  # GitHub still hosts, not ubuntu-latest, and that is the whole point of
+  # the pin: the Wayland/tray/OCR stack is pure Rust plus a statically
+  # linked ONNX Runtime, so the runner's glibc is the only floor this
+  # binary imposes on a user's distro. Building on the oldest image keeps
+  # older distros viable without cross tooling; ubuntu-latest would raise
+  # the floor silently on every image migration. When this image is
+  # retired, moving the pin forward is a deliberate, documented bump of
+  # the supported-distro floor (docs/RELEASING.md).
+  linux:
+    name: Build and package (Linux)
+    runs-on: ubuntu-22.04
+    needs: version
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Mirror of the Windows job's gate, --exclude chibipop-windows for
+      # the same bin-name-collision reason (workspace Cargo.toml). The
+      # packaging script's own layout test rides in here.
+      - name: Tests
+        run: cargo test --workspace --exclude chibipop-windows
+
+      # ADR-0009's standing OCR gate. `test = false` keeps it out of the
+      # sweep above, and a release must not ship an OCR engine that has
+      # drifted off its measured floors.
+      - name: OCR quality gate
+        run: cargo test -p chibipop-linux --test ocr_gate -- --nocapture
+
+      # Default features: `bundled-onnxruntime`, which is `ort`'s pinned
+      # download-binaries. On linux-x64 that prebuilt is a static archive,
+      # so the ONNX Runtime ends up inside `chibipop` and the asset carries
+      # no `libonnxruntime.so` and needs no rpath (ADR-0009, amended).
+      - name: Build
+        run: cargo build --release --workspace --exclude chibipop-windows
+
+      # The asset is built by a script in the repo, not by steps in this
+      # file, so the exact thing a release ships can be built and taken
+      # apart on a dev box. It verifies the bundled model digests as it
+      # stages them and refuses a version that does not match the forever
+      # asset-name contract.
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: scripts/package-linux.sh "$VERSION"
+
+      # Named on the record: the two floors this asset carries. `ldd`
+      # proves there is no libonnxruntime to bundle, and the glibc line is
+      # the oldest distro this build can run on.
+      - name: Floors
+        run: |
+          ldd target/release/chibipop
+          ldd --version | head -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chibipop-${{ needs.version.outputs.version }}-linux-x64
+          path: dist/chibipop-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+          if-no-files-found: error
+
+  # Draft on purpose: a published release is hard to unpublish, and both
+  # assets are worth opening once before anyone downloads them. Drop
+  # --draft here to publish straight away.
+  #
+  # One `gh release create` with both files rather than a create in one
+  # build job and an upload in the other: a release that exists with only
+  # half its assets is a release someone can download.
+  publish:
+    name: Publish as a draft
+    runs-on: ubuntu-latest
+    needs: [version, windows, linux]
+    # Tags only. A dispatch is a rehearsal and stops at the artifacts.
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the draft
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "dist/$PKG.zip" \
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/chibipop-$VERSION-windows-x64.zip" \
+            "dist/chibipop-$VERSION-linux-x64.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "chibipop $GITHUB_REF_NAME" \
             --generate-notes \
             --draft
