@@ -1713,6 +1713,10 @@ mod tests {
         assert!(app.worker.is_none(), "no pipeline yet, as at startup");
 
         app.on_cursor_position(AT);
+        // A rung may re-deliver the resting position (a session that
+        // reopens, an output that re-enters); none of those samples may
+        // reach the Controller while there is nothing to ask.
+        app.on_cursor_position(AT);
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(!written.contains("lookup:"), "nothing to ask yet: {written}");
 
@@ -1725,7 +1729,7 @@ mod tests {
         assert_eq!(
             done(&log),
             ["begin_read", "grab", "ocr masked=false", "end_read"],
-            "the resting cursor gets its lookup"
+            "the resting cursor gets its lookup - the gate was never spent"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
