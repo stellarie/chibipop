@@ -9,15 +9,13 @@
 //! regression against Windows, where show and hide are instant. Making
 //! that the default beats telling users to add a `layerrule no_anim`.
 //!
-//! Why the boilerplate below instead of `delegate_dispatch2!`: SCTK
-//! 0.21's macro writes a *blanket* `Dispatch<I, U>` impl, which would
-//! collide with the hand-written impls the cursor channel already needs
-//! on this same state (`daemon::App`). One `Dispatch` per interface and
-//! user-data pair, each forwarding to SCTK's own `Dispatch2`, is the
-//! same code the macro generates - only enumerated, so the two halves
-//! of the daemon can share one Wayland queue.
+//! Pointer input is the sibling module ([`super::pointer`]): the input
+//! region committed here is what makes the panel reachable at all, and
+//! the hit targets a click resolves against are taken from every frame
+//! this file paints.
 
 use super::place::{self, Placement, Shown, Visibility};
+use super::pointer::{self, HitScene, InputRegion, Interaction, Pointer, Step};
 use super::{paint, physical_theme, text::TextEngine};
 use crate::cursor::outputs::OutputGeometry;
 use crate::daemon::App;
@@ -33,6 +31,9 @@ use smithay_client_toolkit::compositor::{
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::output::{OutputData, OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
+use smithay_client_toolkit::seat::pointer::cursor_shape::CursorShapeManager;
+use smithay_client_toolkit::seat::pointer::AxisScroll;
+use smithay_client_toolkit::seat::SeatState;
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure, LayerSurfaceData,
@@ -48,6 +49,7 @@ use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_pointer::WlPointer;
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_shm::{Format, WlShm};
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -176,6 +178,13 @@ pub struct Popup {
     vis: Visibility,
     /// What is on screen, kept for a re-render at a new scale.
     current: Option<ShowRequest>,
+    /// The seat's pointer and where it is (ADR-0003): the popup's whole
+    /// input story, since Wayland has no machine-wide mouse hook.
+    pointer: Pointer,
+    /// The frame on screen, as the pointer resolves against it. Taken
+    /// from every repaint and dropped by every hide, so a hit can never
+    /// answer with geometry that is no longer painted.
+    hits: Option<HitScene>,
     notes: Vec<String>,
 }
 
@@ -223,6 +232,24 @@ impl Popup {
             notes.push(warning);
         }
 
+        // The pointer (ADR-0003). The seat is bound now and the pointer
+        // itself arrives with the seat's `capabilities` event, which is
+        // also where a pointer plugged in later shows up. No
+        // `wp_cursor_shape_v1` means the cursor is simply left as it
+        // was over the panel: loading XCursor themes ourselves is
+        // exactly what ADR-0004 refused.
+        let shapes = CursorShapeManager::bind(globals, qh).ok();
+        if shapes.is_none() {
+            notes.push(
+                "popup: wp_cursor_shape_v1 missing - the cursor keeps its shape over the panel"
+                    .to_string(),
+            );
+        }
+        let mut pointer = Pointer::new(SeatState::new(globals, qh), shapes, config.popup.scroll_popup);
+        let (script, script_notes) = pointer::script_from_env();
+        pointer.set_script(script);
+        notes.extend(script_notes);
+
         Ok(Popup {
             qh: qh.clone(),
             compositor,
@@ -242,6 +269,8 @@ impl Popup {
             side_panel: config.popup.side_panel,
             vis: Visibility::Hidden,
             current: None,
+            pointer,
+            hits: None,
             notes,
         })
     }
@@ -252,6 +281,12 @@ impl Popup {
         std::mem::take(&mut self.notes)
     }
 
+    /// One diagnostic, for the handlers that live in the sibling
+    /// module. The popup owns no log; the daemon drains these.
+    pub fn note(&mut self, line: String) {
+        self.notes.push(line);
+    }
+
     pub fn surface_count(&self) -> usize {
         self.panels.len()
     }
@@ -260,9 +295,181 @@ impl Popup {
         self.vis.shown()
     }
 
-    /// The scene on screen, for hit-testing and repaints (ticket 38).
+    /// The request on screen, for a repaint at new settings.
     pub fn request(&self) -> Option<&ShowRequest> {
         self.current.as_ref()
+    }
+
+    // ---- pointer input (ADR-0003) ----
+
+    /// The seat, for SCTK's own `wl_seat` dispatch.
+    pub fn seats(&mut self) -> &mut SeatState {
+        self.pointer.seats()
+    }
+
+    /// The seat grew a pointer: take it, and a cursor-shape device to
+    /// go with it. Both are dropped again by [`Popup::pointer_gone`].
+    pub fn pointer_arrived(&mut self, pointer: WlPointer) {
+        self.pointer.set_pointer(Some(pointer));
+        let device = self
+            .pointer
+            .shape_source()
+            .map(|(shapes, pointer)| shapes.get_shape_device(pointer, &self.qh));
+        if let Some(device) = device {
+            self.pointer.attach_shape_device(device);
+        }
+        self.notes.push(format!(
+            "pointer: seat pointer bound (cursor shape {})",
+            if self.pointer.shapes_advertised() { "wp_cursor_shape_v1" } else { "left alone" }
+        ));
+    }
+
+    /// The seat lost its pointer capability.
+    pub fn pointer_gone(&mut self) {
+        self.pointer.set_pointer(None);
+        self.notes.push("pointer: the seat no longer has a pointer".to_string());
+    }
+
+    /// Which surface a pointer event names, if it is one of ours.
+    pub fn panel_of(&self, surface: &WlSurface) -> Option<usize> {
+        self.panels.iter().find(|p| p.layer.wl_surface() == surface).map(|p| p.id)
+    }
+
+    /// The pointer crossed onto a panel.
+    ///
+    /// Reachable only while the popup is shown: a hidden surface's
+    /// input region is empty, so the compositor never sends this - one
+    /// crossing logged is the region working. `serial` is `None` for a
+    /// scripted pass, which has no enter event to quote.
+    pub fn pointer_enter(&mut self, panel: usize, pos: (f64, f64), serial: Option<u32>) {
+        self.pointer.enter(panel, pos, serial);
+        self.notes.push(format!(
+            "pointer: entered surface {panel} at {:.1},{:.1} logical -> {}",
+            pos.0,
+            pos.1,
+            self.hit_at(pos)
+        ));
+        self.hover();
+    }
+
+    pub fn pointer_leave(&mut self, panel: usize) {
+        if self.pointer.focus().is_some_and(|f| f.panel == panel) {
+            self.notes.push(format!("pointer: left surface {panel}"));
+        }
+        self.pointer.leave(panel);
+    }
+
+    pub fn pointer_motion(&mut self, pos: (f64, f64)) {
+        self.pointer.motion(pos);
+        self.hover();
+    }
+
+    /// A left press on the panel, resolved against the frame on screen.
+    pub fn pointer_button(&mut self, pos: (f64, f64)) -> Option<Interaction> {
+        self.pointer.motion(pos);
+        let hits = self.hits.as_ref()?;
+        if self.pointer.focus()?.panel != hits.panel {
+            return None;
+        }
+        Some(pointer::click(hits, pos))
+    }
+
+    /// A wheel frame over the panel.
+    pub fn pointer_wheel(&mut self, axis: &AxisScroll) -> Option<Interaction> {
+        self.pointer.wheel(axis)
+    }
+
+    /// The same wheel path, from a raw `axis_value120`: what a scripted
+    /// pass has, since it holds no `wl_pointer` frame.
+    pub fn pointer_wheel_120(&mut self, value120: i32) -> Option<Interaction> {
+        self.pointer_wheel(&AxisScroll { value120, ..AxisScroll::default() })
+    }
+
+    /// Drop the banked sub-notch delta: `Command::DiscardScroll`, which
+    /// the Controller sends when a fresh popup replaces the old one.
+    pub fn discard_scroll(&mut self) {
+        self.pointer.discard_scroll();
+    }
+
+    /// The hand over anything clickable, the default cursor elsewhere.
+    fn hover(&mut self) {
+        let over = match (self.hits.as_ref(), self.pointer.focus()) {
+            (Some(hits), Some(focus)) if focus.panel == hits.panel => {
+                hits.hit(hits.local(focus.pos)).is_some()
+            }
+            _ => false,
+        };
+        self.pointer.set_shape(over);
+    }
+
+    /// A fresh frame is coming: arm the next scripted pass.
+    pub fn arm_script(&mut self) {
+        self.pointer.arm_script();
+    }
+
+    /// The next scripted pass (`CHIBIPOP_POINTER_SCRIPT`), if one is
+    /// armed and a frame is actually up.
+    ///
+    /// The daemon drives the steps, not this module: each step's effect
+    /// has to reach the Controller and come back as a repaint before
+    /// the next step resolves, or a scripted scroll would be followed
+    /// by a click against the frame it just replaced.
+    pub fn take_pass(&mut self) -> Option<Vec<Step>> {
+        if self.hits.is_none() || self.vis.shown().is_none() {
+            return None;
+        }
+        self.pointer.take_pass()
+    }
+
+    /// What sits at one surface-local logical point, for the log.
+    pub fn hit_at(&self, pos: (f64, f64)) -> String {
+        match self.hits.as_ref() {
+            Some(hits) => match hits.hit(hits.local(pos)) {
+                Some(hit) => format!("{hit:?} at panel px {:?}", hits.local(pos)),
+                None => format!("nothing at panel px {:?}", hits.local(pos)),
+            },
+            None => "nothing is shown".to_string(),
+        }
+    }
+
+    /// The frame's hit targets, in the logical coordinates a pointer
+    /// arrives in: what a scripted pass needs to aim at anything.
+    pub fn dump_hits(&mut self) {
+        let Some(hits) = self.hits.clone() else {
+            self.notes.push("pointer: no frame to dump".to_string());
+            return;
+        };
+        self.notes.push(format!(
+            "pointer: frame on surface {} at {:.3}x, scroll {} px, view {} px, {} target(s)",
+            hits.panel,
+            hits.scale,
+            hits.scroll,
+            hits.view_h,
+            hits.targets.len(),
+        ));
+        for target in &hits.targets {
+            let top = (f64::from(target.y - hits.scroll) / hits.scale).round();
+            let bottom = (f64::from(target.y + target.h - hits.scroll) / hits.scale).round();
+            let across = match (target.x, target.w) {
+                (Some(x), Some(w)) => format!(
+                    "x {:.0}..{:.0}",
+                    f64::from(x) / hits.scale,
+                    f64::from(x + w) / hits.scale
+                ),
+                _ => "x full".to_string(),
+            };
+            self.notes.push(format!(
+                "pointer:   {:?} logical y {top:.0}..{bottom:.0}, {across}",
+                target.action
+            ));
+        }
+        if let Some(strip) = hits.anki {
+            self.notes.push(format!(
+                "pointer:   Anki logical y {:.0}..{:.0}, x full",
+                f64::from(strip.y) / hits.scale,
+                f64::from(strip.y + strip.h) / hits.scale,
+            ));
+        }
     }
 
     /// Map one hidden surface per known output. Every surface is mapped
@@ -376,7 +583,10 @@ impl Popup {
         }
         self.caps = (config.popup.max_width_percent, config.popup.max_height_percent);
         self.side_panel = config.popup.side_panel;
-
+        // Windows arms its wheel hook per dispatch tick from the same
+        // setting; the popup's own region has nothing to arm, so the
+        // gate lives on the pointer.
+        self.pointer.set_wheel_enabled(config.popup.scroll_popup);
 
         let theme = theme_from_config(config);
         let refont = theme.font_name != self.theme.font_name;
@@ -479,6 +689,10 @@ impl Popup {
 
     /// Hide: a transparent buffer and an empty input region, never an
     /// unmap. Cheap and instant, and a hide while hidden costs nothing.
+    ///
+    /// The pointer loses its frame here too - an empty input region
+    /// means no `leave` may ever arrive, so the popup forgets what was
+    /// under the cursor rather than waiting to be told.
     pub fn hide(&mut self) {
         if let Some(slot) = self.vis.hide().and_then(|id| self.slot(id)) {
             self.clear(slot);
@@ -579,6 +793,22 @@ impl Popup {
             to_argb(pixmap.data_mut());
         }
 
+        // The targets a click resolves against come from the frame
+        // being painted, never from a remembered one: that is what
+        // keeps a hit honest across a scroll (the offset moved) and a
+        // scale change (every rect did).
+        let panel_id = self.panels[idx].id;
+        let region = InputRegion::of(self.vis, panel_id, pending.placement.logical);
+        self.hits = match region {
+            InputRegion::Panel { .. } => Some(HitScene::of(
+                panel_id,
+                &pending.scene,
+                pending.scroll,
+                pending.scale,
+            )),
+            InputRegion::Empty => None,
+        };
+
         let panel = &mut self.panels[idx];
         if let Some(viewport) = &panel.viewport {
             viewport.set_destination(pending.placement.logical.0.max(1), pending.placement.logical.1.max(1));
@@ -587,9 +817,11 @@ impl Popup {
         // moved wheel and click onto the popup's own region, and
         // Wayland has no machine-wide mouse hook to synthesize them
         // from. Region coordinates are surface-local, i.e. logical.
-        if let Ok(region) = Region::new(&self.compositor) {
-            region.add(0, 0, pending.placement.logical.0.max(1), pending.placement.logical.1.max(1));
-            surface.set_input_region(Some(region.wl_region()));
+        if let Ok(wl) = Region::new(&self.compositor) {
+            if let Some((x, y, w, h)) = region.rect() {
+                wl.add(x, y, w, h);
+            }
+            surface.set_input_region(Some(wl.wl_region()));
         }
         surface.damage_buffer(0, 0, bw, bh);
         surface.frame(&self.qh, FrameCallbackData(surface.clone()));
@@ -601,8 +833,18 @@ impl Popup {
 
     /// Hand one surface a fully transparent buffer at its current size
     /// and take its input region away.
+    ///
+    /// A coalesced frame queued before the hide is dropped with it:
+    /// letting a frame callback repaint it afterwards would put a
+    /// clickable panel back on a screen the Controller believes is
+    /// clear. The pointer's frame goes too - it is the same fact.
     fn clear(&mut self, idx: usize) {
         let logical = self.panels[idx].configured.unwrap_or((1, 1));
+        self.panels[idx].pending = None;
+        if self.hits.as_ref().is_some_and(|h| h.panel == self.panels[idx].id) {
+            self.hits = None;
+        }
+        self.pointer.leave(self.panels[idx].id);
         self.hidden_frame(idx, logical);
     }
 
@@ -810,6 +1052,7 @@ impl CompositorHandler for App {
     fn frame(&mut self, _: &Connection, _: &QueueHandle<App>, surface: &WlSurface, _: u32) {
         self.popup_mut().frame_done(surface);
         self.flush_popup_notes();
+        self.run_pointer_script();
     }
 
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<App>, _: &WlSurface, _: &WlOutput) {}
@@ -865,6 +1108,9 @@ impl LayerShellHandler for App {
     ) {
         self.popup_mut().configured(layer, configure.new_size);
         self.flush_popup_notes();
+        // A resize painted here rather than in `show`, so this is where
+        // a scripted pointer pass finds its frame.
+        self.run_pointer_script();
     }
 }
 
@@ -873,5 +1119,5 @@ impl ProvidesRegistryState for App {
         &mut self.popup_mut().registry
     }
 
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
