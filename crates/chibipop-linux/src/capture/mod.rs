@@ -31,6 +31,11 @@
 //! ADR-0002's two backends this session gets, by advertised
 //! capability. [`portal`] is rung 2, the xdg-desktop-portal ScreenCast
 //! + PipeWire fallback for the compositors with no screencopy at all.
+//!
+//! **What no rung can do.** [`software_cursor`] is the one cursor fact
+//! that is not a request: a compositor drawing a software pointer into
+//! its framebuffer hands it to every backend here, so that condition is
+//! detected and said out loud rather than silently OCR'd (ticket 52).
 
 pub mod backend;
 pub mod crop;
@@ -41,6 +46,7 @@ pub mod png;
 pub mod portal;
 pub mod session;
 pub mod shm;
+pub mod software_cursor;
 
 use crate::cursor::outputs::OutputGeometry;
 use crate::wayland::Advertised;

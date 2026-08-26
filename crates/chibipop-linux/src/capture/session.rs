@@ -43,6 +43,18 @@ const DAMAGE_SINCE: u32 = 2;
 /// was the whole enumeration.
 const BUFFER_DONE_SINCE: u32 = 3;
 
+/// `capture_output_region`'s first argument, `overlay_cursor`: nonzero
+/// asks the compositor for an *extra* compositing pass that paints the
+/// pointer into the copy. Zero, always, on every slot - the damage-race
+/// arm ([`Slot::Watch`]) as much as the read ([`Slot::Copy`]) - because
+/// OCR must read the text, not the pointer sitting on it (ticket 52).
+///
+/// It cannot do more than that: a compositor that already painted a
+/// *software* cursor into the framebuffer screencopy copies hands that
+/// pointer over whatever this argument says, which is why
+/// [`crate::capture::software_cursor`] exists.
+const WITHOUT_CURSOR: i32 = 0;
+
 /// Which frame an event belongs to: the copy a `grab` is waiting on, or
 /// the damage race left in flight between reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,8 +129,9 @@ impl Session {
 
     /// One `capture_output_region` frame, output-local logical.
     ///
-    /// The cursor is never composited in: OCR must read the text, not
-    /// the pointer sitting on it.
+    /// The one place a screencopy frame is asked for: both slots come
+    /// through here, so [`WITHOUT_CURSOR`] is the whole of this
+    /// backend's cursor policy.
     pub fn capture(
         &self,
         manager: &ZwlrScreencopyManagerV1,
@@ -127,7 +140,7 @@ impl Session {
         slot: Slot,
     ) -> ZwlrScreencopyFrameV1 {
         manager.capture_output_region(
-            0,
+            WITHOUT_CURSOR,
             output,
             logical.x,
             logical.y,
@@ -426,5 +439,14 @@ mod tests {
         assert_eq!(shape(wl_shm::Format::Rgb888).order(), Some(Order::Bgr));
         assert_eq!(shape(wl_shm::Format::Bgr888).order(), Some(Order::Rgb));
         assert_eq!(shape(wl_shm::Format::Rgb565).order(), None);
+    }
+
+    /// Ticket 52's audit, pinned: the cursor is never requested into a
+    /// copy, on either slot. A regression here is silent - the pixels
+    /// still arrive, with a pointer in them - so it is asserted rather
+    /// than trusted to the call site's comment.
+    #[test]
+    fn screencopy_never_asks_for_the_pointer_to_be_overlaid() {
+        assert_eq!(0, WITHOUT_CURSOR);
     }
 }

@@ -338,20 +338,7 @@ fn handshake(
 
     // -- SelectSources: one dialog, every monitor (ADR-0002) --
     request(conn, &sender, "SelectSources", deadline, |token| {
-        let mut options: HashMap<&str, Value<'_>> = HashMap::new();
-        options.insert("handle_token", Value::from(token));
-        options.insert("types", Value::U32(SOURCE_MONITOR));
-        options.insert("multiple", Value::Bool(true));
-        // v4-only keys, sent only to a portal that has them.
-        if persists {
-            options.insert("persist_mode", Value::U32(PERSIST_UNTIL_REVOKED));
-            if let Some(token) = restore_token.filter(|token| !token.is_empty()) {
-                options.insert("restore_token", Value::from(token));
-            }
-        }
-        if let Some(mode) = cursor {
-            options.insert("cursor_mode", Value::U32(mode));
-        }
+        let options = select_sources_options(token, cursor, persists, restore_token);
         screencast.call("SelectSources", &(session_object.clone(), options))
     })?;
 
@@ -411,6 +398,42 @@ fn cursor_mode(available: Option<u32>, want_metadata: bool) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// Every `SelectSources` option, in one pure place so ticket 52's audit
+/// can assert what a session is actually negotiated with.
+///
+/// The cursor mode and the restore token travel in the *same* dict, and
+/// that is the whole answer to "can a restored session predate the
+/// cursor_mode fix?": it cannot. Per the ScreenCast spec (interface
+/// version 6, `org.freedesktop.portal.ScreenCast.xml` on this machine),
+/// `restore_token` is itself a `SelectSources` option and "an
+/// application may only attempt to select sources once per session" -
+/// so every launch, restored or not, selects sources afresh and this
+/// dict is what the portal is told. A token restores *which monitors*
+/// were shared and the permission to share them, never a cursor mode,
+/// so there is no stale negotiation to drop the token over.
+fn select_sources_options<'a>(
+    handle_token: &'a str,
+    cursor: Option<u32>,
+    persists: bool,
+    restore_token: Option<&'a str>,
+) -> HashMap<&'static str, Value<'a>> {
+    let mut options: HashMap<&'static str, Value<'a>> = HashMap::new();
+    options.insert("handle_token", Value::from(handle_token));
+    options.insert("types", Value::U32(SOURCE_MONITOR));
+    options.insert("multiple", Value::Bool(true));
+    // v4-only keys, sent only to a portal that has them.
+    if persists {
+        options.insert("persist_mode", Value::U32(PERSIST_UNTIL_REVOKED));
+        if let Some(token) = restore_token.filter(|token| !token.is_empty()) {
+            options.insert("restore_token", Value::from(token));
+        }
+    }
+    if let Some(mode) = cursor {
+        options.insert("cursor_mode", Value::U32(mode));
+    }
+    options
 }
 
 /// One portal method call, subscription first: predict the Request path,
@@ -883,5 +906,59 @@ mod tests {
     fn a_portal_without_the_property_is_sent_no_cursor_mode() {
         assert_eq!(cursor_mode(None, true), None);
         assert_eq!(cursor_mode(Some(0), true), None);
+    }
+
+    // -- ticket 52's audit: no path embeds the pointer --
+
+    /// Exhaustive over every advertisable combination of the four
+    /// defined modes: whatever a portal offers, and whichever rung
+    /// wants it, EMBEDDED is never the mode asked for. A portal that
+    /// only offers EMBEDDED gets no key at all and keeps its Hidden
+    /// default rather than being asked to paint into our pixels.
+    #[test]
+    fn no_advertised_mode_set_ever_asks_for_an_embedded_cursor() {
+        for modes in 0u32..16 {
+            for want_metadata in [false, true] {
+                let got = cursor_mode(Some(modes), want_metadata);
+                assert_ne!(Some(EMBEDDED), got, "modes {modes:#b} metadata {want_metadata}");
+            }
+        }
+        assert_eq!(None, cursor_mode(Some(EMBEDDED), false), "embedded-only offers nothing");
+    }
+
+    /// The hypothesis this kills: a restored session negotiated before
+    /// the cursor_mode fix. `restore_token` is a `SelectSources` option,
+    /// so it rides the very dict that carries `cursor_mode` - a replayed
+    /// grant cannot carry an older cursor mode with it.
+    #[test]
+    fn a_restored_session_selects_sources_with_the_cursor_mode_too() {
+        let options =
+            select_sources_options("tok", Some(CURSOR_MODE_HIDDEN), true, Some("stored-token"));
+        assert_eq!(Some(&Value::from("stored-token")), options.get("restore_token"));
+        assert_eq!(Some(&Value::U32(CURSOR_MODE_HIDDEN)), options.get("cursor_mode"));
+        assert_eq!(Some(&Value::U32(PERSIST_UNTIL_REVOKED)), options.get("persist_mode"));
+        assert_eq!(Some(&Value::Bool(true)), options.get("multiple"));
+    }
+
+    /// A first launch differs only in the token, and a v3 portal is
+    /// sent neither persist key - but both are still told the cursor
+    /// mode.
+    #[test]
+    fn a_fresh_or_unpersistable_session_still_sends_the_cursor_mode() {
+        let fresh = select_sources_options("tok", Some(CURSOR_MODE_METADATA), true, None);
+        assert_eq!(None, fresh.get("restore_token"), "nothing to restore yet");
+        assert_eq!(Some(&Value::U32(CURSOR_MODE_METADATA)), fresh.get("cursor_mode"));
+
+        let old = select_sources_options("tok", Some(CURSOR_MODE_HIDDEN), false, Some("ignored"));
+        assert_eq!(None, old.get("persist_mode"), "v3 gets no persist keys");
+        assert_eq!(None, old.get("restore_token"), "nor a token it cannot use");
+        assert_eq!(Some(&Value::U32(CURSOR_MODE_HIDDEN)), old.get("cursor_mode"));
+    }
+
+    /// An empty stored token is a first launch, not a token.
+    #[test]
+    fn a_blank_stored_token_is_not_sent() {
+        let options = select_sources_options("tok", Some(CURSOR_MODE_HIDDEN), true, Some(""));
+        assert_eq!(None, options.get("restore_token"));
     }
 }

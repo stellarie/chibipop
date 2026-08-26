@@ -53,15 +53,23 @@ impl ChannelId {
 /// What one channel is doing. `detail` is the human half of the menu
 /// row — short, honest, and naming the mechanism or the exact gap.
 ///
-/// Two states, not three: every channel the daemon tracks now resolves
-/// to a real verdict at startup (the ADR-0002 capture ladder including
-/// the portal's eager consent, the ADR-0003 cursor ladder, the
-/// always-bound control socket), so there is no channel left for a
-/// "not built yet" placeholder to describe.
+/// Three states. Two of them resolve at startup for every channel the
+/// daemon tracks (the ADR-0002 capture ladder including the portal's
+/// eager consent, the ADR-0003 cursor ladder, the always-bound control
+/// socket), so there is no channel left for a "not built yet"
+/// placeholder to describe. The third is for the failure this app
+/// refuses to hide: a channel that serves pixels *and* is known to
+/// serve them spoiled - a compositor painting the pointer into the
+/// frames we OCR (ticket 52). Reporting that as Up would be a lie the
+/// user pays for in wrong readings; reporting it as Down would be a lie
+/// they could not act on, because lookups do work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
     /// Working; `detail` names what serves it ("control socket").
     Up { detail: String },
+    /// Serving, with a named defect the user can fix; `detail` names
+    /// what serves it *and* what to change.
+    Degraded { detail: String },
     /// Down; `detail` names exactly what is missing or denied, per the
     /// ADR-0006 example row "Cursor: portal denied — see settings".
     Down { detail: String },
@@ -76,9 +84,27 @@ impl ChannelState {
         ChannelState::Down { detail: detail.into() }
     }
 
+    /// This state, with `defect` appended and the row demoted to
+    /// [`ChannelState::Degraded`]: the row keeps naming what serves the
+    /// channel and gains what is wrong with it.
+    ///
+    /// A channel that is already down stays down - "unsupported, and
+    /// also spoiled" is not a distinction a user can act on, and the
+    /// missing capability is the thing to fix first.
+    pub fn degraded_by(self, defect: &str) -> ChannelState {
+        match self {
+            ChannelState::Down { .. } => self,
+            ChannelState::Up { detail } | ChannelState::Degraded { detail } => {
+                ChannelState::Degraded { detail: format!("{detail}; {defect}") }
+            }
+        }
+    }
+
     fn detail(&self) -> &str {
         match self {
-            ChannelState::Up { detail } | ChannelState::Down { detail } => detail,
+            ChannelState::Up { detail }
+            | ChannelState::Degraded { detail }
+            | ChannelState::Down { detail } => detail,
         }
     }
 }
@@ -185,11 +211,15 @@ impl ChannelStatuses {
         ChannelId::ALL.iter().map(|&id| self.row(id)).collect()
     }
 
-    /// The SNI `Status`: NeedsAttention exactly when a channel is
-    /// down. Nothing else raises it - an icon parked on NeedsAttention
-    /// teaches the user to ignore it.
+    /// The SNI `Status`: NeedsAttention exactly when a channel is down
+    /// or serving spoiled (ticket 52's software cursor). Nothing else
+    /// raises it - an icon parked on NeedsAttention teaches the user to
+    /// ignore it, and both of those states name a fix in their row.
     pub fn sni_status(&self) -> ksni::Status {
-        if self.states.iter().any(|s| matches!(s, ChannelState::Down { .. })) {
+        let wants_attention = |s: &ChannelState| {
+            matches!(s, ChannelState::Down { .. } | ChannelState::Degraded { .. })
+        };
+        if self.states.iter().any(wants_attention) {
             ksni::Status::NeedsAttention
         } else {
             ksni::Status::Active
@@ -200,6 +230,7 @@ impl ChannelStatuses {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::software_cursor;
 
     /// The common case: the promptless capture backend was selected.
     fn screencopy() -> ChannelState {
@@ -250,6 +281,36 @@ mod tests {
         assert_eq!("Capture: portal ScreenCast + PipeWire", statuses.row(ChannelId::Capture));
         assert_eq!("Cursor: portal ScreenCast cursor metadata", statuses.row(ChannelId::Cursor));
         assert_eq!("Trigger: control socket", statuses.row(ChannelId::Trigger));
+    }
+
+    /// Ticket 52: the compositor paints the pointer into the frames the
+    /// backend copies. Lookups work, so the row still names the
+    /// backend - and it names the option to change, and the icon asks
+    /// to be looked at.
+    #[test]
+    fn a_capture_row_can_serve_and_still_name_a_defect() {
+        let defect = software_cursor::PointerInFrames::Always
+            .row_defect()
+            .expect("a known software cursor degrades the row");
+        let mut statuses =
+            ChannelStatuses::startup(screencopy(), &Selection::Rung(Rung::HyprctlPoll), shell());
+        assert_eq!(ksni::Status::Active, statuses.sni_status(), "healthy before");
+
+        statuses.set(ChannelId::Capture, screencopy().degraded_by(&defect));
+        assert_eq!(
+            "Capture: wlr-screencopy region capture; pointer painted into frames - set \
+             cursor:no_hardware_cursors = false",
+            statuses.row(ChannelId::Capture)
+        );
+        assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status(), "spoiled is not healthy");
+    }
+
+    /// A missing capability is the thing to fix first, so a defect
+    /// cannot promote a dead channel into a serving one.
+    #[test]
+    fn a_down_channel_stays_down_when_a_defect_is_added() {
+        let down = ChannelState::down("unsupported - missing zwlr_screencopy_manager_v1");
+        assert_eq!(down.clone(), down.clone().degraded_by("pointer painted into frames"));
     }
 
     /// The ticket's headline contract: a down channel flips the SNI

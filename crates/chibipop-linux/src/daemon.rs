@@ -7,6 +7,7 @@
 
 use crate::capture::backend::{self as capture_backend, Backend};
 use crate::capture::portal::{self, PortalCapture, PortalSession};
+use crate::capture::software_cursor;
 use crate::control::{ControlSocket, StubState, Verb};
 use crate::cursor::{self, budget, hyprctl, image_copy};
 use crate::cursor::image_copy::{CursorHandler, CursorState};
@@ -138,6 +139,13 @@ pub(crate) struct App {
     /// What the ladder picked, so `reload` knows whether a retry is
     /// even meaningful.
     capture_selection: capture_backend::Selection,
+    /// Ticket 52: what the Capture row must say *besides* which backend
+    /// serves it, when this compositor paints the pointer into the
+    /// frames we OCR. Probed once at startup - the option cannot change
+    /// without a compositor reload - and folded into every later
+    /// Capture transition, so a portal retry cannot quietly drop the
+    /// defect from the row.
+    pointer_defect: Option<String>,
     /// Everything the portal retry needs to run again from here.
     portal_retry: Option<PortalRetry>,
     /// Where a new source goes. The dwell watch is the one source this
@@ -949,7 +957,15 @@ impl App {
 
     /// Record a channel transition: the registry, the tray's rows and
     /// SNI status, and one log line — only when something moved.
+    ///
+    /// A known software cursor rides along on the Capture row: the
+    /// backend serving pixels does not stop the pointer being in them
+    /// (ticket 52).
     fn note_channel(&mut self, id: ChannelId, state: ChannelState) {
+        let state = match (id, &self.pointer_defect) {
+            (ChannelId::Capture, Some(defect)) => state.degraded_by(defect),
+            _ => state,
+        };
         if self.tray.set_channel(id, state) {
             let row = self.tray.statuses().row(id);
             self.log.diag(&format!("channel: {row}"));
@@ -1282,6 +1298,16 @@ pub fn run(paths: Paths) -> Result<()> {
     let capture_caps = capture_backend::Capabilities::scan(&globals, portal::available());
     let capture_selection = capture_backend::select(&capture_caps, capture_override);
     log.diag(&capture_selection.startup_line());
+    // Ticket 52: neither rung's pixels can exclude a pointer the
+    // compositor already painted into its own framebuffer, so say so
+    // here rather than letting OCR read arrows as glyphs. Backend-
+    // independent on purpose - the portal's own backend on a wlr desk
+    // copies through the same framebuffer.
+    let pointer_in_frames = software_cursor::probe();
+    if let Some(line) = pointer_in_frames.startup_line() {
+        log.diag(&line);
+    }
+    let pointer_defect = pointer_in_frames.row_defect();
     let portal_metadata = capture_selection.backend() == Some(Backend::Portal)
         && portal::cursor_metadata_available();
 
@@ -1386,7 +1412,10 @@ pub fn run(paths: Paths) -> Result<()> {
     // the daemon's own view of channel health, tray or no tray.
     let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
     let mut statuses = ChannelStatuses::startup(
-        capture_state,
+        match &pointer_defect {
+            Some(defect) => capture_state.degraded_by(defect),
+            None => capture_state,
+        },
         &selection,
         tray::status::popup_state(wayland::popup_shell_advertised(&globals)),
     );
@@ -1490,6 +1519,7 @@ pub fn run(paths: Paths) -> Result<()> {
         last_warning: None,
         portal_serving: capture.is_some(),
         capture_selection,
+        pointer_defect,
         portal_retry,
         popup,
         demo,
@@ -1822,6 +1852,9 @@ mod tests {
             last_warning: None,
             portal_serving: false,
             capture_selection: capture,
+            // Ticket 52's probe is a startup fact; the harness asserts
+            // the folding, not the compositor's option.
+            pointer_defect: None,
             portal_retry: None,
             popup: None,
             demo: Demo::default(),
