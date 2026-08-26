@@ -106,6 +106,9 @@ pub(crate) struct App {
     /// canned popup instead of looking anything up, so the surface can
     /// be driven without a dictionary.
     demo: Demo,
+    /// A scripted pointer pass is running (`CHIBIPOP_POINTER_SCRIPT`),
+    /// so the repaints its own steps cause do not start another.
+    scripting: bool,
     /// The core pipeline: capture + OCR + dictionary on their own
     /// thread (ADR-0001). `None` when it could not be built - no
     /// capture protocol, no OCR models, a refused portal - and the
@@ -413,6 +416,110 @@ impl App {
         }
     }
 
+    /// Popup-local pointer input (ticket 38) -> Controller Events.
+    ///
+    /// The other half of ADR-0003's contextual-interaction bargain:
+    /// there is no global wheel or click channel on Wayland, so these
+    /// arrive from the popup's own input region and nowhere else.
+    pub(crate) fn pointer_interactions(&mut self, interactions: Vec<popup::Interaction>) {
+        for interaction in interactions {
+            match interaction {
+                popup::Interaction::Scroll { notches } => {
+                    self.log.diag(&format!("pointer: wheel {notches:+} notch(es) over the panel"));
+                    self.feed(Event::Scrolled { notches });
+                }
+                popup::Interaction::Click { local, hit } => {
+                    self.log.diag(&format!(
+                        "pointer: click at panel {},{} -> {}",
+                        local.x,
+                        local.y,
+                        match &hit {
+                            Some(hit) => format!("{hit:?}"),
+                            None => "no target".to_string(),
+                        }
+                    ));
+                    self.feed(Event::Clicked { local, hit });
+                }
+                // Core reserves the slot and the painter fills it
+                // (ADR-0004); the AnkiConnect side of this is ticket
+                // 42's, so the receipt is logged where it lands.
+                popup::Interaction::Anki { local } => {
+                    self.log.diag(&format!(
+                        "pointer: click at panel {},{} -> the Anki slot",
+                        local.x, local.y
+                    ));
+                    self.feed(Event::AddRequested);
+                }
+            }
+        }
+    }
+
+    /// The scripted pointer passes (`CHIBIPOP_POINTER_SCRIPT`), driven
+    /// from here rather than inside the popup.
+    ///
+    /// Why here: each step's effect has to reach the Controller and
+    /// come back as a repaint *before* the next step resolves, or a
+    /// scripted scroll would be followed by a click against the frame
+    /// it just replaced. Called after every path that may have painted
+    /// (a synchronous show, a configure, a frame callback), because
+    /// which of the three actually rasters depends on whether the
+    /// surface had to be resized first. Re-entrant calls return at once
+    /// and the loop below picks up the pass they armed.
+    pub(crate) fn run_pointer_script(&mut self) {
+        if self.scripting {
+            return;
+        }
+        self.scripting = true;
+        while let Some(steps) = self.popup.as_mut().and_then(Popup::take_pass) {
+            let Some(panel) = self.popup.as_ref().and_then(Popup::shown).map(|s| s.output) else {
+                break;
+            };
+            for step in steps {
+                self.pointer_step(panel, step);
+            }
+        }
+        self.scripting = false;
+    }
+
+    /// One scripted step, through the same entry points a real
+    /// `wl_pointer` frame drives.
+    fn pointer_step(&mut self, panel: usize, step: popup::Step) {
+        if self.popup.is_none() {
+            return;
+        }
+        let interaction = match step {
+            popup::Step::Enter(x, y) => {
+                self.log.diag(&format!("pointer: script enter at {x},{y} logical"));
+                self.popup_mut().pointer_enter(panel, (x, y), None);
+                None
+            }
+            popup::Step::Motion(x, y) => {
+                self.popup_mut().pointer_motion((x, y));
+                let at = self.popup_mut().hit_at((x, y));
+                self.log.diag(&format!("pointer: script motion at {x},{y} logical -> {at}"));
+                None
+            }
+            popup::Step::Click(x, y) => {
+                self.log.diag(&format!("pointer: script click at {x},{y} logical"));
+                self.popup_mut().pointer_button((x, y))
+            }
+            popup::Step::Wheel(value120) => {
+                self.log.diag(&format!("pointer: script wheel value120 {value120}"));
+                self.popup_mut().pointer_wheel_120(value120)
+            }
+            popup::Step::Leave => {
+                self.popup_mut().pointer_leave(panel);
+                None
+            }
+            popup::Step::Dump => {
+                self.popup_mut().dump_hits();
+                None
+            }
+        };
+        self.flush_popup_notes();
+        self.pointer_interactions(interaction.into_iter().collect());
+    }
+
     /// One Event through the Controller, and every Command it answers
     /// with executed - then the dwell watch brought in line with what
     /// is now on screen (ADR-0010). Ticket 42 fills in the Anki rows.
@@ -496,7 +603,14 @@ impl App {
                 let settings = worker::settings(&self.config, &self.dicts);
                 self.send_trigger(TriggerKind::Reload(Box::new(settings)), id);
             }
+            // New content, so a scripted pass is owed one frame from
+            // now. A `RepaintPopup` below is deliberately *not* armed:
+            // a pass that re-ran on its own scroll repaint would drive
+            // itself in a circle.
             Command::ShowPopup { presentation, anchor, scroll, show_back } => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.arm_script();
+                }
                 self.show_popup(&ShowRequest {
                     presentation: *presentation,
                     anchor,
@@ -519,6 +633,14 @@ impl App {
                 }
             }
             Command::HidePopup => self.hide_popup(),
+            // A fresh popup replaces the old one: the sub-notch delta
+            // banked against the entry that just went away must not
+            // nudge the new one (ticket 38).
+            Command::DiscardScroll => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.discard_scroll();
+                }
+            }
             // Screen content: written only where the user opted in.
             Command::LogLookup { headword, match_len } => {
                 self.log.lookup(&format!("{headword}  match={match_len}"));
@@ -598,6 +720,9 @@ impl App {
                     started.elapsed().as_micros(),
                 ));
                 self.placed(placed);
+                // A same-size show rasters synchronously, so the frame
+                // a scripted pass needs already exists.
+                self.run_pointer_script();
             }
             Err(e) => {
                 self.log.diag(&format!("popup: place failed: {e:#}"));
@@ -636,6 +761,11 @@ impl App {
             "popup: demo show at anchor {},{} {}x{}",
             anchor.x, anchor.y, anchor.w, anchor.h
         ));
+        // The demo bypasses the Controller, so it arms the scripted
+        // pointer pass itself.
+        if let Some(popup) = self.popup.as_mut() {
+            popup.arm_script();
+        }
         self.show_popup(&ShowRequest {
             presentation: popup::canned(),
             anchor,
@@ -1178,6 +1308,7 @@ pub fn run(paths: Paths) -> Result<()> {
         portal_retry,
         popup,
         demo,
+        scripting: false,
         config,
     };
 
@@ -1507,6 +1638,7 @@ mod tests {
             portal_retry: None,
             popup: None,
             demo: Demo::default(),
+            scripting: false,
         }
     }
 

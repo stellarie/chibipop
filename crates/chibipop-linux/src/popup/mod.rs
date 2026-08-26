@@ -17,10 +17,12 @@
 mod demo;
 mod paint;
 mod place;
+mod pointer;
 mod surface;
 mod text;
 
 pub use demo::{canned, Demo};
+pub use pointer::{Interaction, Step};
 pub use surface::{Placed, Popup, ShowRequest};
 
 use chibipop::ui::layout::Rgb;
@@ -76,6 +78,47 @@ pub fn physical_theme(theme: &Theme, scale: f64) -> Theme {
         ..theme.clone()
     }
 }
+
+/// One `Dispatch` per interface and user-data pair, forwarding to the
+/// `Dispatch2` impl SCTK ships for that pair.
+///
+/// Why this instead of `delegate_dispatch2!`: SCTK 0.21's macro writes
+/// a *blanket* `Dispatch<I, U>` impl, which would collide with the
+/// hand-written impls the cursor channel already needs on this same
+/// state (`daemon::App`). One `Dispatch` per interface and user-data
+/// pair, each forwarding to SCTK's own `Dispatch2`, is the same code
+/// the macro generates - only enumerated, so the two halves of the
+/// daemon can share one Wayland queue. It lives in this module because
+/// both dispatch halves of the popup - the surface's and the
+/// pointer's - are written with it.
+///
+/// The expansion site provides `App`, `Dispatch`, `Dispatch2`, `Proxy`,
+/// `Connection`, `QueueHandle` and `Arc`.
+macro_rules! forward {
+    ($iface:ty, $udata:ty) => {
+        impl Dispatch<$iface, $udata> for App {
+            fn event(
+                state: &mut App,
+                proxy: &$iface,
+                event: <$iface as Proxy>::Event,
+                data: &$udata,
+                conn: &Connection,
+                qh: &QueueHandle<App>,
+            ) {
+                <$udata as Dispatch2<$iface, App>>::event(data, state, proxy, event, conn, qh);
+            }
+
+            fn event_created_child(
+                opcode: u16,
+                qh: &QueueHandle<App>,
+            ) -> Arc<dyn wayland_client::backend::ObjectData> {
+                <$udata as Dispatch2<$iface, App>>::event_created_child(opcode, qh)
+            }
+        }
+    };
+}
+
+pub(crate) use forward;
 
 #[cfg(test)]
 mod tests {
