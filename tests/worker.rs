@@ -115,6 +115,7 @@ fn dict_named(name: &str) -> FakeDictionary {
 fn settings() -> WorkerSettings {
     WorkerSettings {
         max_passes: 1,
+        upscale: 2,
         prefer_vertical: false,
         capture: CaptureSize::default(),
         scan_alphanumeric: true,

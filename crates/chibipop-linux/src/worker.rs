@@ -121,6 +121,10 @@ fn deconjugator() -> Deconjugator {
 pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
     WorkerSettings {
         max_passes: config.ocr.max_ocr_passes,
+        // Never upscaled: meikiocr is strictly worse on 2x crops than
+        // on native-resolution ones, on every benchmark slice
+        // (ADR-0009 - "the Linux adapter never upscales").
+        upscale: 1,
         prefer_vertical: config.ocr.prefer_vertical,
         capture: CaptureSize { w: config.ocr.capture_width, h: config.ocr.capture_height },
         scan_alphanumeric: config.ocr.scan_alphanumeric,
@@ -237,5 +241,17 @@ mod tests {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(RULES);
         let rules = load_rules(&repo).expect("the shipped deconjugation rules must parse");
         assert!(!rules.is_empty());
+    }
+
+    /// ADR-0009: "the Linux adapter never upscales" - native crops beat
+    /// 2x on every benchmark slice, so the settings this daemon hands
+    /// the shared Worker must carry factor 1. The OCR gate feeds meiki
+    /// native fixtures directly and cannot catch a runtime factor
+    /// drift; this pins it at the seam instead.
+    #[test]
+    fn the_linux_worker_never_upscales() {
+        let s = settings(&Config::default(), &[]);
+        assert_eq!(1, s.upscale);
+        assert_eq!(1, s.snapshot().upscale, "and the snapshot carries it to TextSource");
     }
 }

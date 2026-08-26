@@ -13,14 +13,18 @@ use crate::text::mask::CaptureMask;
 use crate::text::{Frame, OcrEngine, RegionCapture, TextSpan};
 use anyhow::{Context, Result};
 
-/// Small text else misreads.
-pub const UPSCALE: i32 = 2;
+// The capture upscale factor is per-platform and lives in
+// `SettingsSnapshot::upscale`: the Windows engine misreads small text
+// at native resolution (it supplies 2), the Linux engine measures
+// strictly worse on upscaled crops and never upscales (ADR-0009 - it
+// supplies 1).
 
 // MAINTAINER NOTE - adaptive upscale retry, disabled 2026-08-08.
 // (Deliberately longer than the 30-char house rule: this records a
 // method and a retraction, and Stella asked for it to live here.)
 //
-// What it does: after the first pass at UPSCALE, if the tallest word
+// What it does: after the first pass at the configured upscale, if the
+// tallest word
 // recognised is under SMALL_GLYPH_PX, capture and OCR the same region
 // again at RETRY_UPSCALE and prefer that result when it is non-empty.
 //
@@ -108,6 +112,11 @@ struct Recognised {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct SettingsSnapshot {
     pub max_passes: u8,
+    /// Nearest-neighbour factor applied to every grab before OCR sees
+    /// it. A platform fact, not a user knob: 2 on Windows (WinRT OCR
+    /// misreads small text at 1x), 1 on Linux (ADR-0009 - meikiocr is
+    /// strictly worse on upscaled crops).
+    pub upscale: i32,
     pub prefer_vertical: bool,
     pub capture: CaptureSize,
     pub scan_alphanumeric: bool,
@@ -229,7 +238,7 @@ impl TextSource {
         region: PhysRect,
         mask: CaptureMask,
     ) -> Result<RegionRead> {
-        let (lines, frame) = self.recognise_at_capture(region, UPSCALE, mask)?;
+        let (lines, frame) = self.recognise_at_capture(region, self.settings.upscale, mask)?;
         let (lines, frame) = if ADAPTIVE_RETRY && glyphs_look_small(&lines) {
             match self.recognise_at_capture(region, RETRY_UPSCALE, mask) {
                 Ok((bigger, big_frame)) if !bigger.is_empty() => (bigger, big_frame),
@@ -481,7 +490,7 @@ impl TextSource {
         tolerance: i32,
         mask: CaptureMask,
     ) -> Result<Vec<OcrWord>> {
-        let (lines, _) = self.recognise_at_capture(tile, UPSCALE, mask)?;
+        let (lines, _) = self.recognise_at_capture(tile, self.settings.upscale, mask)?;
         Ok(nearest_line(&lines, perpendicular_centre, orientation, tolerance)
             .map(|line| line.words.clone())
             .unwrap_or_default())
@@ -760,6 +769,7 @@ mod tests {
     fn snap() -> SettingsSnapshot {
         SettingsSnapshot {
             max_passes: 1,
+            upscale: 2,
             prefer_vertical: false,
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
@@ -892,6 +902,28 @@ mod tests {
         }
     }
 
+    /// The factor is the snapshot's, not a core constant: an upscale-1
+    /// platform (Linux, ADR-0009) must put native-resolution pixels in
+    /// front of its engine, and an upscale-2 one (Windows) doubled
+    /// ones - through the resolve path a real lookup takes, not just
+    /// `recognise_at_capture`'s explicit factor argument.
+    #[test]
+    fn resolve_reads_at_the_snapshot_upscale() {
+        let region = PhysRect { x: 0, y: 0, w: 4, h: 2 };
+        for (factor, expect) in [(1, (4, 2)), (2, (8, 4))] {
+            let seen = Rc::new(RefCell::new(None));
+            let ocr = RecordingOcr { seen: Rc::clone(&seen), words: Vec::new() };
+            let mut source = TextSource::new(
+                Box::new(SolidCapture),
+                Box::new(ocr),
+                SettingsSnapshot { upscale: factor, ..snap() },
+            );
+            source.resolve_in_region(PhysPoint { x: 1, y: 1 }, region, CaptureMask::NONE).unwrap();
+            let (_, w, h) = seen.borrow_mut().take().expect("OCR must have run");
+            assert_eq!(expect, (w, h), "factor {factor}");
+        }
+    }
+
     // -- reusing an unchanged grab's words (ADR-0002/ADR-0010) --
 
     fn paced(unchanged: bool) -> (TextSource, std::rc::Rc<std::cell::Cell<u32>>) {
@@ -901,6 +933,7 @@ mod tests {
             Box::new(Counting { runs: runs.clone() }),
             SettingsSnapshot {
                 max_passes: 1,
+                upscale: 2,
                 prefer_vertical: false,
                 capture: CaptureSize::default(),
                 scan_alphanumeric: false,
@@ -982,6 +1015,7 @@ mod tests {
         assert_eq!(runs.get(), 1);
         let settings = SettingsSnapshot {
             max_passes: 2,
+            upscale: 2,
             prefer_vertical: true,
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
@@ -993,7 +1027,8 @@ mod tests {
 
     // -- where the two features meet: the mask is part of "same words" --
 
-    /// `Counting`'s one word maps to this box out of `BOX` at `UPSCALE`.
+    /// `Counting`'s one word maps to this box out of `BOX` at the
+    /// snapshot's upscale of 2.
     const WORD: PhysRect = PhysRect { x: 100, y: 100, w: 20, h: 20 };
 
     /// The dangerous direction, and the reason the mask is in the key:

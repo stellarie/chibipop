@@ -145,7 +145,10 @@ jobs:
   # ADR-0007: the second native job, mirrored gates, no cross-compilation.
   # Pinned to ubuntu-24.04, not ubuntu-latest, per the rolling
   # oldest-supported-runner policy (the runner's glibc is the release
-  # binary's floor; ubuntu-22.04 left the runner fleet in 2026). The gate is
+  # binary's floor). ubuntu-22.04 is still hosted, but `ort`'s static
+  # ONNX Runtime prebuilt needs its glibc 2.38+/GCC-13 libstdc++ and
+  # fails to link there - the prebuilt, not the runner catalogue, sets
+  # the floor (see release.yml and ADR-0007's 2026-08-26 amendment). The gate is
   # compositor-free: the runner has no WAYLAND_DISPLAY, and every
   # integration test that needs one skips without it (ADR-0007). The real
   # compositor lives in the non-blocking `sway-smoke` job below; nothing

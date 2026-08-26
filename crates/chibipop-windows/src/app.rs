@@ -1824,6 +1824,7 @@ fn derive(cfg: &Config) -> LiveSettings {
 fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
     WorkerSettings {
         max_passes: live.max_ocr_passes,
+        upscale: crate::text::UPSCALE,
         prefer_vertical: live.prefer_vertical,
         capture: live.capture,
         scan_alphanumeric: live.scan_alphanumeric,

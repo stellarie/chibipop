@@ -46,6 +46,8 @@ pub enum TriggerKind {
 /// What the worker owns.
 pub struct WorkerSettings {
     pub max_passes: u8,
+    /// Per-platform capture upscale (Windows 2, Linux 1 - ADR-0009).
+    pub upscale: i32,
     pub prefer_vertical: bool,
     pub capture: CaptureSize,
     pub scan_alphanumeric: bool,
@@ -57,10 +59,12 @@ pub struct WorkerSettings {
 }
 
 impl WorkerSettings {
-    /// The OCR half, for the facade.
-    fn snapshot(&self) -> SettingsSnapshot {
+    /// The OCR half, for the facade - and for a bin to assert what it
+    /// hands `TextSource` (the Linux crate pins `upscale: 1` through it).
+    pub fn snapshot(&self) -> SettingsSnapshot {
         SettingsSnapshot {
             max_passes: self.max_passes,
+            upscale: self.upscale,
             prefer_vertical: self.prefer_vertical,
             capture: self.capture,
             scan_alphanumeric: self.scan_alphanumeric,
@@ -380,6 +384,7 @@ mod tests {
     fn ws(passes: u8) -> WorkerSettings {
         WorkerSettings {
             max_passes: passes,
+            upscale: 2,
             prefer_vertical: false,
             capture: CaptureSize::default(),
             scan_alphanumeric: true,

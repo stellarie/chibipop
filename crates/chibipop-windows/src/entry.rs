@@ -9,7 +9,7 @@ use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
 use chibipop::text::mask::CaptureMask;
-use chibipop::text::source::UPSCALE;
+use chibipop_windows::text::UPSCALE;
 use chibipop::text::SettingsSnapshot;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -144,6 +144,7 @@ pub fn run() -> Result<()> {
             let mut source = chibipop_windows::text::text_source(
                 SettingsSnapshot {
                     max_passes: tiles,
+                    upscale: UPSCALE,
                     prefer_vertical: false,
                     capture,
                     scan_alphanumeric: true,
@@ -320,6 +321,7 @@ pub fn run() -> Result<()> {
             let mut source = chibipop_windows::text::text_source(
                 SettingsSnapshot {
                     max_passes: tiles,
+                    upscale: UPSCALE,
                     prefer_vertical: false,
                     capture: chibipop::text::layout::CaptureSize::default(),
                     scan_alphanumeric: true,

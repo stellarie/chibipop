@@ -11,6 +11,11 @@ pub use chibipop::text::{
     layout, mask, Frame, RegionCapture, SettingsSnapshot, TextSource, TextSpan,
 };
 
+/// The Windows capture upscale: WinRT OCR misreads small text at
+/// native resolution. A platform fact core no longer hardcodes
+/// (ADR-0009 - the Linux engine supplies 1).
+pub const UPSCALE: i32 = 2;
+
 use anyhow::Result;
 
 /// The Windows `TextSource`, no capture guard: probe and watch. The app's
