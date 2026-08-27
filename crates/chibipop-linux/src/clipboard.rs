@@ -51,6 +51,7 @@ use crate::wayland::Advertised;
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::os::fd::OwnedFd;
+use std::sync::mpsc;
 use std::sync::Arc;
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_seat::WlSeat;
@@ -150,12 +151,23 @@ impl Notes {
     }
 }
 
+/// One copy on its way to the offer thread: the bytes, and the receipt
+/// the caller asked for.
+struct Take {
+    payload: Arc<[u8]>,
+    /// `Some` for [`Clipboard::set_and_settle`] only. The thread answers
+    /// it once the compositor has the offer, and drops it instead if the
+    /// roundtrip failed — so a caller that waits either learns the
+    /// selection is live or learns it never became live.
+    settled: Option<mpsc::SyncSender<()>>,
+}
+
 /// The daemon's writable selection: bytes in, an offer held open.
 pub struct Clipboard {
     rung: Rung,
     /// The offer thread's inbox. Its receiver lives in that thread's
     /// loop, so a send is also the wake.
-    text: calloop::channel::Sender<Arc<[u8]>>,
+    text: calloop::channel::Sender<Take>,
 }
 
 impl Clipboard {
@@ -205,7 +217,8 @@ impl Clipboard {
         let seat = registry.bind::<WlSeat, _, Owner>(seat_global.name, 1, &qh, ());
         let device = manager.device(&seat, &qh);
 
-        let mut owner = Owner { manager, device, source: None, notes, finished: false };
+        let mut owner =
+            Owner { conn: conn.clone(), manager, device, source: None, notes, finished: false };
         // One round trip before the thread exists, so a refused bind is
         // an `Err` here rather than a silent thread. It also delivers
         // the device's opening `selection` event, whose offer the
@@ -215,7 +228,7 @@ impl Clipboard {
             .roundtrip(&mut owner)
             .with_context(|| format!("binding {} on its own connection", rung.global()))?;
 
-        let (text, inbox) = calloop::channel::channel::<Arc<[u8]>>();
+        let (text, inbox) = calloop::channel::channel::<Take>();
         std::thread::Builder::new()
             .name("chibipop-clipboard".to_string())
             .spawn(move || serve(conn, queue, owner, inbox))
@@ -238,8 +251,31 @@ impl Clipboard {
     /// compositor retired our device, or the process is coming down —
     /// which the caller reports rather than retries.
     pub fn set(&self, text: &str) -> Result<()> {
+        self.copy(text, None)
+    }
+
+    /// Take the selection with `text` and return once the compositor
+    /// has the offer.
+    ///
+    /// [`Clipboard::set`]'s promise — the bytes are queued — is all the
+    /// pump may wait for, and it is not enough for a caller whose next
+    /// act is to tell a reader the selection is ready: the thread has
+    /// still to be scheduled, build the source and put `set_selection`
+    /// on the wire. `clipboard-check` is that caller, and this is why
+    /// it can say "selection taken" and mean it.
+    pub fn set_and_settle(&self, text: &str) -> Result<()> {
+        // Depth one: the thread sends the receipt and moves on, and
+        // nothing else is ever waiting on this channel.
+        let (settled, taken) = mpsc::sync_channel::<()>(1);
+        self.copy(text, Some(settled))?;
+        taken.recv().map_err(|_| {
+            anyhow::anyhow!("the compositor never took the selection; see the clipboard's notes")
+        })
+    }
+
+    fn copy(&self, text: &str, settled: Option<mpsc::SyncSender<()>>) -> Result<()> {
         let payload: Arc<[u8]> = Arc::from(text.as_bytes());
-        self.text.send(payload).map_err(|_| {
+        self.text.send(Take { payload, settled }).map_err(|_| {
             anyhow::anyhow!("the clipboard thread has ended; the selection was not taken")
         })
     }
@@ -248,6 +284,11 @@ impl Clipboard {
 /// The clipboard thread's whole world: the manager, the device, and the
 /// source that currently owns the selection.
 struct Owner {
+    /// This thread's own connection, for the one thing the event queue
+    /// inside calloop's source cannot be asked from a callback: a
+    /// roundtrip. [`Connection::roundtrip`] dispatches nothing, so the
+    /// events it reads wait for calloop to hand them over as usual.
+    conn: Connection,
     manager: Manager,
     device: Device,
     /// `None` before the first copy and after the compositor cancelled
@@ -260,14 +301,14 @@ struct Owner {
 }
 
 impl Owner {
-    /// Offer `payload` and take the selection with it.
-    fn take(&mut self, payload: Arc<[u8]>, qh: &QueueHandle<Owner>) {
+    /// Offer a copy's bytes and take the selection with them.
+    fn take(&mut self, copy: Take, qh: &QueueHandle<Owner>) {
         // The payload rides as the source's own user data rather than in
         // a field here: a source may not be reused after
         // `set_selection` (it is a protocol error), so every copy makes
         // a new one, and each answers with the bytes it was created for
         // even if a `send` for a replaced source is still in flight.
-        let source = self.manager.source(payload, qh);
+        let source = self.manager.source(copy.payload, qh);
         for mime in TEXT_MIMES {
             source.offer(mime);
         }
@@ -277,6 +318,23 @@ impl Owner {
         // onto the new source by the time it reads this destroy.
         if let Some(old) = self.source.replace(source) {
             old.destroy();
+        }
+        let Some(settled) = copy.settled else {
+            // Nobody is waiting, so the flush calloop does on its way
+            // back to sleep is soon enough.
+            return;
+        };
+        // Somebody is: for them, "taken" has to mean the compositor has
+        // processed the request, not that it is still in this process's
+        // write buffer. The sync is what turns one into the other, and a
+        // dropped receipt is the honest answer when it never came back.
+        match self.conn.roundtrip() {
+            Ok(_) => {
+                let _ = settled.send(());
+            }
+            Err(e) => self
+                .notes
+                .note(format!("clipboard: the compositor did not answer the offer - {e}")),
         }
     }
 
@@ -420,7 +478,7 @@ fn serve(
     conn: Connection,
     queue: EventQueue<Owner>,
     mut owner: Owner,
-    inbox: calloop::channel::Channel<Arc<[u8]>>,
+    inbox: calloop::channel::Channel<Take>,
 ) {
     let events: calloop::EventLoop<'static, Owner> = match calloop::EventLoop::try_new() {
         Ok(events) => events,
@@ -436,7 +494,7 @@ fn serve(
         return;
     }
     let inserted = handle.insert_source(inbox, move |event, _, owner: &mut Owner| match event {
-        calloop::channel::Event::Msg(payload) => owner.take(payload, &qh),
+        calloop::channel::Event::Msg(copy) => owner.take(copy, &qh),
         // The daemon dropped its sender: the process is coming down.
         calloop::channel::Event::Closed => owner.finished = true,
     });

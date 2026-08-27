@@ -131,7 +131,16 @@ fn clipboard_check(text: &str, hold: u64) -> Result<()> {
         bail!("{}", clipboard::unavailable_line());
     };
     println!("clipboard: rung {} ({})", board.rung().global(), clipboard::TEXT_MIMES[0]);
-    board.set(text)?;
+    // The line below is what a reader waits for, so the take has to have
+    // settled before it is printed: `wl-paste` spawned the instant it
+    // appears must find a selection the compositor already knows about.
+    // A failed handover prints the thread's own account of it first.
+    if let Err(e) = board.set_and_settle(text) {
+        while let Ok(line) = notes.try_recv() {
+            println!("{line}");
+        }
+        return Err(e);
+    }
     println!("clipboard: selection taken - {} character(s)", text.chars().count());
 
     // Held on purpose: the offer only answers `send` while this process

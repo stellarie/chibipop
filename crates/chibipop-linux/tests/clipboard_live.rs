@@ -17,6 +17,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
@@ -28,6 +29,25 @@ const MARKER: &str = "chibipop 日本語 clipboard 確認";
 
 /// The line `clipboard-check` prints once the selection is ours.
 const TAKEN: &str = "clipboard: selection taken";
+
+/// The session's one selection, which both tests below have to own.
+///
+/// libtest runs them on two threads of this process, and there is only
+/// one selection to take: overlapped, the later holder's `set_selection`
+/// cancels the earlier one's offer, and the earlier test then reads not
+/// its own bytes but whatever its sibling leaves behind - an empty
+/// selection, once that sibling has reaped its holder. So each test owns
+/// the selection for one whole take-read-release and hands it on.
+static SELECTION: Mutex<()> = Mutex::new(());
+
+/// Own the session selection until the returned guard is dropped.
+///
+/// Poisoning is a sibling that failed mid-take, which says nothing about
+/// whether the selection can be taken now: the guard is honoured either
+/// way, so a real failure is reported once instead of twice.
+fn selection() -> MutexGuard<'static, ()> {
+    SELECTION.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn skip() -> bool {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
@@ -101,6 +121,7 @@ fn holding() -> (Child, String) {
 /// a second connection would be this crate agreeing with itself.
 #[test]
 fn another_wayland_client_reads_the_selection_the_daemon_took() {
+    let _selection = selection();
     if skip() {
         return;
     }
@@ -126,6 +147,7 @@ fn another_wayland_client_reads_the_selection_the_daemon_took() {
 /// XWayland application asks by a name the offer answers.
 #[test]
 fn the_offer_answers_the_legacy_x11_selection_targets_as_well() {
+    let _selection = selection();
     if skip() {
         return;
     }
