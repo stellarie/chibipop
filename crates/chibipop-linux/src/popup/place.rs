@@ -101,13 +101,17 @@ pub struct Placement {
     pub margin: (i32, i32),
 }
 
-/// Place a measured popup on one output.
+/// One physical rect on one output as that surface's own geometry.
 ///
-/// `size` is the panel's physical pixel size (body view plus the Anki
-/// strip - one surface holds both on Linux); `monitor` is that output's
-/// physical box, in the same global space as `anchor`.
-pub fn place(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, scale: f64) -> Placement {
-    let rect = place_popup(anchor, size, monitor, POPUP_GAP);
+/// The whole ADR-0004 derivation in one place, because three surfaces
+/// now need it: physical pixels are authoritative, the buffer is that
+/// many device pixels, the logical size is `ceil(physical / scale)` and
+/// the margins are `round(local / scale)` from the output's top-left
+/// corner - a layer surface's margins being relative to the output it
+/// was created on. Sub-pixel slack lands in the last row and column of
+/// the buffer, which is padding on the popup and one border pixel
+/// everywhere else.
+pub fn derive(rect: PhysRect, monitor: PhysRect, scale: f64) -> Placement {
     let scale = if scale > 0.0 { scale } else { 1.0 };
 
     // Output-local, because margins are.
@@ -123,6 +127,38 @@ pub fn place(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, scale: f64) 
         ),
         margin: ((local_y / scale).round() as i32, (local_x / scale).round() as i32),
     }
+}
+
+/// Place a measured popup on one output.
+///
+/// `size` is the panel's physical pixel size (body view plus the Anki
+/// strip - one surface holds both on Linux); `monitor` is that output's
+/// physical box, in the same global space as `anchor`.
+pub fn place(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, scale: f64) -> Placement {
+    derive(place_popup(anchor, size, monitor, POPUP_GAP), monitor, scale)
+}
+
+/// One output, as a surface *beside* the popup needs it.
+///
+/// The selector and the outline map their own layer surfaces and must
+/// pin each one to a `wl_output`: an output is fixed at creation and
+/// margins are relative to it (ADR-0004), so `output = NULL` would hand
+/// them an origin nobody chose. They read this list off the popup
+/// rather than binding a second `OutputState`, so all three surfaces
+/// agree about the global physical space by construction.
+#[derive(Debug, Clone)]
+pub struct Screen {
+    /// The popup's own stable surface id for this output, so a
+    /// diagnostic naming surface 1 means the same monitor everywhere.
+    pub id: usize,
+    pub output: wayland_client::protocol::wl_output::WlOutput,
+    /// This output's box in the global physical space.
+    pub rect: PhysRect,
+    /// The scale to raster at: `preferred_scale` where it has spoken,
+    /// the output's own ratio until then. Never latched.
+    pub scale: f64,
+    /// What the log calls this monitor.
+    pub name: String,
 }
 
 /// Which output holds an anchor.

@@ -22,7 +22,8 @@ mod surface;
 mod text;
 
 pub use demo::{canned, Demo};
-pub use pointer::{Interaction, Step};
+pub use place::{derive, Screen};
+pub use pointer::{frame as pointer_frame, Interaction, Step};
 pub use surface::{Placed, Popup, ShowRequest};
 
 use chibipop::ui::layout::Rgb;

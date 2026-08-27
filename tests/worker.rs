@@ -128,7 +128,7 @@ fn settings() -> WorkerSettings {
         capture: CaptureSize::default(),
         scan_alphanumeric: true,
         language: "ja".to_string(),
-        present_cfg: chibipop::config::Config::default().present_config(),
+        present_cfg: chibipop::config::Config::default().present_config(&[], || true),
         scan_display: ScanDisplay { captures: false, highlight: false },
         sentence_mode: chibipop::config::SentenceMode::Line,
         static_region: None,

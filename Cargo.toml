@@ -136,6 +136,12 @@ path = "src/lib.rs"
 # are named only by the bins (ADR-0001). This crate builds on stable Linux.
 [dependencies]
 anyhow.workspace = true
+# The Anki picture payload: AnkiConnect takes attachments as base64.
+base64.workspace = true
+# The one PNG encoder (spec D3, src/image.rs). Pure Rust, so it costs the
+# Windows bin nothing and it is the same version the Linux bin already
+# decodes its tray icons with.
+png.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

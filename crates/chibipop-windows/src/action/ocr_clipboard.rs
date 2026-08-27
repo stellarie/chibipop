@@ -34,61 +34,14 @@ impl Action for OcrClipboardAction {
             .recv()
             .context("OCR worker ended before returning text")?
             .map_err(|error| anyhow!(error))?;
-        let text = join_lines(&lines);
+        // The joining rule is core's (`chibipop::text::layout`, reached
+        // through this crate's re-export): the Linux daemon copies the
+        // same text out of the same seam, and two implementations would
+        // be two answers.
+        let text = crate::text::layout::join_lines(&lines);
         if text.is_empty() {
             return Ok(ActionOutcome::Cancelled);
         }
         Ok(ActionOutcome::TextCaptured { text })
-    }
-}
-
-/// Joins OCR words without spaces.
-fn join_lines(lines: &[crate::text::layout::OcrLine]) -> String {
-    lines
-        .iter()
-        .map(|line| {
-            line.words
-                .iter()
-                .map(|word| word.text.as_str())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::geom::PhysRect;
-    use crate::text::layout::{OcrLine, OcrWord};
-
-    fn word(text: &str) -> OcrWord {
-        OcrWord {
-            text: text.to_string(),
-            rect: PhysRect {
-                x: 0,
-                y: 0,
-                w: 1,
-                h: 1,
-            },
-        }
-    }
-
-    #[test]
-    fn joins_words_and_lines() {
-        let lines = vec![
-            OcrLine {
-                words: vec![word("これは"), word("テスト")],
-            },
-            OcrLine {
-                words: vec![word("二行目")],
-            },
-        ];
-        assert_eq!("これはテスト\n二行目", join_lines(&lines));
-    }
-
-    #[test]
-    fn empty_lines_produce_empty_text() {
-        assert_eq!("", join_lines(&[]));
     }
 }

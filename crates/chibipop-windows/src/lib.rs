@@ -35,6 +35,6 @@ pub mod ui;
 // addressing them as `crate::…`, unchanged by the workspace split.
 #[cfg(windows)]
 use chibipop::{
-    anki, config, controller, dict, geom, library, lookup, paths, present, settings, update,
-    worker,
+    anki, config, controller, dict, geom, image, library, lookup, paths, present, settings, shot,
+    update, worker,
 };

@@ -396,23 +396,35 @@ mod tests {
     }
 
     /// The Hyprland snippet's bind lines must be the same lines the
-    /// settings window hands out for the default chord - two spellings
-    /// of one trigger would be a support trap. The shipped file is for
+    /// settings window hands out for the default chords - two spellings
+    /// of one binding would be a support trap. The shipped file is for
     /// an *installed* chibipop, so the bare command name is the right
     /// exe there; a dev checkout gets its own path from
-    /// `paths::exec_name` at runtime (ticket 51).
+    /// `paths::exec_name` at runtime (ticket 51). The add-card bind is
+    /// commented out in the shipped file, which still contains its
+    /// line verbatim.
     #[test]
     fn the_shipped_hyprland_snippet_matches_the_window_snippet() {
         let text = extras("hyprland.conf");
         assert!(text.contains("\nexec-once = chibipop run\n"), "{text}");
 
-        let chord = chibipop::config::Config::default().trigger.trigger_key_linux;
-        let snippet = super::super::snippets::bind_snippet(
-            super::super::snippets::Compositor::Hyprland,
-            &chord,
-            Path::new(paths::COMMAND),
-        );
-        for line in snippet.lines() {
+        let cfg = chibipop::config::Config::default();
+        let hyprland = super::super::snippets::Compositor::Hyprland;
+        let both = [
+            super::super::snippets::bind_snippet(
+                hyprland,
+                &cfg.trigger.trigger_key_linux,
+                Path::new(paths::COMMAND),
+                super::super::snippets::Bind::Hold,
+            ),
+            super::super::snippets::bind_snippet(
+                hyprland,
+                &cfg.anki.add_key_linux,
+                Path::new(paths::COMMAND),
+                super::super::snippets::Bind::Press(crate::control::Verb::AnkiAdd),
+            ),
+        ];
+        for line in both.iter().flat_map(|snippet| snippet.lines()) {
             assert!(text.contains(line), "extras/hyprland.conf is missing {line:?}");
         }
     }

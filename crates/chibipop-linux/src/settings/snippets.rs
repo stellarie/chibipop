@@ -7,6 +7,7 @@
 //! from third-party capture, so the window offers the compositor's own
 //! rule where one exists and says so where none does.
 
+use crate::control::Verb;
 use crate::paths;
 use std::path::Path;
 
@@ -54,41 +55,66 @@ fn split_chord(chord: &str) -> (Vec<&str>, &str) {
     (parts, key)
 }
 
-/// The native-bind snippet: press runs `trigger-down`, release
-/// `trigger-up`, exactly the verbs the control socket speaks.
+/// Which bind shape a chord needs.
+///
+/// The verb text is never a caller-built string: it comes from
+/// [`Verb::as_str`], so renaming a verb cannot leave a snippet naming a
+/// word the socket no longer answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bind {
+    /// The trigger: press runs `trigger-down`, release `trigger-up`, and
+    /// the pair carries the Hyprland release caveat.
+    Hold,
+    /// A one-shot global action: one press, one verb, no release line.
+    Press(Verb),
+}
+
+/// The native-bind snippet for one chord: exactly the verbs the control
+/// socket speaks.
 ///
 /// `exe` is the binary to name, resolved by the caller
 /// (`paths::exec_name`) and never looked up here: a pasted bind must
 /// exec the daemon the user is actually running, which under
 /// `cargo run` is `target/debug/chibipop` and is not on PATH
 /// (ticket 51). Keeping the lookup outside keeps this function pure.
-pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path) -> String {
+pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind) -> String {
     let (mods, key) = split_chord(chord);
     let exe = paths::shell_quote(exe);
     match compositor {
         Compositor::Hyprland => {
             let mask = mods.join(" ");
-            // The caveat lines are part of the snippet on purpose.
-            // Hyprland (≤ 0.55.4, verified in source and live) can fire
-            // NO release bind when a chord's modifier goes up before its
-            // key: release matching requires the bind's mod mask to hold
-            // at the release instant (KeybindManager.cpp "Gate A"), and
-            // a modifier-keyed `bindr` is shadowed the moment another
-            // key is pressed during the hold (hyprwm/Hyprland#5032,
-            // #7675). Every rescue was tried and measured — a modifier
-            // `bindr`/`bindir`, an empty-mask `bindr` on the key, and a
-            // submap-scoped `bindri` (which wedges the whole keymap) —
-            // see ticket 53. So the pair is shipped as-is and the user
-            // is told the one habit and the one recovery that exist.
-            // The GlobalShortcuts `global` dispatcher is immune by
-            // design, which is one more reason the portal rung is
-            // rung 1 (ADR-0003).
-            format!(
-                "bind = {mask}, {key}, exec, {exe} ctl trigger-down\n\
-                 bindr = {mask}, {key}, exec, {exe} ctl trigger-up\n\
-                 # Release {key} before {mask} - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
-                 # If the popup sticks, tap the chord again (release {key} first), or bind `ctl toggle` instead."
-            )
+            match bind {
+                // The caveat lines are part of the snippet on purpose.
+                // Hyprland (≤ 0.55.4, verified in source and live) can
+                // fire NO release bind when a chord's modifier goes up
+                // before its key: release matching requires the bind's
+                // mod mask to hold at the release instant
+                // (KeybindManager.cpp "Gate A"), and a modifier-keyed
+                // `bindr` is shadowed the moment another key is pressed
+                // during the hold (hyprwm/Hyprland#5032, #7675). Every
+                // rescue was tried and measured — a modifier
+                // `bindr`/`bindir`, an empty-mask `bindr` on the key,
+                // and a submap-scoped `bindri` (which wedges the whole
+                // keymap) — see ticket 53. So the pair is shipped as-is
+                // and the user is told the one habit and the one
+                // recovery that exist. The GlobalShortcuts `global`
+                // dispatcher is immune by design, which is one more
+                // reason the portal rung is rung 1 (ADR-0003).
+                Bind::Hold => format!(
+                    "bind = {mask}, {key}, exec, {exe} ctl {down}\n\
+                     bindr = {mask}, {key}, exec, {exe} ctl {up}\n\
+                     # Release {key} before {mask} - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
+                     # If the popup sticks, tap the chord again (release {key} first), or bind `ctl toggle` instead.",
+                    down = Verb::TriggerDown.as_str(),
+                    up = Verb::TriggerUp.as_str(),
+                ),
+                // No release line, so none of the above applies: a
+                // press-only bind cannot be wedged by a lost release.
+                Bind::Press(verb) => format!(
+                    "bind = {mask}, {key}, exec, {exe} ctl {verb}",
+                    verb = verb.as_str(),
+                ),
+            }
         }
         _ => {
             // sway syntax; every other wlr compositor documents an
@@ -99,11 +125,20 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path) -> String {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("+");
-            format!(
-                "# sway syntax - adapt to your compositor\n\
-                 bindsym --no-repeat {chord} exec {exe} ctl trigger-down\n\
-                 bindsym --release {chord} exec {exe} ctl trigger-up"
-            )
+            match bind {
+                Bind::Hold => format!(
+                    "# sway syntax - adapt to your compositor\n\
+                     bindsym --no-repeat {chord} exec {exe} ctl {down}\n\
+                     bindsym --release {chord} exec {exe} ctl {up}",
+                    down = Verb::TriggerDown.as_str(),
+                    up = Verb::TriggerUp.as_str(),
+                ),
+                Bind::Press(verb) => format!(
+                    "# sway syntax - adapt to your compositor\n\
+                     bindsym --no-repeat {chord} exec {exe} ctl {verb}",
+                    verb = verb.as_str(),
+                ),
+            }
         }
     }
 }
@@ -143,7 +178,7 @@ mod tests {
 
     #[test]
     fn hyprland_bind_for_the_default_chord() {
-        let snippet = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new(DEV_EXE));
+        let snippet = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new(DEV_EXE), Bind::Hold);
         assert_eq!(
             snippet,
             "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-down\n\
@@ -157,7 +192,8 @@ mod tests {
     /// a CTRL+SHIFT+K user must be told to release K first.
     #[test]
     fn hyprland_bind_for_a_two_modifier_chord() {
-        let snippet = bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K", Path::new("chibipop"));
+        let snippet =
+            bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K", Path::new("chibipop"), Bind::Hold);
         assert_eq!(
             snippet,
             "bind = CTRL SHIFT, K, exec, chibipop ctl trigger-down\n\
@@ -167,9 +203,25 @@ mod tests {
         );
     }
 
+    /// A one-shot action is one line: no release bind, and therefore
+    /// none of the release caveat the hold has to carry.
+    #[test]
+    fn hyprland_press_bind_is_one_line_with_no_release_caveat() {
+        let snippet = bind_snippet(
+            Compositor::Hyprland,
+            "ALT+A",
+            Path::new(DEV_EXE),
+            Bind::Press(Verb::AnkiAdd),
+        );
+        assert_eq!(
+            snippet,
+            "bind = ALT, A, exec, /home/u/chibipop/target/debug/chibipop ctl anki-add"
+        );
+    }
+
     #[test]
     fn sway_bind_keeps_the_chord_spelling() {
-        let snippet = bind_snippet(Compositor::Sway, "ALT+F", Path::new(DEV_EXE));
+        let snippet = bind_snippet(Compositor::Sway, "ALT+F", Path::new(DEV_EXE), Bind::Hold);
         assert!(snippet.contains(&format!(
             "bindsym --no-repeat ALT+F exec {DEV_EXE} ctl trigger-down"
         )));
@@ -179,9 +231,53 @@ mod tests {
     }
 
     #[test]
+    fn sway_press_bind_is_the_labelled_dialect_with_no_release_line() {
+        let snippet = bind_snippet(
+            Compositor::Sway,
+            "ALT+A",
+            Path::new(DEV_EXE),
+            Bind::Press(Verb::AnkiAdd),
+        );
+        assert_eq!(
+            snippet,
+            format!(
+                "# sway syntax - adapt to your compositor\n\
+                 bindsym --no-repeat ALT+A exec {DEV_EXE} ctl anki-add"
+            )
+        );
+        assert!(!snippet.contains("--release"), "a press bind has no release line: {snippet}");
+    }
+
+    /// The snippet must name the verb the socket answers, not a string
+    /// the caller composed: a renamed verb has to change the snippet.
+    #[test]
+    fn every_press_bind_names_the_verbs_own_wire_word() {
+        for verb in crate::control::VERBS {
+            for compositor in [Compositor::Hyprland, Compositor::Sway] {
+                let snippet =
+                    bind_snippet(compositor, "ALT+A", Path::new("chibipop"), Bind::Press(verb));
+                assert!(
+                    snippet.ends_with(&format!("chibipop ctl {}", verb.as_str())),
+                    "{snippet}"
+                );
+            }
+        }
+        let hold = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new("chibipop"), Bind::Hold);
+        assert!(hold.contains(&format!("ctl {}", Verb::TriggerDown.as_str())), "{hold}");
+        assert!(hold.contains(&format!("ctl {}", Verb::TriggerUp.as_str())), "{hold}");
+    }
+
+    #[test]
     fn unknown_compositor_gets_the_labelled_sway_dialect() {
-        assert!(bind_snippet(Compositor::Other, "ALT+F", Path::new(DEV_EXE))
+        assert!(bind_snippet(Compositor::Other, "ALT+F", Path::new(DEV_EXE), Bind::Hold)
             .starts_with("# sway syntax"));
+        assert!(bind_snippet(
+            Compositor::Other,
+            "ALT+A",
+            Path::new(DEV_EXE),
+            Bind::Press(Verb::AnkiAdd)
+        )
+        .starts_with("# sway syntax"));
     }
 
     /// A path with a space is the everyday case (`~/My Builds/...`, and
@@ -190,7 +286,7 @@ mod tests {
     #[test]
     fn a_path_with_a_space_is_quoted_for_both_dialects() {
         let exe = Path::new("/home/u/my builds/chibipop");
-        let hypr = bind_snippet(Compositor::Hyprland, "ALT+F", exe);
+        let hypr = bind_snippet(Compositor::Hyprland, "ALT+F", exe, Bind::Hold);
         assert!(
             hypr.contains("bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-down"),
             "{hypr}"
@@ -199,7 +295,7 @@ mod tests {
             hypr.contains("bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl trigger-up"),
             "{hypr}"
         );
-        let sway = bind_snippet(Compositor::Sway, "ALT+F", exe);
+        let sway = bind_snippet(Compositor::Sway, "ALT+F", exe, Bind::Hold);
         assert!(
             sway.contains(
                 "bindsym --no-repeat ALT+F exec '/home/u/my builds/chibipop' ctl trigger-down"
@@ -211,6 +307,11 @@ mod tests {
                 "bindsym --release ALT+F exec '/home/u/my builds/chibipop' ctl trigger-up"
             ),
             "{sway}"
+        );
+        let press = bind_snippet(Compositor::Hyprland, "ALT+A", exe, Bind::Press(Verb::AnkiAdd));
+        assert_eq!(
+            "bind = ALT, A, exec, '/home/u/my builds/chibipop' ctl anki-add",
+            press
         );
     }
 

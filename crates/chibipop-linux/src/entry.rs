@@ -5,7 +5,7 @@
 
 use crate::control::{self, Verb};
 use crate::paths::{self, Paths};
-use crate::{capture, daemon, settings, wayland};
+use crate::{capture, clipboard, daemon, settings, wayland};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -28,9 +28,15 @@ enum Command {
     Run,
     /// Send one verb to the running daemon's control socket.
     ///
-    /// The forever verb set: reload, trigger-down, trigger-up, toggle.
-    /// Bind these in your compositor, e.g. sway:
+    /// The forever verb set: reload, trigger-down, trigger-up, toggle,
+    /// anki-add, screenshot, ocr-clipboard, static-region. One verb per global
+    /// action, never a scripting API (ADR-0003). Bind these in your compositor,
+    /// e.g. sway:
     ///   bindsym --no-repeat Mod4+j exec chibipop ctl trigger-down
+    ///   bindsym --no-repeat Mod4+a exec chibipop ctl anki-add
+    ///   bindsym --no-repeat Mod4+s exec chibipop ctl screenshot
+    ///   bindsym --no-repeat Mod4+c exec chibipop ctl ocr-clipboard
+    ///   bindsym --no-repeat Mod4+r exec chibipop ctl static-region
     Ctl { verb: String },
     /// Open the settings window: its own process (ADR-0005), so a
     /// settings crash can never take live-hover down.
@@ -59,6 +65,25 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Take the clipboard selection with a known string and hold it.
+    ///
+    /// The clipboard ladder's diagnostic, the role `probe` plays for the
+    /// capability report and `capture-dump` plays for the capture rungs:
+    /// lock-free, socket-free, safe beside a live daemon, and the only
+    /// way to see - rather than assume - whether this compositor lets a
+    /// focus-less daemon own the selection at all. Reads nothing: a
+    /// session with no data-control protocol prints the same refusal the
+    /// daemon does and exits non-zero.
+    ///
+    /// It replaces whatever is currently on your clipboard.
+    ClipboardCheck {
+        /// What to put on the clipboard.
+        #[arg(long, default_value = "chibipop clipboard check", value_name = "TEXT")]
+        text: String,
+        /// Hold the selection this long so another client can read it.
+        #[arg(long, default_value_t = 3, value_name = "SECS")]
+        hold: u64,
+    },
 }
 
 pub fn run() -> ExitCode {
@@ -73,6 +98,7 @@ pub fn run() -> ExitCode {
         Command::CaptureDump { region, out, dwell, full } => {
             capture_dump(&paths, region.as_deref(), out, dwell, full)
         }
+        Command::ClipboardCheck { text, hold } => clipboard_check(&text, hold),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -81,6 +107,41 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The clipboard ladder's diagnostic: take the selection, hold it, say
+/// what happened.
+///
+/// Lock-free and socket-free like `probe`, and it deliberately does the
+/// real thing rather than reporting the advertised globals: whether a
+/// focus-less client may own the selection here is a fact about the
+/// compositor's data-control implementation, not about its registry.
+fn clipboard_check(text: &str, hold: u64) -> Result<()> {
+    let display = wayland::display_name()?;
+    let conn =
+        wayland_client::Connection::connect_to_env().context("connecting to the Wayland display")?;
+    let globals = wayland::collect_globals(&conn)?;
+    println!("WAYLAND_DISPLAY={display}");
+
+    // The pump's note channel, without a pump: this is a one-shot
+    // process, so the clipboard thread's lines are drained and printed
+    // here instead of being logged there.
+    let (notes_tx, notes) = calloop::channel::channel::<String>();
+    let Some(board) = clipboard::Clipboard::bind(&globals, notes_tx)? else {
+        bail!("{}", clipboard::unavailable_line());
+    };
+    println!("clipboard: rung {} ({})", board.rung().global(), clipboard::TEXT_MIMES[0]);
+    board.set(text)?;
+    println!("clipboard: selection taken - {} character(s)", text.chars().count());
+
+    // Held on purpose: the offer only answers `send` while this process
+    // lives, so a reader (`wl-paste`) needs a window in which to ask.
+    std::thread::sleep(std::time::Duration::from_secs(hold));
+    while let Ok(line) = notes.try_recv() {
+        println!("{line}");
+    }
+    println!("clipboard: held for {hold}s, releasing");
+    Ok(())
 }
 
 /// One verb over the socket; prints the daemon's reply.

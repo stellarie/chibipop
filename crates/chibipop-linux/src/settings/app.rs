@@ -18,10 +18,13 @@ use super::autostart;
 use super::channel::{HotkeyChannel, HotkeyControl};
 use super::rebuild;
 use super::snippets::{self, Compositor};
+use crate::clipboard;
+use crate::control::Verb;
 use crate::lock::{self, LockError};
 use anyhow::Context;
 use chibipop::config::{
-    PopupLayer, TriggerMode, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
+    PopupLayer, SentenceMode, TriggerMode, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
+    SUMMARY_RANGE,
 };
 use chibipop::settings::SettingsForm;
 use iced::widget::{
@@ -42,7 +45,12 @@ pub struct Init {
     pub socket_path: PathBuf,
     pub log_path: PathBuf,
     pub compositor: Compositor,
+    /// Who owns the trigger binding.
     pub channel: HotkeyChannel,
+    /// Who owns the add-card binding. A separate value because the
+    /// portal answers per id and a row may only name its own key
+    /// (`super::hotkey_channel`).
+    pub add_channel: HotkeyChannel,
     /// Where the dictionary archives live; a rebuild edits it.
     pub library_dir: PathBuf,
     /// The database a rebuild renames over.
@@ -57,6 +65,11 @@ pub struct Init {
     /// window opened (`paths::exec_name`): a pasted bind has to exec
     /// *this* daemon, not whatever `chibipop` PATH finds (ticket 51).
     pub exe: PathBuf,
+    /// Which data-control protocol this session advertises, if any
+    /// (`clipboard::rung`). `None` - stock GNOME - is what the
+    /// OCR-to-clipboard row reports instead of a chord that could only
+    /// log a refusal.
+    pub clipboard_rung: Option<clipboard::Rung>,
 }
 
 pub fn run(init: Init) -> anyhow::Result<()> {
@@ -82,12 +95,16 @@ struct App {
     log_path: PathBuf,
     compositor: Compositor,
     channel: HotkeyChannel,
+    add_channel: HotkeyChannel,
     library_dir: PathBuf,
     db_path: PathBuf,
     runtime_dir: PathBuf,
     autostart: Option<autostart::Target>,
     home: Option<PathBuf>,
     exe: PathBuf,
+    /// Whether this session has a clipboard protocol at all; see
+    /// [`Init::clipboard_rung`].
+    clipboard_rung: Option<clipboard::Rung>,
     /// Mirrors the `.desktop` file, re-read after every toggle.
     autostart_on: bool,
     /// The font combo's items; see [`font_items`].
@@ -123,6 +140,7 @@ impl App {
             log_path: init.log_path,
             compositor: init.compositor,
             channel: init.channel,
+            add_channel: init.add_channel,
             library_dir: init.library_dir,
             db_path: init.db_path,
             runtime_dir: init.runtime_dir,
@@ -130,6 +148,7 @@ impl App {
             autostart: init.autostart,
             home: init.home,
             exe: init.exe,
+            clipboard_rung: init.clipboard_rung,
             fonts,
             selected_dict: None,
             add_path: String::new(),
@@ -139,8 +158,112 @@ impl App {
         }
     }
 
+    /// The trigger row's copyable bind: the press/release pair.
     fn bind_snippet(&self) -> String {
-        snippets::bind_snippet(self.compositor, &self.linux.trigger_key_linux, &self.exe)
+        snippets::bind_snippet(
+            self.compositor,
+            &self.linux.trigger_key_linux,
+            &self.exe,
+            snippets::Bind::Hold,
+        )
+    }
+
+    /// The add-card row's copyable bind, or `None` when there is no
+    /// chord to bind. `None` is also what the row renders on, so the
+    /// button and the text cannot disagree.
+    fn add_bind_snippet(&self) -> Option<String> {
+        match self.add_control() {
+            HotkeyControl::Snippet { text } => Some(text),
+            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
+        }
+    }
+
+    /// What the add-card chord row renders (ADR-0003's 2026-08-26
+    /// addendum: the add is a control-socket verb, so the native rung
+    /// can bind it exactly like the trigger).
+    fn add_control(&self) -> HotkeyControl {
+        self.add_channel.control(
+            self.compositor,
+            &self.linux.add_key_linux,
+            &self.exe,
+            snippets::Bind::Press(Verb::AnkiAdd),
+        )
+    }
+
+    /// What the static-region chord row renders.
+    ///
+    /// [`HotkeyChannel::Native`] unconditionally, and that is the whole
+    /// point of decision D1: the portal id set stays at exactly two, so
+    /// no GlobalShortcuts session ever registers this action and the
+    /// compositor bind is its *only* global channel. Reading
+    /// `self.channel` here would render the trigger's portal key under
+    /// this chord - a row claiming a key it was never given, which is
+    /// the one thing ADR-0005 forbids this window.
+    fn static_region_control(&self) -> HotkeyControl {
+        HotkeyChannel::Native.control(
+            self.compositor,
+            &self.linux.static_region_key_linux,
+            &self.exe,
+            snippets::Bind::Press(Verb::StaticRegion),
+        )
+    }
+
+    /// The static-region row's copyable bind, or `None` when the chord
+    /// is blank. The button exists only while this is `Some`, so a
+    /// cleared chord cannot put a stale bind on the clipboard.
+    fn static_region_bind_snippet(&self) -> Option<String> {
+        match self.static_region_control() {
+            HotkeyControl::Snippet { text } => Some(text),
+            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
+        }
+    }
+
+    /// What the mining screenshot's chord row renders.
+    ///
+    /// [`HotkeyChannel::Native`] for exactly the reason given above:
+    /// nothing registers this action with the portal (D1), so the
+    /// compositor bind is its only global channel.
+    fn screenshot_control(&self) -> HotkeyControl {
+        HotkeyChannel::Native.control(
+            self.compositor,
+            self.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
+            &self.exe,
+            snippets::Bind::Press(Verb::Screenshot),
+        )
+    }
+
+    /// The screenshot row's copyable bind, or `None` when there is no
+    /// chord to build one from.
+    fn screenshot_bind_snippet(&self) -> Option<String> {
+        match self.screenshot_control() {
+            HotkeyControl::Snippet { text } => Some(text),
+            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
+        }
+    }
+
+    /// What the OCR-to-clipboard chord row renders. Native only, for
+    /// the same reason as the two above.
+    fn ocr_clipboard_control(&self) -> HotkeyControl {
+        HotkeyChannel::Native.control(
+            self.compositor,
+            self.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
+            &self.exe,
+            snippets::Bind::Press(Verb::OcrClipboard),
+        )
+    }
+
+    /// The OCR-to-clipboard row's copyable bind, or `None` when there is
+    /// no chord to build one from - or when this compositor has no
+    /// clipboard protocol to copy *into*, because a bind that could only
+    /// ever log a refusal is the invalid line ADR-0005 forbids this
+    /// window from handing a user.
+    fn ocr_clipboard_bind_snippet(&self) -> Option<String> {
+        // No rung, no bind: the `?` is the guard.
+        self.clipboard_rung?;
+        match self.ocr_clipboard_control() {
+            HotkeyControl::Snippet { text } => Some(text),
+            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
+        }
     }
 
     fn apply(&mut self) {
@@ -316,9 +439,35 @@ enum Message {
     AnkiDeck(String),
     AnkiModel(String),
     AnkiAddKey(String),
+    FirstDictOnly(bool),
+    /// `actions.screenshot.include_on_add`: whether an add carries a
+    /// mining picture (core's gate, `chibipop::shot::plan_add`).
+    IncludeScreenshot(bool),
+    /// The mining screenshot's chord. Empty text is `None` on the
+    /// config field, and this arm is the only place that mapping lives.
+    ScreenshotKey(String),
+    ScreenshotSaveDir(String),
+    /// The OCR-to-clipboard chord. Empty text is `None` on the config
+    /// field, and this arm is the only place that mapping lives.
+    OcrClipboardKey(String),
+    /// The sentence-capture picker's label; mapped back through
+    /// [`SENTENCE_MODES`], never by index or by string comparison at the
+    /// call site.
+    SentenceModePicked(String),
+    ShowStaticOverlay(bool),
+    StaticRegionKey(String),
     FieldMapAnki(usize, String),
     FieldMapSource(usize, String),
+    /// Copy the trigger chord's press/release bind.
     CopyBind,
+    /// Copy the add-card chord's one-press bind.
+    CopyAddBind,
+    /// Copy the static-region chord's one-press bind.
+    CopyStaticRegionBind,
+    /// Copy the mining screenshot's one-press bind.
+    CopyScreenshotBind,
+    /// Copy the OCR-to-clipboard chord's one-press bind.
+    CopyOcrClipboardBind,
     CopyRule,
     Autostart(bool),
     CheckUpdate,
@@ -372,6 +521,24 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AnkiDeck(v) => app.form.anki_deck = v,
         Message::AnkiModel(v) => app.form.anki_model = v,
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
+        Message::FirstDictOnly(v) => app.form.first_dict_only = v,
+        Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
+        // The one place empty text becomes `None`: the config field is
+        // an `Option` so that absence stays typed, and a `""` chord
+        // written into it would be a sentinel the daemon would then
+        // have to know about.
+        Message::ScreenshotKey(v) => {
+            app.linux.screenshot_key_linux = (!v.trim().is_empty()).then_some(v);
+        }
+        Message::ScreenshotSaveDir(v) => app.linux.screenshot_save_dir = v,
+        // Same mapping, same reason (`upstream-merge-fallout` ticket 06
+        // removed this sentinel from the Windows twin).
+        Message::OcrClipboardKey(v) => {
+            app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
+        }
+        Message::SentenceModePicked(label) => app.form.sentence_mode = sentence_mode_of(&label),
+        Message::ShowStaticOverlay(on) => app.form.show_static_overlay = on,
+        Message::StaticRegionKey(v) => app.linux.static_region_key_linux = v,
         Message::FieldMapAnki(i, v) => {
             if let Some(m) = app.form.field_map.get_mut(i) {
                 m.anki_field = v;
@@ -383,6 +550,29 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::CopyBind => return iced::clipboard::write(app.bind_snippet()),
+        // The button only exists while there is a snippet, so `None`
+        // here is unreachable through the UI; it stays a no-op rather
+        // than putting a stale bind on the clipboard.
+        Message::CopyAddBind => {
+            if let Some(snippet) = app.add_bind_snippet() {
+                return iced::clipboard::write(snippet);
+            }
+        }
+        Message::CopyStaticRegionBind => {
+            if let Some(snippet) = app.static_region_bind_snippet() {
+                return iced::clipboard::write(snippet);
+            }
+        }
+        Message::CopyScreenshotBind => {
+            if let Some(snippet) = app.screenshot_bind_snippet() {
+                return iced::clipboard::write(snippet);
+            }
+        }
+        Message::CopyOcrClipboardBind => {
+            if let Some(snippet) = app.ocr_clipboard_bind_snippet() {
+                return iced::clipboard::write(snippet);
+            }
+        }
         Message::CopyRule => {
             if let (_, Some(rule)) = snippets::capture_rule(app.compositor) {
                 return iced::clipboard::write(rule);
@@ -499,35 +689,44 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
     ]
     .spacing(20);
 
-    let hotkey: Element<'_, Message> =
-        match app.channel.control(app.compositor, &app.linux.trigger_key_linux, &app.exe) {
-            HotkeyControl::Snippet { text: snippet } => column![
-                text("Native channel: your compositor owns the binding. Paste this into its config:"),
-                container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
-                button("Copy bind snippet").on_press(Message::CopyBind),
-            ]
-            .spacing(6)
-            .into(),
-            // The portal rung (ticket 36). There is no in-app rebind to
-            // offer and pretending otherwise would be the one thing
-            // ADR-0005 forbids here: the portal owns the binding, the
-            // dialog it raises at bind time and the desktop's own
-            // shortcut editor are where a key changes, and the chord
-            // above is only what we ask for next time.
-            HotkeyControl::Rebind { current } => column![
-                text("Portal channel: the GlobalShortcuts portal owns this binding."),
-                text(match &current {
-                    Some(key) => format!("Current key: {key}"),
-                    None => "Current key: your desktop does not report one - open its global-shortcuts settings to see or change it".to_string(),
-                }),
-                text(
-                    "The chord above is the preferred trigger, offered to the portal at the next start; your desktop's shortcut editor has the last word."
-                )
-                .size(13),
-            ]
-            .spacing(6)
-            .into(),
-        };
+    let hotkey: Element<'_, Message> = match app.channel.control(
+        app.compositor,
+        &app.linux.trigger_key_linux,
+        &app.exe,
+        snippets::Bind::Hold,
+    ) {
+        HotkeyControl::Snippet { text: snippet } => column![
+            text("Native channel: your compositor owns the binding. Paste this into its config:"),
+            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            button("Copy bind snippet").on_press(Message::CopyBind),
+        ]
+        .spacing(6)
+        .into(),
+        // The portal rung (ticket 36). There is no in-app rebind to
+        // offer and pretending otherwise would be the one thing
+        // ADR-0005 forbids here: the portal owns the binding, the
+        // dialog it raises at bind time and the desktop's own
+        // shortcut editor are where a key changes, and the chord
+        // above is only what we ask for next time.
+        HotkeyControl::Rebind { current } => column![
+            text("Portal channel: the GlobalShortcuts portal owns this binding."),
+            text(match &current {
+                Some(key) => format!("Current key: {key}"),
+                None => "Current key: your desktop does not report one - open its global-shortcuts settings to see or change it".to_string(),
+            }),
+            text(
+                "The chord above is the preferred trigger, offered to the portal at the next start; your desktop's shortcut editor has the last word."
+            )
+            .size(13),
+        ]
+        .spacing(6)
+        .into(),
+        HotkeyControl::NoChord => {
+            text("Type a chord above to get a bind you can paste or a key to ask the portal for.")
+                .size(13)
+                .into()
+        }
+    };
 
     section(
         "Trigger",
@@ -758,12 +957,302 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
             checkbox(app.form.show_scan_region)
                 .label("Outline what each hover captured")
                 .on_toggle(Message::ShowScanRegion),
+            // OCR-to-clipboard lives here rather than in a group of its
+            // own: it reads the screen with the same engine and the same
+            // settings every row above configures, and the only thing
+            // it does differently is where the text goes.
+            labeled(
+                "OCR-to-clipboard chord (portal syntax)",
+                text_input(
+                    "ALT+C",
+                    app.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
+                )
+                .on_input(Message::OcrClipboardKey)
+                .width(200),
+            ),
+            ocr_clipboard_bind(app),
         ]
         .spacing(10),
     )
 }
 
+/// The OCR-to-clipboard chord's copyable bind, or the reason there is
+/// none.
+///
+/// Two reasons there might be none, and they are different facts: no
+/// chord typed, or no clipboard protocol on this compositor at all. The
+/// second is checked first, because a bind pasted on a session where
+/// chibipop cannot write the selection would be a key that only ever
+/// logs a refusal - and ADR-0005's rule is that this window does not
+/// hand out lines that cannot work.
+fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
+    if app.clipboard_rung.is_none() {
+        return text(
+            "This compositor has no clipboard protocol chibipop can use, so there is nothing \
+             to bind: writing the selection without keyboard focus needs \
+             ext_data_control_manager_v1 or zwlr_data_control_manager_v1, and this session \
+             advertises neither. Every other feature is unaffected."
+        )
+        .size(13)
+        .into();
+    }
+    match app.ocr_clipboard_control() {
+        HotkeyControl::Snippet { text: snippet } => column![
+            text(
+                "Native channel only: this action has no portal shortcut, so a compositor \
+                 bind is the only way to reach it. Paste this into your compositor's config:"
+            ),
+            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            button("Copy OCR-to-clipboard bind").on_press(Message::CopyOcrClipboardBind),
+        ]
+        .spacing(6)
+        .into(),
+        // Unreachable: `ocr_clipboard_control` always asks as
+        // `HotkeyChannel::Native`, precisely so this row can never claim
+        // a portal key. Rendered honestly rather than unwrapped.
+        HotkeyControl::Rebind { .. } => {
+            text("OCR-to-clipboard has no portal shortcut; bind it in your compositor.")
+                .size(13)
+                .into()
+        }
+        HotkeyControl::NoChord => {
+            text("No OCR-to-clipboard chord is set, so there is no bind to copy - type one above.")
+                .size(13)
+                .into()
+        }
+    }
+}
+
+/// The sentence-capture picker, in the order it is offered.
+///
+/// One ordered table is both halves of the UI edge - the labels going
+/// out and the mode coming back - so nothing in between gets to decide
+/// the mapping. The Windows window's `SENTENCE_MODES` exists because a
+/// Win32 combo answers with an index; iced answers with the label, which
+/// is the same problem and gets the same answer rather than a `match` on
+/// a string literal at the call site.
+const SENTENCE_MODES: [(SentenceMode, &str); 3] = [
+    (SentenceMode::Line, "Current line"),
+    (SentenceMode::All, "All lines"),
+    (SentenceMode::Static, "Static region"),
+];
+
+/// The picker's items, in table order.
+fn sentence_labels() -> Vec<String> {
+    SENTENCE_MODES.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+/// The label a mode is offered under. Every `SentenceMode` is in the
+/// table, so the fallback is unreachable; it is the first item because
+/// that is the one a fourth, untabled mode would want.
+fn sentence_mode_label(mode: SentenceMode) -> &'static str {
+    SENTENCE_MODES.iter().find(|&&(m, _)| m == mode).map_or(SENTENCE_MODES[0].1, |&(_, l)| l)
+}
+
+/// The mode a picked label names. Only labels this table handed out can
+/// come back, so the default is unreachable through the UI.
+fn sentence_mode_of(label: &str) -> SentenceMode {
+    SENTENCE_MODES.iter().find(|&&(_, l)| l == label).map_or(SentenceMode::Line, |&(m, _)| m)
+}
+
+/// The static-region chord's copyable bind, or the reason there is none.
+///
+/// Its caption says "native channel" in every case, unlike the trigger's
+/// and the add's: this action has no portal id at all (D1), so a
+/// compositor bind is not one of two ways to reach it - it is the only
+/// way, and a row that left that implicit would be inviting the user to
+/// wait for a consent dialog that is never coming.
+fn static_region_bind(app: &App) -> Element<'_, Message> {
+    match app.static_region_control() {
+        HotkeyControl::Snippet { text: snippet } => column![
+            text(
+                "Native channel only: this action has no portal shortcut, so a compositor \
+                 bind is the only way to reach it. Paste this into your compositor's config:"
+            ),
+            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            button("Copy static-region bind").on_press(Message::CopyStaticRegionBind),
+        ]
+        .spacing(6)
+        .into(),
+        // Unreachable: `static_region_control` always asks as
+        // `HotkeyChannel::Native`, precisely so this row can never claim
+        // a portal key. Rendered honestly rather than unwrapped.
+        HotkeyControl::Rebind { .. } => {
+            text("The static region has no portal shortcut; bind it in your compositor.")
+                .size(13)
+                .into()
+        }
+        HotkeyControl::NoChord => text(
+            "No static-region chord is set, so there is no bind to copy - type one above."
+        )
+        .size(13)
+        .into(),
+    }
+}
+
+/// The sentence-capture group: which text the Anki sentence field gets,
+/// and - only where it means anything - the static region's two rows.
+///
+/// Windows hides its region rows unless the mode is Static, and so does
+/// this, with one deliberate exception: the *chord* row stays. The region
+/// can be set in any mode (that is how a user decides to switch to
+/// Static), so hiding the only way to bind the key until they had
+/// already switched would be a chicken and egg.
+fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let mut rows: Vec<Element<'_, Message>> = vec![labeled(
+        "Anki sentence field",
+        pick_list(
+            sentence_labels(),
+            Some(sentence_mode_label(app.form.sentence_mode).to_string()),
+            Message::SentenceModePicked,
+        ),
+    )];
+    if app.form.sentence_mode == SentenceMode::Static {
+        rows.push(
+            checkbox(app.form.show_static_overlay)
+                .label("Show the static region outline")
+                .on_toggle(Message::ShowStaticOverlay)
+                .into(),
+        );
+        rows.push(
+            text(
+                "The outline is a layer surface, so it needs zwlr_layer_shell_v1 like the \
+                 popup; without it the region still serves lookups, unmarked."
+            )
+            .size(13)
+            .into(),
+        );
+    }
+    rows.push(labeled(
+        "Static region chord (portal syntax)",
+        text_input("ALT+R", &app.linux.static_region_key_linux)
+            .on_input(Message::StaticRegionKey)
+            .width(200),
+    ));
+    rows.push(static_region_bind(app));
+    rows
+}
+
+/// The mining screenshot's copyable bind, or the reason there is none.
+///
+/// Native-channel wording in every case, for the same reason
+/// `static_region_bind` uses it: this action has no portal id (D1), so
+/// a compositor bind is not one of two ways to reach it but the only
+/// one, and a row that left that implicit would be inviting the user to
+/// wait for a consent dialog that is never coming.
+fn screenshot_bind(app: &App) -> Element<'_, Message> {
+    match app.screenshot_control() {
+        HotkeyControl::Snippet { text: snippet } => column![
+            text(
+                "Native channel only: this action has no portal shortcut, so a compositor \
+                 bind is the only way to reach it. Paste this into your compositor's config:"
+            ),
+            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            button("Copy screenshot bind").on_press(Message::CopyScreenshotBind),
+        ]
+        .spacing(6)
+        .into(),
+        // Unreachable: `screenshot_control` always asks as
+        // `HotkeyChannel::Native`, precisely so this row can never claim
+        // a portal key. Rendered honestly rather than unwrapped.
+        HotkeyControl::Rebind { .. } => {
+            text("The mining screenshot has no portal shortcut; bind it in your compositor.")
+                .size(13)
+                .into()
+        }
+        HotkeyControl::NoChord => text(
+            "No screenshot chord is set, so there is no bind to copy - type one above. \
+             Adding a card can still take a picture with the checkbox above."
+        )
+        .size(13)
+        .into(),
+    }
+}
+
+/// The mining screenshot's group: the gate that puts a picture on an
+/// add, where the PNG lands, and the chord for taking one on its own.
+///
+/// Every row is shown whatever the gate says, unlike Windows' Anki tab:
+/// the folder and the chord both matter to the standalone screenshot
+/// action, which `include_on_add` has nothing to do with.
+fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
+    vec![
+        checkbox(app.form.include_screenshot)
+            .label("Include screenshot when adding")
+            .on_toggle(Message::IncludeScreenshot)
+            .into(),
+        text(
+            "Asking for a card dims the screen: drag the area to capture, release to \
+             confirm. Esc or a right-click skips the picture and files the card without \
+             one. Map it to a field with source = \"screenshot\" below."
+        )
+        .size(13)
+        .into(),
+        labeled(
+            "Screenshots folder",
+            text_input("screenshots", &app.linux.screenshot_save_dir)
+                .on_input(Message::ScreenshotSaveDir)
+                .width(260),
+        ),
+        text(
+            "An absolute path is taken as typed. A relative one lands under your XDG data \
+             directory, or beside the executable in portable mode."
+        )
+        .size(13)
+        .into(),
+        labeled(
+            "Mining screenshot chord",
+            text_input(
+                "SUPER+S",
+                app.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
+            )
+            .on_input(Message::ScreenshotKey)
+            .width(200),
+        ),
+        screenshot_bind(app),
+    ]
+}
+
 fn anki_section(app: &App) -> Element<'_, Message> {
+    // The add-card chord's own hotkey control, the same shape the
+    // trigger row has: on the native rung the compositor bind is the
+    // only thing that can reach the add at all (ADR-0003 rung 2 plus
+    // its 2026-08-26 addendum), so a row without a copyable bind was a
+    // chord the user could type and never bind.
+    let add_bind: Element<'_, Message> = match app.add_control() {
+        HotkeyControl::Snippet { text: snippet } => column![
+            text("Native channel: your compositor owns this binding. Paste this into its config:"),
+            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            button("Copy add-card bind").on_press(Message::CopyAddBind),
+        ]
+        .spacing(6)
+        .into(),
+        // The portal rung, with the key the portal published for the
+        // *add-card* id (ticket 09) - the same status vocabulary the
+        // trigger row uses, because it is the same fact about a
+        // different action. `current: None` is the honest absence: a
+        // desktop that reports no key, or one that never answered for
+        // this id.
+        HotkeyControl::Rebind { current } => column![
+            text("Portal channel: the GlobalShortcuts portal owns this binding."),
+            text(match &current {
+                Some(key) => format!("Current key: {key}"),
+                None => "Current key: your desktop does not report one - open its global-shortcuts settings to see or change it".to_string(),
+            }),
+            text(
+                "The chord above is the preferred add-card key, offered to the portal at the next start; your desktop's shortcut editor has the last word."
+            )
+            .size(13),
+        ]
+        .spacing(6)
+        .into(),
+        HotkeyControl::NoChord => text(
+            "No add-card chord is set, so there is no bind to copy - type one above."
+        )
+        .size(13)
+        .into(),
+    };
+
     let mut body = column![
         checkbox(app.form.anki_enabled)
             .label("Enable Anki integration")
@@ -788,6 +1277,16 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                 .on_input(Message::AnkiAddKey)
                 .width(200),
         ),
+        add_bind,
+        // Windows' "First dictionary only" (`ui/settings_window.rs`),
+        // the same field on the same form: the daemon already honours
+        // `anki.first_dict_only`, so without this row the only way to
+        // use it was hand-editing the TOML.
+        checkbox(app.form.first_dict_only)
+            .label("First dictionary only")
+            .on_toggle(Message::FirstDictOnly),
+        column(screenshot_rows(app)).spacing(10),
+        column(sentence_rows(app)).spacing(10),
         text("Field mappings").size(14),
     ]
     .spacing(10);
@@ -961,12 +1460,17 @@ mod tests {
             log_path: dir.join("chibipop.log"),
             compositor: Compositor::Hyprland,
             channel: HotkeyChannel::Native,
+            add_channel: HotkeyChannel::Native,
             library_dir: dir.join("library"),
             db_path: dir.join("chibipop.sqlite"),
             runtime_dir: dir.join("run"),
             autostart: None,
             home: None,
             exe: PathBuf::from("/usr/bin/chibipop"),
+            // A session that can copy, so the OCR-to-clipboard row's
+            // chord half is what a test drives; the no-protocol case is
+            // asserted by setting this to `None`.
+            clipboard_rung: Some(clipboard::Rung::Wlr),
             autostart_on: false,
             fonts: vec![Cow::Borrowed("Noto Sans")],
             capture_w: "480".to_string(),
@@ -977,6 +1481,380 @@ mod tests {
             checking_update: false,
             status: String::new(),
         }
+    }
+
+    /// The add-card row carries the trigger row's status vocabulary
+    /// (ticket 09): on the portal rung it names the key the portal
+    /// published for `anki-add` and offers no snippet, because a
+    /// pasted compositor bind is not what owns that key.
+    #[test]
+    fn the_add_card_row_reports_the_portals_own_add_key() {
+        let dir = scratch("addportalrow");
+        let mut app = app(&dir);
+        app.add_channel = HotkeyChannel::Portal { current_binding: Some("Meta+A".into()) };
+
+        assert_eq!(
+            HotkeyControl::Rebind { current: Some("Meta+A".into()) },
+            app.add_control()
+        );
+        // And no copy button, so a portal row cannot hand out a bind
+        // that would not be the one in force.
+        assert_eq!(None, app.add_bind_snippet());
+
+        // The trigger row keeps its own key: two rows, two channels.
+        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
+        assert_eq!(
+            HotkeyControl::Rebind { current: Some("Meta+F".into()) },
+            app.channel.control(
+                app.compositor,
+                &app.linux.trigger_key_linux,
+                &app.exe,
+                snippets::Bind::Hold,
+            )
+        );
+        // The whole window still builds a widget tree with both rows on
+        // the portal rung: the status block is real widgetry, not just a
+        // control value.
+        let _ = view(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No daemon has published anything, so the add row falls back to
+    /// the affordance a user can act on: the pasteable bind.
+    #[test]
+    fn a_silent_daemon_leaves_the_add_card_row_offering_a_snippet() {
+        let dir = scratch("addsnippetrow");
+        let app = app(&dir);
+        assert!(
+            matches!(app.add_control(), HotkeyControl::Snippet { .. }),
+            "got {:?}",
+            app.add_control()
+        );
+        assert!(app.add_bind_snippet().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The checkbox is only worth having if it reaches the file: the
+    /// toggle must land on `anki.first_dict_only`, which the Linux
+    /// daemon already reads.
+    #[test]
+    fn the_first_dictionary_only_checkbox_round_trips_into_the_config() {
+        let dir = scratch("firstdict");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+        assert!(!app.form.first_dict_only, "the default is every dictionary");
+
+        let _ = update(&mut app, Message::FirstDictOnly(true));
+        assert!(chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
+
+        let _ = update(&mut app, Message::FirstDictOnly(false));
+        assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The OCR-to-clipboard row's whole point on the native rung: the
+    /// typed chord comes back as a bind naming the running binary and the
+    /// `ocr-clipboard` verb, and never as a portal key - this action has
+    /// no portal id (D1), so borrowing the trigger's would be a row
+    /// claiming a key it was never given.
+    #[test]
+    fn the_ocr_clipboard_chord_offers_a_pasteable_native_bind() {
+        let dir = scratch("ocrclipbind");
+        let mut app = app(&dir);
+        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
+
+        let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
+        let snippet = app.ocr_clipboard_bind_snippet().expect("a typed chord has a bind");
+
+        assert_eq!("bind = ALT, C, exec, /usr/bin/chibipop ctl ocr-clipboard", snippet);
+        assert!(
+            !snippet.contains("Meta+F"),
+            "the trigger's portal key must never reach this row: {snippet}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cleared box is an absent `Option`, not a `""` chord: the config
+    /// field is `Option<String>` precisely so absence stays typed
+    /// (`upstream-merge-fallout` ticket 06), and the row offers no bind.
+    #[test]
+    fn a_cleared_ocr_clipboard_chord_is_absent_rather_than_an_empty_string() {
+        let dir = scratch("ocrclipclear");
+        let mut app = app(&dir);
+
+        let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
+        assert_eq!(Some("ALT+C".to_string()), app.linux.ocr_clipboard_key_linux);
+
+        let _ = update(&mut app, Message::OcrClipboardKey("   ".to_string()));
+        assert_eq!(None, app.linux.ocr_clipboard_key_linux, "whitespace is not a chord");
+        assert_eq!(None, app.ocr_clipboard_bind_snippet());
+        // And the copy message is inert rather than pasting a stale bind.
+        let _ = update(&mut app, Message::CopyOcrClipboardBind);
+        assert_eq!(None, app.ocr_clipboard_bind_snippet());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stock GNOME: a chord that could only ever log a refusal is not a
+    /// bind this window hands out (ADR-0005), so the row withholds it
+    /// even though the chord itself is perfectly well typed.
+    #[test]
+    fn a_session_with_no_clipboard_protocol_offers_no_ocr_clipboard_bind() {
+        let dir = scratch("ocrclipnoproto");
+        let mut app = app(&dir);
+        let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
+        assert!(app.ocr_clipboard_bind_snippet().is_some(), "a session that can copy offers one");
+
+        app.clipboard_rung = None;
+
+        assert_eq!(None, app.ocr_clipboard_bind_snippet());
+        // The chord is still carried: a GNOME user who later moves to a
+        // compositor with data control must not lose what they typed.
+        assert_eq!(Some("ALT+C".to_string()), app.linux.ocr_clipboard_key_linux);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The add-card row's whole point: on the native rung the chord the
+    /// user typed comes back as a bind they can paste, naming the
+    /// running binary and the `anki-add` verb. Without this the chord
+    /// was uneditable into anything (ADR-0003 rung 2 is the only rung a
+    /// sway session has).
+    #[test]
+    fn the_add_card_chord_offers_a_pasteable_bind_for_the_typed_chord() {
+        let dir = scratch("addbind");
+        let mut app = app(&dir);
+
+        let _ = update(&mut app, Message::AnkiAddKey("CTRL+SHIFT+A".to_string()));
+        let snippet = app.add_bind_snippet().expect("a chord has a bind");
+
+        assert_eq!("bind = CTRL SHIFT, A, exec, /usr/bin/chibipop ctl anki-add", snippet);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cleared chord has nothing to bind, so the row must say so
+    /// rather than hand out `bind = , A, …`.
+    #[test]
+    fn a_cleared_add_card_chord_offers_no_bind_at_all() {
+        let dir = scratch("addnobind");
+        let mut app = app(&dir);
+
+        let _ = update(&mut app, Message::AnkiAddKey(String::new()));
+
+        assert_eq!(HotkeyControl::NoChord, app.add_control());
+        assert_eq!(None, app.add_bind_snippet());
+        // And the copy message is inert rather than pasting a stale one.
+        let _ = update(&mut app, Message::CopyAddBind);
+        assert_eq!(None, app.add_bind_snippet());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The trigger row is untouched by all of it: the default chord
+    /// still produces the hold pair, byte for byte.
+    #[test]
+    fn the_trigger_row_still_hands_out_the_hold_pair() {
+        let dir = scratch("holdpair");
+        let app = app(&dir);
+        assert_eq!(
+            "bind = ALT, F, exec, /usr/bin/chibipop ctl trigger-down\n\
+             bindr = ALT, F, exec, /usr/bin/chibipop ctl trigger-up\n\
+             # Release F before ALT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
+             # If the popup sticks, tap the chord again (release F first), or bind `ctl toggle` instead.",
+            app.bind_snippet()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The static-region row's whole point: the chord the user typed
+    /// comes back as a bind naming the running binary and the
+    /// `static-region` verb. Without it a shipped, editable chord could
+    /// not be bound at all, because this action has no portal rung to
+    /// fall back on.
+    #[test]
+    fn the_static_region_chord_offers_a_pasteable_bind_for_the_typed_chord() {
+        let dir = scratch("srbind");
+        let mut app = app(&dir);
+
+        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
+        let snippet = app.static_region_bind_snippet().expect("a chord has a bind");
+
+        assert_eq!("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region", snippet);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Decision D1, in the one place a user could notice it broken: this
+    /// action is never portal-registered, so its row asks as
+    /// `HotkeyChannel::Native` however the *trigger* resolved. A row that
+    /// read `app.channel` would print the trigger's portal key under the
+    /// static-region chord - a window claiming a key it was never given.
+    #[test]
+    fn the_static_region_row_never_borrows_the_portals_trigger_key() {
+        let dir = scratch("srnative");
+        let mut app = app(&dir);
+        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
+        app.add_channel = HotkeyChannel::Portal { current_binding: Some("Meta+A".into()) };
+
+        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
+
+        assert_eq!(
+            HotkeyControl::Snippet {
+                text: "bind = ALT, R, exec, /usr/bin/chibipop ctl static-region".to_string()
+            },
+            app.static_region_control(),
+            "a portal session must not change what this row offers"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default is unset (`anki.static_region_key_linux` ships
+    /// empty), so out of the box the row has nothing to copy and says so
+    /// rather than handing out `bind = , R, …`.
+    #[test]
+    fn an_unset_static_region_chord_offers_no_bind_at_all() {
+        let dir = scratch("srnobind");
+        let mut app = app(&dir);
+
+        assert_eq!("", app.linux.static_region_key_linux, "the shipped default is unset");
+        assert_eq!(HotkeyControl::NoChord, app.static_region_control());
+        assert_eq!(None, app.static_region_bind_snippet());
+        // Inert rather than pasting a stale bind.
+        let _ = update(&mut app, Message::CopyStaticRegionBind);
+        assert_eq!(None, app.static_region_bind_snippet());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The screenshot row's own bind, and the `Option` at its edge: the
+    /// text box is the only place `""` becomes `None`, so a typed chord
+    /// lands as `Some` and a cleared one as absence - never as an
+    /// empty-string sentinel in the config file.
+    #[test]
+    fn the_screenshot_chord_offers_a_pasteable_bind_and_clears_to_none() {
+        let dir = scratch("shotbind");
+        let mut app = app(&dir);
+
+        assert_eq!(None, app.linux.screenshot_key_linux, "the shipped default is unset");
+        assert_eq!(HotkeyControl::NoChord, app.screenshot_control());
+
+        let _ = update(&mut app, Message::ScreenshotKey("SUPER+S".to_string()));
+        assert_eq!(Some("SUPER+S".to_string()), app.linux.screenshot_key_linux);
+        assert_eq!(
+            "bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot",
+            app.screenshot_bind_snippet().expect("a chord has a bind")
+        );
+
+        let _ = update(&mut app, Message::ScreenshotKey("   ".to_string()));
+        assert_eq!(None, app.linux.screenshot_key_linux, "blank is absence, not an empty chord");
+        assert_eq!(None, app.screenshot_bind_snippet());
+        // Inert rather than pasting a stale bind.
+        let _ = update(&mut app, Message::CopyScreenshotBind);
+        assert_eq!(None, app.screenshot_bind_snippet());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Decision D1 again, for this row: never portal-registered, so it
+    /// asks as `HotkeyChannel::Native` however the trigger resolved.
+    #[test]
+    fn the_screenshot_row_never_borrows_the_portals_trigger_key() {
+        let dir = scratch("shotnative");
+        let mut app = app(&dir);
+        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
+        app.add_channel = HotkeyChannel::Portal { current_binding: Some("Meta+A".into()) };
+
+        let _ = update(&mut app, Message::ScreenshotKey("SUPER+S".to_string()));
+
+        assert_eq!(
+            HotkeyControl::Snippet {
+                text: "bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot".to_string()
+            },
+            app.screenshot_control(),
+            "a portal session must not change what this row offers"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two rows beside the chord: the gate is core's own form field,
+    /// and an emptied folder box means the default folder rather than
+    /// the data directory itself (a relative `save_dir` is joined onto
+    /// it, so `""` would scatter PNGs among the database).
+    #[test]
+    fn the_screenshot_rows_apply_the_gate_and_never_save_an_empty_folder() {
+        let dir = scratch("shotrows");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+
+        let _ = update(&mut app, Message::IncludeScreenshot(true));
+        assert!(chibipop::settings::apply_to(&app.form, &cfg).actions.screenshot.include_on_add);
+
+        let _ = update(&mut app, Message::ScreenshotSaveDir("  /tmp/mining  ".to_string()));
+        let mut out = chibipop::settings::apply_to(&app.form, &cfg);
+        app.linux.apply_over(&mut out);
+        assert_eq!("/tmp/mining", out.actions.screenshot.save_dir, "trimmed, as typed");
+
+        let _ = update(&mut app, Message::ScreenshotSaveDir(String::new()));
+        let mut out = chibipop::settings::apply_to(&app.form, &cfg);
+        app.linux.apply_over(&mut out);
+        assert_eq!(
+            cfg.actions.screenshot.save_dir, out.actions.screenshot.save_dir,
+            "a cleared box falls back to the shipped folder"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The picker is an ordered table, so a label round-trips to its own
+    /// mode and nothing between the two halves gets to decide. Every
+    /// `SentenceMode` has to be in it: a mode the table forgot would be
+    /// unreachable in the window and would silently read as `Line`.
+    #[test]
+    fn every_sentence_mode_round_trips_through_its_own_label() {
+        for mode in [SentenceMode::Line, SentenceMode::All, SentenceMode::Static] {
+            let label = sentence_mode_label(mode);
+            assert_eq!(mode, sentence_mode_of(label), "{label}");
+            assert!(sentence_labels().iter().any(|l| l == label), "{label} must be offered");
+        }
+        assert_eq!(3, sentence_labels().len(), "the table is the whole list");
+    }
+
+    /// Picking *Static region* stages the mode on the shared form, which
+    /// is what Apply then writes and the daemon reads.
+    #[test]
+    fn picking_the_static_region_mode_stages_it_on_the_form() {
+        let dir = scratch("srmode");
+        let mut app = app(&dir);
+        assert_eq!(SentenceMode::Line, app.form.sentence_mode, "the shipped default");
+
+        let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
+        assert_eq!(SentenceMode::Static, app.form.sentence_mode);
+
+        let _ = update(&mut app, Message::ShowStaticOverlay(false));
+        assert!(!app.form.show_static_overlay);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows hides its region rows unless the mode is Static, and so
+    /// does this - except the chord row, because the region can be set in
+    /// any mode and hiding the only way to bind the key until the user
+    /// had already switched would be a chicken and egg. Row *count* is
+    /// the observable: iced widgets are opaque, and what matters is which
+    /// rows exist.
+    #[test]
+    fn the_outline_checkbox_is_static_only_but_the_chord_row_always_shows() {
+        let dir = scratch("srrows");
+        let mut app = app(&dir);
+
+        // Picker, chord, bind text: three rows and no checkbox.
+        assert_eq!(3, sentence_rows(&app).len(), "not static: no region checkbox");
+
+        let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
+        // Plus the checkbox and its layer-shell caption.
+        assert_eq!(5, sentence_rows(&app).len(), "static: the checkbox joins");
+
+        // And the chord row is still there in the non-static case, which
+        // is the deliberate divergence from Windows.
+        let _ = update(&mut app, Message::SentenceModePicked("All lines".to_string()));
+        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
+        assert!(
+            app.static_region_bind_snippet().is_some(),
+            "the region can be set in any mode, so its bind is offered in any mode"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -1266,12 +2144,14 @@ mod tests {
             log_path: config_home.join("log"),
             compositor: Compositor::Hyprland,
             channel: HotkeyChannel::Native,
+            add_channel: HotkeyChannel::Native,
             library_dir: config_home.join("library"),
             db_path: config_home.join("chibipop.sqlite"),
             runtime_dir: config_home.join("run"),
             autostart: autostart::Target::resolve(&env),
             home: env.home.clone(),
             exe: PathBuf::from("/usr/bin/chibipop"),
+            clipboard_rung: Some(clipboard::Rung::Wlr),
         }
     }
 

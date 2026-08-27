@@ -8,7 +8,7 @@
 
 use crate::control::{self, Verb};
 use anyhow::{Context, Result};
-use chibipop::config::{Config, PopupLayer};
+use chibipop::config::{Config, OcrClipboardConfig, PopupLayer, ScreenshotConfig};
 use chibipop::settings::SettingsForm;
 use std::path::Path;
 
@@ -19,6 +19,27 @@ pub struct LinuxFields {
     /// Advisory on the native channel; the portal binding later (36).
     pub trigger_key_linux: String,
     pub add_key_linux: String,
+    /// The static-region chord. Native-channel only (ADR-0003's
+    /// 2026-08-26 addendum): nothing registers it with the portal, so it
+    /// exists to be rendered as a copyable `ctl static-region` bind.
+    /// Empty means no chord, exactly as `add_key_linux` does.
+    pub static_region_key_linux: String,
+    /// The mining screenshot's chord, native-channel only for the same
+    /// reason as the static-region one above. `Option`, not a `String`
+    /// with `""` for unbound: the config field is `Option<String>`
+    /// precisely so absence stays typed (`upstream-merge-fallout`
+    /// ticket 06 removed that sentinel from the Windows twin), so the
+    /// empty-text-box mapping lives at the UI edge and nowhere else.
+    pub screenshot_key_linux: Option<String>,
+    /// `actions.screenshot.save_dir` as typed. Where it resolves *to* is
+    /// the daemon's (`Paths::screenshots_dir`), not this window's.
+    pub screenshot_save_dir: String,
+    /// The OCR-to-clipboard chord, native-channel only for the same
+    /// reason as the two above. `Option` for the same reason
+    /// `screenshot_key_linux` is: `actions.ocr_clipboard.hotkey_linux` is
+    /// `Option<String>` precisely so absence stays typed, and the
+    /// empty-text-box mapping lives at the UI edge.
+    pub ocr_clipboard_key_linux: Option<String>,
     pub layer: PopupLayer,
     pub show_lookup_log: bool,
 }
@@ -28,6 +49,14 @@ impl LinuxFields {
         LinuxFields {
             trigger_key_linux: cfg.trigger.trigger_key_linux.clone(),
             add_key_linux: cfg.anki.add_key_linux.clone(),
+            static_region_key_linux: cfg.anki.static_region_key_linux.clone(),
+            screenshot_key_linux: cfg.actions.screenshot.hotkey_linux.clone(),
+            screenshot_save_dir: cfg.actions.screenshot.save_dir.clone(),
+            ocr_clipboard_key_linux: cfg
+                .actions
+                .ocr_clipboard
+                .as_ref()
+                .and_then(|action| action.hotkey_linux.clone()),
             layer: cfg.popup.layer,
             show_lookup_log: cfg.debug.show_lookup_log,
         }
@@ -36,6 +65,29 @@ impl LinuxFields {
     pub fn apply_over(&self, cfg: &mut Config) {
         cfg.trigger.trigger_key_linux = self.trigger_key_linux.clone();
         cfg.anki.add_key_linux = self.add_key_linux.clone();
+        cfg.anki.static_region_key_linux = self.static_region_key_linux.clone();
+        cfg.actions.screenshot.hotkey_linux = self.screenshot_key_linux.clone();
+        // The nested section carries *both* platforms' chords, so it may
+        // only die when both are absent - the rule
+        // `chibipop::settings::apply_to` already applies from the
+        // Windows side (`an_unset_ocr_clipboard_key_keeps_the_linux_twin`),
+        // read here off the config that call just wrote. Clearing this
+        // box must not evict the Windows key with it.
+        let windows_chord = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey.clone());
+        cfg.actions.ocr_clipboard = match (windows_chord, self.ocr_clipboard_key_linux.clone()) {
+            (None, None) => None,
+            (hotkey, hotkey_linux) => Some(OcrClipboardConfig { hotkey, hotkey_linux }),
+        };
+        // A cleared box means the default folder, never the data dir
+        // itself: a relative `save_dir` is joined onto that dir, so an
+        // empty string would scatter PNGs among the database and the
+        // dictionary archives.
+        let dir = self.screenshot_save_dir.trim();
+        cfg.actions.screenshot.save_dir = if dir.is_empty() {
+            ScreenshotConfig::default().save_dir
+        } else {
+            dir.to_string()
+        };
         cfg.popup.layer = self.layer;
         cfg.debug.show_lookup_log = self.show_lookup_log;
     }
@@ -128,6 +180,85 @@ mod tests {
         assert!(describe(&applied).contains("daemon is not running"));
     }
 
+    /// The nested `[actions.ocr_clipboard]` section carries both
+    /// platforms' chords, so clearing the Linux box must not evict the
+    /// Windows key with it - the mirror of core's
+    /// `an_unset_ocr_clipboard_key_keeps_the_linux_twin`, from this side.
+    #[test]
+    fn clearing_the_linux_ocr_clipboard_chord_keeps_the_windows_twin() {
+        let dir = scratch("ocrclip_twin");
+        let config_path = dir.join("chibipop.toml");
+        let mut cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".to_string()),
+            hotkey_linux: Some("ALT+C".to_string()),
+        });
+        cfg.save(&config_path).unwrap();
+
+        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        let mut linux = LinuxFields::from_config(&cfg);
+        assert_eq!(Some("ALT+C".to_string()), linux.ocr_clipboard_key_linux, "read in as typed");
+        // The window's cleared text box, as `Message::OcrClipboardKey`
+        // maps it: absence, never an empty string.
+        linux.ocr_clipboard_key_linux = None;
+
+        apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+
+        assert_eq!(
+            Some(OcrClipboardConfig { hotkey: Some("f9".to_string()), hotkey_linux: None }),
+            chibipop::config::load_or_create(&config_path).unwrap().actions.ocr_clipboard,
+            "the Windows chord survives a Linux Apply that cleared the Linux one"
+        );
+    }
+
+    /// And with neither chord the section goes away rather than being
+    /// written as a table full of `None`: absence stays absence
+    /// (ADR-0012, `upstream-merge-fallout` ticket 06).
+    #[test]
+    fn an_ocr_clipboard_section_with_neither_chord_is_dropped() {
+        let dir = scratch("ocrclip_dropped");
+        let config_path = dir.join("chibipop.toml");
+        let mut cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        cfg.actions.ocr_clipboard =
+            Some(OcrClipboardConfig { hotkey: None, hotkey_linux: Some("ALT+C".to_string()) });
+        cfg.save(&config_path).unwrap();
+
+        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        let mut linux = LinuxFields::from_config(&cfg);
+        linux.ocr_clipboard_key_linux = None;
+
+        apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+
+        assert_eq!(
+            None,
+            chibipop::config::load_or_create(&config_path).unwrap().actions.ocr_clipboard
+        );
+    }
+
+    /// The other direction: a chord typed into an empty config creates
+    /// the section, and a later reload reads it back.
+    #[test]
+    fn a_typed_ocr_clipboard_chord_creates_the_section_and_round_trips() {
+        let dir = scratch("ocrclip_typed");
+        let config_path = dir.join("chibipop.toml");
+        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        assert_eq!(None, cfg.actions.ocr_clipboard, "a default config has no section");
+        let mut linux = LinuxFields::from_config(&cfg);
+        linux.ocr_clipboard_key_linux = Some("ALT+C".to_string());
+
+        apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+
+        let saved = chibipop::config::load_or_create(&config_path).unwrap();
+        assert_eq!(
+            Some(OcrClipboardConfig { hotkey: None, hotkey_linux: Some("ALT+C".to_string()) }),
+            saved.actions.ocr_clipboard
+        );
+        assert_eq!(
+            Some("ALT+C".to_string()),
+            LinuxFields::from_config(&saved).ocr_clipboard_key_linux
+        );
+    }
+
     #[test]
     fn with_a_socket_apply_sends_exactly_one_reload() {
         let dir = scratch("live");
@@ -163,6 +294,10 @@ mod tests {
         let linux = LinuxFields {
             trigger_key_linux: "CTRL+SHIFT+K".into(),
             add_key_linux: "ALT+B".into(),
+            static_region_key_linux: "ALT+R".into(),
+            screenshot_key_linux: Some("SUPER+S".into()),
+            screenshot_save_dir: "shots".into(),
+            ocr_clipboard_key_linux: Some("SUPER+C".into()),
             layer: PopupLayer::Top,
             show_lookup_log: true,
         };
@@ -174,6 +309,8 @@ mod tests {
         // The Windows twins survived the whole-struct save untouched.
         assert_eq!(saved.trigger.trigger_key, cfg.trigger.trigger_key);
         assert_eq!(saved.anki.add_key, cfg.anki.add_key);
+        assert_eq!(saved.anki.static_region_key, cfg.anki.static_region_key);
+        assert_eq!(saved.actions.screenshot.hotkey, cfg.actions.screenshot.hotkey);
         assert_eq!(saved.ocr.language, cfg.ocr.language);
     }
 

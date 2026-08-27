@@ -591,6 +591,16 @@ pub struct ActionsConfig {
 pub struct ScreenshotConfig {
     #[serde(default = "default_screenshot_hotkey")]
     pub hotkey: String,
+    /// Same action on Linux; absent leaves it unbound.
+    ///
+    /// Not portal syntax, unlike `anki.add_key_linux`: ADR-0003 fixes the
+    /// portal's shortcut ids at exactly two forever, so this action rides
+    /// the control socket instead (spec D1) and the chord here is the
+    /// compositor bind the Linux settings window hands out as a copyable
+    /// snippet. `Option`, mirroring the ocr-clipboard twin, so absence
+    /// stays typed rather than an empty-string sentinel.
+    #[serde(default)]
+    pub hotkey_linux: Option<String>,
     #[serde(default = "default_screenshot_save_dir")]
     pub save_dir: String,
     #[serde(default)]
@@ -638,6 +648,7 @@ impl Default for ScreenshotConfig {
     fn default() -> ScreenshotConfig {
         ScreenshotConfig {
             hotkey: default_screenshot_hotkey(),
+            hotkey_linux: None,
             save_dir: default_screenshot_save_dir(),
             include_on_add: false,
         }
@@ -759,12 +770,48 @@ impl Config {
         );
     }
 
-    /// The bridge to `present.rs`.
-    pub fn present_config(&self) -> crate::present::PresentConfig {
+    /// The bridge to `present.rs`, with this OCR language's dictionary
+    /// scope resolved.
+    ///
+    /// `dictionaries.per_language[ocr.language]` is the "Not searched"
+    /// split the settings window writes: naming a subset both orders the
+    /// popup and restricts the search to it. Three guards fall back to
+    /// the unrestricted `display_order`, because a popup with nothing in
+    /// it is worse than an unfiltered one:
+    ///
+    /// - no entry for the language, or an empty one - it was never split;
+    /// - a list matching nothing installed - a typo, or the dictionaries
+    ///   it named are gone;
+    /// - `engine_runs()` says no - the configured recogniser for this
+    ///   language is not the one that will read the screen, so the list
+    ///   drawn up for it does not apply. Windows answers with
+    ///   language-pack availability; Linux answers whether the tag is one
+    ///   meikiocr reads (ADR-0012). Only asked when a list would
+    ///   otherwise apply, so a real probe may sit behind it.
+    ///
+    /// This is the whole rule and the only place `restrict_to_order` is
+    /// decided: returning the finished `PresentConfig` leaves no half-way
+    /// state for a caller to forget to apply.
+    pub fn present_config(
+        &self,
+        dicts: &[crate::present::DictInfo],
+        engine_runs: impl FnOnce() -> bool,
+    ) -> crate::present::PresentConfig {
+        let scoped = self
+            .dictionaries
+            .per_language
+            .get(&self.ocr.language)
+            .filter(|list| !list.is_empty())
+            .filter(|list| {
+                crate::present::any_listed(dicts.iter().map(|d| d.name.as_str()), list)
+                    && engine_runs()
+            });
         crate::present::PresentConfig {
-            dict_order: self.dictionaries.display_order.clone(),
+            dict_order: scoped
+                .cloned()
+                .unwrap_or_else(|| self.dictionaries.display_order.clone()),
             summary_chars: self.popup.summary_chars,
-            restrict_to_order: false,
+            restrict_to_order: scoped.is_some(),
         }
     }
 
@@ -852,6 +899,10 @@ mod tests {
         assert_eq!("ALT+F", c.trigger.trigger_key_linux);
         assert_eq!("ALT+A", c.anki.add_key_linux);
         assert_eq!("", c.anki.static_region_key_linux, "unbound, like its Windows twin");
+        assert_eq!(
+            None, c.actions.screenshot.hotkey_linux,
+            "unbound: the control-socket verb has no compositor bind until a human writes one"
+        );
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
         assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()],
                    c.dictionaries.display_order);
@@ -1804,6 +1855,7 @@ mod tests {
         c.anki.add_key_linux = "CTRL+ALT+A".to_string();
         c.anki.static_region_key = "0x52".to_string();
         c.anki.static_region_key_linux = "ALT+R".to_string();
+        c.actions.screenshot.hotkey_linux = Some("ALT+S".to_string());
         c.actions.ocr_clipboard = Some(OcrClipboardConfig {
             hotkey: Some("f9".to_string()),
             hotkey_linux: Some("ALT+C".to_string()),
@@ -1837,6 +1889,7 @@ mod tests {
         assert_eq!("ALT+F", c.trigger.trigger_key_linux);
         assert_eq!("ALT+A", c.anki.add_key_linux);
         assert_eq!("", c.anki.static_region_key_linux);
+        assert_eq!(None, c.actions.screenshot.hotkey_linux);
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
         // The whole-struct save writes the new keys with those defaults
         // and the old values verbatim.
@@ -1865,6 +1918,7 @@ mod tests {
             "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n\n",
             "[ocr]\nlanguage = \"en\"\n\n",
             "[anki]\nadd_key_linux = \"SUPER+K\"\nstatic_region_key_linux = \"SUPER+R\"\n\n",
+            "[actions.screenshot]\nhotkey_linux = \"SUPER+S\"\n\n",
             "[actions.ocr_clipboard]\nhotkey_linux = \"SUPER+C\"\n",
         )).unwrap();
         // A Windows-style edit: change a rendered field, save the struct.
@@ -1879,6 +1933,11 @@ mod tests {
             Some("SUPER+C".to_string()),
             back.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone()),
             "the Linux OCR-clipboard chord survives a Windows-side save"
+        );
+        assert_eq!(
+            Some("SUPER+S".to_string()),
+            back.actions.screenshot.hotkey_linux,
+            "the Linux screenshot chord survives a Windows-side save"
         );
         assert_eq!(PopupLayer::Top, back.popup.layer);
         assert_eq!("en", back.ocr.language, "hidden on Linux, never dropped");
@@ -2162,27 +2221,84 @@ mod tests {
         assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
     }
 
-    #[test]
-    fn field_map_screenshot_source_resolves() {
-        let map = [
-            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
-            FieldMapping { anki_field: "Context".into(), source: "screenshot".into() },
-        ];
-        let found = map.iter()
-            .find(|m| m.source == "screenshot")
-            .map(|m| m.anki_field.clone());
-        assert_eq!(Some("Context".to_string()), found);
+    fn di(id: i64, name: &str) -> crate::present::DictInfo {
+        crate::present::DictInfo { dict_id: id, name: name.to_string() }
+    }
+
+    fn installed() -> [crate::present::DictInfo; 2] {
+        [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")]
     }
 
     #[test]
-    fn field_map_without_screenshot_returns_none() {
-        let map = [
-            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
-            FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
-        ];
-        let found = map.iter()
-            .find(|m| m.source == "screenshot")
-            .map(|m| m.anki_field.clone());
-        assert_eq!(None, found);
+    fn the_active_language_selects_its_own_list() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans-CN".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let out = cfg.present_config(&installed(), || true);
+        assert_eq!(vec!["中日大辞典".to_string()], out.dict_order);
+        assert!(out.restrict_to_order);
+        assert!(
+            !crate::present::keeps_dict("大辞林　第四版", &out.dict_order, out.restrict_to_order),
+            "the excluded dictionary must not be searched"
+        );
+    }
+
+    #[test]
+    fn a_language_with_no_list_falls_back_to_display_order() {
+        let cfg = Config::default();
+        let out = cfg.present_config(&installed(), || true);
+        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
+        assert!(!out.restrict_to_order, "no entry must not restrict");
+    }
+
+    #[test]
+    fn an_empty_list_does_not_restrict() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert("ja".to_string(), Vec::new());
+        assert!(!cfg.present_config(&installed(), || true).restrict_to_order);
+    }
+
+    /// A typo must not blank the popup.
+    #[test]
+    fn a_list_matching_nothing_installed_falls_back() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["Typoo".to_string()]);
+        let out = cfg.present_config(&installed(), || true);
+        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
+        assert!(!out.restrict_to_order, "all patterns missed, so do not restrict");
+    }
+
+    /// Wrong engine: no filter.
+    #[test]
+    fn a_recogniser_that_will_not_run_ignores_the_language_list() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans-CN".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let out = cfg.present_config(&installed(), || false);
+        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
+        assert!(!out.restrict_to_order, "the engine is not running this language");
+    }
+
+    /// The gate costs nothing when no list applies.
+    #[test]
+    fn the_engine_gate_is_not_asked_without_a_matching_list() {
+        let cfg = Config::default();
+        let out = cfg.present_config(&installed(), || panic!("must not probe the recogniser"));
+        assert!(!out.restrict_to_order);
+    }
+
+    #[test]
+    fn summary_chars_rides_along() {
+        let mut cfg = Config::default();
+        cfg.popup.summary_chars = 55;
+        assert_eq!(55, cfg.present_config(&[], || true).summary_chars);
     }
 }

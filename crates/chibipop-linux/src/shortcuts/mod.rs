@@ -310,12 +310,11 @@ fn spec_modifier(name: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Exactly what the control socket's verb does — one code path for
-    /// both trigger sources, so a portal press and a `ctl trigger-down`
-    /// cannot drift apart.
+    /// every rung, so a portal press and a `chibipop ctl <verb>` cannot
+    /// drift apart. There is no second kind of effect on purpose: every
+    /// global action has a verb (ADR-0003's 2026-08-26 addendum), so a
+    /// portal signal is only ever a verb or nothing.
     Verb(Verb),
-    /// The Controller's `AddRequested` — the same Event the in-panel
-    /// slot raises, so both reach one AnkiConnect flow.
-    Add,
     /// Nothing to do.
     Nothing,
 }
@@ -327,7 +326,7 @@ pub fn action(id: ShortcutId, activated: bool) -> Action {
         // both rungs).
         (ShortcutId::Trigger, true) => Action::Verb(Verb::TriggerDown),
         (ShortcutId::Trigger, false) => Action::Verb(Verb::TriggerUp),
-        (ShortcutId::AnkiAdd, true) => Action::Add,
+        (ShortcutId::AnkiAdd, true) => Action::Verb(Verb::AnkiAdd),
         // Releasing the add key cannot un-add a card.
         (ShortcutId::AnkiAdd, false) => Action::Nothing,
     }
@@ -485,9 +484,11 @@ mod tests {
     }
 
     /// Anki adds on press only, and the release is not a second event.
+    /// The press resolves to the *verb*, which is what makes a portal
+    /// press and `chibipop ctl anki-add` the same code path.
     #[test]
     fn the_add_id_adds_once_per_press() {
-        assert_eq!(Action::Add, action(ShortcutId::AnkiAdd, true));
+        assert_eq!(Action::Verb(Verb::AnkiAdd), action(ShortcutId::AnkiAdd, true));
         assert_eq!(Action::Nothing, action(ShortcutId::AnkiAdd, false));
     }
 

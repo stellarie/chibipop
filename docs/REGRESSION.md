@@ -102,7 +102,7 @@ check-shaped clippy spans the whole workspace unexcluded.
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **1407** total across **15** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system → 1407 on 2026-08-26; see below) |
+| Rust tests | **all green**, **1546** total across **17** targets, 0 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system → 1407 on 2026-08-26 → 1546 on 2026-08-26 linux-parity; see below) |
 | Clippy | **exactly 1** accepted error (was 2; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
@@ -889,6 +889,17 @@ Before this branch the overlay window was only *created* when the setting was on
 turning it on later had no window to show and the checkbox did nothing whatsoever. It is now
 created unconditionally and merely shown on demand.
 
+**On Linux this is a different mechanism with the same observable.** There is no overlay window
+to create early or late: the outline is `zwlr_layer_shell_v1` surfaces mapped on the first show
+and given a transparent buffer to hide (never unmapped — Hyprland animates layer surfaces). The
+setting reaches the Worker on every Apply, so the same "turn it on, Apply, hover, boxes appear,
+PID unchanged" is the check. Two extra Linux observables while it is on: `hyprctl layers` lists a
+`namespace: chibipop-outline` surface sized to the bounding box of that hover's boxes, and the
+four kinds are four **theme** colours — the word being defined must not be the same colour as the
+capture box it was found in. Before wave 2 the whole command was a no-op on Linux and the
+checkbox drew nothing at all, so **starting with it off is not the interesting half here** —
+seeing any box at all is.
+
 ### 1.13 The capture guard tracks a live `exclude_from_capture` toggle
 
 The one with real teeth: chibipop's own OCR capture must never contain chibipop's own popup.
@@ -908,6 +919,13 @@ affinity call rather than from what was asked for, because `SetWindowDisplayAffi
 refuse. Before this branch the cached value kept its startup setting for the life of the process,
 so turning exclusion off left the guard off with it, and the popup contaminated the very lookup it
 was displaying.
+
+**On Linux the guard does not exist and this step's instrument now does.** Capture exclusion is a
+compositor rule there, not a setting, and the popup is kept out of its own lookups by the core
+capture mask instead (`CONTEXT.md`, ADR-0008). The visual half still applies verbatim: turn on
+**Outline what each hover captured**, screenshot, and nothing chibipop drew may be sitting inside
+a capture box. The outline itself is drawn two physical px *outside* each box for exactly that
+reason, so a border touching the inside of one is a bug in the overlay, not in the mask.
 
 > [!note] 1.14–1.16 were added 2026-08-11; 1.14 and 1.15 ran **in part**, 1.16 **not at all**
 > They are the acceptance checks for the per-character-retrigger / OCR-language branch. All three

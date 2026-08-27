@@ -19,15 +19,21 @@
 //!
 //! It takes the lock-free path on purpose: no instance lock, no control
 //! socket, safe to run beside a live daemon.
+//!
+//! **One ladder, one bracket.** The backend and the read bracket both
+//! come from [`super::open`] and [`super::read`], so this file proves
+//! the same code the daemon runs rather than a copy of it. A single
+//! named box with no `--dwell` is exactly the product's one-shot path
+//! (spec D6 - own backend, one bracket, no reuse), so it goes through
+//! [`super::oneshot`]; everything else keeps one backend across several
+//! boxes, which is what the dwell damage race needs.
 
-use super::backend::{self, Backend};
-use super::portal::{PortalCapture, PortalSession};
-use super::{geometry, png, WlrScreencopy};
-use crate::cursor::{image_copy, outputs::OutputGeometry};
+use super::backend;
+use super::geometry;
 use crate::wayland;
 use anyhow::{Context, Result};
-use chibipop::geom::{PhysPoint, PhysRect};
-use chibipop::text::RegionCapture;
+use chibipop::geom::PhysRect;
+use chibipop::text::Frame;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -82,35 +88,26 @@ pub fn run(args: Args) -> Result<()> {
     let selection = backend::select(&caps, ov);
     println!("{}", selection.startup_line());
 
-    let (mut backend, outputs): (Box<dyn RegionCapture>, Vec<OutputGeometry>) = match selection
-        .backend()
-    {
-        Some(Backend::WlrScreencopy) => {
-            let backend = WlrScreencopy::open(&globals)?;
-            let outputs = backend.outputs();
-            (Box::new(backend), outputs)
-        }
-        Some(Backend::Portal) => {
-            let outputs = image_copy::probe_geometry(&globals);
-            println!("capture: portal consent follows - a dialog may appear on your screen");
-            let session = PortalSession::open(
-                &args.state_dir,
-                &outputs,
-                PhysPoint { x: 0, y: 0 },
-                None,
-                |line| println!("{line}"),
-            )?;
-            println!(
-                "capture: portal session {} node {} health {:?}",
-                session.session_path(),
-                session.node_id(),
-                session.health()
-            );
-            (Box::new(PortalCapture::new(session)), outputs)
-        }
-        // ADR-0002: an absent rung is a rung the ladder skips.
-        None => anyhow::bail!("no capture backend on this session"),
+    let setup = super::Setup {
+        globals,
+        backend: selection.backend(),
+        state_dir: args.state_dir.clone(),
     };
+
+    // One named box and no dwell: the product's one-shot path, run as
+    // the product runs it. `oneshot` opens the ladder itself, so
+    // nothing above it is needed and nothing below it is reused.
+    if let (Some(region), 0) = (args.region, args.dwell) {
+        println!("capture: one-shot path - this grab's own backend (spec D6)");
+        let started = Instant::now();
+        let frame = super::oneshot(&setup, region)?;
+        let path = args.out.join("chibipop-capture-0.png");
+        report(&frame, region, started, Some(&path))?;
+        return Ok(());
+    }
+
+    let super::Opened { mut backend, outputs } =
+        super::open(&setup, &mut |line| println!("{line}"))?;
 
     for (i, g) in outputs.iter().enumerate() {
         let b = geometry::physical_box(g);
@@ -143,30 +140,30 @@ pub fn run(args: Args) -> Result<()> {
             b.y
         );
         let path = args.out.join(format!("chibipop-capture-{i}.png"));
-        grab_once(backend.as_mut(), *region, Some(&path))?;
+        let started = Instant::now();
+        let frame = super::read(backend.as_mut(), *region)?;
+        report(&frame, *region, started, Some(&path))?;
     }
 
     for i in 0..args.dwell {
         println!("capture: dwell {} of {}", i + 1, args.dwell);
-        grab_once(backend.as_mut(), regions[0], None)?;
+        let started = Instant::now();
+        let frame = super::read(backend.as_mut(), regions[0])?;
+        report(&frame, regions[0], started, None)?;
     }
     Ok(())
 }
 
-/// One whole read - bracket included, exactly as the Worker reads - so
-/// the pacing seen here is the pacing a hover gets.
-fn grab_once(
-    backend: &mut dyn RegionCapture,
+/// What one read decided, as a line and (optionally) a PNG.
+///
+/// The bracket itself is [`super::read`]; this is the half that is only
+/// a diagnostic's, so the library never learns to print.
+fn report(
+    frame: &Frame,
     region: PhysRect,
+    started: Instant,
     write_to: Option<&Path>,
 ) -> Result<()> {
-    let started = Instant::now();
-    backend.begin_read();
-    let frame = backend.grab(region);
-    backend.end_read();
-    let frame = frame.with_context(|| {
-        format!("grabbing {}x{} at ({},{})", region.w, region.h, region.x, region.y)
-    })?;
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     let centre = pixel(&frame.buf, frame.w, frame.w / 2, frame.h / 2);
     println!(
@@ -183,16 +180,8 @@ fn grab_once(
         centre[0],
         mean(&frame.buf),
     );
-    anyhow::ensure!(
-        frame.w == region.w && frame.h == region.h,
-        "the backend answered {}x{} for a {}x{} request",
-        frame.w,
-        frame.h,
-        region.w,
-        region.h
-    );
     if let Some(path) = write_to {
-        let bytes = png::encode(&frame.buf, frame.w as u32, frame.h as u32);
+        let bytes = chibipop::image::encode_bgra_to_png(&frame.buf, frame.w, frame.h)?;
         std::fs::write(path, &bytes)
             .with_context(|| format!("writing {}", path.display()))?;
         println!("capture: wrote {} ({} bytes)", path.display(), bytes.len());

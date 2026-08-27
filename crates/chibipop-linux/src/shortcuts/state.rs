@@ -49,12 +49,19 @@ impl Published {
         Published { portal: true, bindings }
     }
 
-    /// The key the settings window shows as "the current binding": the
-    /// portal's own description of the trigger shortcut, when it has one.
-    pub fn trigger_description(&self) -> Option<String> {
+    /// The key the settings window shows as "the current binding" for
+    /// one action: the portal's own description of that shortcut, when
+    /// it has one.
+    ///
+    /// `None` is the honest absence and covers three real cases — the
+    /// native rung (no bindings at all), a portal that bound the id but
+    /// reported no key, and an id the portal never answered for. All
+    /// three mean the same thing to a row: we were not told a key, so
+    /// do not name one.
+    pub fn description(&self, id: ShortcutId) -> Option<String> {
         self.bindings
             .iter()
-            .find(|binding| binding.id == ShortcutId::Trigger)
+            .find(|binding| binding.id == id)
             .and_then(|binding| binding.trigger.clone())
     }
 
@@ -157,8 +164,33 @@ mod tests {
 
         let read_back = read(&dir).expect("published");
         assert_eq!(published, read_back);
-        assert_eq!(Some("Alt+F".to_string()), read_back.trigger_description());
+        assert_eq!(Some("Alt+F".to_string()), read_back.description(ShortcutId::Trigger));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Both published ids answer for themselves, and an id the portal
+    /// never named answers with the honest absence rather than with the
+    /// other row's key — the add-card row borrowing the trigger's key
+    /// is exactly the lie ADR-0005 forbids this window.
+    #[test]
+    fn each_id_gets_its_own_description_and_an_unbound_id_gets_none() {
+        let published = Published::portal(vec![
+            Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
+            Binding { id: ShortcutId::AnkiAdd, trigger: Some("Alt+A".into()) },
+        ]);
+        assert_eq!(Some("Alt+F".to_string()), published.description(ShortcutId::Trigger));
+        assert_eq!(Some("Alt+A".to_string()), published.description(ShortcutId::AnkiAdd));
+
+        // Bound but unnamed (every xdph session), and never answered
+        // for at all: one row shape, one answer.
+        let partial = Published::portal(vec![Binding {
+            id: ShortcutId::Trigger,
+            trigger: Some("Alt+F".into()),
+        }]);
+        assert_eq!(None, partial.description(ShortcutId::AnkiAdd));
+        let unnamed =
+            Published::portal(vec![Binding { id: ShortcutId::AnkiAdd, trigger: None }]);
+        assert_eq!(None, unnamed.description(ShortcutId::AnkiAdd));
     }
 
     /// A key with spaces in it (KDE spells chords that way) survives.
@@ -173,7 +205,10 @@ mod tests {
             }]),
         )
         .unwrap();
-        assert_eq!(Some("Meta + Shift + F".to_string()), read(&dir).unwrap().trigger_description());
+        assert_eq!(
+            Some("Meta + Shift + F".to_string()),
+            read(&dir).unwrap().description(ShortcutId::Trigger)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -186,7 +221,7 @@ mod tests {
         let read_back = read(&dir).expect("published");
         assert!(!read_back.portal);
         assert!(read_back.bindings.is_empty());
-        assert_eq!(None, read_back.trigger_description());
+        assert_eq!(None, read_back.description(ShortcutId::Trigger));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

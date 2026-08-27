@@ -9,7 +9,6 @@ use crate::present::Presentation;
 use crate::text::layout::OcrLine;
 use anyhow::{Context, Result};
 use chibipop::worker::ServeNudge;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -109,18 +108,19 @@ pub enum ActionOutcome {
     Failed(String),
 }
 
-/// Worker's input.
+/// Worker's input: raw pixels plus the whole add, already decided.
+///
+/// The rule lives in `chibipop::shot` (spec D4) - the pump plans, the
+/// worker only encodes, writes and posts.
 pub struct ScreenshotCommand {
     pub bgra_buf: Vec<u8>,
     pub width: i32,
     pub height: i32,
-    pub save_path: PathBuf,
-    pub expr: String,
-    pub fields: HashMap<String, String>,
-    pub field_map: Vec<crate::config::FieldMapping>,
-    pub anki_url: String,
-    pub anki_deck: String,
-    pub anki_model: String,
+    pub plan: crate::shot::ShotPlan,
+    /// The Anki section as the pump saw it, field map normalised.
+    pub anki: crate::config::AnkiConfig,
+    /// AnkiConnect answered a dupe check: without it the PNG is still
+    /// written, but nothing is filed.
     pub anki_connected: bool,
 }
 

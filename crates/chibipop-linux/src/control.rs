@@ -1,8 +1,14 @@
 //! Control socket (ADR-0003): a UNIX socket at
 //! `$XDG_RUNTIME_DIR/chibipop/run-$WAYLAND_DISPLAY.sock` — keyed exactly
 //! like the instance lock, so lock and socket always name the same
-//! instance — speaking the minimal forever verb set. It is trigger
-//! transport, not a scripting API.
+//! instance — speaking the minimal forever verb set.
+//!
+//! **One verb per global action, and nothing else** (ADR-0003's
+//! 2026-08-26 addendum). A verb exists if and only if it names something
+//! a user can bind a key to: no verb reads state, none takes an
+//! argument, none composes. This is transport for keys the compositor
+//! or the portal presses, not a scripting API — the settings window's
+//! status read lives in `shortcuts::state` for exactly that reason.
 //!
 //! Wire format: one request line (`trigger-down\n`), one reply line
 //! (`OK …` / `ERR …`). Boring on purpose: `bindsym` lines shell out to
@@ -14,16 +20,43 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The minimal forever verb set.
+/// The minimal forever verb set: one verb per global action, never a
+/// scripting API (ADR-0003 and its 2026-08-26 addendum).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
     Reload,
     TriggerDown,
     TriggerUp,
     Toggle,
+    /// Add a card for the lookup on screen - the same action the portal
+    /// `anki-add` shortcut performs, and deliberately the same wire
+    /// name, so a native bind and a portal press are one thing.
+    AnkiAdd,
+    /// Grab a region and file it as the mining context for the lookup
+    /// on screen (`actions.screenshot`). Native-channel only, for the
+    /// same reason as `static-region` below.
+    Screenshot,
+    /// Pick a region, OCR it, and put the text on the clipboard
+    /// (`actions.ocr_clipboard`). Native-channel only, for the same
+    /// reason as `static-region` below.
+    OcrClipboard,
+    /// Draw the box [`chibipop::config::SentenceMode::Static`] reads the
+    /// Anki sentence from. Native-channel only: the portal id set stays
+    /// at exactly two (ADR-0003's addendum), so this verb *is* the
+    /// action's only global channel.
+    StaticRegion,
 }
 
-pub const VERBS: [Verb; 4] = [Verb::Reload, Verb::TriggerDown, Verb::TriggerUp, Verb::Toggle];
+pub const VERBS: [Verb; 8] = [
+    Verb::Reload,
+    Verb::TriggerDown,
+    Verb::TriggerUp,
+    Verb::Toggle,
+    Verb::AnkiAdd,
+    Verb::Screenshot,
+    Verb::OcrClipboard,
+    Verb::StaticRegion,
+];
 
 impl Verb {
     pub fn as_str(self) -> &'static str {
@@ -32,6 +65,10 @@ impl Verb {
             Verb::TriggerDown => "trigger-down",
             Verb::TriggerUp => "trigger-up",
             Verb::Toggle => "toggle",
+            Verb::AnkiAdd => "anki-add",
+            Verb::Screenshot => "screenshot",
+            Verb::OcrClipboard => "ocr-clipboard",
+            Verb::StaticRegion => "static-region",
         }
     }
 
@@ -76,6 +113,23 @@ impl StubState {
                 self.toggled_on = !self.toggled_on;
                 format!("toggled {}", if self.toggled_on { "on" } else { "off" })
             }
+            // No counter: the daemon's Controller owns whether an add
+            // happens at all (no card, empty expression, already
+            // added), so a tally here would be a second, wronger
+            // answer. The line says what was asked for.
+            Verb::AnkiAdd => "card requested for the lookup on screen".to_string(),
+            // No counter either, and for a second reason on top of the
+            // add's: whether a picture is filed at all depends on the
+            // region pick and on whether AnkiConnect can take a card.
+            Verb::Screenshot => "picking the mining screenshot's region".to_string(),
+            // Same again: the pick, the grab and the recogniser each get
+            // to answer nothing, and the clipboard needs a protocol this
+            // compositor may not have. The line reports the ask.
+            Verb::OcrClipboard => "picking a region to OCR onto the clipboard".to_string(),
+            // Same reasoning: the pick itself decides whether a region
+            // is set (a cancel, a drag under the threshold, no layer
+            // shell), so this line reports the ask, not the answer.
+            Verb::StaticRegion => "picking the static sentence region".to_string(),
         }
     }
 }
@@ -202,9 +256,49 @@ mod tests {
         }
     }
 
+    /// The literal is the contract: a bind line a user pasted years ago
+    /// must keep working, so a rename here is a breaking change and
+    /// this assertion is the place it has to be argued.
     #[test]
     fn the_wire_names_are_the_forever_contract() {
-        assert_eq!("reload, trigger-down, trigger-up, toggle", verb_list());
+        assert_eq!(
+            "reload, trigger-down, trigger-up, toggle, anki-add, screenshot, ocr-clipboard, \
+             static-region",
+            verb_list()
+        );
+    }
+
+    /// `anki-add` is spelled exactly like the portal shortcut id, so
+    /// rung 1 and rung 2 of ADR-0003 name one action, not two.
+    #[test]
+    fn the_add_verb_and_the_portal_shortcut_id_share_one_name() {
+        assert_eq!(crate::shortcuts::ShortcutId::AnkiAdd.as_str(), Verb::AnkiAdd.as_str());
+    }
+
+    /// D1, as a property rather than a review habit: the static-region
+    /// action has a verb and deliberately *no* portal id, so the consent
+    /// dialog did not grow to carry it. The compositor bind is its only
+    /// global channel, which is what the settings row's caption says.
+    #[test]
+    fn the_static_region_verb_is_native_channel_only() {
+        assert_eq!(2, crate::shortcuts::ShortcutId::ALL.len(), "the portal id set is closed");
+        assert!(
+            !crate::shortcuts::ShortcutId::ALL
+                .iter()
+                .any(|id| id.as_str() == Verb::StaticRegion.as_str()),
+            "no portal id may name the static-region action"
+        );
+    }
+
+    /// The same property for OCR-to-clipboard: a verb, no portal id.
+    #[test]
+    fn the_ocr_clipboard_verb_is_native_channel_only() {
+        assert!(
+            !crate::shortcuts::ShortcutId::ALL
+                .iter()
+                .any(|id| id.as_str() == Verb::OcrClipboard.as_str()),
+            "no portal id may name the OCR-to-clipboard action"
+        );
     }
 
     #[test]

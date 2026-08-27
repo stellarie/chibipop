@@ -140,9 +140,46 @@ independent of the modifier state, so either release order retracts the popup.
 A daemon started from a bare shell has no app id and the portal refuses it —
 chibipop's status row says so, and the socket keeps serving meanwhile.
 
+**The add-card chord is the same story.** The popup never takes focus, so the
+"add this word to Anki" key is global too — and on a session with no portal the
+compositor bind is the only thing that can reach it. It is one press, one verb,
+with no release line to lose:
+
+```
+bind = ALT, A, exec, chibipop ctl anki-add
+```
+
+```
+bindsym --no-repeat Mod1+a exec chibipop ctl anki-add
+```
+
+Where the portal is running it registers `anki-add` itself and the bind above is
+a second, equivalent route to the same add: both land on one code path, so a
+card added by either is the same card, and the popup's own Anki button is that
+path too.
+
+**The mining screenshot's key is the same story again.** `chibipop ctl
+screenshot` grabs a region for the popup on screen and files it as that card's
+context picture. Its chord (`actions.screenshot.hotkey_linux`, unset by
+default) is **native-channel only** — no portal id, so the consent dialog
+stays at two entries — and one press, one verb:
+
+```
+bind = SUPER, S, exec, chibipop ctl screenshot
+```
+
+```
+bindsym --no-repeat Mod4+s exec chibipop ctl screenshot
+```
+
+Pressed with no popup up it writes one line to the log saying why nothing
+happened: the picture is filed against the word on screen, and there is no
+word without a lookup. The picture that rides an *add* needs no key of its
+own — see **Include screenshot when adding** below.
+
 Ready-to-copy snippets live in [`extras/hyprland.conf`](../extras/hyprland.conf),
 and the settings window shows (and copies) the right snippet for whatever chord
-you configure.
+you configure — one row shape for every global action, trigger chord included.
 
 ---
 
@@ -224,6 +261,12 @@ GNOME is **best-effort**, and today that means something concrete:
 - **The popup cannot hide itself from screen sharing.** See the next section —
   GNOME has no equivalent, so on GNOME the popup would be visible in
   recordings and calls.
+- **OCR-to-clipboard cannot work either.** Writing the selection without
+  keyboard focus needs a data-control protocol, and Mutter implements neither
+  `ext_data_control_manager_v1` nor `zwlr_data_control_manager_v1`. The daemon
+  says so once at startup naming both, and the settings row says it instead of
+  offering a bind that could only log a refusal. Run `chibipop clipboard-check`
+  to see the verdict for your own session.
 
 ## Hiding the popup from screen sharing
 
@@ -270,19 +313,22 @@ compositor session, and a second launch exits with a clear message. If
 daemon and `ctl` say so and stop.
 
 The config file format is shared with Windows — see
-[`docs/REFERENCE.md`](REFERENCE.md) for the full reference. The Linux trigger
-and Anki-add chords are `trigger_key_linux` (default `ALT+F`) and
-`add_key_linux` (default `ALT+A`).
+[`docs/REFERENCE.md`](REFERENCE.md) for the full reference. Every chord has its
+own Linux key, in portal syntax: `trigger_key_linux` (default `ALT+F`),
+`add_key_linux` (default `ALT+A`), `static_region_key_linux` and
+`actions.ocr_clipboard.hotkey_linux` (both unset — native-channel only, so
+nothing is bound until you paste the snippet).
 
 ## Command line
 
 | Command | What it does |
 |---|---|
 | `chibipop run` | Starts the daemon. The default when no subcommand is given. |
-| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, or `reload` (re-read the config). Answers `OK` or `ERR` on one line. |
+| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `anki-add` (add the word in the popup to Anki), `screenshot` (drag a region and file it as the popup's mining picture), `ocr-clipboard` (drag a region and copy its text to the clipboard), `static-region` (drag the box the Static sentence mode reads), or `reload` (re-read the config). Answers `OK` or `ERR` on one line. |
 | `chibipop settings` | Opens the settings window as its own process. |
 | `chibipop probe` | Prints `WAYLAND_DISPLAY` and the capability report for this session. |
 | `chibipop capture-dump --region X,Y,W,H` | Grabs that region through the live capture backend and writes a PNG (default to `/tmp`, `--out DIR` to change). The proof tool for capture problems. |
+| `chibipop clipboard-check` | Takes the clipboard selection with a known string and holds it (`--text`, `--hold SECS`), naming the data-control protocol it used. The proof tool for clipboard problems: it replaces what is on your clipboard, and on a compositor with no data-control protocol it exits non-zero naming both globals it looked for. |
 | `chibipop --config <path> …` | Uses that exact config file, any subcommand. |
 
 There is **no `build-dict` subcommand on Linux**. The frequency-list rebuild
@@ -294,10 +340,42 @@ your frequency lists there and Apply.
 - **OCR is the bundled meikiocr engine**, not Windows OCR. Three ONNX models
   ship with chibipop (`models/meiki/`), hash-pinned and verified at startup —
   a mismatch refuses the engine rather than silently reading with something
-  else. Nothing is downloaded. The *OCR language* setting is Windows-only and
-  hidden on Linux. Model location override: `CHIBIPOP_MODEL_DIR`.
-- **The Static region sentence mode is not yet available.** Selecting it falls
-  back to *Current line*, with a warning in the log.
+  else. Nothing is downloaded. Model location override: `CHIBIPOP_MODEL_DIR`.
+
+  The *OCR language* setting is Windows-only and hidden on Linux, but the value
+  already in your config is kept, not cleared — and it still selects the
+  `[dictionaries.per_language]` list, so the **Not searched** box works here
+  exactly as it does on Windows. One consequence: a config carrying a language
+  meikiocr does not read (anything but `ja`) searches every dictionary, because
+  that language's list was drawn up for a recogniser this build does not run.
+  Clear the key, or set it to `ja`, to have your split apply.
+- **The Static region sentence mode needs a compositor bind for its key.**
+  The mode itself works: pick *Static region* as the Anki sentence field, draw
+  a box, and every card's sentence comes from that box instead of the hovered
+  line. Drawing it is the `static-region` verb — a drag on the dimmed screen,
+  `Esc` or right-click to cancel — and it works in **any** sentence mode,
+  because drawing the box is how you decide to switch to Static. The chord
+  (`anki.static_region_key_linux`, unset by default) is **native-channel only**:
+  it gets no GlobalShortcuts portal id, so the portal consent dialog stays at
+  two entries (ADR-0003's 2026-08-26 addendum) and the compositor bind is the
+  only way to reach it. The settings window renders the bind for whatever chord
+  you type, e.g.
+
+  ```
+  bind = ALT, R, exec, chibipop ctl static-region
+  ```
+
+  ```
+  bindsym --no-repeat Mod1+r exec chibipop ctl static-region
+  ```
+
+  The region is saved to your config file as `anki.static_region = [x, y, w, h]`
+  in physical pixels, and the running daemon picks it up immediately — no
+  restart, no Apply. *Show the static region outline* draws a teal border around
+  it, on by default; that border is a layer surface, so like the popup it needs
+  `zwlr_layer_shell_v1`. Without the layer shell the region still serves
+  lookups, just unmarked, and the log says so once. Both the drag and the border
+  need the layer shell for the same reason.
 - **Updates are check-only.** The *Check for updates* button reports a newer
   release and names the Linux tarball asset; chibipop never replaces its own
   binary on Linux — update with your package manager or by download.
@@ -306,6 +384,49 @@ your frequency lists there and Apply.
 - **Anki works the same** (AnkiConnect, same field map). The add key (default
   `ALT+A`) registers on the GlobalShortcuts portal alongside the trigger; the
   popup's own Anki button works on every compositor.
+- **The mining screenshot works the same, with its own key on the native
+  channel.** *Include screenshot when adding* dims the screen when you ask for
+  a card, exactly as on Windows: drag the region, release to confirm, `Esc` or
+  right-click to skip it (the card still goes in, without a picture), and 20
+  seconds of no decision cancels the pick. The PNG lands in
+  `$XDG_DATA_HOME/chibipop/screenshots` by default — `~/.local/share/chibipop/screenshots`
+  where that is unset, or beside the executable in portable mode — and the
+  *Anki* tab's **Screenshots folder** box changes it (absolute paths taken as
+  typed). Both the drag and the grab need the same protocols the popup and
+  hovering already need (`zwlr_layer_shell_v1` for the selector, the Capture
+  channel for the pixels), so a session where hovering works can always take
+  one. Taking a screenshot *without* asking for a card is the `screenshot`
+  verb, a compositor bind — see [the trigger key](#the-trigger-key).
+- **OCR-to-clipboard works, except on stock GNOME.** The `ocr-clipboard` verb
+  dims the screen, reads the region you drag with the same engine and the same
+  OCR settings hovering uses, and puts the text on the clipboard — one line per
+  recognised line, words butted together, because the recogniser's word split
+  is an artefact and a space between them would be text the screen never had.
+  Nothing is upscaled: meikiocr reads native-resolution crops better than 2x
+  ones (ADR-0009), which is where the Windows twin differs. Its chord
+  (`actions.ocr_clipboard.hotkey_linux`, unset by default) is native-channel
+  only for the same reason `static-region`'s is:
+
+  ```
+  bind = ALT, C, exec, chibipop ctl ocr-clipboard
+  ```
+
+  ```
+  bindsym --no-repeat Mod1+c exec chibipop ctl ocr-clipboard
+  ```
+
+  The one real gap is **the clipboard protocol**. Writing the selection without
+  keyboard focus needs `ext_data_control_manager_v1` or the older
+  `zwlr_data_control_manager_v1`; chibipop takes the first it finds, on a
+  Wayland connection of its own, and holds the offer for as long as the daemon
+  runs. Every wlroots compositor and KWin advertise at least one of them.
+  **Mutter advertises neither**, so on stock GNOME this one action cannot work
+  at all: the daemon says so once at startup, naming both globals, the settings
+  row says it instead of offering a bind, and nothing else is affected. There is
+  no `wl-copy` fallback on purpose — a subprocess would not survive the daemon,
+  and an offer nobody services is a selection that vanishes the moment you try
+  to paste it. `chibipop clipboard-check` is how you see which of the two your
+  session has.
 
 ## Starting at login
 

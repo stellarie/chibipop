@@ -504,6 +504,8 @@ name = "chibipop"
 version = "0.9.3"
 dependencies = [
  "anyhow",
+ "base64",
+ "png",
  "rusqlite",
  "serde",
  "serde_json",

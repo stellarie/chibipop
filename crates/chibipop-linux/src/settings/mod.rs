@@ -21,7 +21,7 @@ mod channel;
 use crate::lock::{self, LockError};
 use crate::paths::{self, Paths};
 use crate::shortcuts;
-use crate::{control, wayland};
+use crate::{clipboard, control, wayland};
 use anyhow::{Context, Result};
 use chibipop::library::Library;
 use chibipop::lookup::model::Dictionary;
@@ -77,6 +77,8 @@ pub fn run(paths: Paths) -> Result<()> {
     };
 
     let env = paths::Env::from_process();
+    // One read, two rows: see `hotkey_channel`.
+    let published = shortcuts::state::read(&paths.state_dir);
     let init = app::Init {
         form,
         linux: apply::LinuxFields::from_config(&cfg),
@@ -84,7 +86,8 @@ pub fn run(paths: Paths) -> Result<()> {
         socket_path: runtime_dir.join(control::file_name(&display)),
         log_path: paths.log_file(),
         compositor: snippets::Compositor::detect(),
-        channel: hotkey_channel(&paths.state_dir),
+        channel: hotkey_channel(published.as_ref(), shortcuts::ShortcutId::Trigger),
+        add_channel: hotkey_channel(published.as_ref(), shortcuts::ShortcutId::AnkiAdd),
         library_dir,
         db_path,
         runtime_dir: runtime_dir.to_path_buf(),
@@ -94,6 +97,15 @@ pub fn run(paths: Paths) -> Result<()> {
         // daemon (`chibipop settings`), so the snippet names the exe
         // the user is actually running (ticket 51).
         exe: paths::exec_name(),
+        // Whether a focus-less client can write the selection here is a
+        // fact about the compositor, not about the daemon, so this
+        // window asks the registry itself rather than reading a status
+        // the daemon published: the OCR-to-clipboard row has to be right
+        // on a machine where no daemon is running at all. One roundtrip
+        // on a throwaway connection - the same probe `chibipop probe`
+        // prints. A display we cannot reach is simply no rung, which is
+        // the honest answer for a row about a Wayland protocol.
+        clipboard_rung: clipboard_rung(),
     };
     app::run(init)?;
 
@@ -101,7 +113,27 @@ pub fn run(paths: Paths) -> Result<()> {
     Ok(())
 }
 
-/// Who owns the trigger binding, as the daemon published it (ticket 36).
+/// Which data-control protocol this session advertises, for the
+/// OCR-to-clipboard row.
+///
+/// A connection and one roundtrip of its own, thrown away immediately:
+/// this process is already a Wayland client (iced owns a toplevel), and
+/// asking the registry is what makes the row true with no daemon
+/// running. Unreachable display or a failed roundtrip is `None` - a row
+/// about a Wayland protocol has nothing else to say about a session it
+/// cannot see.
+fn clipboard_rung() -> Option<clipboard::Rung> {
+    let conn = wayland_client::Connection::connect_to_env().ok()?;
+    clipboard::rung(&wayland::collect_globals(&conn).ok()?)
+}
+
+/// Who owns one action's binding, as the daemon published it (ticket 36).
+///
+/// Resolved per portal id (ticket 09): the daemon requests both ids in
+/// one session, so its published answer names each one separately and a
+/// row can render its own key without borrowing another's. `published`
+/// is read once by the caller so the two rows can never disagree about
+/// which file they read.
 ///
 /// The portal control is only rendered when a daemon actually got the
 /// GlobalShortcuts session *and* the bind through — never on a bus
@@ -112,11 +144,14 @@ pub fn run(paths: Paths) -> Result<()> {
 /// a portal binding for a daemon that has none. No file, or a file
 /// saying native, therefore means the compositor bind is the truth and
 /// the snippet is what helps.
-fn hotkey_channel(state_dir: &Path) -> channel::HotkeyChannel {
-    match shortcuts::state::read(state_dir) {
-        Some(published) if published.portal => channel::HotkeyChannel::Portal {
-            current_binding: published.trigger_description(),
-        },
+fn hotkey_channel(
+    published: Option<&shortcuts::state::Published>,
+    id: shortcuts::ShortcutId,
+) -> channel::HotkeyChannel {
+    match published {
+        Some(published) if published.portal => {
+            channel::HotkeyChannel::Portal { current_binding: published.description(id) }
+        }
         _ => channel::HotkeyChannel::Native,
     }
 }
@@ -146,6 +181,11 @@ mod tests {
         dir
     }
 
+    /// What `run` does: read the file once, resolve one channel per id.
+    fn channel_for(dir: &Path, id: ShortcutId) -> HotkeyChannel {
+        hotkey_channel(shortcuts::state::read(dir).as_ref(), id)
+    }
+
     /// The portal rung reaches the window with the key the portal named,
     /// and the window renders the rebind control instead of a snippet.
     #[test]
@@ -159,11 +199,16 @@ mod tests {
             }]),
         )
         .unwrap();
-        let channel = hotkey_channel(&dir);
+        let channel = channel_for(&dir, ShortcutId::Trigger);
         assert_eq!(HotkeyChannel::Portal { current_binding: Some("Alt+F".into()) }, channel);
         assert_eq!(
             HotkeyControl::Rebind { current: Some("Alt+F".into()) },
-            channel.control(snippets::Compositor::Kde, "ALT+F", Path::new("chibipop"))
+            channel.control(
+                snippets::Compositor::Kde,
+                "ALT+F",
+                Path::new("chibipop"),
+                snippets::Bind::Hold,
+            )
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -179,7 +224,10 @@ mod tests {
             &Published::portal(vec![Binding { id: ShortcutId::Trigger, trigger: None }]),
         )
         .unwrap();
-        assert_eq!(HotkeyChannel::Portal { current_binding: None }, hotkey_channel(&dir));
+        assert_eq!(
+            HotkeyChannel::Portal { current_binding: None },
+            channel_for(&dir, ShortcutId::Trigger)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -188,16 +236,70 @@ mod tests {
     #[test]
     fn the_native_rung_and_a_silent_daemon_both_show_the_snippet() {
         let dir = scratch("native");
-        assert_eq!(HotkeyChannel::Native, hotkey_channel(&dir), "no file at all");
+        assert_eq!(
+            HotkeyChannel::Native,
+            channel_for(&dir, ShortcutId::Trigger),
+            "no file at all"
+        );
         shortcuts::state::publish(&dir, &Published::native()).unwrap();
-        let channel = hotkey_channel(&dir);
+        let channel = channel_for(&dir, ShortcutId::Trigger);
         assert_eq!(HotkeyChannel::Native, channel);
-        let HotkeyControl::Snippet { text } =
-            channel.control(snippets::Compositor::Sway, "ALT+F", Path::new("/opt/cp/chibipop"))
+        let HotkeyControl::Snippet { text } = channel.control(
+            snippets::Compositor::Sway,
+            "ALT+F",
+            Path::new("/opt/cp/chibipop"),
+            snippets::Bind::Hold,
+        )
         else {
             panic!("the native rung must render a snippet");
         };
         assert!(text.contains("/opt/cp/chibipop ctl trigger-down"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The add-card row's own status (ticket 09): when the portal
+    /// answered for `anki-add`, that row names *its* key and the
+    /// trigger row names the trigger's - two rows, two keys, one file.
+    #[test]
+    fn the_add_card_row_gets_the_key_the_portal_published_for_it() {
+        let dir = scratch("addportal");
+        shortcuts::state::publish(
+            &dir,
+            &Published::portal(vec![
+                Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
+                Binding { id: ShortcutId::AnkiAdd, trigger: Some("Alt+A".into()) },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            HotkeyChannel::Portal { current_binding: Some("Alt+F".into()) },
+            channel_for(&dir, ShortcutId::Trigger)
+        );
+        assert_eq!(
+            HotkeyChannel::Portal { current_binding: Some("Alt+A".into()) },
+            channel_for(&dir, ShortcutId::AnkiAdd)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A portal that bound the trigger and never answered for the add:
+    /// the add row is still on the portal rung (the session owns it),
+    /// but it names no key rather than the trigger's.
+    #[test]
+    fn an_unanswered_add_id_is_still_the_portal_rung_with_no_key() {
+        let dir = scratch("addsilent");
+        shortcuts::state::publish(
+            &dir,
+            &Published::portal(vec![Binding {
+                id: ShortcutId::Trigger,
+                trigger: Some("Alt+F".into()),
+            }]),
+        )
+        .unwrap();
+        assert_eq!(
+            HotkeyChannel::Portal { current_binding: None },
+            channel_for(&dir, ShortcutId::AnkiAdd)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -33,10 +33,6 @@ fn to_ocr_lines(r: &RecogniseResult) -> Vec<OcrLine> {
         .collect()
 }
 
-fn encode_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
-    crate::text::capture::encode_bgra_to_png(bgra, w, h)
-}
-
 pub fn estimate_offset(line: &str, cursor_x: i32, region: PhysRect) -> usize {
     let chars = line.chars().count();
     if chars == 0 || region.w <= 0 {
@@ -75,7 +71,7 @@ impl PluginText {
     }
 
     fn attempt(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
-        let png = encode_png(buf, w, h)?;
+        let png = crate::image::encode_bgra_to_png(buf, w, h)?;
         let params = RecogniseParams {
             image_png: base64::engine::general_purpose::STANDARD.encode(&png),
             // The image is its own frame.
@@ -142,7 +138,6 @@ impl chibipop::text::OcrEngine for PluginText {
 mod tests {
     use super::*;
     use crate::plugin::proto::{Line, RecogniseResult, Rect, Word};
-    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
     fn region() -> PhysRect {
         PhysRect { x: 100, y: 200, w: 500, h: 100 }
@@ -207,18 +202,6 @@ mod tests {
             Box::new(p)
         }
         let _ = boxed;
-    }
-
-    #[test]
-    #[ignore = "needs a WinRT apartment, run by hand"]
-    fn the_encoder_produces_a_real_png() {
-        // SAFETY: this thread has not initialised an apartment, and
-        // BitmapEncoder needs one. This is the only test in the lib binary
-        // that reaches WinRT, and it is ignored, so nothing else has
-        // established a conflicting apartment on this thread.
-        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.unwrap();
-        let png = encode_png(&[0xFFu8; 8 * 8 * 4], 8, 8).expect("encode");
-        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]

@@ -660,6 +660,7 @@ mod tests {
         cfg.trigger.trigger_key_linux = "SUPER+J".to_string();
         cfg.anki.add_key_linux = "SUPER+K".to_string();
         cfg.anki.static_region_key_linux = "SUPER+R".to_string();
+        cfg.actions.screenshot.hotkey_linux = Some("SUPER+S".to_string());
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
             hotkey: Some("f9".into()),
             hotkey_linux: Some("SUPER+C".into()),
@@ -675,6 +676,7 @@ mod tests {
             Some("SUPER+C".to_string()),
             out.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone())
         );
+        assert_eq!(Some("SUPER+S".to_string()), out.actions.screenshot.hotkey_linux);
         assert_eq!(crate::config::PopupLayer::Top, out.popup.layer);
         assert_eq!("light", out.popup.theme);
     }
@@ -1274,7 +1276,7 @@ mod tests {
         assert_eq!(
             vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
             form.dict_names,
-            "the tab must match resolve_dict_filter's fallback",
+            "the tab must match present_config's fallback",
         );
         assert!(form.dict_excluded.is_empty());
     }

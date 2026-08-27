@@ -623,6 +623,10 @@ impl SeatHandler for App {
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<App>, _: WlSeat) {}
 }
 
+/// Every `wl_pointer` frame in the daemon lands here - the popup's
+/// pointer and, while a region pick is up, that pick's own - because
+/// SCTK has one handler per state. `App` sorts them by surface
+/// identity; this impl deliberately knows nothing about which is which.
 impl PointerHandler for App {
     fn pointer_frame(
         &mut self,
@@ -631,9 +635,7 @@ impl PointerHandler for App {
         _: &WlPointer,
         events: &[PointerEvent],
     ) {
-        let interactions = frame(self.popup_mut(), events);
-        self.flush_popup_notes();
-        self.pointer_interactions(interactions);
+        App::pointer_frame(self, events);
     }
 }
 

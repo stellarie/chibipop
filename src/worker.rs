@@ -547,7 +547,7 @@ mod tests {
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
             language: "ja".to_string(),
-            present_cfg: Config::default().present_config(),
+            present_cfg: Config::default().present_config(&[], || true),
             scan_display: ScanDisplay { captures: false, highlight: false },
             sentence_mode: SentenceMode::Line,
             static_region: None,
@@ -679,7 +679,7 @@ mod tests {
     /// about.
     fn state_with(dicts: Vec<DictInfo>) -> LookupState {
         LookupState {
-            present_cfg: Config::default().present_config(),
+            present_cfg: Config::default().present_config(&[], || true),
             scan_display: ScanDisplay { captures: false, highlight: false },
             sentence_mode: SentenceMode::Line,
             static_region: None,

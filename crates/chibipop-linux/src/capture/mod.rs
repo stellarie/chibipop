@@ -42,12 +42,12 @@ pub mod crop;
 pub mod dump;
 pub mod geometry;
 pub mod pacing;
-pub mod png;
 pub mod portal;
 pub mod session;
 pub mod shm;
 pub mod software_cursor;
 
+use crate::capture::backend::Backend;
 use crate::cursor::outputs::OutputGeometry;
 use crate::wayland::Advertised;
 use anyhow::{Context, Result};
@@ -58,6 +58,7 @@ use chibipop::text::{Frame, RegionCapture};
 use geometry::Piece;
 use pacing::{Arm, Pacer, Step, Verdict, ARM_DEADLINE, COPY_DEADLINE, DWELL_DEADLINE};
 use session::{Outcome, Session, Slot, State};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use wayland_client::Connection;
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
@@ -76,6 +77,132 @@ struct Held {
 /// Advertised globals enough for this rung.
 pub fn available(globals: &[Advertised]) -> bool {
     session::available(globals)
+}
+
+/// What opening a capture backend *outside* the Worker needs.
+///
+/// Deliberately not [`crate::worker::Setup`]: that one carries the
+/// dictionary path and no state dir, and a one-shot grab opens no
+/// dictionary. What the two share is the only two inputs ADR-0002's
+/// ladder has: what this session advertises, and which rung it picked.
+/// Both are read from the same startup probe, so neither re-runs
+/// [`backend::select`] behind the daemon's back.
+#[derive(Debug, Clone)]
+pub struct Setup {
+    /// The startup capability probe.
+    pub globals: Vec<Advertised>,
+    /// Which rung the ladder picked (ADR-0002). `None` is a session
+    /// with no capture protocol at all, which is a state and not a
+    /// crash.
+    pub backend: Option<Backend>,
+    /// Where the portal rung's restore token lives, so a second
+    /// session on rung 2 is silent instead of prompting again.
+    pub state_dir: PathBuf,
+}
+
+/// A backend and the output layout it reads through.
+pub struct Opened {
+    pub backend: Box<dyn RegionCapture>,
+    /// The outputs, in the cursor channel's convention: what a caller
+    /// with no explicit box has to pick one from.
+    pub outputs: Vec<OutputGeometry>,
+}
+
+/// Open the rung the ladder picked, on the calling thread.
+///
+/// The Worker's backend is thread-affine by construction (see the
+/// module doc), so nothing outside the Worker may borrow it: everything
+/// else opens its own here. Both rungs are reachable, which is the
+/// whole reason this is not a `grim` shell-out (spec D2).
+///
+/// `log` carries the portal rung's consent steps, which are the only
+/// part of an open a user ever needs to see. The screencopy rung says
+/// nothing: it prompts for nothing.
+pub fn open(setup: &Setup, log: &mut dyn FnMut(&str)) -> Result<Opened> {
+    match setup.backend {
+        Some(Backend::WlrScreencopy) => {
+            let backend =
+                WlrScreencopy::open(&setup.globals).context("opening the screencopy backend")?;
+            let outputs = backend.outputs();
+            Ok(Opened { backend: Box::new(backend), outputs })
+        }
+        Some(Backend::Portal) => {
+            let outputs = crate::cursor::image_copy::probe_geometry(&setup.globals);
+            log("capture: portal consent follows - a dialog may appear on your screen");
+            let session = portal::PortalSession::open(
+                &setup.state_dir,
+                &outputs,
+                PhysPoint { x: 0, y: 0 },
+                None,
+                |line| log(&line),
+            )
+            .context("opening the portal capture session")?;
+            log(&format!(
+                "capture: portal session {} node {} health {:?}",
+                session.session_path(),
+                session.node_id(),
+                session.health()
+            ));
+            Ok(Opened { backend: Box::new(portal::PortalCapture::new(session)), outputs })
+        }
+        // ADR-0002: an absent rung is a rung the ladder skips, and a
+        // ladder with no rungs left is a named state.
+        None => anyhow::bail!("this compositor advertises no capture protocol chibipop can use"),
+    }
+}
+
+/// One whole read - bracket included, exactly as the Worker reads - so
+/// the pacing a caller sees is the pacing a hover gets.
+pub fn read(backend: &mut dyn RegionCapture, region: PhysRect) -> Result<Frame> {
+    anyhow::ensure!(
+        region.w > 0 && region.h > 0,
+        "a {}x{} region has no pixels to grab",
+        region.w,
+        region.h
+    );
+    backend.begin_read();
+    let frame = backend.grab(region);
+    backend.end_read();
+    let frame = frame.with_context(|| {
+        format!("grabbing {}x{} at ({},{})", region.w, region.h, region.x, region.y)
+    })?;
+    anyhow::ensure!(
+        frame.w == region.w && frame.h == region.h,
+        "the backend answered {}x{} for a {}x{} request",
+        frame.w,
+        frame.h,
+        region.w,
+        region.h
+    );
+    Ok(frame)
+}
+
+/// One arbitrary-rect grab with a backend of its own (spec D6).
+///
+/// **The caller owns the thread.** This blocks - a screencopy round
+/// trip, or a whole portal handshake on rung 2 - so the daemon must
+/// never call it on the calloop pump. The shape it is written for is
+/// `spawn_anki`'s: clone a [`Setup`], move it into a
+/// `std::thread::Builder::spawn`, and answer the pump over a
+/// `calloop::channel` the way an AnkiConnect call answers it.
+///
+/// ```ignore
+/// let setup = self.capture_setup();
+/// let tx = self.shot_tx.clone();
+/// std::thread::Builder::new().name("chibipop-shot".into()).spawn(move || {
+///     let _ = tx.send(capture::oneshot(&setup, region).map_err(|e| format!("{e:#}")));
+/// })?;
+/// ```
+///
+/// A backend per grab rather than a shared one is the point: the
+/// Worker's is thread-affine and a second reader on it would have two
+/// threads dispatching one queue.
+pub fn oneshot(setup: &Setup, region: PhysRect) -> Result<Frame> {
+    // A one-shot has nowhere to put the portal's consent chatter: the
+    // log lives on the pump thread, and this function may be running on
+    // a thread of its own. A refusal still travels, as the error.
+    let mut opened = open(setup, &mut |_| {})?;
+    read(opened.backend.as_mut(), region)
 }
 
 /// wlr-screencopy region capture, on this thread's own connection.

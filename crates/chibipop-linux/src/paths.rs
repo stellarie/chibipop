@@ -69,6 +69,43 @@ impl Paths {
     pub fn log_file(&self) -> PathBuf {
         self.state_dir.join("chibipop.log")
     }
+
+    /// Where `actions.screenshot.save_dir` resolves to.
+    ///
+    /// An absolute value is taken as-is — a user who typed a path meant
+    /// that path. A relative one resolves **beside the exe in portable
+    /// mode** and **under `data_dir` otherwise**.
+    ///
+    /// The portable half is a deliberate divergence from XDG, kept for
+    /// parity: Windows always joins a relative `save_dir` onto the exe
+    /// directory (`crates/chibipop-windows/src/app.rs:1479-1483`,
+    /// documented in `README.md`), and portable mode's whole promise
+    /// (ADR-0006) is that a copied folder carries everything with it —
+    /// screenshots landing in `~/.local/share` would leave part of the
+    /// user's data behind on the machine. Under XDG the default
+    /// `screenshots` is user *data*, not cache: it is the picture a card
+    /// points at, and losing it breaks the card.
+    pub fn screenshots_dir(&self, save_dir: &str) -> PathBuf {
+        let save_dir = Path::new(save_dir);
+        if save_dir.is_absolute() {
+            return save_dir.to_path_buf();
+        }
+        match self.mode {
+            // Portable mode *is* "the config file sits beside the exe"
+            // (see the module header), so the config's parent is the
+            // exe directory by definition - no second probe of the
+            // environment, and no dependence on where the log went.
+            Mode::Portable => match self.config_file.parent() {
+                Some(exe_dir) => exe_dir.join(save_dir),
+                // Unreachable: `resolve` only reaches Portable through
+                // `exe_dir.join(CONFIG_FILE)`. Relative rather than
+                // panicking, because a screenshot path is not worth a
+                // crash.
+                None => save_dir.to_path_buf(),
+            },
+            Mode::Explicit | Mode::Xdg => self.data_dir.join(save_dir),
+        }
+    }
 }
 
 /// The environment snapshot resolution reads: a plain struct so tests
@@ -366,6 +403,55 @@ mod tests {
         assert_eq!(Mode::Explicit, p.mode);
         assert_eq!(PathBuf::from("/etc/chibipop.toml"), p.config_file);
         assert_eq!(PathBuf::from("/home/u/.local/state/chibipop"), p.state_dir);
+        let _ = std::fs::remove_dir_all(&exe_dir);
+    }
+
+    /// The XDG rung puts screenshots under the data dir: a card points
+    /// at the file, so it is user data, never cache.
+    #[test]
+    fn a_relative_screenshot_dir_lands_under_the_data_dir_on_xdg() {
+        let p = resolve(&env_with_home(), None);
+        assert_eq!(
+            PathBuf::from("/home/u/.local/share/chibipop/screenshots"),
+            p.screenshots_dir("screenshots")
+        );
+        // The explicit rung is the XDG layout with one file moved, so it
+        // resolves the same way.
+        let explicit = resolve(&env_with_home(), Some(PathBuf::from("/etc/chibipop.toml")));
+        assert_eq!(
+            PathBuf::from("/home/u/.local/share/chibipop/shots"),
+            explicit.screenshots_dir("shots")
+        );
+    }
+
+    /// Portable mode keeps every artefact beside the exe, matching the
+    /// Windows bin's own `save_dir` resolution: a copied folder has to
+    /// carry the screenshots a user's cards point at.
+    #[test]
+    fn a_relative_screenshot_dir_lands_beside_the_exe_in_portable_mode() {
+        let exe_dir = tmp_exe_dir("shots");
+        std::fs::write(exe_dir.join(CONFIG_FILE), "").unwrap();
+        let mut env = env_with_home();
+        env.exe_dir = Some(exe_dir.clone());
+        let p = resolve(&env, None);
+        assert_eq!(Mode::Portable, p.mode);
+        assert_eq!(exe_dir.join("screenshots"), p.screenshots_dir("screenshots"));
+        let _ = std::fs::remove_dir_all(&exe_dir);
+    }
+
+    /// A typed absolute path is taken as-is, in every mode.
+    #[test]
+    fn an_absolute_screenshot_dir_is_taken_as_typed() {
+        let exe_dir = tmp_exe_dir("shotsabs");
+        std::fs::write(exe_dir.join(CONFIG_FILE), "").unwrap();
+        let mut env = env_with_home();
+        env.exe_dir = Some(exe_dir.clone());
+        for p in [resolve(&env, None), resolve(&env_with_home(), None)] {
+            assert_eq!(
+                PathBuf::from("/home/u/Pictures/mining"),
+                p.screenshots_dir("/home/u/Pictures/mining")
+            );
+        }
         let _ = std::fs::remove_dir_all(&exe_dir);
     }
 

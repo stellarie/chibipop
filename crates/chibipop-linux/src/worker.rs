@@ -20,18 +20,19 @@ use crate::capture::portal::PortalCapture;
 use crate::capture::WlrScreencopy;
 use crate::wayland::Advertised;
 use anyhow::{bail, Context, Result};
-use chibipop::config::Config;
-use chibipop::geom::ScanDisplay;
+use chibipop::config::{AnkiConfig, Config};
+use chibipop::geom::{PhysRect, ScanDisplay};
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;
 use chibipop::lookup::model::{Dictionary, Entry, TermRow};
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
 use chibipop::present::DictInfo;
-use chibipop::text::layout::CaptureSize;
-use chibipop::worker::{Worker, WorkerParts, WorkerSettings};
+use chibipop::text::layout::{CaptureSize, OcrLine};
+use chibipop::worker::{ServeNudge, Worker, WorkerParts, WorkerSettings};
 use chibipop_linux::ocr::MeikiOcr;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 /// The bundled deconjugation rules, relative to the binary.
 const RULES: &str = "data/deconjugator.json";
@@ -45,6 +46,62 @@ pub struct Setup {
     pub backend: Option<Backend>,
     /// The built dictionary; may not exist yet.
     pub db: PathBuf,
+}
+
+/// Pixels handed to the Worker's OCR engine as a one-off job, and where
+/// the lines go home.
+///
+/// The engine is thread-affine (ADR-0009: three ONNX sessions built on
+/// the Worker's thread), so a job that wants OCR outside a hover has to
+/// run *there*. Core owns that seam — `WorkerParts::serve` — and this is
+/// what travels through it.
+pub struct OcrRequest {
+    /// Top-down BGRA8, at native resolution: this adapter never
+    /// upscales (ADR-0009).
+    pub bgra: Vec<u8>,
+    pub w: i32,
+    pub h: i32,
+    /// The pump's own channel, so an answer is an event and never a
+    /// blocked thread (ADR-0001). A failure travels as text because the
+    /// log lives on the pump.
+    pub answer: calloop::channel::Sender<Result<Vec<OcrLine>, String>>,
+}
+
+/// The one-off OCR queue, and the wake that makes it arrive.
+///
+/// The Worker owns the only OCR engine and drains this queue from its
+/// `serve` hook — but it *blocks* on its own trigger channel and cannot
+/// see this one, so queueing pixels is only half of handing them over.
+/// One type owning both halves, so the two cannot come apart (the
+/// Windows bin's `action::OcrJobs`, same reasoning).
+#[derive(Clone)]
+pub struct OcrJobs {
+    tx: mpsc::Sender<OcrRequest>,
+    nudge: ServeNudge,
+}
+
+impl OcrJobs {
+    pub fn new(tx: mpsc::Sender<OcrRequest>, nudge: ServeNudge) -> OcrJobs {
+        OcrJobs { tx, nudge }
+    }
+
+    /// A queue with no pipeline behind it: the job is parked and never
+    /// served, which is the honest answer while the Worker is down (no
+    /// capture protocol, no OCR models, a refused portal) - the caller
+    /// hears it as a dead answer channel rather than as a copy that
+    /// silently never happens.
+    pub fn disconnected() -> OcrJobs {
+        OcrJobs { tx: mpsc::channel().0, nudge: ServeNudge::disconnected() }
+    }
+
+    /// Queue pixels, then wake the Worker to read them.
+    pub fn send(&self, request: OcrRequest) -> Result<()> {
+        self.tx.send(request).map_err(|_| {
+            anyhow::anyhow!("the OCR pipeline is not running, so there is nothing to recognise with")
+        })?;
+        self.nudge.nudge();
+        Ok(())
+    }
 }
 
 /// The dictionary a fresh install has: none.
@@ -117,6 +174,18 @@ fn deconjugator() -> Deconjugator {
     }
 }
 
+/// The user-drawn box [`chibipop::config::SentenceMode::Static`] reads
+/// from, in the coordinate space core has: physical pixels.
+///
+/// The TOML stores `[x, y, w, h]` because a rect is four numbers and an
+/// array round-trips on every platform (`Config` is shared); everything
+/// above the file wants a [`PhysRect`]. One conversion, so the region the
+/// pipeline reads and the one the outline draws cannot disagree — the
+/// daemon's outline predicate goes through here too.
+pub fn static_region(anki: &AnkiConfig) -> Option<PhysRect> {
+    anki.static_region.map(|[x, y, w, h]| PhysRect { x, y, w, h })
+}
+
 /// What the Worker owns, from the config the daemon has loaded.
 pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
     WorkerSettings {
@@ -129,15 +198,17 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
         capture: CaptureSize { w: config.ocr.capture_width, h: config.ocr.capture_height },
         scan_alphanumeric: config.ocr.scan_alphanumeric,
         language: config.ocr.language.clone(),
-        present_cfg: config.present_config(),
+        // The "Not searched" split from the settings window. meikiocr is
+        // the only engine here, so the language gate is simply whether it
+        // reads the configured tag.
+        present_cfg: config
+            .present_config(dicts, || chibipop_linux::ocr::serves_language(&config.ocr.language)),
         scan_display: ScanDisplay {
             captures: config.debug.show_scan_region,
             highlight: config.popup.highlight_match,
         },
         sentence_mode: config.anki.sentence_mode,
-        // The static-region overlay is a Windows surface; on Linux
-        // `SentenceMode::Static` falls through to line mode with a warning.
-        static_region: None,
+        static_region: static_region(&config.anki),
         dicts: dicts.to_vec(),
     }
 }
@@ -148,11 +219,17 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
 /// (ADR-0002 rung 2), handed over because the Worker thread is what
 /// reads through it. The screencopy rung needs nothing here: it binds
 /// its own connection inside the closure, on that thread.
+///
+/// `jobs` is the receiving half of an [`OcrJobs`] queue, drained by the
+/// core `serve` hook between lookups. A fresh channel per spawn, because
+/// a respawn is a new thread with a new engine and the nudge that wakes
+/// it is the new Worker's.
 pub fn spawn(
     setup: &Setup,
     settings: WorkerSettings,
     portal: Option<PortalCapture>,
     ping: calloop::ping::Ping,
+    jobs: mpsc::Receiver<OcrRequest>,
 ) -> Result<(Worker, Vec<DictInfo>)> {
     let globals = setup.globals.clone();
     let backend = setup.backend;
@@ -186,11 +263,31 @@ pub fn spawn(
                 // daemon outlives its rebuilds and never restarts.
                 reopen_dict: Some(Box::new(move || open_dict(&reopen_db))),
                 engine: LookupEngine::new(deconjugator()),
-                serve: None,
+                serve: Some(serve_jobs(jobs)),
             })
         },
         move || ping.ping(),
     )
+}
+
+/// The `serve` hook: drain the one-off OCR queue against the facade.
+///
+/// Named rather than written inline above so a test can install the
+/// *shipped* hook over fake seams - a test that wrote its own closure
+/// would prove that a hook works, not that this one does.
+///
+/// `try_iter` and not `iter`: the hook runs immediately before the
+/// Worker blocks on its trigger channel, so one that waited for the next
+/// job would be a hover pipeline stopped on a clipboard copy.
+pub fn serve_jobs(jobs: mpsc::Receiver<OcrRequest>) -> chibipop::worker::ServeHook {
+    Box::new(move |source| {
+        for job in jobs.try_iter() {
+            let lines = source.recognise(&job.bgra, job.w, job.h).map_err(|e| format!("{e:#}"));
+            // A caller that gave up is not this thread's problem; the
+            // next job in the queue still runs.
+            let _ = job.answer.send(lines);
+        }
+    })
 }
 
 /// What the log says about the dictionaries a spawn found.
@@ -258,5 +355,93 @@ mod tests {
         let s = settings(&Config::default(), &[]);
         assert_eq!(1, s.upscale);
         assert_eq!(1, s.snapshot().upscale, "and the snapshot carries it to TextSource");
+    }
+
+    /// `settings` used to hardcode `static_region: None` with a comment
+    /// calling the overlay a Windows surface, so `SentenceMode::Static`
+    /// could never do anything here however carefully the user drew a
+    /// box. Core's `resolve_static` is platform-agnostic and reads only
+    /// this field, so carrying it through is the whole feature — pinned
+    /// at the one seam that builds `WorkerSettings` for this daemon.
+    #[test]
+    fn a_configured_static_region_reaches_the_worker_settings() {
+        let mut config = Config::default();
+        config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+        config.anki.static_region = Some([120, 240, 800, 300]);
+
+        let s = settings(&config, &[]);
+        // Both halves, because `resolve_static` gates on the pair: the
+        // mode alone falls through to line mode, and a region alone is
+        // never read.
+        assert_eq!(chibipop::config::SentenceMode::Static, s.sentence_mode);
+        assert_eq!(Some(PhysRect { x: 120, y: 240, w: 800, h: 300 }), s.static_region);
+    }
+
+    /// The default: no box drawn, nothing invented. Core falls through
+    /// to line mode on its own when the region is absent, so the honest
+    /// answer here is `None` rather than a whole-screen stand-in.
+    #[test]
+    fn no_drawn_region_stays_absent_rather_than_becoming_the_screen() {
+        assert_eq!(None, settings(&Config::default(), &[]).static_region);
+    }
+
+    /// The whole point of ticket 08: "Not searched" in the settings
+    /// window has to reach the pipeline. `settings` is the only place the
+    /// daemon builds `WorkerSettings` (reload and spawn both go through
+    /// it), so the scoping is pinned here at that seam.
+    #[test]
+    fn an_excluded_dictionary_is_dropped_from_the_worker_settings() {
+        let dicts = vec![
+            DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
+            DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
+        ];
+        let mut config = Config::default();
+        config.ocr.language = "ja".to_string();
+        config
+            .dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林".to_string()]);
+
+        let cfg = settings(&config, &dicts).present_cfg;
+        assert!(cfg.restrict_to_order, "the split must reach the pipeline");
+        let keeps = |name: &str| {
+            chibipop::present::keeps_dict(name, &cfg.dict_order, cfg.restrict_to_order)
+        };
+        assert!(keeps("大辞林　第四版"));
+        assert!(!keeps("Jitendex.org [2026-07-09]"), "excluded, so not searched");
+    }
+
+    /// No split, no filter: the shipped default searches everything.
+    #[test]
+    fn a_config_with_no_split_searches_every_dictionary() {
+        let dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
+        let cfg = settings(&Config::default(), &dicts).present_cfg;
+        assert!(!cfg.restrict_to_order);
+        assert!(chibipop::present::keeps_dict(
+            "Jitendex.org",
+            &cfg.dict_order,
+            cfg.restrict_to_order
+        ));
+    }
+
+    /// ADR-0012 hides `ocr.language` but keeps whatever is stored, so a
+    /// config shared with a Windows install can name a language meikiocr
+    /// does not read. That language's list was drawn up for a different
+    /// engine: honour the Windows gate and search everything.
+    #[test]
+    fn a_language_meikiocr_does_not_read_keeps_every_dictionary() {
+        let dicts = vec![
+            DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
+            DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
+        ];
+        let mut config = Config::default();
+        config.ocr.language = "zh-Hans-CN".to_string();
+        config
+            .dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["大辞林".to_string()]);
+
+        let cfg = settings(&config, &dicts).present_cfg;
+        assert!(!cfg.restrict_to_order, "the configured recogniser is not the one reading");
     }
 }

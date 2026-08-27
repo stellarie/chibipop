@@ -64,18 +64,41 @@ Settings live in `chibipop.toml` beside the executable.
 ## Mining screenshot
 
 Take a screenshot while mining a word. The screenshot saves to disk and
-attaches to the Anki card as a context image.
+attaches to the Anki card as a context image. Windows and Linux both do
+this, from the same rule in the shared core.
 
 1. **Enable it.** Settings > *Anki* tab > check **Include screenshot when
    adding**.
 2. **Mine a word.** Hover Japanese text until the popup appears.
-3. **Press the Anki add key.** The screen dims. Drag a rectangle around the
-   area you want to capture. Release to confirm.
-4. chibipop saves the PNG to `screenshots/` beside the executable. If Anki
-   is connected, it creates a card with the word and the screenshot.
+3. **Ask for the card** - press the Anki add key, or click the Anki button
+   under the popup. The screen dims. Drag a rectangle around the area you
+   want to capture. Release to confirm.
+4. chibipop saves the PNG and, if Anki is connected, creates a card with
+   the word and the screenshot.
 
-Press **Esc** during selection to skip the screenshot. The card is still
-created without an image.
+**Where the PNG lands.** The folder is `screenshots` by default, and the
+*Anki* tab's **Screenshots folder** box changes it. An absolute path is
+taken as typed. A relative one resolves per platform:
+
+- **Windows**, and **Linux in portable mode** (a `chibipop.toml` beside the
+  executable): beside the executable.
+- **Linux otherwise**: under `$XDG_DATA_HOME/chibipop` (`~/.local/share/chibipop`
+  when that is unset), so the default is
+  `~/.local/share/chibipop/screenshots`. It is data, not cache - losing it
+  breaks the card that points at it.
+
+Press **Esc** during selection - or right-click, on Linux - to skip the
+screenshot. The card is still created without an image. A selection left
+undecided for 20 seconds cancels itself.
+
+**Taking one on its own.** A separate key grabs a mining screenshot for
+the popup already on screen, whether or not the add key was pressed: it
+writes the PNG and, when Anki is serving, files a card for it. On Windows
+that key is `actions.screenshot.hotkey`; on Linux it is a compositor bind
+that runs `chibipop ctl screenshot`, offered as a copyable snippet by the
+*Anki* tab (see [docs/LINUX.md](docs/LINUX.md)). Pressed with no popup up,
+it says so in the log rather than doing nothing: there is no mining
+context without a lookup on screen.
 
 Map the screenshot to an Anki field with `source = "screenshot"` in
 your field map. The Settings dropdown shows it.

@@ -284,10 +284,11 @@ pub fn run() -> Result<()> {
                     print_hits(&hits);
 
                     // The app's own highlight fn.
+                    let all_dicts = dictionary.dicts()?;
                     let presentation = chibipop::present::build(
                         &hits,
-                        &dictionary.dicts()?,
-                        &chibipop::config::Config::default().present_config(),
+                        &all_dicts,
+                        &chibipop::config::Config::default().present_config(&all_dicts, || true),
                     );
                     match chibipop::present::match_highlight(&r.span, presentation.top.as_ref()) {
                         Some(m) => {

@@ -14,7 +14,7 @@
 //! the hit targets a click resolves against are taken from every frame
 //! this file paints.
 
-use super::place::{self, Placement, Shown, Visibility};
+use super::place::{self, Placement, Screen, Shown, Visibility};
 use super::pointer::{self, HitScene, InputRegion, Interaction, Pointer, Step};
 use super::{paint, physical_theme, text::TextEngine};
 use crate::cursor::outputs::OutputGeometry;
@@ -321,6 +321,83 @@ impl Popup {
 
     pub fn surface_count(&self) -> usize {
         self.panels.len()
+    }
+
+    /// The outputs, as the surfaces beside the popup need them.
+    ///
+    /// One `OutputState` serves the whole daemon (`registry_handlers!`
+    /// names exactly one), so the selector and the outline read the
+    /// monitor list here instead of binding a second one. They get the
+    /// popup's own surface ids with it, which is what makes "surface 1"
+    /// mean one monitor across every diagnostic this daemon writes.
+    pub fn screens(&self) -> Vec<Screen> {
+        self.panels
+            .iter()
+            .map(|p| Screen {
+                id: p.id,
+                output: p.output.clone(),
+                rect: place::output_physical(&p.geo),
+                scale: place::fractional(p.preferred, &p.geo),
+                name: self
+                    .outputs
+                    .info(&p.output)
+                    .and_then(|i| i.name)
+                    .unwrap_or_else(|| format!("output-{}", p.id)),
+            })
+            .collect()
+    }
+
+    /// The one `wl_shm` and the one `wl_compositor` this process bound.
+    ///
+    /// Shared with the selector and the outline so neither binds a
+    /// second: a `wl_shm`'s format list is per-process knowledge, and a
+    /// `wl_compositor` is a factory handle worth having exactly one of.
+    /// A `SlotPool` is *not* shared - it is an mmap, and one per
+    /// surface set is the point.
+    pub fn shm(&self) -> &Shm {
+        &self.shm
+    }
+
+    pub fn compositor(&self) -> &CompositorState {
+        &self.compositor
+    }
+
+    /// The one `wp_viewporter`, and no fractional-scale object beside
+    /// it: the popup already has a surface on every output, so its
+    /// `preferred_scale` is this daemon's single source of scale truth
+    /// and the other two surfaces read it back through
+    /// [`Popup::screens`]. Nothing latches it there either.
+    pub fn viewporter(&self) -> Option<&WpViewporter> {
+        self.viewporter.as_ref()
+    }
+
+    /// The logical theme this popup resolved from the config, and
+    /// re-resolves on every reload.
+    ///
+    /// The scan outline reads its four `scan_*` colours off it rather
+    /// than resolving a second theme of its own: the outline is drawn
+    /// beside the popup, for the same lookup, and there is exactly one
+    /// answer to "what does this session look like". Lengths here are
+    /// logical - the outline's are physical constants, so it never
+    /// wants the scaled copy [`physical_theme`] makes for a render.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Does one `wl_surface` belong to the popup?
+    ///
+    /// The routing question every shared SCTK handler now asks: three
+    /// kinds of layer surface answer into one `App`, so a `configure` or
+    /// a `frame` has to be sorted by identity rather than assumed to be
+    /// the popup's.
+    pub fn owns(&self, surface: &WlSurface) -> bool {
+        self.panels.iter().any(|p| p.layer.wl_surface() == surface)
+    }
+
+    /// The same question for a `closed`/`configure`, which name a layer
+    /// surface rather than a `wl_surface`.
+    pub fn owns_layer(&self, layer: &LayerSurface) -> bool {
+        self.panels.iter().any(|p| &p.layer == layer)
     }
 
     pub fn shown(&self) -> Option<Shown> {
@@ -1079,10 +1156,11 @@ impl CompositorHandler for App {
     ) {
     }
 
+    /// Only the popup asks for frame callbacks, and `App` checks that
+    /// before acting: three kinds of layer surface now dispatch into one
+    /// state, so nothing here may assume a surface is a panel.
     fn frame(&mut self, _: &Connection, _: &QueueHandle<App>, surface: &WlSurface, _: u32) {
-        self.popup_mut().frame_done(surface);
-        self.flush_popup_notes();
-        self.run_pointer_script();
+        self.surface_frame(surface);
     }
 
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<App>, _: &WlSurface, _: &WlOutput) {}
@@ -1122,10 +1200,14 @@ impl ShmHandler for App {
     }
 }
 
+/// Configures and closes for every layer surface in the daemon arrive
+/// here - the popup's panels, the selector's full-output dim, the
+/// outline's frames - because SCTK has one handler per state. `App`
+/// sorts them by surface identity; this impl deliberately knows nothing
+/// about which is which.
 impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<App>, layer: &LayerSurface) {
-        self.popup_mut().drop_layer(layer);
-        self.flush_popup_notes();
+        self.layer_closed(layer);
     }
 
     fn configure(
@@ -1136,11 +1218,7 @@ impl LayerShellHandler for App {
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        self.popup_mut().configured(layer, configure.new_size);
-        self.flush_popup_notes();
-        // A resize painted here rather than in `show`, so this is where
-        // a scripted pointer pass finds its frame.
-        self.run_pointer_script();
+        self.layer_configured(layer, configure.new_size);
     }
 }
 

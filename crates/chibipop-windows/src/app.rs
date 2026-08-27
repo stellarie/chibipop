@@ -3,7 +3,7 @@
 use crate::anki;
 use crate::config::{resolve_engine, Config, EngineChoice};
 use crate::controller::{
-    Command, Controller, ControllerConfig, Event, PopupView, TrayAction,
+    Command, Controller, ControllerConfig, Event, PopupView, RequestId, TrayAction,
 };
 use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay};
 use crate::input::hooks::Hooks;
@@ -1171,9 +1171,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     println!("chibipop: right-click the tray icon to change mode or quit.");
 
     // Spawned before dicts existed.
-    let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || configured_recogniser_runs(&cfg));
-    live.present_cfg.dict_order = order;
-    live.present_cfg.restrict_to_order = restrict;
+    rescope_lookups(&mut live, &cfg, &dicts, worker.trigger());
     // Visible just before the Hide.
     //
     // Cleared by hides elsewhere.
@@ -1186,10 +1184,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut controller = Controller::new(controller_config(&live));
     // OpenSettings, loop-deferred.
     let mut want_settings = false;
-    // The screenshot worker owns
-    // the add this Command::AddNote
-    // stands for (include_screenshot).
-    let mut screenshot_owns_add = false;
+    // An authorised add waiting on a
+    // region: see PendingShot.
+    let mut pending_shot: Option<PendingShot> = None;
     // Rising/falling key edges.
     let mut trigger_was_held = false;
     // Static overlay visibility.
@@ -1312,7 +1309,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     popup: &popup,
                     renderer: &mut renderer,
                     theme: &theme,
+                    cfg: &cfg,
                     live: &live,
+                    exe_dir: &exe_dir,
                     overlay: overlay.as_ref(),
                     anki_button: anki_button.as_ref(),
                     trigger_tx: worker.trigger(),
@@ -1321,7 +1320,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     add_tx: &add_tx,
                     main_tid,
                     want_settings: &mut want_settings,
-                    screenshot_owns_add: &mut screenshot_owns_add,
+                    pending_shot: &mut pending_shot,
                     dupe_cache: &dupe_cache,
                 },
             )
@@ -1332,22 +1331,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // dictionaries were known.
     drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
 
-    // PNG encoding needs WinRT.
+    // The screenshot worker: pure Rust now, so no WinRT apartment.
     {
         let rx = screenshot_rx;
         let tx = screenshot_done_tx;
         let tid = main_tid;
         thread::spawn(move || {
-            // SAFETY: initialises the WinRT apartment for this
-            // thread; `RO_INIT_MULTITHREADED` is always valid
-            // and calling it on a thread that already has one is
-            // harmless (returns `RPC_E_CHANGED_MODE` which we
-            // discard).
-            unsafe {
-                let _ = windows::Win32::System::WinRT::RoInitialize(
-                    windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
-                );
-            }
             for cmd in rx {
                 let result = handle_screenshot_save(cmd);
                 let _ = tx.send(result);
@@ -1437,86 +1426,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 drive!(Event::AddRequested);
             }
 
+            // Every add route is one event: the state machine decides,
+            // and its `AddNote` is where a screenshot joins in (spec D4).
             if Hooks::take_add_hotkey() {
-                // include_screenshot (upstream 0.9.x): pick a region, save
-                // the PNG, and let the screenshot worker attach the card; a
-                // cancelled selection falls back to the plain add.
-                //
-                // `Controller::start_add`'s own guards, applied here: this
-                // flow dispatches the add itself, so the state machine
-                // never sees the request and cannot refuse it for us.
-                // Nothing to add, an add in flight, or one already added
-                // means no selector and no PNG at all.
-                let payload = if live.include_screenshot {
-                    controller.popup().map(|view| {
-                        let (expr, fields) = note_payload(&view, live.first_dict_only);
-                        let refused = expr.is_empty()
-                            || view.anki.adding
-                            || view.anki.added.contains(&expr);
-                        (refused, (expr, fields), view.anki.connected)
-                    })
-                } else {
-                    None
-                };
-                match payload {
-                    // Refused: the hotkey does nothing.
-                    Some((true, ..)) => {}
-                    Some((false, (expr, fields), anki_connected)) => {
-                        let _ = popup.hide();
-                        if let Some(b) = &anki_button {
-                            b.hide();
-                        }
-                        let rect = region_selection.run();
-                        if let Some(rect) = rect {
-                            if let Ok(cap) = crate::text::capture::capture_upscaled_by(rect, 1) {
-                                let word = crate::action::screenshot::sanitize_filename(&expr);
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs();
-                                let filename = format!("{word}_{now}.png");
-                                let ss_cfg = &cfg.actions.screenshot;
-                                let save_dir = if Path::new(&ss_cfg.save_dir).is_absolute() {
-                                    PathBuf::from(&ss_cfg.save_dir)
-                                } else {
-                                    exe_dir.join(&ss_cfg.save_dir)
-                                };
-                                let save_path = save_dir.join(filename);
-                                let cmd = crate::action::ScreenshotCommand {
-                                    bgra_buf: cap.buf,
-                                    width: cap.w,
-                                    height: cap.h,
-                                    save_path,
-                                    expr,
-                                    fields,
-                                    field_map: live.anki_field_map.clone(),
-                                    anki_url: live.anki_url.clone(),
-                                    anki_deck: live.anki_deck.clone(),
-                                    anki_model: live.anki_model.clone(),
-                                    anki_connected,
-                                };
-                                let _ = screenshot_tx.send(cmd);
-                                // The worker owns this add now.
-                                screenshot_owns_add = true;
-                            }
-                        }
-                        let _ = popup.show_without_activating();
-                        if let Some(b) = &anki_button {
-                            b.show_without_activating();
-                        }
-                        // The Controller owns the add's state either
-                        // way - in-flight mark, repaint, button sync -
-                        // and refuses the next press until the answer
-                        // lands. Only the AddNote dispatch is the
-                        // worker's; a cancelled selection (or a failed
-                        // capture) falls back to the plain add.
-                        drive!(Event::AddRequested);
-                        screenshot_owns_add = false;
-                    }
-                    None => {
-                        drive!(Event::AddRequested);
-                    }
-                }
+                drive!(Event::AddRequested);
             }
 
             // Static region hotkey (slot 1).
@@ -1603,26 +1516,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         height,
                         save_dir,
                     }) => {
+                        // The mining screenshot files its own card and
+                        // is gated by neither `include_on_add` nor the
+                        // add guards, so it takes the ungated plan.
                         if let Some(view) = controller.popup() {
-                            let (expr, fields) = note_payload(&view, live.first_dict_only);
-                            let word = crate::action::screenshot::sanitize_filename(&expr);
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            let filename = format!("{word}_{now}.png");
-                            let save_path = save_dir.join(filename);
                             let cmd = crate::action::ScreenshotCommand {
                                 bgra_buf,
                                 width,
                                 height,
-                                save_path,
-                                expr,
-                                fields,
-                                field_map: live.anki_field_map.clone(),
-                                anki_url: live.anki_url.clone(),
-                                anki_deck: live.anki_deck.clone(),
-                                anki_model: live.anki_model.clone(),
+                                plan: crate::shot::plan(&view, &cfg, &save_dir, epoch_secs()),
+                                anki: anki_snapshot(&cfg, &live),
                                 anki_connected: view.anki.connected,
                             };
                             let _ = screenshot_tx.send(cmd);
@@ -1701,11 +1604,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
                                 live = derive(&cfg);
-                                let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || {
-                                    configured_recogniser_runs(&cfg)
-                                });
-                                live.present_cfg.dict_order = order;
-                                live.present_cfg.restrict_to_order = restrict;
+                                live.present_cfg = cfg
+                                    .present_config(&dicts, || configured_recogniser_runs(&cfg));
                                 sync_ocr_clipboard_action(
                                     &mut action_registry,
                                     live.actions_ocr_clipboard_hotkey.as_deref(),
@@ -1769,12 +1669,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 }
                             } else {
                                 live = derive(&updated);
-                                let (order, restrict) =
-                                    resolve_dict_filter(&updated, &dicts, || {
-                                        configured_recogniser_runs(&updated)
-                                    });
-                                live.present_cfg.dict_order = order;
-                                live.present_cfg.restrict_to_order = restrict;
+                                live.present_cfg = updated.present_config(&dicts, || {
+                                    configured_recogniser_runs(&updated)
+                                });
                                 sync_ocr_clipboard_action(
                                     &mut action_registry,
                                     live.actions_ocr_clipboard_hotkey.as_deref(),
@@ -1933,8 +1830,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         tray.notify("chibipop", &format!("{} added", result.expr));
                     }
                 }
-                // The failure has to land too - the popup marked itself
-                // in-flight when the hotkey dispatched this add.
+                // The failure has to land too - `start_add` marked the
+                // popup in flight before it handed this add over.
                 if !result.expr.is_empty() {
                     let failed = result.err.is_some();
                     drive!(Event::NoteAdded { expr: result.expr, failed });
@@ -1973,6 +1870,50 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+        }
+
+        // The OS half of screenshot-on-add, outside every command batch:
+        // the state machine authorised this add and marked the popup in
+        // flight, and all that is left is picking a region and grabbing
+        // it. The selector pumps messages of its own, which is exactly
+        // why it cannot run where the plan was made.
+        //
+        // The settings routing above can `continue` past this, but only
+        // for dialog messages - the dispatch tick never is one, so a
+        // parked plan waits at most one DISPATCH_TICK_MS.
+        if let Some(pending) = pending_shot.take() {
+            let _ = popup.hide();
+            if let Some(b) = &anki_button {
+                b.hide();
+            }
+            let grabbed = region_selection.run().and_then(|rect| {
+                crate::text::capture::capture_upscaled_by(rect, 1)
+                    .inspect_err(|e| eprintln!("chibipop: grabbing the screenshot failed: {e:#}"))
+                    .ok()
+            });
+            let _ = popup.show_without_activating();
+            if let Some(b) = &anki_button {
+                b.show_without_activating();
+            }
+            match grabbed {
+                Some(cap) => {
+                    let _ = screenshot_tx.send(crate::action::ScreenshotCommand {
+                        bgra_buf: cap.buf,
+                        width: cap.w,
+                        height: cap.h,
+                        plan: pending.plan,
+                        anki: anki_snapshot(&cfg, &live),
+                        anki_connected: pending.anki_connected,
+                    });
+                }
+                // Cancelled, or the grab failed: the card still goes in,
+                // just without a picture. The popup is already marked
+                // adding, so this is the only way it ever clears.
+                None => {
+                    let PendingShot { plan, .. } = pending;
+                    spawn_add_note(plan.expr, plan.fields, &live, &add_tx, main_tid);
+                }
             }
         }
     }
@@ -2073,58 +2014,65 @@ fn show_presentation(
     Ok((rect, content_h, view_h))
 }
 
-/// The add-note payload. Core owns
-/// the rule (ADR-0001); this is the
-/// `PopupView` shim the message loop
-/// calls.
-fn note_payload(
-    view: &PopupView<'_>,
-    first_dict_only: bool,
-) -> (String, HashMap<String, String>) {
-    crate::controller::note_payload(view.presentation, first_dict_only)
+/// Seconds since the epoch, for the screenshot filename.
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
-/// PNG + optional Anki card.
+/// The `[anki]` section as the pump reads it: the config's own, with
+/// `derive`'s empty-field-map fallback applied so a screenshot add
+/// routes its fields exactly like a plain one.
+fn anki_snapshot(cfg: &Config, live: &LiveSettings) -> crate::config::AnkiConfig {
+    crate::config::AnkiConfig { field_map: live.anki_field_map.clone(), ..cfg.anki.clone() }
+}
+
+/// One plain add, off the pump thread.
+fn spawn_add_note(
+    expr: String,
+    fields: HashMap<String, String>,
+    live: &LiveSettings,
+    add_tx: &mpsc::Sender<AddNoteResult>,
+    main_tid: u32,
+) {
+    let url = live.anki_url.clone();
+    let deck = live.anki_deck.clone();
+    let model = live.anki_model.clone();
+    let field_map = live.anki_field_map.clone();
+    let tx = add_tx.clone();
+    thread::spawn(move || {
+        let err = anki::add_note(&url, &deck, &model, &fields, &field_map)
+            .err()
+            .map(|e| format!("{e:#}"));
+        let _ = tx.send(AddNoteResult { expr, err });
+        // SAFETY: wakes the pump.
+        unsafe {
+            let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+/// Encode, write, file. Every rule
+/// here is core's (`chibipop::shot`);
+/// this runs it off the pump.
 fn handle_screenshot_save(
     cmd: crate::action::ScreenshotCommand,
 ) -> crate::action::ScreenshotResult {
     let result = (|| -> anyhow::Result<()> {
-        std::fs::create_dir_all(cmd.save_path.parent().unwrap_or(Path::new(".")))?;
-        let png = crate::text::capture::encode_bgra_to_png(&cmd.bgra_buf, cmd.width, cmd.height)?;
-        std::fs::write(&cmd.save_path, &png)?;
-        if cmd.anki_connected && !cmd.expr.is_empty() {
-            let screenshot_field = cmd
-                .field_map
-                .iter()
-                .find(|m| m.source == "screenshot")
-                .map(|m| m.anki_field.clone());
-            let pic = screenshot_field.map(|field| {
-                use base64::Engine;
-                crate::anki::NotePicture {
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(&png),
-                    filename: format!(
-                        "chibipop-screenshot-{}.png",
-                        cmd.save_path
-                            .file_stem()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                    ),
-                    fields: vec![field],
-                }
-            });
-            crate::anki::add_note_with_picture(
-                &cmd.anki_url,
-                &cmd.anki_deck,
-                &cmd.anki_model,
-                &cmd.fields,
-                &cmd.field_map,
-                pic.as_ref(),
-            )?;
+        let png = crate::image::encode_bgra_to_png(&cmd.bgra_buf, cmd.width, cmd.height)?;
+        // Anki unreachable: the picture is still worth saving, it just
+        // has no card to ride on.
+        if cmd.anki_connected && !cmd.plan.expr.is_empty() {
+            crate::shot::save_and_add(&png, &cmd.plan, &cmd.anki)?;
+        } else {
+            crate::shot::save(&png, &cmd.plan)?;
         }
         Ok(())
     })();
     crate::action::ScreenshotResult {
-        expr: cmd.expr,
+        expr: cmd.plan.expr,
         err: result.err().map(|e| format!("{e:#}")),
     }
 }
@@ -2229,12 +2177,28 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
     }
 }
 
+/// One add waiting on the OS half of the screenshot-on-add flow.
+///
+/// Parked by the `AddNote` executor, drained at the top of the pump: the
+/// region selector runs its own nested message pump, which cannot be
+/// entered from inside a command batch.
+struct PendingShot {
+    plan: crate::shot::ShotPlan,
+    /// The popup's view of AnkiConnect when the add was authorised.
+    /// False still writes the PNG; it just files no card.
+    anki_connected: bool,
+}
+
 /// What executing Commands needs.
 struct Exec<'a> {
     popup: &'a Popup,
     renderer: &'a mut Renderer,
     theme: &'a Theme,
+    /// The whole config: `AddNote` hands it to `chibipop::shot`, which
+    /// owns the screenshot-on-add rule.
+    cfg: &'a Config,
     live: &'a LiveSettings,
+    exe_dir: &'a Path,
     overlay: Option<&'a Overlay>,
     anki_button: Option<&'a AnkiButton>,
     trigger_tx: &'a mpsc::Sender<Trigger>,
@@ -2244,11 +2208,8 @@ struct Exec<'a> {
     main_tid: u32,
     /// OpenSettings, loop-handled.
     want_settings: &'a mut bool,
-    /// Set by the include_screenshot
-    /// flow: the screenshot worker
-    /// dispatches that add itself, so
-    /// `AddNote` only marks state.
-    screenshot_owns_add: &'a mut bool,
+    /// An add that wants a picture; the loop does the OS half.
+    pending_shot: &'a mut Option<PendingShot>,
     /// Read-only here; the pump
     /// owns the writes.
     dupe_cache: &'a HashMap<String, bool>,
@@ -2429,30 +2390,30 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::AddNote { expr, fields } => {
-            // The include_screenshot flow already sent this add to the
-            // screenshot worker (PNG attached); the Controller still
-            // ran start_add for the in-flight state, repaint and button
-            // sync, and the answer arrives as WM_APP_SCREENSHOT_DONE.
-            if *x.screenshot_owns_add {
-                *x.screenshot_owns_add = false;
+            // The screenshot-on-add seam (spec D4). Every route to an add
+            // - the low-level hook click, the button's own
+            // WM_LBUTTONDOWN, the add hotkey - arrives here, and it
+            // arrives only once `start_add` has applied its guards and
+            // marked the popup in flight, so this bin never restates one
+            // of them.
+            //
+            // The OS half (hide, select a region, grab) is deliberately
+            // not done here: the selector runs its own nested
+            // `GetMessageW` pump, and pumping inside a command batch
+            // would re-enter `drive` half-way through one. The plan is
+            // parked instead and the loop drains it once the batch is
+            // over.
+            let root = crate::action::screenshot::save_root(&x.cfg.actions.screenshot, x.exe_dir);
+            let pending = controller.popup().and_then(|view| {
+                let anki_connected = view.anki.connected;
+                crate::shot::plan_add(&view, x.cfg, &root, epoch_secs())
+                    .map(|plan| PendingShot { plan, anki_connected })
+            });
+            if pending.is_some() {
+                *x.pending_shot = pending;
                 return None;
             }
-            let url = x.live.anki_url.clone();
-            let deck = x.live.anki_deck.clone();
-            let model = x.live.anki_model.clone();
-            let field_map = x.live.anki_field_map.clone();
-            let tx = x.add_tx.clone();
-            let main_tid = x.main_tid;
-            thread::spawn(move || {
-                let err = anki::add_note(&url, &deck, &model, &fields, &field_map)
-                    .err()
-                    .map(|e| format!("{e:#}"));
-                let _ = tx.send(AddNoteResult { expr, err });
-                // SAFETY: wakes the pump.
-                unsafe {
-                    let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
-                }
-            });
+            spawn_add_note(expr, fields, x.live, x.add_tx, x.main_tid);
             None
         }
         Command::LogLookup { headword, match_len } => {
@@ -2533,7 +2494,6 @@ struct LiveSettings {
     per_character_lookup: bool,
     actions_screenshot_hotkey: String,
     actions_ocr_clipboard_hotkey: Option<String>,
-    include_screenshot: bool,
     first_dict_only: bool,
 }
 
@@ -2555,7 +2515,10 @@ impl LiveSettings {
 fn derive(cfg: &Config) -> LiveSettings {
     LiveSettings {
         popup: cfg.popup.clone(),
-        present_cfg: cfg.present_config(),
+        // No dictionary identities yet - the unrestricted fallback, which
+        // is what an empty library resolves to anyway. The three callers
+        // that have them re-resolve `present_cfg` right after.
+        present_cfg: cfg.present_config(&[], || true),
         scan_display: ScanDisplay {
             captures: cfg.debug.show_scan_region,
             highlight: cfg.popup.highlight_match,
@@ -2601,7 +2564,6 @@ fn derive(cfg: &Config) -> LiveSettings {
             .ocr_clipboard
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
-        include_screenshot: cfg.actions.screenshot.include_on_add,
         first_dict_only: cfg.anki.first_dict_only,
     }
 }
@@ -2621,6 +2583,38 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
         static_region: live.static_region,
         dicts: dicts.to_vec(),
     }
+}
+
+/// The "Not searched" split, once the identities are known.
+///
+/// `Config::present_config` matches the split against the installed
+/// dictionary names, and the worker's own first read is where those names
+/// come from - so the settings `Worker::spawn` was handed were resolved
+/// against an empty library and came out unrestricted. Push the real
+/// answer now that it can be computed: a fresh session must honour the
+/// setting from its first lookup, not from the first reload. Nothing to
+/// say when it did not change, which is every config with no split.
+fn rescope_lookups(
+    live: &mut LiveSettings,
+    cfg: &Config,
+    dicts: &[DictInfo],
+    trigger_tx: &mpsc::Sender<Trigger>,
+) {
+    let resolved = cfg.present_config(dicts, || configured_recogniser_runs(cfg));
+    if resolved == live.present_cfg {
+        return;
+    }
+    println!(
+        "chibipop: {} searches {} of {} dictionary/ies",
+        cfg.ocr.language,
+        resolved.dict_order.len(),
+        dicts.len(),
+    );
+    live.present_cfg = resolved;
+    let _ = trigger_tx.send(Trigger {
+        kind: TriggerKind::Reload(Box::new(worker_settings(live, dicts))),
+        id: RequestId(0),
+    });
 }
 
 /// Not excluded means guard on.
@@ -2766,24 +2760,6 @@ fn configured_recogniser_runs(cfg: &Config) -> bool {
     startup_language(tag, &fallback, || recogniser_available(tag)).is_none()
 }
 
-/// The list this language uses.
-fn resolve_dict_filter(
-    cfg: &Config,
-    dicts: &[DictInfo],
-    engine_runs: impl FnOnce() -> bool,
-) -> (Vec<String>, bool) {
-    let listed = cfg.dictionaries.per_language.get(&cfg.ocr.language);
-    let Some(list) = listed.filter(|l| !l.is_empty()) else {
-        return (cfg.dictionaries.display_order.clone(), false);
-    };
-    let installed = dicts.iter().map(|d| d.name.as_str());
-    if crate::present::any_listed(installed, list) && engine_runs() {
-        (list.clone(), true)
-    } else {
-        (cfg.dictionaries.display_order.clone(), false)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2888,6 +2864,64 @@ mod tests {
         let live = derive(&cfg);
         assert_eq!("zh-Hant", live.language);
         assert_eq!("zh-Hant", worker_settings(&live, &[]).language);
+    }
+
+    /// The dictionary names the "Not searched" split is matched against
+    /// are the worker's own first read, so the spawn cannot resolve the
+    /// scope before the worker exists - it re-resolves after. Without
+    /// that, a fresh session searched every dictionary until something
+    /// sent a reload. The pump cannot be driven from a unit test, so the
+    /// decision-and-push function is pinned directly.
+    #[test]
+    fn a_fresh_worker_is_told_the_split_once_the_names_are_known() {
+        let mut cfg = Config::default();
+        let lang = cfg.ocr.language.clone();
+        cfg.dictionaries
+            .per_language
+            .insert(lang, vec!["大辞林".to_string()]);
+        let mut live = derive(&cfg);
+        assert!(
+            !live.present_cfg.restrict_to_order,
+            "an empty library cannot be restricted"
+        );
+        let dicts = vec![
+            DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
+            DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
+        ];
+        let (tx, rx) = mpsc::channel::<Trigger>();
+
+        rescope_lookups(&mut live, &cfg, &dicts, &tx);
+
+        assert!(live.present_cfg.restrict_to_order, "the split resolved");
+        assert_eq!(
+            vec!["大辞林".to_string()],
+            live.present_cfg.dict_order,
+            "the surviving pattern, matched against the installed names"
+        );
+        let sent = rx.try_recv().expect("the reload must have reached the worker");
+        match sent.kind {
+            TriggerKind::Reload(settings) => {
+                assert_eq!(live.present_cfg, settings.present_cfg);
+                assert_eq!(2, settings.dicts.len(), "the reload carries the identities");
+            }
+            _ => panic!("a rescope is a reload"),
+        }
+    }
+
+    /// And costs nothing when there is nothing to say: the shipped
+    /// config has no split, so no reload and no log line.
+    #[test]
+    fn a_worker_whose_scope_did_not_change_is_left_alone() {
+        let cfg = Config::default();
+        let mut live = derive(&cfg);
+        let before = live.present_cfg.clone();
+        let dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
+        let (tx, rx) = mpsc::channel::<Trigger>();
+
+        rescope_lookups(&mut live, &cfg, &dicts, &tx);
+
+        assert_eq!(before, live.present_cfg);
+        assert!(rx.try_recv().is_err(), "an unchanged scope must not reload");
     }
 
     /// Step 3b: the input trio.
@@ -3019,67 +3053,6 @@ mod tests {
             dict_id: id,
             name: name.to_string(),
         }
-    }
-
-    #[test]
-    fn the_active_language_selects_its_own_list() {
-        let mut cfg = Config::default();
-        cfg.ocr.language = "zh-Hans-CN".to_string();
-        cfg.dictionaries
-            .per_language
-            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
-        let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
-        let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
-        assert_eq!(vec!["中日大辞典".to_string()], order);
-        assert!(restrict);
-    }
-
-    #[test]
-    fn a_language_with_no_list_falls_back_to_display_order() {
-        let cfg = Config::default();
-        let dicts = [di(1, "大辞林　第四版")];
-        let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
-        assert_eq!(cfg.dictionaries.display_order, order);
-        assert!(!restrict, "no entry must not restrict");
-    }
-
-    /// A typo must not blank it.
-    #[test]
-    fn a_list_matching_nothing_installed_falls_back() {
-        let mut cfg = Config::default();
-        cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries
-            .per_language
-            .insert("ja".to_string(), vec!["Typoo".to_string()]);
-        let dicts = [di(1, "大辞林　第四版")];
-        let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
-        assert!(!restrict, "all patterns missed, so do not restrict");
-    }
-
-    /// Wrong engine: no filter.
-    #[test]
-    fn a_substituted_recogniser_ignores_the_language_list() {
-        let mut cfg = Config::default();
-        cfg.ocr.language = "zh-Hans-CN".to_string();
-        cfg.dictionaries
-            .per_language
-            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
-        let dicts = [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")];
-        let (order, restrict) = resolve_dict_filter(&cfg, &dicts, || false);
-        assert_eq!(cfg.dictionaries.display_order, order);
-        assert!(!restrict, "the engine is not running this language");
-    }
-
-    #[test]
-    fn an_empty_list_does_not_restrict() {
-        let mut cfg = Config::default();
-        cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries
-            .per_language
-            .insert("ja".to_string(), Vec::new());
-        let dicts = [di(1, "大辞林　第四版")];
-        let (_, restrict) = resolve_dict_filter(&cfg, &dicts, || true);
-        assert!(!restrict);
     }
 
     struct ScratchDir(PathBuf);

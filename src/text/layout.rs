@@ -14,6 +14,34 @@ pub struct OcrLine {
     pub words: Vec<OcrWord>,
 }
 
+/// Recognised lines as one plain-text block: words butted together, one
+/// line per [`OcrLine`].
+///
+/// No space between words, because the words are Japanese and the OCR's
+/// word split is a recognition artefact rather than orthography - a
+/// space between them would be text the screen never had. The line
+/// break *is* on screen, so it survives.
+///
+/// In core rather than in a bin because both bins now copy a region's
+/// text to the clipboard (`ocr-clipboard`) and one rule cannot be two
+/// implementations (ADR-0001). Byte-for-byte the joined shape the
+/// Windows action shipped - one `String` instead of a `Vec<String>` and
+/// a `join`, because a clipboard payload is built once and read once.
+pub fn join_lines(lines: &[OcrLine]) -> String {
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        // Index, not emptiness: a line the recogniser answered with no
+        // words is still a line, so it still ends the one above it.
+        if i > 0 {
+            out.push('\n');
+        }
+        for word in &line.words {
+            out.push_str(&word.text);
+        }
+    }
+    out
+}
+
 /// The word under `cursor`.
 pub fn hit_scan(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, f64)> = None;
@@ -506,6 +534,37 @@ mod tests {
                 w("は", 160, 100, 20, 20),
             ],
         }]
+    }
+
+    /// Words are butted together and lines keep their break: the word
+    /// split is a recognition artefact, the line break is on screen.
+    #[test]
+    fn recognised_lines_join_without_spaces_and_keep_one_break_each() {
+        let lines = vec![
+            OcrLine { words: vec![w("これは", 0, 0, 1, 1), w("テスト", 0, 0, 1, 1)] },
+            OcrLine { words: vec![w("二行目", 0, 0, 1, 1)] },
+        ];
+        assert_eq!("これはテスト\n二行目", join_lines(&lines));
+    }
+
+    /// No lines is the empty string, not a stray newline: the caller
+    /// gates on emptiness to decide there is nothing to copy.
+    #[test]
+    fn nothing_recognised_joins_to_the_empty_string() {
+        assert_eq!("", join_lines(&[]));
+        assert_eq!("", join_lines(&[OcrLine { words: Vec::new() }]));
+    }
+
+    /// A line the recogniser answered with no words is still a line, so
+    /// it still ends the one above it.
+    #[test]
+    fn a_wordless_line_between_two_others_keeps_both_breaks() {
+        let lines = vec![
+            OcrLine { words: vec![w("上", 0, 0, 1, 1)] },
+            OcrLine { words: Vec::new() },
+            OcrLine { words: vec![w("下", 0, 0, 1, 1)] },
+        ];
+        assert_eq!("上\n\n下", join_lines(&lines));
     }
 
     #[test]

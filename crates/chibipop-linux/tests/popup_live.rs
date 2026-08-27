@@ -219,10 +219,15 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
     // placement arithmetic checked against the other side of the
     // protocol instead of against itself.
     if let Some(layers) = hyprctl("layers") {
+        // By pid, not by namespace alone: a developer running a real
+        // chibipop in the same session has a `namespace: chibipop`
+        // layer of their own, and comparing this daemon's placement
+        // against that one fails for no reason.
+        let pid = format!("pid: {}", session.daemon.id());
         let line = layers
             .lines()
-            .find(|l| l.contains("namespace: chibipop"))
-            .unwrap_or_else(|| panic!("no chibipop layer in:\n{layers}"))
+            .find(|l| l.contains("namespace: chibipop,") && l.contains(&pid))
+            .unwrap_or_else(|| panic!("no chibipop layer for {pid} in:\n{layers}"))
             .to_string();
         // `hyprctl` prints `xywh: X Y W H`, every number logical.
         let logical = format!(

@@ -13,6 +13,8 @@
 #[cfg(target_os = "linux")]
 mod capture;
 #[cfg(target_os = "linux")]
+mod clipboard;
+#[cfg(target_os = "linux")]
 mod control;
 #[cfg(target_os = "linux")]
 mod cursor;
@@ -25,9 +27,13 @@ mod lock;
 #[cfg(target_os = "linux")]
 mod logging;
 #[cfg(target_os = "linux")]
+mod overlay;
+#[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
 mod popup;
+#[cfg(target_os = "linux")]
+mod select;
 #[cfg(target_os = "linux")]
 mod settings;
 #[cfg(target_os = "linux")]
