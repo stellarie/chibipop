@@ -35,7 +35,7 @@ pub fn encode_bgra_to_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
 
     // BGRA -> RGB, dropping the junk byte.
     let mut rgb = Vec::with_capacity(pixels * 3);
-    for px in bgra[..need].chunks_exact(4) {
+    for px in bgra[..need].as_chunks::<4>().0 {
         rgb.extend_from_slice(&[px[2], px[1], px[0]]);
     }
 
@@ -79,8 +79,8 @@ mod tests {
         let (dw, dh, rgb) = decode(&png);
         assert_eq!((w as u32, h as u32), (dw, dh));
         assert_eq!((w * h * 3) as usize, rgb.len());
-        for (src, dst) in bgra.chunks_exact(4).zip(rgb.chunks_exact(3)) {
-            assert_eq!([src[2], src[1], src[0]], dst, "BGR -> RGB");
+        for (src, dst) in bgra.as_chunks::<4>().0.iter().zip(rgb.as_chunks::<3>().0) {
+            assert_eq!(&[src[2], src[1], src[0]], dst, "BGR -> RGB");
         }
     }
 
