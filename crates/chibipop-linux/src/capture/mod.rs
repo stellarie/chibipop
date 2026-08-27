@@ -468,7 +468,20 @@ impl WlrScreencopy {
         match self.st.copy.outcome {
             Some(Outcome::Ready) => {}
             Some(Outcome::Failed) => anyhow::bail!("the compositor failed the copy"),
-            None => anyhow::bail!("the copy went unanswered for {COPY_DEADLINE:?}"),
+            // The protocol leaves no third answer: `copy` is followed by
+            // `flags` and `ready`, or by `failed`
+            // (wlr-screencopy-unstable-v1, the `copy` request). Silence is
+            // neither, and it is what a compositor does for an output it is
+            // not repainting - measured on Hyprland 0.55.4 with the display
+            // DPMS-off, where the very grab that answers in 2 ms awake is
+            // still unanswered at 10 s. So the refusal names that condition
+            // rather than the timer, which is already 85x the cost of a copy
+            // this compositor does answer.
+            None => anyhow::bail!(
+                "the copy went unanswered for {COPY_DEADLINE:?}: the compositor owes ready \
+                 or failed and sent neither, which is what an output nothing is repainting \
+                 does - a display asleep or powered off"
+            ),
         }
         let cut = geometry::cut(&piece, shape.w, shape.h)
             .context("the copied buffer holds none of the requested pixels")?;

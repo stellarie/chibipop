@@ -465,6 +465,16 @@ into the frame. Fix: `hyprctl keyword cursor:no_hardware_cursors false` (make
 it permanent in `hyprland.conf` if your cursor survives). Verify either way
 with `chibipop capture-dump --region X,Y,W,H` around the pointer.
 
+**Every capture refuses with "the copy went unanswered".** The output chibipop
+asked about is not being repainted, which is what a display that has powered
+off (DPMS) looks like from a Wayland client — a locked, unattended desktop is
+the usual way to get there. `zwlr_screencopy_manager_v1` answers a `copy` with
+`ready` or `failed` and nothing else, so a compositor that goes silent leaves
+no third answer to report; chibipop refuses on its deadline rather than
+hanging. Wake the panel (`hyprctl dispatch dpms on`, or any input) and the
+same grab answers in single-digit milliseconds. Nothing to fix in chibipop, and
+nothing a hover can hit: there is no hovering on a dark screen.
+
 **The status row says the shortcuts portal refused an app id.** The daemon was
 started from a bare shell, which gives the GlobalShortcuts portal nothing to
 identify it by. Launch chibipop from its desktop entry or the systemd user
