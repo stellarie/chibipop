@@ -39,6 +39,8 @@ mod settings;
 #[cfg(target_os = "linux")]
 mod shortcuts;
 #[cfg(target_os = "linux")]
+mod signals;
+#[cfg(target_os = "linux")]
 mod tray;
 #[cfg(target_os = "linux")]
 mod trigger;

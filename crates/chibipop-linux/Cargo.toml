@@ -65,6 +65,10 @@ calloop-wayland-source.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
+# The signal mask behind the signalfd (ticket 13, src/signals.rs):
+# calloop's `signals` source masks only the thread that builds it, and
+# calloop exposes no mask of its own.
+nix.workspace = true
 # The `chibipop settings` window (ADR-0005): iced 0.14 on a plain
 # xdg_toplevel, in this transient process only — the daemon never links it.
 iced.workspace = true

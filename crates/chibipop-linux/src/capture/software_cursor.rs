@@ -141,7 +141,12 @@ pub fn probe() -> PointerInFrames {
 }
 
 fn read_option(option: &str) -> Option<i64> {
-    let out = Command::new("hyprctl").args(["getoption", option]).output().ok()?;
+    // Same reason as `hyprctl::sample`: no child inherits the daemon's
+    // shutdown mask (ticket 13).
+    let out = crate::signals::unmasked(&mut Command::new("hyprctl"))
+        .args(["getoption", option])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

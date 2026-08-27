@@ -23,12 +23,12 @@ use crate::overlay::{self, Outline};
 use crate::popup::{self, Demo, Popup, ShowRequest};
 use crate::select::{self, Pick, Selector};
 use crate::shortcuts;
+use crate::signals;
 use crate::trigger::{self, Hold};
 use crate::wayland;
 use crate::worker;
 use anyhow::{bail, Context, Result};
 use calloop::generic::Generic;
-use calloop::signals::{Signal, Signals};
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
 use calloop_wayland_source::WaylandSource;
@@ -2508,6 +2508,13 @@ fn epoch_secs() -> u64 {
 }
 
 pub fn run(paths: Paths) -> Result<()> {
+    // Before anything else in this process, because "anything else"
+    // eventually spawns a thread and the mask is only inherited at spawn
+    // (ticket 13, `signals::block_shutdown`). The source itself joins the
+    // pump far below, next to the other event sources; the signals are
+    // blocked from this line on either way.
+    let signals = signals::block_shutdown()?;
+
     let display = wayland::display_name()?;
     let runtime_dir = paths.runtime_dir()?;
 
@@ -2997,15 +3004,15 @@ pub fn run(paths: Paths) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering the tray channel: {e}"))?;
 
+    // The signalfd blocked at the top of `run`, now that there is a pump
+    // to read it: every thread this daemon has was spawned under that
+    // mask, so a process-directed SIGINT/SIGTERM has nowhere else to go.
     event_loop
         .handle()
-        .insert_source(
-            Signals::new(&[Signal::SIGINT, Signal::SIGTERM]).context("registering signal handling")?,
-            |event, _, app: &mut App| {
-                app.log.diag(&format!("signal: {:?} - shutting down", event.signal()));
-                app.signal.stop();
-            },
-        )
+        .insert_source(signals, |event, _, app: &mut App| {
+            app.log.diag(&format!("signal: {:?} - shutting down", event.signal()));
+            app.signal.stop();
+        })
         .map_err(|e| anyhow::anyhow!("registering the signal source: {e}"))?;
 
     // The Worker's results, drained on its wake.

@@ -46,10 +46,16 @@ impl SettingsChild {
 }
 
 /// The production command: this very binary, `settings` subcommand.
+///
+/// `unmasked` because the daemon blocks SIGINT/SIGTERM for every thread
+/// it has (ticket 13) and a mask outlives `exec`: without it the settings
+/// window - a long-lived process of its own - would start unable to hear
+/// a supervisor or a session asking it to stop.
 pub fn settings_command() -> io::Result<Command> {
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
     command.arg("settings");
+    crate::signals::unmasked(&mut command);
     Ok(command)
 }
 

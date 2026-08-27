@@ -39,7 +39,10 @@ pub fn parse_cursorpos(out: &str) -> Option<(i32, i32)> {
 /// One sample, logical layout coordinates. `None` on any failure —
 /// a missing binary or a hiccup must never kill the daemon.
 pub fn sample() -> Option<(i32, i32)> {
-    let out = Command::new("hyprctl").arg("cursorpos").output().ok()?;
+    // `unmasked`: the daemon's blocked SIGINT/SIGTERM would otherwise be
+    // this child's too (ticket 13), and a `hyprctl` that ever wedged
+    // would then outlive the group kill meant to clear it.
+    let out = crate::signals::unmasked(&mut Command::new("hyprctl")).arg("cursorpos").output().ok()?;
     if !out.status.success() {
         return None;
     }

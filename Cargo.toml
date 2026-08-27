@@ -105,6 +105,13 @@ png = "0.18.1"
 # Test-only: the OCR gate mirrors the benchmark harness's NFKC step when it
 # scores a prediction (tools/ocr-bench/bench/common.py normalise()).
 unicode-normalization = "0.1.24"
+# The POSIX signal mask (ticket 13): the daemon blocks SIGINT/SIGTERM for
+# every thread and hands the default disposition back to every child it
+# execs. `calloop`'s `signals` feature already resolves exactly this
+# version - its `Signal` enum is its own, so the mask itself has to come
+# from here - and its `signal` feature is the one calloop enables, so the
+# one-pin rule costs no new package and no new feature in the lockfile.
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }
 
 # --- ticket 34 (portal ScreenCast capture backend, ADR-0002 rung 2) ---
 # The portal handshake is D-Bus, and zbus is already in this tree: ksni's

@@ -528,6 +528,7 @@ dependencies = [
  "iced",
  "ksni",
  "libloading 0.9.0",
+ "nix",
  "ort",
  "png",
  "serde_json",
