@@ -16,9 +16,6 @@ __pycache__/
 /CONTEXT.md
 /docs/agents/
 /.scratch/
-# Local-only scripts, except the tracked packaging entrypoint.
-/scripts/
-!/scripts/package-linux.sh
 
 # Project memory - local only.
 /MEMORY.md
