@@ -6,6 +6,15 @@
 //! because an absent rung is a rung the ladder walks past (ADR-0002),
 //! not a failure.
 //!
+//! The assertions that read a *frame* skip once more when this session's
+//! outputs are not being repainted - an unattended dev box whose panel
+//! has powered off is the ordinary case - because a copy the compositor
+//! will never answer measures the display's power state and not this
+//! rung. Which rung was *chosen* is asserted either way: that line is
+//! printed at selection, before any frame exists, so it neither needs a
+//! lit screen nor is ever evidence that capture works. See
+//! [`skip_unless_painting`].
+//!
 //! **Nothing here opens a consent dialog by default.** A test suite
 //! that puts a permission prompt on a developer's screen every time it
 //! runs is a test suite people stop running, and the one dialog
@@ -37,6 +46,14 @@ const BACKEND: &str = "CHIBIPOP_CAPTURE_BACKEND";
 /// The opt-in that allows a real consent dialog.
 const CONSENT_OPT_IN: &str = "CHIBIPOP_PORTAL_CONSENT_TEST";
 
+/// The refusal a copy earns when the compositor took it and then said
+/// nothing at all: neither `ready` nor `failed`, which
+/// `wlr-screencopy-unstable-v1`'s `copy` request names as its only two
+/// answers. The measured cause on this box is an output nothing is
+/// repainting, and rung 1 here *is* that protocol -
+/// `wlr_capture_live.rs`'s `UNANSWERED` pins the measurement.
+const UNANSWERED: &str = "the copy went unanswered";
+
 /// Only skip on the two honest reasons: no session, or no portal.
 fn skip() -> bool {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
@@ -64,6 +81,29 @@ fn portal_on_the_bus() -> bool {
         ])
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// Whether the grab `out` records went unanswered, which makes the frame
+/// it never produced a measurement of the display's power state and not
+/// of this file's rung.
+///
+/// Mirrors `wlr_capture_live.rs`'s `skip_unless_painting`, and is narrow
+/// for the same reason: only [`UNANSWERED`] skips, so a wrong size, a
+/// `failed` frame or a bad format still falls through and fails the
+/// assertion it guards. It reads the dump the caller already ran instead
+/// of probing with a grab of its own, because down *this* file's ladder
+/// a probe is not free - a session advertising no screencopy would
+/// answer it from the portal rung, and the module doc budgets no dialog
+/// for a default run. Duplicated rather than shared because these two
+/// test binaries have no module to share: `tests/` here holds data
+/// fixtures and nothing else.
+fn skip_unless_painting(out: &std::process::Output) -> bool {
+    let refused = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() && refused.contains(UNANSWERED) {
+        eprintln!("skipping: {}", refused.trim());
+        return true;
+    }
+    false
 }
 
 /// A scratch state dir, so a test never reads or rotates the real
@@ -111,6 +151,11 @@ fn png_size(path: &Path) -> (u32, u32) {
 /// actually contradict it: Hyprland advertises screencopy *and* runs a
 /// ScreenCast portal, and the promptless rung must still win. If this
 /// ever regresses, a wlr user gets a permission dialog they never had.
+///
+/// And the rung it prefers has to *deliver*, which is a separate claim
+/// from having been chosen: the `capture:` line below is printed at
+/// selection, before the copy is even requested, so a grab that then
+/// produced nothing prints it just the same.
 #[test]
 fn a_session_with_both_rungs_still_takes_the_promptless_one() {
     if skip() {
@@ -119,6 +164,7 @@ fn a_session_with_both_rungs_still_takes_the_promptless_one() {
     let state = scratch("auto");
     let out = dump(&state, None, "0,0,8,8");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     if !stdout.contains("zwlr_screencopy_manager_v1")
         && !stdout.contains("capture: wlr-screencopy region capture")
     {
@@ -136,6 +182,14 @@ fn a_session_with_both_rungs_still_takes_the_promptless_one() {
     );
     // No dialog can have appeared, because the portal was never asked.
     assert!(!state.join("state/chibipop/portal-restore-token").exists());
+    // Everything above reads the choice. This reads the frame, so it is
+    // the one part a display nothing is repainting can honestly refuse.
+    if skip_unless_painting(&out) {
+        let _ = std::fs::remove_dir_all(&state);
+        return;
+    }
+    assert!(out.status.success(), "the preferred rung grabbed nothing: {stdout}\n{stderr}");
+    assert_eq!(png_size(&state.join("dump/chibipop-capture-0.png")), (8, 8), "{stdout}");
     let _ = std::fs::remove_dir_all(&state);
 }
 
@@ -155,6 +209,9 @@ fn an_empty_ladder_names_both_rungs_and_fails_cleanly() {
     assert!(stdout.contains("zwlr_screencopy_manager_v1"), "{stdout}");
     assert!(stdout.contains("org.freedesktop.portal.ScreenCast"), "{stdout}");
     assert!(!stderr.contains("panicked"), "{stderr}");
+    // "Cleanly" cuts both ways: a ladder with no rung must not leave a
+    // half-written frame behind pretending it had one.
+    assert!(!state.join("dump/chibipop-capture-0.png").exists(), "{stdout}");
     let _ = std::fs::remove_dir_all(&state);
 }
 
@@ -168,8 +225,20 @@ fn an_unknown_backend_override_is_reported_and_ignored() {
     let state = scratch("badenv");
     let out = dump(&state, Some("evdev"), "0,0,8,8");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stdout.contains("ignoring CHIBIPOP_CAPTURE_BACKEND=\"evdev\""), "{stdout}");
     assert!(stdout.contains("expected auto|screencopy|portal|none"), "{stdout}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    // "Ignored, never fatal" is a claim about what the ladder did next,
+    // and the diagnostic above would read exactly the same if the dump
+    // had died on the value: the run has to have gone on to finish the
+    // grab an unset hook would have taken.
+    if skip_unless_painting(&out) {
+        let _ = std::fs::remove_dir_all(&state);
+        return;
+    }
+    assert!(out.status.success(), "a bad override must not be fatal: {stdout}\n{stderr}");
+    assert_eq!(png_size(&state.join("dump/chibipop-capture-0.png")), (8, 8), "{stdout}");
     let _ = std::fs::remove_dir_all(&state);
 }
 
