@@ -2371,13 +2371,14 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             let url = x.live.anki_url.clone();
             let deck = x.live.anki_deck.clone();
             let model = x.live.anki_model.clone();
+            let field_map = x.live.anki_field_map.clone();
             let tx = x.anki_tx.clone();
             let main_tid = x.main_tid;
             thread::spawn(move || {
                 let refs: Vec<&str> = uncached.iter().map(|s| s.as_str()).collect();
                 // The union: the controller
                 // replaces, never merges.
-                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs) {
+                let dupes = match anki::find_duplicates(&url, &deck, &model, &refs, &field_map) {
                     Ok(found) => {
                         let mut all = cached_dupes;
                         all.extend(found);

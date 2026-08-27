@@ -325,8 +325,13 @@ impl AnkiCall {
         match self {
             AnkiCall::Dupes { generation, exprs } => {
                 let refs: Vec<&str> = exprs.iter().map(String::as_str).collect();
-                let dupes =
-                    chibipop::anki::find_duplicates(&anki.url, &anki.deck, &anki.model, &refs);
+                let dupes = chibipop::anki::find_duplicates(
+                    &anki.url,
+                    &anki.deck,
+                    &anki.model,
+                    &refs,
+                    &anki.field_map,
+                );
                 AnkiOutcome::Dupes { generation, dupes: dupes.map_err(|e| format!("{e:#}")) }
             }
             AnkiCall::Add { expr, fields } => {
