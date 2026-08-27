@@ -123,6 +123,18 @@ pub fn save_and_add(png: &[u8], plan: &ShotPlan, anki: &AnkiConfig) -> Result<i6
     )
 }
 
+/// Seconds since the epoch, for the screenshot filename.
+///
+/// One clock, here with the rule that consumes it: [`plan`] names files
+/// `<word>_<epoch>.png`, so both bins pass this as `now` and a
+/// screenshots folder carried between platforms is named one way.
+pub fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// A filename for `word`, safe on every platform this ships on.
 ///
 /// The illegal set is Windows': `\ / : * ? " < > |`. It is the strict

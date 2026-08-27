@@ -917,7 +917,12 @@ impl App {
     /// only hands it the popup, the config and the clock.
     fn plan_shot_for_add(&self) -> Option<chibipop::shot::ShotPlan> {
         let view = self.controller.popup()?;
-        chibipop::shot::plan_add(&view, &self.config, &self.screenshots_dir(), epoch_secs())
+        chibipop::shot::plan_add(
+            &view,
+            &self.config,
+            &self.screenshots_dir(),
+            chibipop::shot::epoch_secs(),
+        )
     }
 
     /// `screenshot`: grab a region and file it as the mining context for
@@ -939,7 +944,12 @@ impl App {
                 // picture whatever the popup's add state is, so it takes
                 // none of `plan_add`'s guards and does not read
                 // `include_on_add`.
-                chibipop::shot::plan(&view, &self.config, &self.screenshots_dir(), epoch_secs()),
+                chibipop::shot::plan(
+                    &view,
+                    &self.config,
+                    &self.screenshots_dir(),
+                    chibipop::shot::epoch_secs(),
+                ),
                 // The popup's own view of AnkiConnect. False still
                 // writes the PNG; it just has no card to ride on.
                 view.anki.enabled && view.anki.connected,
@@ -2500,16 +2510,6 @@ fn clipboard_notes(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::
     })
     .map_err(|e| anyhow::anyhow!("registering the clipboard note channel: {e}"))?;
     Ok(tx)
-}
-
-/// Now, as `chibipop::shot` names files by (the Windows bin's
-/// `epoch_secs`, so a screenshots folder carried between the two
-/// platforms is named one way).
-fn epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 pub fn run(paths: Paths) -> Result<()> {

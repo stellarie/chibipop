@@ -1524,7 +1524,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 bgra_buf,
                                 width,
                                 height,
-                                plan: crate::shot::plan(&view, &cfg, &save_dir, epoch_secs()),
+                                plan: crate::shot::plan(
+                                    &view,
+                                    &cfg,
+                                    &save_dir,
+                                    crate::shot::epoch_secs(),
+                                ),
                                 anki: anki_snapshot(&cfg, &live),
                                 anki_connected: view.anki.connected,
                             };
@@ -2021,14 +2026,6 @@ fn show_presentation(
     Ok((rect, content_h, view_h))
 }
 
-/// Seconds since the epoch, for the screenshot filename.
-fn epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 /// The `[anki]` section as the pump reads it: the config's own, with
 /// `derive`'s empty-field-map fallback applied so a screenshot add
 /// routes its fields exactly like a plain one.
@@ -2414,7 +2411,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             let root = crate::action::screenshot::save_root(&x.cfg.actions.screenshot, x.exe_dir);
             let pending = controller.popup().and_then(|view| {
                 let anki_connected = view.anki.connected;
-                crate::shot::plan_add(&view, x.cfg, &root, epoch_secs())
+                crate::shot::plan_add(&view, x.cfg, &root, crate::shot::epoch_secs())
                     .map(|plan| PendingShot { plan, anki_connected })
             });
             if pending.is_some() {
