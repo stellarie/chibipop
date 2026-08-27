@@ -1820,20 +1820,27 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
         } else if msg.message == WM_APP_SCREENSHOT_DONE {
             while let Ok(result) = screenshot_done_rx.try_recv() {
-                if let Some(e) = &result.err {
-                    eprintln!("chibipop: screenshot failed: {e}");
-                } else if !result.expr.is_empty() {
-                    // The word is in the collection now: teach the
-                    // cache, or a cached `false` outlives the add.
-                    dupe_cache.insert(result.expr.clone(), true);
-                    if live.notify_on_add {
-                        tray.notify("chibipop", &format!("{} added", result.expr));
+                match &result.filed {
+                    Ok(Some(_)) => {
+                        // The word is in the collection now: teach the
+                        // cache, or a cached `false` outlives the add.
+                        dupe_cache.insert(result.expr.clone(), true);
+                        if live.notify_on_add {
+                            tray.notify("chibipop", &format!("{} added", result.expr));
+                        }
                     }
+                    // Nothing was added, so this gets a line rather
+                    // than an "added" notification: the picture on
+                    // disk is the whole of what happened.
+                    Ok(None) => eprintln!(
+                        "chibipop: screenshot saved to {} - no card to file it on",
+                        result.dir.display()
+                    ),
+                    Err(e) => eprintln!("chibipop: screenshot failed: {e}"),
                 }
                 // The failure has to land too - `start_add` marked the
                 // popup in flight before it handed this add over.
-                if !result.expr.is_empty() {
-                    let failed = result.err.is_some();
+                if let Some(failed) = result.add_failed() {
                     drive!(Event::NoteAdded { expr: result.expr, failed });
                 }
             }
@@ -2060,20 +2067,20 @@ fn spawn_add_note(
 fn handle_screenshot_save(
     cmd: crate::action::ScreenshotCommand,
 ) -> crate::action::ScreenshotResult {
-    let result = (|| -> anyhow::Result<()> {
+    let filed = (|| -> anyhow::Result<Option<i64>> {
         let png = crate::image::encode_bgra_to_png(&cmd.bgra_buf, cmd.width, cmd.height)?;
-        // Anki unreachable: the picture is still worth saving, it just
-        // has no card to ride on.
         if cmd.anki_connected && !cmd.plan.expr.is_empty() {
-            crate::shot::save_and_add(&png, &cmd.plan, &cmd.anki)?;
-        } else {
-            crate::shot::save(&png, &cmd.plan)?;
+            return crate::shot::save_and_add(&png, &cmd.plan, &cmd.anki).map(Some);
         }
-        Ok(())
+        // Anki unreachable: the picture is still worth saving, it just
+        // has no card to ride on - and no card is not an add.
+        crate::shot::save(&png, &cmd.plan)?;
+        Ok(None)
     })();
     crate::action::ScreenshotResult {
+        dir: cmd.plan.path.parent().unwrap_or(cmd.plan.path.as_path()).to_path_buf(),
         expr: cmd.plan.expr,
-        err: result.err().map(|e| format!("{e:#}")),
+        filed: filed.map_err(|e| format!("{e:#}")),
     }
 }
 

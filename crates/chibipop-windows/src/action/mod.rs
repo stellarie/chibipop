@@ -124,10 +124,41 @@ pub struct ScreenshotCommand {
     pub anki_connected: bool,
 }
 
-/// Worker's output.
+/// Worker's output: what became of the picture.
+///
+/// Three answers, not two. A mining screenshot with Anki out of reach
+/// still writes its PNG, and that is neither a card the popup may call
+/// an add nor a failure - flattening it into an error flag is how the
+/// popup came to claim notes Anki had never seen.
 pub struct ScreenshotResult {
     pub expr: String,
-    pub err: Option<String>,
+    /// Where the PNG landed - all the filed-nothing diagnostic has to
+    /// report, and the reason that case is worth a line at all.
+    pub dir: PathBuf,
+    /// `Ok(Some(id))` filed a note, `Ok(None)` wrote the picture and
+    /// nothing else, `Err` got neither done.
+    pub filed: Result<Option<i64>, String>,
+}
+
+impl ScreenshotResult {
+    /// The add lifecycle this answer closes - `Some(failed)` - or
+    /// `None` when there is none to close.
+    ///
+    /// Filing nothing is a picture with no card behind it, so nothing
+    /// may claim the word was filed; the other two both answer the
+    /// popup, which `start_add` marked adding before it authorised the
+    /// picture. A screenshot taken with no popup up carries no word,
+    /// so nothing is waiting on that one either.
+    pub fn add_failed(&self) -> Option<bool> {
+        if self.expr.is_empty() {
+            return None;
+        }
+        match self.filed {
+            Ok(Some(_)) => Some(false),
+            Ok(None) => None,
+            Err(_) => Some(true),
+        }
+    }
 }
 
 /// Actions, indexed by hotkey.
@@ -253,5 +284,34 @@ mod tests {
             reg.dispatch(2, &empty_state(), &mut ctx),
             Some(ActionOutcome::Completed)
         ));
+    }
+
+    fn shot_result(expr: &str, filed: Result<Option<i64>, String>) -> ScreenshotResult {
+        ScreenshotResult { expr: expr.to_string(), dir: PathBuf::from("shots"), filed }
+    }
+
+    #[test]
+    fn a_filed_note_closes_the_add() {
+        assert_eq!(shot_result("猫", Ok(Some(1729))).add_failed(), Some(false));
+    }
+
+    #[test]
+    fn filing_nothing_is_not_an_add() {
+        // Anki never saw the word: calling this an add flips the
+        // button and caches a dupe for a note that does not exist.
+        assert_eq!(shot_result("猫", Ok(None)).add_failed(), None);
+    }
+
+    #[test]
+    fn a_shot_that_never_landed_closes_the_add_as_failed() {
+        assert_eq!(shot_result("猫", Err("disk full".into())).add_failed(), Some(true));
+    }
+
+    #[test]
+    fn a_wordless_screenshot_has_no_add_to_close() {
+        // The plain hotkey, pressed with no popup up: no expr, so no
+        // lifecycle to close - not even when the write fails.
+        assert_eq!(shot_result("", Ok(None)).add_failed(), None);
+        assert_eq!(shot_result("", Err("disk full".into())).add_failed(), None);
     }
 }
