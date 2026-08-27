@@ -364,17 +364,6 @@ impl Default for OcrConfig {
     }
 }
 
-impl OcrConfig {
-    /// The tag to warn about, on a Japanese-only engine.
-    ///
-    /// `ocr.language` is a Windows field: hidden on Linux, preserved on
-    /// save, worth one diagnostic when it names something meikiocr
-    /// cannot deliver.
-    pub fn unsupported_language(&self) -> Option<&str> {
-        (!self.language.eq_ignore_ascii_case("ja")).then_some(self.language.as_str())
-    }
-}
-
 /// A resolved OCR engine choice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineChoice {
@@ -2088,22 +2077,6 @@ mod tests {
     fn an_empty_font_falls_back_without_asking() {
         let choice = resolve_font("", Platform::Linux, |_| panic!("asked about an empty literal"));
         assert_eq!("Noto Sans CJK JP", choice.family());
-    }
-
-    /// meikiocr is Japanese-only; `ja` needs no diagnostic.
-    #[test]
-    fn a_ja_language_is_not_flagged() {
-        assert_eq!(None, OcrConfig::default().unsupported_language());
-        let ocr = OcrConfig { language: "JA".to_string(), ..OcrConfig::default() };
-        assert_eq!(None, ocr.unsupported_language(), "case folds");
-    }
-
-    /// A non-`ja` tag is preserved and named once.
-    #[test]
-    fn a_non_ja_language_is_flagged_but_kept() {
-        let ocr = OcrConfig { language: "en".to_string(), ..OcrConfig::default() };
-        assert_eq!(Some("en"), ocr.unsupported_language());
-        assert_eq!("en", ocr.language, "the value itself is untouched");
     }
 
     // ---- plugin engine ----
