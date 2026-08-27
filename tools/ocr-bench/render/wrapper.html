@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>loading</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 2560px; height: 1400px; overflow: hidden;
+               background: #ffffff; color: #101010; }
+  iframe { position: absolute; left: 0; top: 0; width: 2560px; height: 1080px; border: 0; }
+  /* Same stack as the corpus page. "Noto Sans JP" is typically absent on this host;
+     JP glyphs resolve through sans-serif to Noto Sans CJK JP. */
+  .blk { position: absolute; letter-spacing: 0; white-space: pre;
+         font-family: "Noto Sans JP", "Yu Gothic UI", "Microsoft YaHei", sans-serif; }
+  #s16 { left: 100px; top: 1120px; font-size: 16px; line-height: 22px; }
+  #s12 { left: 100px; top: 1220px; font-size: 12px; line-height: 17px; }
+</style>
+<body>
+<!-- The repo corpus, rendered untouched. -->
+<iframe id="corpus" src="../../../docs/fixtures/ocr-corpus.html"></iframe>
+
+<!-- Small-glyph additions (<=16 px), owned by the wrapper so the repo file stays as-is. -->
+<div class="blk" id="s16">駅前の喫茶店で新しい辞書を読んだ。</div>
+<div class="blk" id="s12">HPが50%を切ったらSkill発動、MP回復を待て。</div>
+
+<script>
+  function charBoxes(el, base) {
+    const node = el.firstChild;
+    const range = document.createRange ? el.ownerDocument.createRange() : null;
+    const out = [];
+    for (let i = 0; i < node.length; i++) {
+      range.setStart(node, i); range.setEnd(node, i + 1);
+      const b = range.getBoundingClientRect();
+      out.push({ c: node.data[i],
+                 x: +(b.x + base.x).toFixed(2), y: +(b.y + base.y).toFixed(2),
+                 w: +b.width.toFixed(2), h: +b.height.toFixed(2) });
+    }
+    return { text: node.data, chars: out };
+  }
+  const frame = document.getElementById('corpus');
+  frame.addEventListener('load', () => {
+    const doc = frame.contentDocument;
+    const out = {};
+    // Iframe sits at (0,0) scroll-less, so iframe coords are page coords.
+    for (const id of ['j1', 'outlined', 'alnum', 'j2', 'vert'])
+      out[id] = charBoxes(doc.getElementById(id), { x: 0, y: 0 });
+    for (const id of ['s16', 's12'])
+      out[id] = charBoxes(document.getElementById(id), { x: 0, y: 0 });
+    document.title = 'READY ' + JSON.stringify(out);
+  });
+</script>
+</body>
