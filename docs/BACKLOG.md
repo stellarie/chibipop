@@ -1119,6 +1119,20 @@ the order list usefully.
 **Raised 2026-08-16 by the v0.8.0 round, after four consecutive tasks re-reported it. Pre-existing,
 and it quietly inflates every test total this project has ever published.**
 
+> **Amended 2026-08-27 (ticket 17): the guard is fixed, and half of this item stands.**
+> `tests/golden.rs` no longer probes one repo path. It resolves the dictionary the way the
+> product does — `$CHIBIPOP_GOLDEN_DB`, then the Linux daemon's
+> `$XDG_DATA_HOME/chibipop/chibipop.sqlite`, then the path the Windows bin's default `--out`
+> lands on in a cargo tree — so the corpus **runs** on any box with a real library, and it
+> failed the first time it did: `してしまった: expected する in top 3, got ["仕手", "して", "梓"]`
+> (ticket 16). A skip now prints every path it looked at, so the reason is checkable.
+>
+> What stands: in dictionary-free CI it still early-returns and libtest still counts that as a
+> pass, so CI totals still include one test that did not run. Option (b) below is **not** the
+> answer it looks like — a committed fixture holding only the corpus words gives every case one
+> candidate, and "expected X in top 3" is then true by construction. This corpus grades ranking
+> against 660k terms of competition; a fixture would restore the green and delete the meaning.
+
 `tests/golden.rs:31-34` early-returns when `data/chibipop.sqlite` is absent:
 
 ```rust

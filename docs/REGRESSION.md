@@ -113,14 +113,20 @@ silently not running must. CI asserts `≥ 400` and prints the total; **873** is
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
 
-> [!warning] One of those tests never runs here, and is counted as passed
-> `golden_corpus` (`tests/golden.rs:31-34`) early-returns when `data/chibipop.sqlite` is absent,
-> printing `SKIP golden_corpus: … not built` and asserting **nothing**. It is reported as `ok`, not
-> as ignored, so **every total on this page includes one test that did not run** on any tree without
-> a built database — which is every fresh clone and every worktree. The ignored tests beside the
-> total are *different* tests. This is pre-existing and is recorded here rather than fixed: making the
-> skip visible in the count means either failing the suite on a clone or teaching the `awk` to
-> subtract, and both are their own change.
+> [!warning] One of those tests only runs where a dictionary does, and is counted as passed either way
+> `golden_corpus` (`tests/golden.rs`) grades deconjugation against a real library. It early-returns
+> when it cannot find one, and a `#[test]` that returns is a **pass** — not the one ignored test —
+> so **every total on this page measured on a tree without a built database includes one test that
+> did not run**: every fresh clone, every worktree, and CI. The ignored tests beside the total are
+> *different* tests.
+>
+> **Amended 2026-08-27 (ticket 17).** Until then it probed `data/chibipop.sqlite` and nothing else,
+> so it skipped on *every* tree, this one included — the Windows box above is the exception, because
+> that repo path is where its own `build-dict --out` default lands. It now resolves the dictionary
+> the way the product does (`$CHIBIPOP_GOLDEN_DB`, the Linux daemon's
+> `$XDG_DATA_HOME/chibipop/chibipop.sqlite`, then that same cargo-tree path) and names every path it
+> looked at when it skips. Making the skip *visible in the count* is still unfixed and still its own
+> change: it means either failing the suite on a clone or teaching the `awk` to subtract.
 
 > [!warning] `cargo test --lib` reports 910 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`

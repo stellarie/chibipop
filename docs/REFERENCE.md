@@ -437,10 +437,13 @@ cargo test
 **873 tests** across six targets, one of them ignored. Re-measured
 2026-08-16.
 
-One of those 873 does not run here. `golden_corpus` early-returns when
-`data/chibipop.sqlite` is absent and is reported as a **pass**, not as the one
-ignored test, so every total on this page and in Tier 0 includes a test that
-asserted nothing on any tree without a built database. Pre-existing; see
+One of those 873 only runs where a dictionary does. `golden_corpus` grades
+deconjugation against a real library and resolves one the way the product does
+(`$CHIBIPOP_GOLDEN_DB`, then `$XDG_DATA_HOME/chibipop/chibipop.sqlite`, then
+`data/chibipop.sqlite` in a cargo tree); with none of those present it prints
+every path it looked at and returns, which libtest reports as a **pass**, not as
+the one ignored test. So a total measured on a tree without a built database —
+a fresh clone, or CI — includes one test that did not run. See
 [`BACKLOG.md`](BACKLOG.md) §27.
 
 Tier 0 of [`REGRESSION.md`](REGRESSION.md) is the authority on this number
