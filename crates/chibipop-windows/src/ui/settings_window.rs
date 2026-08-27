@@ -1501,6 +1501,45 @@ fn row_mapping(anki_field: &str, source: &str) -> Option<crate::config::FieldMap
     })
 }
 
+/// The field map an Apply saves: the rows merged into the saved map, never
+/// the rows alone.
+///
+/// `readings` is one entry per rendered row - field name, and the source its
+/// combo currently shows - so its keys are exactly the field names the note
+/// type has: the window builds one row per name `modelFieldNames` returned
+/// (`app.rs:797-806`) and rebuilds them whenever that list changes
+/// (`field_names_match`). A row is therefore a *view* of one mapping, not
+/// the mapping itself, and a saved mapping whose field the model lacks - a
+/// renamed field, a deleted one, or one belonging to the note type the user
+/// just switched away from - has no row to be read out of and must survive
+/// the save untouched. Rebuilding from the rows alone silently deleted it
+/// the first time the user opened the Anki tab and pressed Apply (ticket
+/// 21).
+///
+/// `"(none)"` is the opposite case and must stay so: a row exists, so the
+/// user looked at a field the model *has* and said no. `row_mapping` drops
+/// it and the saved value is not handed back.
+///
+/// Order is the rows' order first - the model's field order, which is the
+/// order the user just read down the tab - then the mappings no row covered,
+/// keeping the order the config had them in. Rows first makes the saved
+/// order equal the displayed order, and the result is a fixed point of this
+/// function, so pressing Apply again never reshuffles the user's TOML.
+fn merged_field_map(
+    saved: &[crate::config::FieldMapping],
+    readings: &[(&str, &str)],
+) -> Vec<crate::config::FieldMapping> {
+    let mut out: Vec<crate::config::FieldMapping> =
+        readings.iter().filter_map(|(field, source)| row_mapping(field, source)).collect();
+    out.extend(
+        saved
+            .iter()
+            .filter(|m| !readings.iter().any(|(field, _)| *field == m.anki_field))
+            .cloned(),
+    );
+    out
+}
+
 /// Rows per field-map column.
 fn field_map_rows_needed(n: usize) -> i32 {
     n.div_ceil(2).max(1) as i32
@@ -2283,6 +2322,16 @@ impl SettingsWindow {
     /// Rebuilds the field-map rows.
     ///
     /// No-op if empty or unchanged.
+    ///
+    /// One row per field the note type has, so a saved mapping naming a
+    /// field it does not have gets no row and the user cannot see it. That
+    /// is the deliberate choice: showing a disabled row per missing field
+    /// would be more honest, but the rows are two columns of fixed geometry
+    /// sized off the model's field count, and an invisible mapping is only
+    /// confusing where a deleted one is data loss. `merged_field_map` is
+    /// what makes it safe - the save preserves what it never rendered
+    /// (ticket 21). Nothing here deletes a mapping the user did not ask to
+    /// delete: unmapping is setting a rendered row to `"(none)"`.
     fn populate_field_map(&self, fields: &[String]) {
         if fields.is_empty() || self.field_map_unchanged(fields) {
             return;
@@ -2298,7 +2347,9 @@ impl SettingsWindow {
                 let _ = DestroyWindow(hwnd);
             }
         }
-        let existing = self.staged.borrow().field_map.clone();
+        // Nothing said about the map seeds nothing: `default_source` already
+        // renders an unmapped field as `"(none)"`.
+        let existing = self.staged.borrow().field_map.clone().unwrap_or_default();
         let (extra, rows) = self.build_field_map_rows(fields, &existing);
         *self.field_map_extra.borrow_mut() = extra;
         *self.field_map_rows.borrow_mut() = rows;
@@ -3342,19 +3393,27 @@ impl SettingsWindow {
             let ocr_clipboard_key =
                 resolved_ocr_clipboard_key(h, template.ocr_clipboard_key.as_deref());
 
-            // Empty is not missing.
+            // A row is a *view* of one mapping, never the mapping itself, so
+            // the save merges; `merged_field_map` owns that decision. The
+            // `rows.is_empty()` branch that used to substitute
+            // `template.field_map` here is gone, not forgotten: no rows means
+            // the window knows no field names, so every saved mapping is
+            // unknown and the merge returns that same map untouched.
             let rows = self.field_map_rows.borrow();
-            let field_map = if rows.is_empty() {
-                template.field_map.clone()
-            } else {
-                rows.iter()
-                    .filter_map(|(name, combo)| {
-                        let i = SendMessageW(*combo, CB_GETCURSEL, None, None).0.max(0);
-                        let src = FIELD_MAP_SOURCES.get(i as usize).copied().unwrap_or("(none)");
-                        row_mapping(name, src)
-                    })
-                    .collect()
-            };
+            let readings: Vec<(&str, &str)> = rows
+                .iter()
+                .map(|(name, combo)| {
+                    let i = SendMessageW(*combo, CB_GETCURSEL, None, None).0.max(0);
+                    let src = FIELD_MAP_SOURCES.get(i as usize).copied().unwrap_or("(none)");
+                    (name.as_str(), src)
+                })
+                .collect();
+            // Always an answer, never `None`: a merged map is complete even
+            // with no rows, so core's "a window with nothing to say must not
+            // wipe the map" rule (ticket 20) has nothing left to protect on
+            // this path.
+            let saved = template.field_map.as_deref().unwrap_or_default();
+            let field_map = Some(merged_field_map(saved, &readings));
 
             SettingsForm {
                 mode: if checked(ID_MODE_HOLD) {
@@ -3699,6 +3758,106 @@ mod tests {
     #[test]
     fn row_mapping_is_none_for_the_none_source() {
         assert_eq!(None, row_mapping("Front", "(none)"));
+    }
+
+    /// Ticket 21's data loss: the note type no longer has `LegacyAudio`, so
+    /// no row renders for it and the pre-merge read-back deleted the
+    /// mapping the user never touched.
+    #[test]
+    fn merged_field_map_keeps_a_mapping_the_model_lacks() {
+        let saved = vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")];
+        assert_eq!(
+            vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")],
+            merged_field_map(&saved, &[("Front", "expression")]),
+        );
+    }
+
+    #[test]
+    fn merged_field_map_takes_a_rendered_fields_value_from_its_row() {
+        let saved = vec![mapping("Front", "expression")];
+        assert_eq!(
+            vec![mapping("Front", "sentence")],
+            merged_field_map(&saved, &[("Front", "sentence")]),
+        );
+    }
+
+    #[test]
+    fn merged_field_map_maps_a_field_the_config_never_named() {
+        assert_eq!(
+            vec![mapping("Back", "reading")],
+            merged_field_map(&[], &[("Back", "reading")]),
+        );
+    }
+
+    /// A row exists, so the user looked at that field and said no. Merging
+    /// must not hand the old value back.
+    #[test]
+    fn merged_field_map_does_not_resurrect_a_none_row() {
+        let saved = vec![mapping("Front", "expression")];
+        assert!(merged_field_map(&saved, &[("Front", "(none)")]).is_empty());
+    }
+
+    /// The whole subtlety in one assert: same empty combo reading, opposite
+    /// outcomes, decided by whether the model has the field at all.
+    #[test]
+    fn merged_field_map_separates_a_none_row_from_a_field_with_no_row() {
+        let saved = vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")];
+        assert_eq!(
+            vec![mapping("LegacyAudio", "audio")],
+            merged_field_map(&saved, &[("Front", "(none)")]),
+        );
+    }
+
+    /// Rows in the model's order, then the survivors in the config's.
+    #[test]
+    fn merged_field_map_orders_rows_first_then_survivors() {
+        let saved = vec![
+            mapping("OldAudio", "audio"),
+            mapping("Front", "sentence"),
+            mapping("OldReading", "reading"),
+        ];
+        assert_eq!(
+            vec![
+                mapping("Front", "expression"),
+                mapping("Back", "glossary"),
+                mapping("OldAudio", "audio"),
+                mapping("OldReading", "reading"),
+            ],
+            merged_field_map(&saved, &[("Front", "expression"), ("Back", "glossary")]),
+        );
+    }
+
+    /// Pressing Apply twice must not reshuffle the user's TOML.
+    #[test]
+    fn merged_field_map_is_a_fixed_point_under_a_second_apply() {
+        let saved = vec![mapping("OldAudio", "audio"), mapping("Front", "sentence")];
+        let readings = [("Front", "expression"), ("Back", "glossary")];
+        let once = merged_field_map(&saved, &readings);
+        assert_eq!(once, merged_field_map(&once, &readings));
+    }
+
+    /// AnkiConnect never answered, so no row was ever rendered. This is what
+    /// makes the old `rows.is_empty()` branch redundant.
+    #[test]
+    fn merged_field_map_keeps_everything_when_no_row_was_rendered() {
+        let saved = vec![mapping("Front", "expression"), mapping("Back", "glossary")];
+        assert_eq!(saved, merged_field_map(&saved, &[]));
+    }
+
+    /// The whole seam, not only the decision: a real window renders a note
+    /// type that has lost a mapped field, and Apply still saves it.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn reading_a_model_missing_a_mapped_field_keeps_the_mapping() {
+        let saved = vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")];
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.field_map = Some(saved.clone());
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        window.populate_combos(&[], &[], &["Front".to_string()]);
+        assert_eq!(Some(saved), window.read(&form).field_map);
     }
 
     fn dummy_hwnd(n: isize) -> HWND {

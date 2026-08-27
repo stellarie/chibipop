@@ -1539,6 +1539,26 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    /// Ticket 20 makes an empty map reachable from either settings
+    /// window, so the serde default must keep firing on an absent key
+    /// only: a present `field_map = []` is the user's answer, not a
+    /// missing one (contrast
+    /// `an_anki_section_without_field_map_still_defaults_to_lapis`).
+    #[test]
+    fn an_emptied_anki_field_map_survives_a_save_and_reload() {
+        let p = tmp("field_map_emptied");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.field_map = Vec::new();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert!(
+            back.anki.field_map.is_empty(),
+            "a user who mapped nothing must not get Lapis back on reload"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
     #[test]
     fn a_config_without_anki_section_defaults_field_map() {
         let p = tmp("no_anki_field_map");

@@ -282,7 +282,9 @@ impl App {
         // opened and left blank stops - on the way to the file, not in
         // core and not per keystroke, because a half-typed name is a
         // normal thing for a text box to hold.
-        self.form.field_map.retain(|mapping| !mapping.anki_field.trim().is_empty());
+        if let Some(rows) = self.form.field_map.as_mut() {
+            rows.retain(|mapping| !mapping.anki_field.trim().is_empty());
+        }
         match apply::apply(&self.form, &self.linux, &self.config_path, &self.socket_path) {
             Ok(applied) => {
                 // The file now holds the clamped truth; show it.
@@ -562,7 +564,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ShowStaticOverlay(on) => app.form.show_static_overlay = on,
         Message::StaticRegionKey(v) => app.linux.static_region_key_linux = v,
         Message::FieldMapAnki(i, v) => {
-            if let Some(m) = app.form.field_map.get_mut(i) {
+            if let Some(m) = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i)) {
                 m.anki_field = v;
             }
         }
@@ -573,23 +575,30 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         // is one core silently contributes nothing for (`anki.rs`'s
         // `mapped_fields`) - a mapping that looks set and is not.
         Message::FieldMapSource(i, v) => {
-            if let (Some(source), Some(m)) = (field_source_of(&v), app.form.field_map.get_mut(i)) {
+            let row = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i));
+            if let (Some(source), Some(m)) = (field_source_of(&v), row) {
                 m.source = source.to_string();
             }
         }
         // The Anki field starts blank: it is the user's note type that
         // names its fields. `App::apply` is what refuses to store the
-        // row if they never fill it in.
-        Message::FieldMapAdd => app.form.field_map.push(FieldMapping {
-            anki_field: String::new(),
-            source: NEW_ROW_SOURCE.to_string(),
-        }),
+        // row if they never fill it in. A user adding a row is a window
+        // that knows its rows, so this creates the list rather than
+        // dropping the press when the form has no answer yet.
+        Message::FieldMapAdd => {
+            app.form.field_map.get_or_insert_with(Vec::new).push(FieldMapping {
+                anki_field: String::new(),
+                source: NEW_ROW_SOURCE.to_string(),
+            });
+        }
         // The index is a position in the list the last frame rendered,
         // so a stale one would panic `Vec::remove`; bounds-checked
         // rather than trusting message ordering to rule that out.
         Message::FieldMapRemove(i) => {
-            if i < app.form.field_map.len() {
-                app.form.field_map.remove(i);
+            if let Some(rows) = app.form.field_map.as_mut() {
+                if i < rows.len() {
+                    rows.remove(i);
+                }
             }
         }
         Message::CopyBind => return iced::clipboard::write(app.bind_snippet()),
@@ -1301,6 +1310,8 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = app
         .form
         .field_map
+        .as_deref()
+        .unwrap_or(&[])
         .iter()
         .enumerate()
         .map(|(i, mapping)| {
@@ -1549,6 +1560,14 @@ mod tests {
     use super::*;
     use crate::paths::Env;
     use std::path::Path;
+
+    /// The rows the window is editing. Linux's rows are the config's
+    /// rows, so this form always has an answer about the field map;
+    /// `None` is the Windows-only state where AnkiConnect never named
+    /// the fields (`chibipop::settings::SettingsForm::field_map`).
+    fn form_rows(app: &App) -> &[FieldMapping] {
+        app.form.field_map.as_deref().expect("a Linux form always has field-map rows")
+    }
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1974,21 +1993,20 @@ mod tests {
         let dir = scratch("fmadd");
         let mut app = app(&dir);
         assert!(
-            !app.form.field_map.iter().any(|m| m.source == "screenshot"),
+            !form_rows(&app).iter().any(|m| m.source == "screenshot"),
             "the shipped default_field_map has no screenshot row - that is the gap"
         );
 
         let _ = update(&mut app, Message::FieldMapAdd);
-        let at = app.form.field_map.len() - 1;
+        let at = form_rows(&app).len() - 1;
         // The seed is a pickable source, so the row means something
         // before the user has touched the picker at all.
-        assert_eq!(Some(NEW_ROW_SOURCE), field_source_of(&app.form.field_map[at].source));
+        assert_eq!(Some(NEW_ROW_SOURCE), field_source_of(&form_rows(&app)[at].source));
         let _ = update(&mut app, Message::FieldMapAnki(at, "Picture".to_string()));
 
         assert_eq!(
             Some("Picture".to_string()),
-            app.form
-                .field_map
+            form_rows(&app)
                 .iter()
                 .find(|m| m.source == "screenshot")
                 .map(|m| m.anki_field.clone()),
@@ -1998,8 +2016,8 @@ mod tests {
         // And the picker moves that row to any other source without the
         // typed field name following it.
         let _ = update(&mut app, Message::FieldMapSource(at, "sentence".to_string()));
-        assert_eq!("sentence", app.form.field_map[at].source);
-        assert_eq!("Picture", app.form.field_map[at].anki_field);
+        assert_eq!("sentence", form_rows(&app)[at].source);
+        assert_eq!("Picture", form_rows(&app)[at].anki_field);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2009,22 +2027,21 @@ mod tests {
     fn removing_a_row_takes_the_one_that_was_pressed() {
         let dir = scratch("fmremove");
         let mut app = app(&dir);
-        app.form.field_map.clear();
+        app.form.field_map = Some(Vec::new());
         for name in ["First", "Middle", "Last"] {
             let _ = update(&mut app, Message::FieldMapAdd);
-            let at = app.form.field_map.len() - 1;
+            let at = form_rows(&app).len() - 1;
             let _ = update(&mut app, Message::FieldMapAnki(at, name.to_string()));
         }
 
         let _ = update(&mut app, Message::FieldMapRemove(1));
-        let names: Vec<&str> =
-            app.form.field_map.iter().map(|m| m.anki_field.as_str()).collect();
+        let names: Vec<&str> = form_rows(&app).iter().map(|m| m.anki_field.as_str()).collect();
         assert_eq!(vec!["First", "Last"], names);
 
         // A press that arrived after its row was already gone is inert
         // rather than a `Vec::remove` panic in the UI thread.
         let _ = update(&mut app, Message::FieldMapRemove(9));
-        assert_eq!(2, app.form.field_map.len());
+        assert_eq!(2, form_rows(&app).len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2036,16 +2053,16 @@ mod tests {
     fn a_row_with_no_anki_field_never_reaches_the_saved_config() {
         let dir = scratch("fmblank");
         let mut app = app(&dir);
-        let shipped = app.form.field_map.len();
+        let shipped = form_rows(&app).len();
 
         let _ = update(&mut app, Message::FieldMapAdd);
-        let named = app.form.field_map.len() - 1;
+        let named = form_rows(&app).len() - 1;
         let _ = update(&mut app, Message::FieldMapAnki(named, "Picture".to_string()));
         // One row the user opened and walked away from, and one they
         // filled with spaces, which is no more a field name than "".
         let _ = update(&mut app, Message::FieldMapAdd);
         let _ = update(&mut app, Message::FieldMapAdd);
-        let blank = app.form.field_map.len() - 1;
+        let blank = form_rows(&app).len() - 1;
         let _ = update(&mut app, Message::FieldMapAnki(blank, "   ".to_string()));
 
         let _ = update(&mut app, Message::Apply);
@@ -2068,7 +2085,27 @@ mod tests {
         );
         // The window shows what the file holds, the same way Apply
         // re-reads the clamped capture size.
-        assert_eq!(shipped + 1, app.form.field_map.len());
+        assert_eq!(shipped + 1, form_rows(&app).len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket 20: removing every row is an answer, not a window that
+    /// never had rows to show, so Apply writes the empty map instead of
+    /// silently keeping the shipped one. Read off the file Apply wrote,
+    /// because the guard this replaced was invisible from inside the
+    /// form - the save reported success either way.
+    #[test]
+    fn removing_every_row_saves_an_empty_map() {
+        let dir = scratch("fmempty");
+        let mut app = app(&dir);
+        assert!(!form_rows(&app).is_empty(), "the shipped map is what gets emptied");
+        for _ in 0..form_rows(&app).len() {
+            let _ = update(&mut app, Message::FieldMapRemove(0));
+        }
+
+        let _ = update(&mut app, Message::Apply);
+        let saved = chibipop::config::load_or_create(&app.config_path).expect("Apply wrote it");
+        assert!(saved.anki.field_map.is_empty(), "the user removed every row; the file says so");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2090,10 +2127,10 @@ mod tests {
         assert_eq!(None, field_source_of("sceenshot"));
 
         let _ = update(&mut app, Message::FieldMapAdd);
-        let at = app.form.field_map.len() - 1;
+        let at = form_rows(&app).len() - 1;
         let _ = update(&mut app, Message::FieldMapSource(at, "sceenshot".to_string()));
         assert_eq!(
-            NEW_ROW_SOURCE, app.form.field_map[at].source,
+            NEW_ROW_SOURCE, form_rows(&app)[at].source,
             "an unlisted source leaves the row on the one it had"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2108,7 +2145,7 @@ mod tests {
     fn every_mapping_is_rendered_and_the_add_control_always_is() {
         let dir = scratch("fmrows");
         let mut app = app(&dir);
-        let shipped = app.form.field_map.len();
+        let shipped = form_rows(&app).len();
         assert_eq!(
             shipped + 2,
             field_map_rows(&app).len(),
@@ -2118,7 +2155,7 @@ mod tests {
         let _ = update(&mut app, Message::FieldMapAdd);
         assert_eq!(shipped + 3, field_map_rows(&app).len(), "the new row renders at once");
 
-        app.form.field_map.clear();
+        app.form.field_map = Some(Vec::new());
         assert_eq!(2, field_map_rows(&app).len(), "an emptied map still offers Add");
 
         // The whole window builds with a screenshot row in the map: the

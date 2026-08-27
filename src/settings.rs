@@ -58,7 +58,15 @@ pub struct SettingsForm {
     pub anki_deck: String,
     pub anki_model: String,
     pub anki_add_key: String,
-    pub field_map: Vec<FieldMapping>,
+    /// `None`: this window has no answer about the field map, so Apply
+    /// leaves the saved one alone. Windows fills its rows from a live
+    /// AnkiConnect `modelFieldNames` call that answers with an empty
+    /// vector whenever Anki is unreachable
+    /// (`crates/chibipop-windows/src/app.rs:797-806`), and a window that
+    /// was never told the field names must not wipe a good mapping.
+    /// `Some(vec![])` is a user who mapped nothing, which is an answer
+    /// and saves (ticket 20).
+    pub field_map: Option<Vec<FieldMapping>>,
     pub notify_on_add: bool,
     pub sentence_mode: SentenceMode,
     pub static_region_key: String,
@@ -337,7 +345,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_deck: cfg.anki.deck.clone(),
         anki_model: cfg.anki.model.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
-        field_map: cfg.anki.field_map.clone(),
+        field_map: Some(cfg.anki.field_map.clone()),
         notify_on_add: cfg.anki.notify_on_add,
         sentence_mode: cfg.anki.sentence_mode,
         static_region_key: cfg.anki.static_region_key.clone(),
@@ -404,8 +412,8 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.model = form.anki_model.clone();
     out.anki.add_key = form.anki_add_key.clone();
     out.anki.notify_on_add = form.notify_on_add;
-    if !form.field_map.is_empty() {
-        out.anki.field_map = form.field_map.clone();
+    if let Some(field_map) = &form.field_map {
+        out.anki.field_map = field_map.clone();
     }
     out.anki.sentence_mode = form.sentence_mode;
     out.anki.static_region_key = form.static_region_key.clone();
@@ -801,7 +809,7 @@ mod tests {
             source: "expression".into(),
         }];
         let form = from_config(&cfg, &dicts());
-        assert_eq!(cfg.anki.field_map, form.field_map);
+        assert_eq!(Some(cfg.anki.field_map.clone()), form.field_map);
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
     }
 
@@ -811,6 +819,37 @@ mod tests {
         let cfg = cfg_with(&[]);
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
+    }
+
+    /// A user who removes every row is saying "map nothing": an answer,
+    /// and a storable state.
+    #[test]
+    fn emptying_the_field_map_saves_an_empty_map() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.field_map =
+            vec![FieldMapping { anki_field: "Front".into(), source: "expression".into() }];
+        let mut form = from_config(&cfg, &dicts());
+        form.field_map = Some(Vec::new());
+        assert!(
+            apply_to(&form, &cfg).anki.field_map.is_empty(),
+            "the user emptied the map; Apply must save that"
+        );
+    }
+
+    /// A window whose rows never loaded has no answer, which is not the
+    /// same value as an empty answer.
+    #[test]
+    fn a_window_with_nothing_to_say_cannot_wipe_the_field_map() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.field_map =
+            vec![FieldMapping { anki_field: "Front".into(), source: "expression".into() }];
+        let mut form = from_config(&cfg, &dicts());
+        form.field_map = None;
+        assert_eq!(
+            cfg.anki.field_map,
+            apply_to(&form, &cfg).anki.field_map,
+            "Anki was unreachable; Apply must leave the saved map alone"
+        );
     }
 
     #[test]
