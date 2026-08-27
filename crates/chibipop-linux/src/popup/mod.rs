@@ -25,6 +25,10 @@ pub use demo::{canned, Demo};
 pub use place::{derive, Screen};
 pub use pointer::{frame as pointer_frame, Interaction, Step};
 pub use surface::{Placed, Popup, ShowRequest};
+/// The name half of the Japanese-font probe, for the settings font
+/// combo (ADR-0005). The popup itself asks the whole question through
+/// [`surface::Popup`]'s engine.
+pub use text::jp_capable;
 
 use chibipop::ui::layout::Rgb;
 use chibipop::ui::theme::Theme;

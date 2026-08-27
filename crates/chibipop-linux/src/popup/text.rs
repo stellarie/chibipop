@@ -485,7 +485,7 @@ pub enum JpFonts {
 /// families Linux distributions actually ship Japanese in. The bare
 /// `gothic`/`mincho` entries are the Japanese type classes and catch the
 /// long tail (`TakaoGothic`, `Sazanami Mincho`, distro-renamed IPA
-/// builds); [`NON_JP`] and [`LATIN_GOTHIC`] veto them first.
+/// builds); [`NON_JP`] and [`FALSE_GOTHIC`] veto them first.
 const JP_MARKERS: &[&str] = &[
     "cjk jp",
     " jp",
@@ -559,11 +559,16 @@ const NON_JP: &[&str] = &[
     "spoqa han sans",
 ];
 
-/// Latin display faces that borrowed "Gothic" from the American type
-/// term and cover no kanji at all. Without this, one of them installed
-/// beside a Chinese CJK font would pass as Japanese and suppress the
-/// warning the user needs.
-const LATIN_GOTHIC: &[&str] = &[
+/// Faces whose name carries "Gothic" for a reason that has nothing to do
+/// with Japanese, and which cover no kanji at all: the American type
+/// term (`Century Gothic` and the rest) and `Noto Sans Gothic`, which
+/// draws Wulfila's Gothic *script* - `U+10330..U+1034A` and a handful of
+/// combining marks, nothing else - and ships in the same `noto-fonts`
+/// package every desktop already has. Without this table one of them
+/// installed beside a Chinese CJK font would pass as Japanese and
+/// suppress the warning the user needs, and the settings font combo
+/// ([`jp_capable`]) would offer a family that can only draw tofu.
+const FALSE_GOTHIC: &[&str] = &[
     "century gothic",
     "urw gothic",
     "franklin gothic",
@@ -573,6 +578,7 @@ const LATIN_GOTHIC: &[&str] = &[
     "letter gothic",
     "highway gothic",
     "alternate gothic",
+    "noto sans gothic",
 ];
 
 /// Trailing locale tags that mean "this CJK family is not Japanese".
@@ -588,6 +594,48 @@ const LOCALE_TAGS: &[&str] = &["sc", "tc", "hc", "cn", "tw", "hk", "kr", "k"];
 
 fn locale_tagged(lower: &str) -> bool {
     lower.rsplit(' ').next().is_some_and(|tag| LOCALE_TAGS.contains(&tag))
+}
+
+/// Which of [`classify`]'s buckets a family name falls in.
+///
+/// One lowercasing, one pass over the tables, and one place the order of
+/// the vetoes is written down: [`classify`] needs all four answers and
+/// [`jp_capable`] needs one of them, and a second copy of that order
+/// would be a second definition of "Japanese font".
+enum Bucket {
+    /// A name the tables read as Japanese.
+    Jp,
+    /// A [`NON_JP`] name: recognised, and recognisably not Japanese.
+    NonJp,
+    /// A [`LOCALE_TAGS`] name: not Japanese, and not reliably CJK either.
+    Tagged,
+    /// A name no table claims - every ordinary Latin face.
+    Neutral,
+}
+
+fn bucket(family: &str) -> Bucket {
+    let lower = family.to_ascii_lowercase();
+    if matches_any(&lower, NON_JP) {
+        Bucket::NonJp
+    } else if locale_tagged(&lower) {
+        Bucket::Tagged
+    } else if !matches_any(&lower, FALSE_GOTHIC) && matches_any(&lower, JP_MARKERS) {
+        Bucket::Jp
+    } else {
+        Bucket::Neutral
+    }
+}
+
+/// Does this family name read as Japanese?
+///
+/// The per-name half of [`classify`], for the settings font combo
+/// (ADR-0005: the combo is populated from fontdb's JP-capable
+/// families). A name question only - there is no shaping here, so
+/// unlike [`classify`] it cannot know what a face's cmap holds. That is
+/// the right trade for a combo, which offers candidates rather than
+/// passing a verdict on the machine.
+pub fn jp_capable(family: &str) -> bool {
+    matches!(bucket(family), Bucket::Jp)
 }
 
 /// The verdict for a set of installed families.
@@ -608,13 +656,11 @@ pub fn classify(families: &[&str], kanji_covered: bool) -> JpFonts {
     let mut named = None;
     let mut tagged = None;
     for name in families {
-        let lower = name.to_ascii_lowercase();
-        if matches_any(&lower, NON_JP) {
-            named = named.or(Some(*name));
-        } else if locale_tagged(&lower) {
-            tagged = tagged.or(Some(*name));
-        } else if !matches_any(&lower, LATIN_GOTHIC) && matches_any(&lower, JP_MARKERS) {
-            return JpFonts::Present { family: (*name).to_string() };
+        match bucket(name) {
+            Bucket::Jp => return JpFonts::Present { family: (*name).to_string() },
+            Bucket::NonJp => named = named.or(Some(*name)),
+            Bucket::Tagged => tagged = tagged.or(Some(*name)),
+            Bucket::Neutral => {}
         }
     }
     // Kanji resolved, so *something* covers them even when no name in
@@ -792,13 +838,19 @@ mod tests {
         assert_eq!(JpFonts::Present { family: JP.to_string() }, classify(&both, true));
     }
 
+    /// `Noto Sans Gothic` is the one that matters in practice: it draws
+    /// the Gothic script, covers no kanji, and is already installed
+    /// wherever `noto-fonts` is.
     #[test]
-    fn latin_display_faces_named_gothic_are_not_japanese() {
-        assert_eq!(
-            JpFonts::WrongVariant { family: "Noto Sans CJK SC".to_string() },
-            classify(&["Century Gothic", "Noto Sans CJK SC"], true),
-            "a Latin Gothic must not suppress the wrong-variant warning"
-        );
+    fn faces_named_gothic_for_other_reasons_are_not_japanese() {
+        for gothic in ["Century Gothic", "Noto Sans Gothic"] {
+            assert_eq!(
+                JpFonts::WrongVariant { family: "Noto Sans CJK SC".to_string() },
+                classify(&[gothic, "Noto Sans CJK SC"], true),
+                "{gothic} must not suppress the wrong-variant warning"
+            );
+            assert!(!jp_capable(gothic), "{gothic} must not reach the settings font combo");
+        }
     }
 
     /// Sarasa ships one family per locale and its tag is the last token,

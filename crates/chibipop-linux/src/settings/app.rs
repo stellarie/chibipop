@@ -21,6 +21,7 @@ use super::snippets::{self, Compositor};
 use crate::clipboard;
 use crate::control::Verb;
 use crate::lock::{self, LockError};
+use crate::popup;
 use anyhow::Context;
 use chibipop::config::{
     FieldMapping, PopupLayer, SentenceMode, TriggerMode, FIELD_SOURCES, MAX_HEIGHT_RANGE,
@@ -1502,9 +1503,11 @@ fn status_row(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Every installed family name, sorted and deduplicated, owned by the
-/// process. The JP-capable filter (ADR-0004's probe) arrives with the
-/// popup's font work; a full list never lies, it is just longer.
+/// The installed families the combo offers: fontdb's JP-capable ones
+/// (ADR-0005), sorted and deduplicated, owned by the process. The
+/// filter is the popup's own classifier ([`popup::jp_capable`]) and not
+/// a second marker table, so both halves of the product agree on what
+/// "draws Japanese" means.
 ///
 /// A `static` because iced's [`iced::font::Family::Name`] takes a
 /// `&'static str`: the preview label has to name the family it paints
@@ -1515,15 +1518,38 @@ static FAMILIES: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut names: Vec<String> = db.faces().map(|face| face.families[0].0.clone()).collect();
     names.sort();
     names.dedup();
-    names
+    offered(names)
 });
+
+/// The names [`FAMILIES`] keeps, and what happens when none of them
+/// draws Japanese.
+///
+/// A machine with no Japanese face gets the whole list back: an empty
+/// combo is a control the user cannot use at all, and the popup meets
+/// the same machine by painting anyway and naming the missing package
+/// (ADR-0004's degrade-visibly posture) rather than by refusing.
+///
+/// Pure, so the filter is testable without a font stack - the property
+/// the popup's classifier tables are written for.
+fn offered(all: Vec<String>) -> Vec<String> {
+    let (jp, rest): (Vec<String>, Vec<String>) =
+        all.into_iter().partition(|name| popup::jp_capable(name));
+    if jp.is_empty() {
+        rest
+    } else {
+        jp
+    }
+}
 
 /// The font combo's items.
 ///
-/// `Borrowed` is an installed family, so iced can be told to paint the
-/// preview with it. `Owned` is the configured literal that no installed
-/// face carries - it is still offered and still selected (ADR-0012: no
-/// sentinel semantics), it just has nothing to preview with.
+/// `Borrowed` is one of [`FAMILIES`], so iced can be told to paint the
+/// preview with it. `Owned` is the configured literal the combo would
+/// not otherwise offer - uninstalled, or installed but not a family
+/// that draws Japanese. It is still offered and still selected
+/// (ADR-0012: no sentinel semantics); it just previews as iced's
+/// default, which is where a family with no kanji in it would have
+/// ended up glyph by glyph anyway.
 fn font_items(configured: &str) -> Vec<Cow<'static, str>> {
     let mut items: Vec<Cow<'static, str>> =
         FAMILIES.iter().map(|f| Cow::Borrowed(f.as_str())).collect();
@@ -1542,8 +1568,9 @@ fn selected_family(app: &App) -> Option<&Cow<'static, str>> {
     app.fonts.iter().find(|f| f.as_ref() == app.form.font.as_str())
 }
 
-/// The family the preview paints with: the selection when an installed
-/// face carries the name, iced's default when none does.
+/// The family the preview paints with: the selection when the combo
+/// offers that name itself, iced's default when it is the configured
+/// literal ([`font_items`]).
 fn preview_font(selected: Option<&Cow<'static, str>>) -> Font {
     match selected {
         Some(Cow::Borrowed(name)) => Font::with_name(name),
@@ -2185,7 +2212,7 @@ mod tests {
             .fonts
             .iter()
             .find(|f| matches!(f, Cow::Borrowed(_)))
-            .expect("no installed family to pick")
+            .expect("no offered family to pick")
             .clone();
 
         let _ = update(&mut app, Message::FontPicked(picked.clone()));
@@ -2215,6 +2242,30 @@ mod tests {
         assert_eq!(Some(&Cow::Owned(app.form.font.clone())), selected_family(&app));
         assert_eq!(Font::DEFAULT, preview_font(selected_family(&app)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0005: the combo is populated from the JP-capable families,
+    /// and it borrows the popup's classifier to decide - a Chinese pan-CJK
+    /// face and a Latin "Gothic" are both out.
+    #[test]
+    fn the_font_combo_offers_only_families_that_draw_japanese() {
+        let installed =
+            ["DejaVu Sans", "Noto Sans CJK JP", "Noto Sans CJK SC", "IPAGothic", "Century Gothic"];
+
+        assert_eq!(
+            vec!["Noto Sans CJK JP".to_string(), "IPAGothic".to_string()],
+            offered(installed.iter().map(|f| (*f).to_string()).collect()),
+        );
+    }
+
+    /// No Japanese face installed is the popup's degrade-visibly case,
+    /// not a reason to hand the user a combo with nothing in it.
+    #[test]
+    fn a_machine_with_no_japanese_face_is_offered_every_family() {
+        let installed: Vec<String> =
+            ["DejaVu Sans", "Liberation Serif"].iter().map(|f| (*f).to_string()).collect();
+
+        assert_eq!(installed.clone(), offered(installed));
     }
 
     #[test]
