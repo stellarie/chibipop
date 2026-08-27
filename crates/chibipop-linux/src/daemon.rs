@@ -45,6 +45,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use smithay_client_toolkit::seat::pointer::PointerEvent;
 use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
+use wayland_client::backend::protocol::ProtocolError;
+use wayland_client::backend::WaylandError;
 use wayland_client::delegate_dispatch;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::WlPointer;
@@ -52,7 +54,7 @@ use wayland_client::protocol::wl_registry;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::globals::registry_queue_init;
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, QueueHandle};
 use wayland_protocols::ext::image_capture_source::v1::client::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1;
@@ -92,6 +94,12 @@ pub(crate) struct App {
     /// owns from the same source of truth the Controller reads.
     config: chibipop::config::Config,
     signal: LoopSignal,
+    /// The protocol error that ended this session, if one did (ticket
+    /// 11). Unrecoverable by construction, so the Wayland source's
+    /// dispatch stops the pump the way a signal does and leaves its
+    /// verdict here; [`run`] reads it after the orderly shutdown and
+    /// turns it into a non-zero exit.
+    fatal: Option<ProtocolError>,
     /// The cursor channel's Wayland side (ticket 33).
     cursor: CursorState,
     /// Driven by cursor Events and the trigger verbs; its Commands are
@@ -1999,6 +2007,36 @@ impl App {
         }
     }
 
+    /// The compositor's verdict on this connection: one diagnostic, then
+    /// the same stop the tray's Quit and the signal source use (ticket
+    /// 11).
+    ///
+    /// A protocol error is unrecoverable by construction - the object it
+    /// names is already destroyed server-side and every later request on
+    /// this connection is invalid - so there is nothing to retry and
+    /// nothing to degrade: the pump ends and the exit status says so.
+    /// Guarded because the error is sticky: it is visible on every wakeup
+    /// after the first, and the log must not repeat itself (the spin this
+    /// replaces wrote ~8 MB of stderr in 300 s).
+    fn end_on_protocol_error(&mut self, err: &ProtocolError) {
+        if self.fatal.is_some() {
+            return;
+        }
+        // The message is the compositor's own sentence, and only the pure
+        // Rust backend hands it over: libwayland keeps it for its own log
+        // line and leaves this empty, so name it only when there is one.
+        self.log.diag(&format!(
+            "wayland: protocol error on {}#{} - code {}{}{} - the connection is dead, shutting down",
+            err.object_interface,
+            err.object_id,
+            err.code,
+            if err.message.is_empty() { "" } else { ": " },
+            err.message,
+        ));
+        self.fatal = Some(err.clone());
+        self.signal.stop();
+    }
+
     /// Record a channel transition: the registry, the tray's rows and
     /// SNI status, and one log line — only when something moved.
     ///
@@ -2317,6 +2355,67 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
         if let wl_registry::Event::GlobalRemove { name } = event {
             app.log.diag(&format!("wayland: global {name} removed"));
         }
+    }
+}
+
+/// The daemon's own queue on the pump, dispatched by the daemon rather
+/// than by `WaylandSource::insert`'s callback (ticket 11).
+///
+/// `insert` hands the queue `EventQueue::dispatch_pending` and stops
+/// there, and that call cannot report a protocol error: wayland-client's
+/// `dispatching_impl` reads the backend with
+/// `dispatch_inner_queue().unwrap_or_default()` and says it drops the
+/// error on purpose. So a compositor that kills the connection leaves a
+/// permanently readable socket, `Ok(0)` on every wakeup and a pegged
+/// core. Asking the connection for its sticky error here is the whole
+/// fix, and it is smaller than dispatching the queue by hand: the source
+/// keeps its read guard, its flush and its `before_sleep`, all of which
+/// are load-bearing on a connection with more than one queue on it.
+fn insert_wayland_source(
+    pump: &LoopHandle<'static, App>,
+    conn: &Connection,
+    queue: EventQueue<App>,
+) -> Result<()> {
+    let watch = conn.clone();
+    pump.insert_source(WaylandSource::new(conn.clone(), queue), move |_, queue, app: &mut App| {
+        let dispatched = queue.dispatch_pending(app);
+        let fatal = match &dispatched {
+            // Nothing left to hand the handlers - how every drain ends,
+            // and all a wakeup after a protocol error ever looks like.
+            // One `last_error` check per wakeup, on a mutex the dispatch
+            // above has just taken repeatedly.
+            Ok(0) => watch.protocol_error(),
+            Ok(_) => None,
+            Err(e) => fatal_protocol_error(e).cloned(),
+        };
+        match fatal {
+            // The daemon has taken the failure over: `Ok(0)` so the
+            // source neither logs its own copy of the error nor turns it
+            // into calloop's opaque `Protocol error`. The pump is already
+            // stopped, so this is the last dispatch either way.
+            Some(err) => {
+                app.end_on_protocol_error(&err);
+                Ok(0)
+            }
+            None => dispatched,
+        }
+    })
+    .map_err(|e| anyhow::anyhow!("registering the Wayland source: {e}"))?;
+    Ok(())
+}
+
+/// Which dispatch failures the daemon ends on: protocol errors, and only
+/// those (ticket 11).
+///
+/// A protocol error is a verdict on the whole connection. Everything else
+/// stays the source's business, which is what keeps a `WouldBlock` flush
+/// or a slow compositor from being mistaken for a dead one - and a
+/// malformed message, which the source already treats as fatal, from
+/// being reported twice.
+fn fatal_protocol_error(err: &DispatchError) -> Option<&ProtocolError> {
+    match err {
+        DispatchError::Backend(WaylandError::Protocol(err)) => Some(err),
+        DispatchError::Backend(WaylandError::Io(_)) | DispatchError::BadMessage { .. } => None,
     }
 }
 
@@ -2719,6 +2818,7 @@ pub fn run(paths: Paths) -> Result<()> {
         stub: StubState::default(),
         paths: paths.clone(),
         signal: event_loop.get_signal(),
+        fatal: None,
         pump: event_loop.handle(),
         dwell: None,
         cursor: CursorState::default(),
@@ -2827,9 +2927,7 @@ pub fn run(paths: Paths) -> Result<()> {
         app.probe_surfaces(&mut queue);
     }
 
-    WaylandSource::new(conn.clone(), queue)
-        .insert(event_loop.handle())
-        .context("registering the Wayland source")?;
+    insert_wayland_source(&event_loop.handle(), &conn, queue)?;
 
     // Rung 3 is the only timed source; event rungs cost zero idle
     // wakeups (ADR-0010).
@@ -2945,13 +3043,24 @@ pub fn run(paths: Paths) -> Result<()> {
     drop(event_loop);
     app.log.diag("shutdown: control socket unlinked, instance lock released");
     drop(lock);
-    Ok(())
+
+    // A protocol error stopped the pump the way a signal does, so the
+    // shutdown above is the orderly one - but a session the compositor
+    // killed is not a session the user quit, and the exit status has to
+    // tell a supervisor apart from the two (ticket 11). The diagnostic
+    // naming the object, the code and the compositor's message is
+    // already in the log and on stderr; this only carries the verdict.
+    match &app.fatal {
+        Some(err) => bail!("shut down on a Wayland protocol error on {}", err.object_interface),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shortcuts::ShortcutId;
+    use wayland_client::backend::ObjectId;
 
     /// The concrete hot-reload contract: `reload` re-reads the file,
     /// so the lookup-log gate follows the config without a restart.
@@ -3090,6 +3199,7 @@ mod tests {
             },
             config: chibipop::config::Config::default(),
             signal: event_loop.get_signal(),
+            fatal: None,
             pump: event_loop.handle(),
             dwell: None,
             settings: SettingsChild::new(),
@@ -5177,5 +5287,156 @@ mod tests {
         );
         assert_eq!(1, anki.seen().len(), "one card, from the add that owned the slot");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- ticket 11: a protocol error ends the daemon ----
+
+    /// A `ProtocolError` shaped like the one a compositor sends when a
+    /// client binds a global that does not exist.
+    fn a_protocol_error() -> ProtocolError {
+        ProtocolError {
+            code: 0,
+            object_id: 2,
+            object_interface: "wl_registry".to_string(),
+            message: "invalid global wl_seat (4294967295)".to_string(),
+        }
+    }
+
+    /// The fatal decision itself. A protocol error is a verdict on the
+    /// whole connection; a slow compositor and a lost socket are not, and
+    /// promoting either would turn a hiccup into a dead daemon.
+    #[test]
+    fn only_a_protocol_error_is_fatal_to_the_daemon() {
+        let fatal = DispatchError::Backend(WaylandError::Protocol(a_protocol_error()));
+        assert_eq!(
+            Some("wl_registry"),
+            fatal_protocol_error(&fatal).map(|e| e.object_interface.as_str())
+        );
+
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::BrokenPipe] {
+            let io = DispatchError::Backend(WaylandError::Io(std::io::Error::from(kind)));
+            assert!(fatal_protocol_error(&io).is_none(), "{kind:?} is the source's business");
+        }
+
+        let bad = DispatchError::BadMessage {
+            sender_id: ObjectId::null(),
+            interface: "wl_surface",
+            opcode: 3,
+        };
+        assert!(fatal_protocol_error(&bad).is_none(), "already fatal one layer down");
+    }
+
+    /// The wiring, without a compositor: the verdict ends the pump the way
+    /// a signal does, is recorded for the exit status, and is said once.
+    ///
+    /// Fed from inside the loop on purpose - `EventLoop::run` clears the
+    /// stop flag as it starts, so a stop from outside would prove nothing
+    /// (the note in `select.rs` found that the hard way).
+    #[test]
+    fn a_protocol_error_ends_the_pump_and_is_diagnosed_once() {
+        let dir = scratch("protoend");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        event_loop
+            .handle()
+            .insert_source(Timer::immediate(), |_, _, app: &mut App| {
+                // Twice, because the backend's error is sticky: every
+                // wakeup after the first would see it again.
+                app.end_on_protocol_error(&a_protocol_error());
+                app.end_on_protocol_error(&a_protocol_error());
+                TimeoutAction::Drop
+            })
+            .unwrap();
+
+        let passes = run_bounded(&mut event_loop, &mut app);
+
+        assert!(passes < RUNAWAY, "the pump must end on the verdict, not iterate: {passes} passes");
+        let err = app.fatal.as_ref().expect("the exit status needs the verdict");
+        assert_eq!("wl_registry", err.object_interface);
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(
+            1,
+            written.matches("wayland: protocol error on wl_registry#2 - code 0:").count(),
+            "one diagnostic, naming the object, the code and the compositor's message: {written}"
+        );
+        assert!(written.contains("invalid global wl_seat"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real thing, when there is a compositor to say it: a throwaway
+    /// registry binds a global that cannot exist, and the pump ends.
+    ///
+    /// This is the case the ticket was filed on, so it is worth a live
+    /// test - but CI is headless (ADR-0007), which is why the wiring above
+    /// is pinned without one too. Nothing here is compositor-specific:
+    /// refusing a bind for an unknown global name belongs to the wayland
+    /// library the compositor links, not to the compositor.
+    #[test]
+    fn a_real_protocol_error_ends_the_pump() {
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            eprintln!("skipping: WAYLAND_DISPLAY is unset (headless)");
+            return;
+        }
+        let Ok(conn) = Connection::connect_to_env() else {
+            eprintln!("skipping: WAYLAND_DISPLAY is set but not connectable");
+            return;
+        };
+        let dir = scratch("protolive");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let queue = conn.new_event_queue::<App>();
+        let qh = queue.handle();
+        insert_wayland_source(&event_loop.handle(), &conn, queue).unwrap();
+
+        // The throwaway object: a registry of this test's own, asked for a
+        // global name no compositor can have advertised. The compositor
+        // answers `wl_display.error` on it and drops the connection.
+        let registry = conn.display().get_registry(&qh, ());
+        registry.bind::<WlSeat, (), App>(u32::MAX, 1, &qh, ());
+
+        let passes = run_bounded(&mut event_loop, &mut app);
+
+        let err = app.fatal.as_ref().unwrap_or_else(|| {
+            panic!(
+                "the compositor's protocol error must end the daemon; {passes} passes, log: {}",
+                std::fs::read_to_string(&log_file).unwrap_or_default()
+            )
+        });
+        assert!(
+            passes < RUNAWAY,
+            "and end it rather than iterate on the dead socket: {passes} passes"
+        );
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(
+            1,
+            written.matches("wayland: protocol error on").count(),
+            "one diagnostic for {err:?}: {written}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// How many passes a pump that does not end is allowed before the test
+    /// takes the loop away from it. Generous: a live compositor's answer
+    /// costs a round trip, and the spin this guards against needs no sleep
+    /// at all, so it burns the whole budget in microseconds.
+    const RUNAWAY: u32 = 50;
+
+    /// Run until something stops the pump or [`RUNAWAY`] passes are spent,
+    /// and answer with the passes spent. The escape is what keeps a
+    /// regression a failure rather than a hung test.
+    fn run_bounded(event_loop: &mut EventLoop<'static, App>, app: &mut App) -> u32 {
+        let escape = event_loop.get_signal();
+        let mut passes = 0;
+        event_loop
+            .run(Some(Duration::from_millis(20)), app, |_| {
+                passes += 1;
+                if passes >= RUNAWAY {
+                    escape.stop();
+                }
+            })
+            .expect("the pump must end, not error");
+        passes
     }
 }
