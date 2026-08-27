@@ -106,13 +106,19 @@ mod tests {
 
     /// `SigBlk` as the child itself reports it, with or without
     /// [`unmasked`] applied.
+    ///
+    /// `grep` is exec'd directly, with no shell in between: the mask
+    /// itself survives `exec`, but Ubuntu's `dash` build clears its
+    /// inherited mask at startup, so a `/bin/sh -c` probe measures the
+    /// shell's own policy instead of the leak (it turned CI red while
+    /// every bash-as-sh box passed).
     fn child_mask(unmask: bool) -> SigSet {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "grep '^SigBlk:' /proc/self/status"]);
+        let mut command = Command::new("grep");
+        command.args(["^SigBlk:", "/proc/self/status"]);
         if unmask {
             unmasked(&mut command);
         }
-        let out = command.output().expect("/bin/sh exists on any test box");
+        let out = command.output().expect("grep exists on any test box");
         assert!(out.status.success(), "child failed: {out:?}");
         let text = String::from_utf8(out.stdout).unwrap();
         let hex = text.split_whitespace().nth(1).expect("SigBlk: <hex>");
