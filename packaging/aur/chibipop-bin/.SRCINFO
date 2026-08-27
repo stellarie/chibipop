@@ -1,0 +1,25 @@
+pkgbase = chibipop-bin
+	pkgdesc = Hover-to-read Japanese lookup for Wayland (official binary release)
+	pkgver = 0.8.2
+	pkgrel = 1
+	url = https://github.com/unusualcrow/chibipop
+	arch = x86_64
+	license = GPL-3.0-or-later
+	license = LGPL-3.0-only
+	license = MIT
+	depends = glibc
+	depends = gcc-libs
+	depends = hicolor-icon-theme
+	optdepends = noto-fonts-cjk: Japanese glyphs in the popup - without a JP font kanji render as tofu
+	optdepends = xdg-desktop-portal: capture and global-shortcut channels on KDE and GNOME
+	optdepends = pipewire: the portal capture stream (dlopened, only on that rung)
+	provides = chibipop=0.8.2
+	conflicts = chibipop
+	options = !strip
+	options = !debug
+	source = https://github.com/unusualcrow/chibipop/releases/download/v0.8.2/chibipop-v0.8.2-linux-x64.tar.gz
+	source = chibipop-0.8.2.svg::https://raw.githubusercontent.com/unusualcrow/chibipop/v0.8.2/crates/chibipop-windows/assets/chibipop.svg
+	sha256sums = 01cd3ffc53e3e104fb6f506b3970cc56cb3cd6719d9a50a0734792892e2bae8e
+	sha256sums = 4118d69fd02f869ff8a3a626c0abf3f640c148dff627e521752596319d518288
+
+pkgname = chibipop-bin

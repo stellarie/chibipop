@@ -48,6 +48,12 @@ pub struct TriggerConfig {
     /// Which key gates popups.
     #[serde(default = "default_trigger_key")]
     pub trigger_key: String,
+    /// Which chord gates popups on Linux.
+    ///
+    /// XDG GlobalShortcuts preferred-binding syntax; advisory on the
+    /// wlr-native channel, where the compositor bind is the truth.
+    #[serde(default = "default_trigger_key_linux")]
+    pub trigger_key_linux: String,
     /// Re-look-up per character?
     #[serde(default)]
     pub per_character_lookup: bool,
@@ -58,7 +64,12 @@ fn default_trigger_key() -> String {
     "shift".to_string()
 }
 
-pub(crate) fn default_ocr_language() -> String {
+/// A chord, not a bare key: a portal binding is a system-wide grab.
+fn default_trigger_key_linux() -> String {
+    "ALT+F".to_string()
+}
+
+pub fn default_ocr_language() -> String {
     "ja".to_string()
 }
 
@@ -163,6 +174,9 @@ pub struct PopupConfig {
     /// Collapsed rows beside, not below.
     #[serde(default)]
     pub side_panel: bool,
+    /// Which layer the popup sits on, on Linux.
+    #[serde(default)]
+    pub layer: PopupLayer,
 }
 
 /// 25% of the monitor.
@@ -178,6 +192,95 @@ fn default_highlight_match() -> bool {
 /// On by default.
 fn default_scroll_popup() -> bool {
     true
+}
+
+/// `popup.layer`: which wlr layer the Linux popup sits on.
+///
+/// `overlay` clears everything including fullscreen clients; `top` sits
+/// under them, which some compositors handle better.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PopupLayer {
+    /// Above everything, the default.
+    #[default]
+    Overlay,
+    /// Below fullscreen clients.
+    Top,
+}
+
+/// Which platform a field is being read for.
+///
+/// Every field lives on the one shared `Config`; this only picks which
+/// of a per-platform pair a caller means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Windows,
+    Linux,
+}
+
+impl Platform {
+    /// The platform this build runs on.
+    pub const fn current() -> Platform {
+        if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        }
+    }
+
+    /// The font a fresh config is created with.
+    pub const fn default_font(self) -> &'static str {
+        match self {
+            Platform::Windows => "Yu Gothic UI",
+            Platform::Linux => "Noto Sans CJK JP",
+        }
+    }
+}
+
+/// Which font family a popup should actually use.
+///
+/// `popup.font` is a dumb literal, so a config carried from the other
+/// platform names a family this one may not have. The caller renders the
+/// warning; the choice is made here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontChoice {
+    /// The configured family resolved.
+    Configured(String),
+    /// It did not; the platform default stands in.
+    Fallback {
+        /// What the config asked for.
+        requested: String,
+        /// What will be used instead.
+        family: &'static str,
+    },
+}
+
+impl FontChoice {
+    /// The family to render with, either way.
+    pub fn family(&self) -> &str {
+        match self {
+            FontChoice::Configured(f) => f,
+            FontChoice::Fallback { family, .. } => family,
+        }
+    }
+}
+
+/// Picks the family to render with.
+///
+/// `resolvable` answers whether the font stack has the family; an empty
+/// literal is never asked about, it just falls back.
+pub fn resolve_font(
+    configured: &str,
+    platform: Platform,
+    resolvable: impl FnOnce(&str) -> bool,
+) -> FontChoice {
+    if !configured.is_empty() && resolvable(configured) {
+        return FontChoice::Configured(configured.to_string());
+    }
+    FontChoice::Fallback {
+        requested: configured.to_string(),
+        family: platform.default_font(),
+    }
 }
 
 /// `[dictionaries]`.
@@ -310,6 +413,32 @@ pub struct FieldMapping {
     pub source: String,
 }
 
+/// Every `source` a field-map row may name, in the order a picker
+/// offers them.
+///
+/// A `source` is the key [`crate::anki::mapped_fields`] looks up in the
+/// note's `fields` map; a row whose source is absent from that map
+/// contributes nothing to the note. `expression`, `reading`, `glossary`
+/// and `glossary_html` always come from `anki::fields_from_card`, which
+/// adds `frequency` only when the card carries one;
+/// `controller::note_payload` adds `sentence` when the hover produced
+/// one. `screenshot` is the odd one out: it is never a `fields` key at
+/// all, and `shot::plan` reads it straight off this list's row to learn
+/// which Anki field the picture belongs in.
+///
+/// Windows' combo prepends `"(none)"`, which is that one UI's idiom for
+/// "this field is unmapped" and is filtered out by its `row_mapping`
+/// before a save; it is never a stored value, so it is not a source.
+pub const FIELD_SOURCES: [&str; 7] = [
+    "expression",
+    "reading",
+    "glossary",
+    "frequency",
+    "glossary_html",
+    "screenshot",
+    "sentence",
+];
+
 /// `[anki]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnkiConfig {
@@ -324,18 +453,24 @@ pub struct AnkiConfig {
     /// Shortcut: add the top card.
     #[serde(default = "default_anki_add_key")]
     pub add_key: String,
+    /// Same shortcut on Linux, in portal syntax.
+    #[serde(default = "default_anki_add_key_linux")]
+    pub add_key_linux: String,
     /// Tray balloon on add.
     #[serde(default = "default_notify_on_add")]
     pub notify_on_add: bool,
     /// Which fields go where.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
-    /// "line", "all", or "static".
+    /// How the Anki sentence field is assembled.
     #[serde(default = "default_sentence_mode")]
-    pub sentence_mode: String,
+    pub sentence_mode: SentenceMode,
     /// Set the static region.
     #[serde(default = "default_static_region_key")]
     pub static_region_key: String,
+    /// Same key on Linux, in portal syntax.
+    #[serde(default = "default_static_region_key_linux")]
+    pub static_region_key_linux: String,
     /// [x, y, w, h] if set.
     #[serde(default)]
     pub static_region: Option<[i32; 4]>,
@@ -367,18 +502,47 @@ fn default_anki_add_key() -> String {
     "a".to_string()
 }
 
+/// Mirrors the trigger's modifier family: a portal
+/// binding is system-wide, so a bare letter will not do.
+fn default_anki_add_key_linux() -> String {
+    "ALT+A".to_string()
+}
+
 /// On by default.
 fn default_notify_on_add() -> bool {
     true
 }
 
+/// `anki.sentence_mode`: which text the Anki sentence field gets.
+///
+/// `lowercase` for the TOML: existing files carry `"line"`, `"all"`,
+/// and `"static"`, and they keep parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SentenceMode {
+    /// The OCR line the cursor is on.
+    Line,
+    /// Every line the hover's capture read.
+    All,
+    /// Every line inside the user-drawn region, which is also what a
+    /// lookup reads from in this mode.
+    Static,
+}
+
 /// Default sentence mode.
-fn default_sentence_mode() -> String {
-    "line".to_string()
+fn default_sentence_mode() -> SentenceMode {
+    SentenceMode::Line
 }
 
 /// Default static region key.
 fn default_static_region_key() -> String {
+    String::new()
+}
+
+/// Unbound, like its Windows twin: ADR-0003 keeps the portal's shortcut
+/// list to the trigger and the Anki add, so a chord shipped here would
+/// claim a system-wide grab that nothing binds.
+fn default_static_region_key_linux() -> String {
     String::new()
 }
 
@@ -406,10 +570,12 @@ impl Default for AnkiConfig {
             deck: default_anki_deck(),
             model: default_anki_model(),
             add_key: default_anki_add_key(),
+            add_key_linux: default_anki_add_key_linux(),
             notify_on_add: default_notify_on_add(),
             field_map: default_field_map(),
             sentence_mode: default_sentence_mode(),
             static_region_key: default_static_region_key(),
+            static_region_key_linux: default_static_region_key_linux(),
             static_region: None,
             show_static_overlay: default_show_static_overlay(),
             first_dict_only: false,
@@ -440,6 +606,16 @@ pub struct ActionsConfig {
 pub struct ScreenshotConfig {
     #[serde(default = "default_screenshot_hotkey")]
     pub hotkey: String,
+    /// Same action on Linux; absent leaves it unbound.
+    ///
+    /// Not portal syntax, unlike `anki.add_key_linux`: ADR-0003 fixes the
+    /// portal's shortcut ids at exactly two forever, so this action rides
+    /// the control socket instead (spec D1) and the chord here is the
+    /// compositor bind the Linux settings window hands out as a copyable
+    /// snippet. `Option`, mirroring the ocr-clipboard twin, so absence
+    /// stays typed rather than an empty-string sentinel.
+    #[serde(default)]
+    pub hotkey_linux: Option<String>,
     #[serde(default = "default_screenshot_save_dir")]
     pub save_dir: String,
     #[serde(default)]
@@ -452,6 +628,9 @@ pub struct OcrClipboardConfig {
     /// Empty or absent disables the action.
     #[serde(default)]
     pub hotkey: Option<String>,
+    /// Same action on Linux, in portal syntax; absent disables it.
+    #[serde(default)]
+    pub hotkey_linux: Option<String>,
 }
 
 /// On by default.
@@ -484,6 +663,7 @@ impl Default for ScreenshotConfig {
     fn default() -> ScreenshotConfig {
         ScreenshotConfig {
             hotkey: default_screenshot_hotkey(),
+            hotkey_linux: None,
             save_dir: default_screenshot_save_dir(),
             include_on_add: false,
         }
@@ -514,6 +694,7 @@ impl Default for Config {
             trigger: TriggerConfig {
                 mode: TriggerMode::Live,
                 trigger_key: default_trigger_key(),
+                trigger_key_linux: default_trigger_key_linux(),
                 per_character_lookup: false,
             },
             popup: PopupConfig {
@@ -522,10 +703,11 @@ impl Default for Config {
                 max_width_percent: default_max_width_percent(),
                 max_height_percent: 45,
                 summary_chars: 40,
-                font: "Yu Gothic UI".to_string(),
+                font: Platform::current().default_font().to_string(),
                 highlight_match: default_highlight_match(),
                 scroll_popup: default_scroll_popup(),
                 side_panel: false,
+                layer: PopupLayer::default(),
             },
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
@@ -603,12 +785,71 @@ impl Config {
         );
     }
 
-    /// The bridge to `present.rs`.
-    pub fn present_config(&self) -> crate::present::PresentConfig {
+    /// The bridge to `present.rs`, with this OCR language's dictionary
+    /// scope resolved.
+    ///
+    /// `dictionaries.per_language[ocr.language]` is the "Not searched"
+    /// split the settings window writes: naming a subset both orders the
+    /// popup and restricts the search to it. Three guards fall back to
+    /// the unrestricted `display_order`, because a popup with nothing in
+    /// it is worse than an unfiltered one:
+    ///
+    /// - no entry for the language, or an empty one - it was never split;
+    /// - a list matching nothing installed - a typo, or the dictionaries
+    ///   it named are gone;
+    /// - `engine_runs()` says no - the configured recogniser for this
+    ///   language is not the one that will read the screen, so the list
+    ///   drawn up for it does not apply. Windows answers with
+    ///   language-pack availability; Linux answers whether the tag is one
+    ///   meikiocr reads (ADR-0012). Only asked when a list would
+    ///   otherwise apply, so a real probe may sit behind it.
+    ///
+    /// This is the whole rule and the only place `restrict_to_order` is
+    /// decided: returning the finished `PresentConfig` leaves no half-way
+    /// state for a caller to forget to apply.
+    pub fn present_config(
+        &self,
+        dicts: &[crate::present::DictInfo],
+        engine_runs: impl FnOnce() -> bool,
+    ) -> crate::present::PresentConfig {
+        let scoped = self
+            .dictionaries
+            .per_language
+            .get(&self.ocr.language)
+            .filter(|list| !list.is_empty())
+            .filter(|list| {
+                crate::present::any_listed(dicts.iter().map(|d| d.name.as_str()), list)
+                    && engine_runs()
+            });
         crate::present::PresentConfig {
-            dict_order: self.dictionaries.display_order.clone(),
+            dict_order: scoped
+                .cloned()
+                .unwrap_or_else(|| self.dictionaries.display_order.clone()),
             summary_chars: self.popup.summary_chars,
-            restrict_to_order: false,
+            restrict_to_order: scoped.is_some(),
+        }
+    }
+
+    /// Which layer the Linux popup sits on.
+    ///
+    /// The conduit the Linux popup reads; Windows ignores it.
+    pub fn popup_layer(&self) -> PopupLayer {
+        self.popup.layer
+    }
+
+    /// The trigger chord this platform binds.
+    pub fn trigger_key_for(&self, platform: Platform) -> &str {
+        match platform {
+            Platform::Windows => &self.trigger.trigger_key,
+            Platform::Linux => &self.trigger.trigger_key_linux,
+        }
+    }
+
+    /// The Anki-add chord this platform binds.
+    pub fn add_key_for(&self, platform: Platform) -> &str {
+        match platform {
+            Platform::Windows => &self.anki.add_key,
+            Platform::Linux => &self.anki.add_key_linux,
         }
     }
 }
@@ -661,6 +902,34 @@ mod tests {
         std::env::temp_dir().join(format!("chibipop_cfg_{}_{}.toml", std::process::id(), name))
     }
 
+    /// `controller::note_payload` can supply a sentence, so a picker
+    /// must be able to route it.
+    #[test]
+    fn field_sources_offers_sentence() {
+        assert!(FIELD_SOURCES.contains(&"sentence"));
+    }
+
+    /// Without this row a mining screenshot has no field to land in:
+    /// `shot::plan` finds the picture field by this source alone.
+    #[test]
+    fn field_sources_offers_screenshot() {
+        assert!(FIELD_SOURCES.contains(&"screenshot"));
+    }
+
+    /// A shipped default a picker cannot offer would be unreproducible
+    /// from the settings window.
+    #[test]
+    fn every_default_field_map_source_is_offered() {
+        for mapping in default_field_map() {
+            assert!(
+                FIELD_SOURCES.contains(&mapping.source.as_str()),
+                "default row {} maps source {:?}, which no picker offers",
+                mapping.anki_field,
+                mapping.source
+            );
+        }
+    }
+
     #[test]
     fn defaults_match_the_spec() {
         let c = Config::default();
@@ -669,7 +938,15 @@ mod tests {
         assert_eq!(25, c.popup.max_width_percent);
         assert_eq!(45, c.popup.max_height_percent);
         assert_eq!(40, c.popup.summary_chars);
-        assert_eq!("Yu Gothic UI", c.popup.font);
+        assert_eq!(Platform::current().default_font(), c.popup.font);
+        assert_eq!("ALT+F", c.trigger.trigger_key_linux);
+        assert_eq!("ALT+A", c.anki.add_key_linux);
+        assert_eq!("", c.anki.static_region_key_linux, "unbound, like its Windows twin");
+        assert_eq!(
+            None, c.actions.screenshot.hotkey_linux,
+            "unbound: the control-socket verb has no compositor bind until a human writes one"
+        );
+        assert_eq!(PopupLayer::Overlay, c.popup.layer);
         assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()],
                    c.dictionaries.display_order);
     }
@@ -1057,7 +1334,7 @@ mod tests {
 
     #[test]
     fn sentence_mode_defaults_to_line() {
-        assert_eq!("line", Config::default().anki.sentence_mode);
+        assert_eq!(SentenceMode::Line, Config::default().anki.sentence_mode);
     }
 
     #[test]
@@ -1164,11 +1441,40 @@ mod tests {
         let p = tmp("sentence_static_rt");
         let _ = std::fs::remove_file(&p);
         let mut c = Config::default();
-        c.anki.sentence_mode = "static".to_string();
+        c.anki.sentence_mode = SentenceMode::Static;
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
-        assert_eq!("static", back.anki.sentence_mode);
+        assert_eq!(SentenceMode::Static, back.anki.sentence_mode);
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// The strings an 0.9.x file carries still name the modes: the enum
+    /// is a Rust-side type, not a file format change.
+    #[test]
+    fn a_config_written_before_the_enum_still_names_every_mode() {
+        for (written, expected) in [
+            ("line", SentenceMode::Line),
+            ("all", SentenceMode::All),
+            ("static", SentenceMode::Static),
+        ] {
+            let p = tmp(&format!("sentence_legacy_{written}"));
+            let _ = std::fs::remove_file(&p);
+            std::fs::write(&p, format!(concat!(
+                "[trigger]\nmode = \"live\"\n\n",
+                "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+                "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+                "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+                "[anki]\nsentence_mode = \"{}\"\n",
+            ), written)).unwrap();
+            let loaded = load_or_create(&p).unwrap();
+            assert_eq!(expected, loaded.anki.sentence_mode, "{written} must still load");
+            // And the file we write back is the one it can read again.
+            loaded.save(&p).unwrap();
+            assert!(std::fs::read_to_string(&p)
+                .unwrap()
+                .contains(&format!("sentence_mode = \"{written}\"")));
+            let _ = std::fs::remove_file(&p);
+        }
     }
 
     /// Guards the shipped default.
@@ -1219,6 +1525,26 @@ mod tests {
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
         assert_eq!(c.anki.field_map, back.anki.field_map);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Ticket 20 makes an empty map reachable from either settings
+    /// window, so the serde default must keep firing on an absent key
+    /// only: a present `field_map = []` is the user's answer, not a
+    /// missing one (contrast
+    /// `an_anki_section_without_field_map_still_defaults_to_lapis`).
+    #[test]
+    fn an_emptied_anki_field_map_survives_a_save_and_reload() {
+        let p = tmp("field_map_emptied");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.anki.field_map = Vec::new();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert!(
+            back.anki.field_map.is_empty(),
+            "a user who mapped nothing must not get Lapis back on reload"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1549,6 +1875,210 @@ mod tests {
         assert_eq!(c.dictionaries.per_language, back.dictionaries.per_language);
     }
 
+    /// ADR-0012: the creation-time font is a per-platform literal.
+    #[test]
+    fn each_platform_creates_its_own_default_font() {
+        assert_eq!("Yu Gothic UI", Platform::Windows.default_font());
+        assert_eq!("Noto Sans CJK JP", Platform::Linux.default_font());
+    }
+
+    /// ADR-0012: every field serializes on every platform, so a config
+    /// exercising both platforms' fields survives a save/load unchanged.
+    #[test]
+    fn a_config_with_both_platforms_fields_round_trips_losslessly() {
+        let p = tmp("both_platforms_round_trip");
+        let mut c = Config::default();
+        c.trigger.mode = TriggerMode::HoldKey;
+        c.trigger.trigger_key = "f2".to_string();
+        c.trigger.trigger_key_linux = "CTRL+ALT+F".to_string();
+        c.trigger.per_character_lookup = true;
+        c.popup.theme = "light".to_string();
+        c.popup.exclude_from_capture = true;
+        c.popup.max_width_percent = 30;
+        c.popup.max_height_percent = 50;
+        c.popup.summary_chars = 60;
+        c.popup.font = "IPAexGothic".to_string();
+        c.popup.highlight_match = false;
+        c.popup.scroll_popup = false;
+        c.popup.side_panel = true;
+        c.popup.layer = PopupLayer::Top;
+        c.dictionaries.per_language.insert("ja".to_string(), vec!["大辞林".to_string()]);
+        c.ocr.max_ocr_passes = 3;
+        c.ocr.prefer_vertical = true;
+        c.ocr.capture_width = 640;
+        c.ocr.capture_height = 120;
+        c.ocr.scan_alphanumeric = false;
+        c.ocr.language = "en".to_string();
+        c.debug.show_scan_region = true;
+        c.anki.enabled = true;
+        c.anki.url = "http://localhost:1234".to_string();
+        c.anki.deck = "Mining".to_string();
+        c.anki.model = "Kaishi".to_string();
+        c.anki.add_key = "d".to_string();
+        c.anki.add_key_linux = "CTRL+ALT+A".to_string();
+        c.anki.static_region_key = "0x52".to_string();
+        c.anki.static_region_key_linux = "ALT+R".to_string();
+        c.actions.screenshot.hotkey_linux = Some("ALT+S".to_string());
+        c.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".to_string()),
+            hotkey_linux: Some("ALT+C".to_string()),
+        });
+        c.save(&p).unwrap();
+        assert_eq!(c, load_or_create(&p).unwrap());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A Windows-shaped file predating the Linux fields loads with every
+    /// stored value intact and the new fields at their documented defaults.
+    #[test]
+    fn a_windows_shaped_legacy_file_loads_unchanged_and_gains_defaults() {
+        let p = tmp("windows_legacy");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"hold-key\"\ntrigger_key = \"f2\"\n\n",
+            "[popup]\ntheme = \"light\"\nexclude_from_capture = true\n",
+            "max_height_percent = 50\nsummary_chars = 60\nfont = \"Meiryo\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n\n",
+            "[anki]\nadd_key = \"d\"\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        // Windows-rendered fields: exactly what the file said.
+        assert_eq!(TriggerMode::HoldKey, c.trigger.mode);
+        assert_eq!("f2", c.trigger.trigger_key);
+        assert_eq!("light", c.popup.theme);
+        assert!(c.popup.exclude_from_capture);
+        assert_eq!("Meiryo", c.popup.font);
+        assert_eq!("d", c.anki.add_key);
+        // New fields: the documented defaults, no migration.
+        assert_eq!("ALT+F", c.trigger.trigger_key_linux);
+        assert_eq!("ALT+A", c.anki.add_key_linux);
+        assert_eq!("", c.anki.static_region_key_linux);
+        assert_eq!(None, c.actions.screenshot.hotkey_linux);
+        assert_eq!(PopupLayer::Overlay, c.popup.layer);
+        // The whole-struct save writes the new keys with those defaults
+        // and the old values verbatim.
+        c.save(&p).unwrap();
+        let saved = std::fs::read_to_string(&p).unwrap();
+        assert!(saved.contains("trigger_key = \"f2\""));
+        assert!(saved.contains("trigger_key_linux = \"ALT+F\""));
+        assert!(saved.contains("add_key = \"d\""));
+        assert!(saved.contains("add_key_linux = \"ALT+A\""));
+        assert!(saved.contains("static_region_key_linux = \"\""));
+        assert!(saved.contains("layer = \"overlay\""));
+        assert!(saved.contains("font = \"Meiryo\""));
+        assert_eq!(c, load_or_create(&p).unwrap());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The other platform's fields survive a save untouched.
+    #[test]
+    fn a_save_preserves_the_other_platforms_fields() {
+        let p = tmp("preserve_other_platform");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\ntrigger_key_linux = \"SUPER+J\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Noto Sans CJK JP\"\n",
+            "layer = \"top\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n\n",
+            "[ocr]\nlanguage = \"en\"\n\n",
+            "[anki]\nadd_key_linux = \"SUPER+K\"\nstatic_region_key_linux = \"SUPER+R\"\n\n",
+            "[actions.screenshot]\nhotkey_linux = \"SUPER+S\"\n\n",
+            "[actions.ocr_clipboard]\nhotkey_linux = \"SUPER+C\"\n",
+        )).unwrap();
+        // A Windows-style edit: change a rendered field, save the struct.
+        let mut c = load_or_create(&p).unwrap();
+        c.popup.theme = "light".to_string();
+        c.save(&p).unwrap();
+        let back = load_or_create(&p).unwrap();
+        assert_eq!("SUPER+J", back.trigger.trigger_key_linux);
+        assert_eq!("SUPER+K", back.anki.add_key_linux);
+        assert_eq!("SUPER+R", back.anki.static_region_key_linux);
+        assert_eq!(
+            Some("SUPER+C".to_string()),
+            back.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone()),
+            "the Linux OCR-clipboard chord survives a Windows-side save"
+        );
+        assert_eq!(
+            Some("SUPER+S".to_string()),
+            back.actions.screenshot.hotkey_linux,
+            "the Linux screenshot chord survives a Windows-side save"
+        );
+        assert_eq!(PopupLayer::Top, back.popup.layer);
+        assert_eq!("en", back.ocr.language, "hidden on Linux, never dropped");
+        assert_eq!("light", back.popup.theme);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// `popup.layer` accepts exactly `overlay` and `top`.
+    #[test]
+    fn popup_layer_parses_overlay_and_top_and_rejects_garbage() {
+        let base = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"X\"\n",
+        );
+        let parse = |layer_line: &str| {
+            toml::from_str::<Config>(&format!("{base}{layer_line}"))
+        };
+        assert_eq!(PopupLayer::Overlay, parse("layer = \"overlay\"\n").unwrap().popup.layer);
+        assert_eq!(PopupLayer::Top, parse("layer = \"top\"\n").unwrap().popup.layer);
+        assert_eq!(PopupLayer::Overlay, parse("").unwrap().popup.layer, "absent takes the default");
+        assert!(parse("layer = \"bottom\"\n").is_err(), "garbage layers are a parse error");
+    }
+
+    /// The conduit the Linux popup reads.
+    #[test]
+    fn popup_layer_reaches_the_accessor() {
+        let mut c = Config::default();
+        assert_eq!(PopupLayer::Overlay, c.popup_layer());
+        c.popup.layer = PopupLayer::Top;
+        assert_eq!(PopupLayer::Top, c.popup_layer());
+    }
+
+    /// Each bin reads only its own key fields.
+    #[test]
+    fn key_accessors_pick_the_platforms_field() {
+        let mut c = Config::default();
+        c.trigger.trigger_key = "f2".to_string();
+        c.anki.add_key = "d".to_string();
+        assert_eq!("f2", c.trigger_key_for(Platform::Windows));
+        assert_eq!("ALT+F", c.trigger_key_for(Platform::Linux));
+        assert_eq!("d", c.add_key_for(Platform::Windows));
+        assert_eq!("ALT+A", c.add_key_for(Platform::Linux));
+    }
+
+    /// A resolvable literal is used as-is.
+    #[test]
+    fn a_resolvable_font_is_kept() {
+        let choice = resolve_font("IPAexGothic", Platform::Linux, |_| true);
+        assert_eq!(FontChoice::Configured("IPAexGothic".to_string()), choice);
+        assert_eq!("IPAexGothic", choice.family());
+    }
+
+    /// ADR-0004/0012: an unresolvable literal falls back to the
+    /// platform default, naming what was asked for.
+    #[test]
+    fn an_unresolvable_font_falls_back_to_the_platform_default() {
+        let choice = resolve_font("Yu Gothic UI", Platform::Linux, |_| false);
+        assert_eq!(
+            FontChoice::Fallback {
+                requested: "Yu Gothic UI".to_string(),
+                family: "Noto Sans CJK JP",
+            },
+            choice
+        );
+        assert_eq!("Noto Sans CJK JP", choice.family());
+        let windows = resolve_font("Noto Sans CJK JP", Platform::Windows, |_| false);
+        assert_eq!("Yu Gothic UI", windows.family());
+    }
+
+    /// An empty literal never reaches the resolver.
+    #[test]
+    fn an_empty_font_falls_back_without_asking() {
+        let choice = resolve_font("", Platform::Linux, |_| panic!("asked about an empty literal"));
+        assert_eq!("Noto Sans CJK JP", choice.family());
+    }
+
     // ---- plugin engine ----
 
     #[test]
@@ -1688,19 +2218,39 @@ mod tests {
         assert_eq!(None, cfg.actions.ocr_clipboard);
     }
 
+    /// Both platforms' chords ride the one nested section (ADR-0012).
     #[test]
     fn ocr_clipboard_hotkey_round_trips() {
         let mut cfg = Config::default();
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
             hotkey: Some("ctrl+shift+o".into()),
+            hotkey_linux: Some("CTRL+SHIFT+O".into()),
         });
         let text = toml::to_string(&cfg).unwrap();
         let loaded: Config = toml::from_str(&text).unwrap();
         assert_eq!(
             Some(OcrClipboardConfig {
                 hotkey: Some("ctrl+shift+o".to_string()),
+                hotkey_linux: Some("CTRL+SHIFT+O".to_string()),
             }),
             loaded.actions.ocr_clipboard
+        );
+    }
+
+    /// A Windows-shaped section predating the Linux twin.
+    #[test]
+    fn an_ocr_clipboard_section_without_the_linux_twin_loads_with_it_absent() {
+        let toml = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n\n",
+            "[actions.ocr_clipboard]\nhotkey = \"f9\"\n",
+        );
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            Some(OcrClipboardConfig { hotkey: Some("f9".to_string()), hotkey_linux: None }),
+            cfg.actions.ocr_clipboard
         );
     }
 
@@ -1718,27 +2268,84 @@ mod tests {
         assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
     }
 
-    #[test]
-    fn field_map_screenshot_source_resolves() {
-        let map = [
-            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
-            FieldMapping { anki_field: "Context".into(), source: "screenshot".into() },
-        ];
-        let found = map.iter()
-            .find(|m| m.source == "screenshot")
-            .map(|m| m.anki_field.clone());
-        assert_eq!(Some("Context".to_string()), found);
+    fn di(id: i64, name: &str) -> crate::present::DictInfo {
+        crate::present::DictInfo { dict_id: id, name: name.to_string() }
+    }
+
+    fn installed() -> [crate::present::DictInfo; 2] {
+        [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")]
     }
 
     #[test]
-    fn field_map_without_screenshot_returns_none() {
-        let map = [
-            FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
-            FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
-        ];
-        let found = map.iter()
-            .find(|m| m.source == "screenshot")
-            .map(|m| m.anki_field.clone());
-        assert_eq!(None, found);
+    fn the_active_language_selects_its_own_list() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans-CN".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let out = cfg.present_config(&installed(), || true);
+        assert_eq!(vec!["中日大辞典".to_string()], out.dict_order);
+        assert!(out.restrict_to_order);
+        assert!(
+            !crate::present::keeps_dict("大辞林　第四版", &out.dict_order, out.restrict_to_order),
+            "the excluded dictionary must not be searched"
+        );
+    }
+
+    #[test]
+    fn a_language_with_no_list_falls_back_to_display_order() {
+        let cfg = Config::default();
+        let out = cfg.present_config(&installed(), || true);
+        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
+        assert!(!out.restrict_to_order, "no entry must not restrict");
+    }
+
+    #[test]
+    fn an_empty_list_does_not_restrict() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.per_language.insert("ja".to_string(), Vec::new());
+        assert!(!cfg.present_config(&installed(), || true).restrict_to_order);
+    }
+
+    /// A typo must not blank the popup.
+    #[test]
+    fn a_list_matching_nothing_installed_falls_back() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["Typoo".to_string()]);
+        let out = cfg.present_config(&installed(), || true);
+        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
+        assert!(!out.restrict_to_order, "all patterns missed, so do not restrict");
+    }
+
+    /// Wrong engine: no filter.
+    #[test]
+    fn a_recogniser_that_will_not_run_ignores_the_language_list() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "zh-Hans-CN".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        let out = cfg.present_config(&installed(), || false);
+        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
+        assert!(!out.restrict_to_order, "the engine is not running this language");
+    }
+
+    /// The gate costs nothing when no list applies.
+    #[test]
+    fn the_engine_gate_is_not_asked_without_a_matching_list() {
+        let cfg = Config::default();
+        let out = cfg.present_config(&installed(), || panic!("must not probe the recogniser"));
+        assert!(!out.restrict_to_order);
+    }
+
+    #[test]
+    fn summary_chars_rides_along() {
+        let mut cfg = Config::default();
+        cfg.popup.summary_chars = 55;
+        assert_eq!(55, cfg.present_config(&[], || true).summary_chars);
     }
 }

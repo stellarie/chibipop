@@ -5,3 +5,4 @@ pub mod build;
 pub mod edit;
 pub mod frequency;
 pub mod glossary;
+pub mod progress;

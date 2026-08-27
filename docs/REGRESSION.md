@@ -70,10 +70,16 @@ machine has two.
 ```bash
 export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
 powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.Name -eq 'chibipop.exe' -and \$_.ExecutablePath -like '*\target\*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
-cargo test 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
-cargo clippy --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
-cargo build --release 2>&1 | grep -E "^error|Finished"
+cargo test --workspace --exclude chibipop-linux 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
+cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
+cargo build --release --workspace --exclude chibipop-linux 2>&1 | grep -E "^error|Finished"
 ```
+
+The `--workspace --exclude chibipop-linux` flags arrived with ticket 29: `default-members`
+serves the Linux dev box since then, so a bare `cargo test` here would silently skip the
+Windows crate — the exact under-coverage this tier exists to catch. Both bins are named
+`chibipop`, so link-producing commands must exclude the foreign bin crate (collision);
+check-shaped clippy spans the whole workspace unexcluded.
 
 > [!caution] Never kill chibipop by name on this machine — three different things answer to it
 > The preflight above used to be `Stop-Process -Name chibipop -Force`. **`-Name` is not
@@ -96,8 +102,8 @@ cargo build --release 2>&1 | grep -E "^error|Finished"
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green**, **1010** total across **8** targets, 3 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system; see below) |
-| Clippy | **exactly 3** accepted errors (was 4; see below) |
+| Rust tests | **all green**, **1546** total across **17** targets, 0 ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system → 1407 on 2026-08-26 → 1546 on 2026-08-26 linux-parity; see below) |
+| Clippy | **exactly 1** accepted error (was 2; see below) |
 | Bin-target clippy (below) | **0** |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
@@ -107,14 +113,20 @@ silently not running must. CI asserts `≥ 400` and prints the total; **873** is
 measures today, so a *lower* number is the thing to explain. The clippy counts are equalities —
 that is the difference between the two rows and it is deliberate.
 
-> [!warning] One of those tests never runs here, and is counted as passed
-> `golden_corpus` (`tests/golden.rs:31-34`) early-returns when `data/chibipop.sqlite` is absent,
-> printing `SKIP golden_corpus: … not built` and asserting **nothing**. It is reported as `ok`, not
-> as ignored, so **every total on this page includes one test that did not run** on any tree without
-> a built database — which is every fresh clone and every worktree. The ignored tests beside the
-> total are *different* tests. This is pre-existing and is recorded here rather than fixed: making the
-> skip visible in the count means either failing the suite on a clone or teaching the `awk` to
-> subtract, and both are their own change.
+> [!warning] One of those tests only runs where a dictionary does, and is counted as passed either way
+> `golden_corpus` (`tests/golden.rs`) grades deconjugation against a real library. It early-returns
+> when it cannot find one, and a `#[test]` that returns is a **pass** — not the one ignored test —
+> so **every total on this page measured on a tree without a built database includes one test that
+> did not run**: every fresh clone, every worktree, and CI. The ignored tests beside the total are
+> *different* tests.
+>
+> **Amended 2026-08-27 (ticket 17).** Until then it probed `data/chibipop.sqlite` and nothing else,
+> so it skipped on *every* tree, this one included — the Windows box above is the exception, because
+> that repo path is where its own `build-dict --out` default lands. It now resolves the dictionary
+> the way the product does (`$CHIBIPOP_GOLDEN_DB`, the Linux daemon's
+> `$XDG_DATA_HOME/chibipop/chibipop.sqlite`, then that same cargo-tree path) and names every path it
+> looked at when it skips. Making the skip *visible in the count* is still unfixed and still its own
+> change: it means either failing the suite on a clone or teaching the `awk` to subtract.
 
 > [!warning] `cargo test --lib` reports 910 / 1, which looks like the full figure
 > Bare `cargo test` is the only correct command for re-baselining this row. `cargo test --lib`
@@ -269,18 +281,31 @@ owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that
 `LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
 before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
 
-**The three accepted clippy errors — unchanged since 2026-08-09, sites re-confirmed 2026-08-11:**
+**The one accepted clippy error — re-baselined 2026-08-26 (the upstream v0.9.x merge rewrote
+`deconj.rs` past its `useless_conversion` site; the three findings that same merge carried into
+`src/worker.rs` were refactored away rather than accepted — a `ServeHook` alias for the `serve`
+hook's boxed closure, and a `LookupState` bundle for the five reload-replaced locals that
+`take_reload` and `resolve_trigger` used to pass one at a time):**
 
 | Lint | Site |
 |---|---|
-| `useless_conversion` — explicit `.into_iter()` in an `IntoIterator` argument | `src/lookup/deconj.rs:78` |
-| `too_many_arguments` (8/7) | `src/lookup/model.rs:78` |
-| `too_many_arguments` (10/7) | `src/ui/render.rs:699` |
+| `too_many_arguments` (8/7) — `add_term` | `src/lookup/model.rs:86` |
 
-It was **4** until 2026-08-09. The fourth was `while_let_loop`, on `worker_main`'s trigger drain;
-the hot-reload branch replaced that loop with an explicit `drain` (a `Reload` message must never be
-swallowed by newest-wins coalescing), so the lint went with it. That is a legitimate 4 → 3, not a
-suppression — the count went **down** because the code did.
+It was **4** until 2026-08-09, **3** until 2026-08-25, and **2** until 2026-08-26. The fourth was
+`while_let_loop`, on `worker_main`'s trigger drain; the hot-reload branch replaced that loop with an
+explicit `drain` (a `Reload` message must never be swallowed by newest-wins coalescing), so the lint
+went with it. The third was `layout_pass` in the Windows bin crate, deleted when ticket 27 moved the
+popup's layout walk into core as `PopupScene`. The second was `useless_conversion` at
+`src/lookup/deconj.rs:78`, gone with upstream's own rewrite of that function. Each of those is a
+legitimate step down, not a suppression — the count went **down** because the code did, and no
+`#[allow]` was added for any of them.
+
+Since the 2026-08-24 workspace split the CI gate counts rendered **warnings from a plain clippy
+run** (no `-D warnings`) instead of error lines: denying warnings turns core's accepted findings
+into hard errors, the core lib produces no rmeta, and the dependent `chibipop-windows` crate never
+gets linted — its accepted finding would silently vanish from the count. Left as warnings, every
+target lints, cargo deduplicates repeat diagnostics across targets, and one workspace-wide run
+renders each finding exactly once. Same baseline, same number: **1**.
 
 > [!warning] The clippy line changed on 2026-07-29, because the old one could not fail
 > It used to be `grep -cE "^error: (doc list|explicit call|this function|this loop)"` —
@@ -505,7 +530,7 @@ assumed.
 parses each `plugin.toml` it finds, and lists a broken manifest beside its error instead of
 dropping it — a filter here would make `plugin list`'s per-failure reason impossible. `src/plugin/cli.rs`
 is also new (`list`, `test_one`), and `chibipop plugin list` / `chibipop plugin test` are wired into
-`src/main.rs`, but none of that carries its own unit test — it was proven for real in Step 6, not
+`crates/chibipop-windows/src/main.rs`, but none of that carries its own unit test — it was proven for real in Step 6, not
 in the suite; see the task report. Three tests, all new, none rewritten: a missing root returns
 empty rather than erroring; a directory with one good and one broken manifest reports both, the
 second as `Err`; a directory holding a subfolder with no `plugin.toml` skips it without moving the
@@ -605,15 +630,15 @@ Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chibipop.exe' } |
 
 A survivor under `target\` means a path reached neither exit.
 
-**Why counts, not exit status.** The repo carries three accepted clippy errors; a plain
-`-D warnings` run therefore always exits non-zero, and CI must assert the count is **3** rather than
-that clippy passed. A 4th is a real regression — most often a field added by one commit and read by
+**Why counts, not exit status.** The repo carries one accepted clippy error; a plain
+`-D warnings` run therefore always exits non-zero, and CI must assert the count is **1** rather than
+that clippy passed. A 2nd is a real regression — most often a field added by one commit and read by
 the next, which is why a task that adds a field must be the task that reads it.
 
 The bin target needs the accepted lints suppressed or clippy aborts before `main.rs` compiles:
 
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings \
+cargo clippy --workspace --all-targets --all-features -- -D warnings \
   -A clippy::while_let_loop -A clippy::doc_lazy_continuation -A clippy::useless_conversion \
   -A clippy::too_many_arguments -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1 | grep -cE "^(error|warning)"
 ```
@@ -681,7 +706,7 @@ full-screen and work against its published coordinates. `probe` reads a coordina
 the pointer, so it disturbs nothing; the rows that *do* move the pointer are marked.
 
 > [!note] Which language each command can actually test — added 2026-08-17
-> **`probe` and `watch` hardcode `"ja"`** (`src/main.rs:140` and `:311`), so **no `probe` row on
+> **`probe` and `watch` hardcode `"ja"`** (`crates/chibipop-windows/src/main.rs:140` and `:311`), so **no `probe` row on
 > this page can test Chinese OCR at all**. Only `run` reads `ocr.language`. `watch` additionally
 > ignores the configured capture size and always uses `CaptureSize::default()`. Anything about
 > zh-Hans / zh-Hant therefore has to go through §1.21, which drives the real app.
@@ -818,7 +843,7 @@ Record the PID (`Get-Process chibipop`), open Settings, change **Capture height*
 > [!warning] `probe` is not a read-only observer, and it reads the file rather than the process
 > **It writes.** `probe` calls `config::load_or_create`, whose NotFound arm **creates a fresh
 > `chibipop.toml`** — including when `--region` makes the config irrelevant. That side effect is new
-> as of this branch (`src/main.rs`, before the `--region` match). Probing a directory with no config
+> as of this branch (`crates/chibipop-windows/src/main.rs`, before the `--region` match). Probing a directory with no config
 > is therefore not an inspection, it is an initialisation. Harmless in the ordinary case, since the
 > app writes that file anyway — not harmless if you were about to conclude something from the file
 > being absent.
@@ -870,6 +895,17 @@ Before this branch the overlay window was only *created* when the setting was on
 turning it on later had no window to show and the checkbox did nothing whatsoever. It is now
 created unconditionally and merely shown on demand.
 
+**On Linux this is a different mechanism with the same observable.** There is no overlay window
+to create early or late: the outline is `zwlr_layer_shell_v1` surfaces mapped on the first show
+and given a transparent buffer to hide (never unmapped — Hyprland animates layer surfaces). The
+setting reaches the Worker on every Apply, so the same "turn it on, Apply, hover, boxes appear,
+PID unchanged" is the check. Two extra Linux observables while it is on: `hyprctl layers` lists a
+`namespace: chibipop-outline` surface sized to the bounding box of that hover's boxes, and the
+four kinds are four **theme** colours — the word being defined must not be the same colour as the
+capture box it was found in. Before wave 2 the whole command was a no-op on Linux and the
+checkbox drew nothing at all, so **starting with it off is not the interesting half here** —
+seeing any box at all is.
+
 ### 1.13 The capture guard tracks a live `exclude_from_capture` toggle
 
 The one with real teeth: chibipop's own OCR capture must never contain chibipop's own popup.
@@ -889,6 +925,13 @@ affinity call rather than from what was asked for, because `SetWindowDisplayAffi
 refuse. Before this branch the cached value kept its startup setting for the life of the process,
 so turning exclusion off left the guard off with it, and the popup contaminated the very lookup it
 was displaying.
+
+**On Linux the guard does not exist and this step's instrument now does.** Capture exclusion is a
+compositor rule there, not a setting, and the popup is kept out of its own lookups by the core
+capture mask instead (`CONTEXT.md`, ADR-0008). The visual half still applies verbatim: turn on
+**Outline what each hover captured**, screenshot, and nothing chibipop drew may be sitting inside
+a capture box. The outline itself is drawn two physical px *outside* each box for exactly that
+reason, so a border touching the inside of one is a bug in the overlay, not in the mask.
 
 > [!note] 1.14–1.16 were added 2026-08-11; 1.14 and 1.15 ran **in part**, 1.16 **not at all**
 > They are the acceptance checks for the per-character-retrigger / OCR-language branch. All three
@@ -2158,7 +2201,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **Every geometry fixture used touching glyphs** | A whole class of bug that ten tests and a release walk straight past. Real OCR emits *gaps*; a fixture at `x=100,130,160` with `w=30` has none, and gap-conditional code is invisible to it. When a code path branches on spacing, at least one fixture must be spaced. |
 | **`glossary` and `glossary_html` are different Anki sources** | Cards that look plain next to a popup that looks rich. Nothing errors — the field map just asked for the other one. Check `target/release/chibipop.toml` before believing the feature is missing. |
 | **A child that prints progress will fill a 4 KB pipe and stop** | A build at ~3% CPU with a WAL that stopped growing, forever. `RedirectStandardOutput = $true` + `ReadToEnd()` after the wait loop is the trap; redirect to a **file** instead. Corpus-dependent, so it passes on the small corpus and hangs on the big one. |
-| **`probe` and `watch` are Japanese-only** | A Chinese OCR check that "fails" while the app works. Both hardcode `"ja"` (`src/main.rs:140`, `:311`); only `run` reads `ocr.language`. `watch` also ignores the configured capture size. |
+| **`probe` and `watch` are Japanese-only** | A Chinese OCR check that "fails" while the app works. Both hardcode `"ja"` (`crates/chibipop-windows/src/main.rs:140`, `:311`); only `run` reads `ocr.language`. `watch` also ignores the configured capture size. |
 | **DXGI declines a region that crosses a screen edge** | `DXGI capture unavailable (no DXGI output for region); using BitBlt` on any probe within half a capture-width of x=0. Not a failure — the fallback is the design — but it means edge-of-screen probes are not measuring the DXGI path. |
 | **A stripped dependency reads as a free one** | Task 3 measured 3.44 MB after adding `zip`, because nothing called it yet and the linker dropped it. Size a new dependency only once something actually reaches it. Also: 3,928,064 bytes is 3.75 MB, not 3.93 — divide by 2²⁰, not 10⁶. |
 

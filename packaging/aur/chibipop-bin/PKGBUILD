@@ -1,0 +1,101 @@
+# Maintainer: unusualcrow <unusualcrow@protonmail.com>
+#
+# The release asset, repacked (ADR-0007). This package compiles nothing:
+# `scripts/package-linux.sh` already produced one executable plus its data
+# files, and on linux-x64 that executable carries ONNX Runtime inside it -
+# `ort`'s pinned prebuilt is a static archive, so there is no
+# `libonnxruntime.so` to bundle here and no rpath to preserve (ADR-0009's
+# 2026-08-26 addendum). `ldd` on the shipped binary names the whole
+# runtime floor, and it is what `depends` below says.
+#
+# Update this file with `packaging/aur/bump.sh vX.Y.Z`, never by hand: it
+# rewrites pkgver, resets pkgrel, re-hashes every source and regenerates
+# .SRCINFO in one step, from this template. The push to AUR stays manual.
+#
+# The pkgver and checksums checked in here are a *rehearsal's*: the
+# tarball they were built and installed against came from a local
+# `scripts/package-linux.sh` run, because v0.8.2 has no GitHub release
+# yet. They become real when `bump.sh` runs against a tag that does.
+
+pkgname=chibipop-bin
+_pkgname=chibipop
+pkgver=0.8.2
+pkgrel=1
+pkgdesc="Hover-to-read Japanese lookup for Wayland (official binary release)"
+arch=('x86_64')
+url="https://github.com/unusualcrow/chibipop"
+# The app is GPL-3.0-or-later; the bundled meikiocr weights are LGPL-3.0
+# data files, and the statically linked ONNX Runtime is MIT. All three
+# ship in this package, so all three are named here.
+license=('GPL-3.0-or-later' 'LGPL-3.0-only' 'MIT')
+# The entire floor: `ldd` lists libstdc++, libgcc_s, libm, libc and the
+# loader, nothing else. SQLite is compiled into the binary (rusqlite's
+# `bundled` feature) and so is ONNX Runtime.
+# `hicolor-icon-theme` owns the directories the .desktop entry's icon goes
+# into; namcap makes that an error, and it is right - without it the icon
+# lands in a tree nothing indexes.
+depends=('glibc' 'gcc-libs' 'hicolor-icon-theme')
+optdepends=(
+	'noto-fonts-cjk: Japanese glyphs in the popup - without a JP font kanji render as tofu'
+	'xdg-desktop-portal: capture and global-shortcut channels on KDE and GNOME'
+	'pipewire: the portal capture stream (dlopened, only on that rung)'
+)
+provides=("chibipop=$pkgver")
+conflicts=('chibipop')
+# `!strip`: the shipped binary is deliberately unstripped so a user's
+# backtrace names functions - stripping saves 14 MB on disk but only ~2 MB
+# of the download, and the Windows asset does not strip either.
+# `!debug`: there is no source tree here to build a debug package from, so
+# the default would produce an empty `chibipop-bin-debug`.
+options=('!strip' '!debug')
+# The tarball's name is a forever contract (ADR-0007): every shipped
+# binary's update check parses `chibipop-v<semver>-linux-x64.tar.gz` off
+# releases/latest. The icon is not in the asset - the tarball is what a
+# user extracts into one directory, and a hicolor icon only means anything
+# to a distro install - so it comes from the tag alongside it.
+source=("https://github.com/unusualcrow/chibipop/releases/download/v$pkgver/chibipop-v$pkgver-linux-x64.tar.gz"
+        "$_pkgname-$pkgver.svg::https://raw.githubusercontent.com/unusualcrow/chibipop/v$pkgver/crates/chibipop-windows/assets/chibipop.svg")
+sha256sums=('01cd3ffc53e3e104fb6f506b3970cc56cb3cd6719d9a50a0734792892e2bae8e'
+            '4118d69fd02f869ff8a3a626c0abf3f640c148dff627e521752596319d518288')
+
+package() {
+	cd "$srcdir/chibipop-v$pkgver-linux-x64"
+
+	install -Dm755 chibipop "$pkgdir/usr/bin/chibipop"
+
+	# The binary finds its data by walking up from its own directory, so
+	# an FHS install is not free-form: `/usr/bin/chibipop` looks for
+	# `../share/chibipop/models/meiki` (models::LAYOUTS) and
+	# `../share/chibipop/data/deconjugator.json` (the daemon's rules
+	# search). Move either one and the OCR engine refuses to open or
+	# every conjugated form stops resolving.
+	install -Dm644 data/deconjugator.json "$pkgdir/usr/share/$_pkgname/data/deconjugator.json"
+	install -Dm644 -t "$pkgdir/usr/share/$_pkgname/models/meiki" \
+		models/meiki/*.onnx models/meiki/SHA256SUMS.txt models/meiki/LICENSE.md
+
+	# The models are hash-pinned (ADR-0009) and the binary re-checks them
+	# when the engine opens, so a bad download must fail here rather than
+	# become a runtime refusal on the user's machine.
+	(cd "$pkgdir/usr/share/$_pkgname/models/meiki" && sha256sum --check --strict SHA256SUMS.txt)
+
+	# Session integration. The systemd unit is the packaged one - it
+	# already names /usr/bin/chibipop, which is where this package puts
+	# the binary - and it is a *user* unit: the daemon needs a Wayland
+	# session, not a boot.
+	install -Dm644 extras/chibipop.desktop "$pkgdir/usr/share/applications/chibipop.desktop"
+	install -Dm644 extras/chibipop.service "$pkgdir/usr/lib/systemd/user/chibipop.service"
+	# `Icon=chibipop` in the .desktop entry resolves to this. The tray
+	# icon does not - those pixmaps are compiled into the binary, so the
+	# tray works on installs that have no hicolor tree at all.
+	install -Dm644 "$srcdir/$_pkgname-$pkgver.svg" \
+		"$pkgdir/usr/share/icons/hicolor/scalable/apps/chibipop.svg"
+
+	# The Hyprland snippet and its README are documentation, not config:
+	# they are copied into a user's own dotfiles, never read from here.
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+	install -Dm644 extras/README.md "$pkgdir/usr/share/doc/$_pkgname/extras/README.md"
+	install -Dm644 extras/hyprland.conf "$pkgdir/usr/share/doc/$_pkgname/extras/hyprland.conf"
+
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 models/meiki/LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.models.md"
+}

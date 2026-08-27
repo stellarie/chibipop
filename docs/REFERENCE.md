@@ -150,6 +150,21 @@ the binary in `target/release/` and the data at the repository root.
 only. It is created when absent, so a fallback would write a first run's
 settings to whichever directory happened to launch it.
 
+On Linux the config is discovered in a fixed order, **first match wins, never
+dual-read**: the `--config` flag → **portable mode** (a `chibipop.toml` beside
+the executable puts data, log, and cache beside it too) → XDG
+(`~/.config/chibipop/chibipop.toml`, data in `~/.local/share/chibipop`, the log
+in `~/.local/state/chibipop`, cache in `~/.cache/chibipop`). The instance lock
+and control socket always live under `$XDG_RUNTIME_DIR/chibipop`, keyed per
+`$WAYLAND_DISPLAY`, in every mode.
+
+**Migrating between the portable and XDG layouts is a manual copy** — chibipop
+never moves your files itself. To go portable → XDG: stop the daemon, copy
+`chibipop.toml` to `~/.config/chibipop/` and the `data/` folder's contents to
+`~/.local/share/chibipop/`, then remove (or rename) the `chibipop.toml` beside
+the executable so portable mode stops winning. The reverse direction is the
+same copy the other way. The log and cache are disposable; don't bother.
+
 ### The latest-build copy
 
 `C:\Users\Stella\Documents\chibipop-latest` holds the latest build. Refresh it
@@ -422,10 +437,13 @@ cargo test
 **873 tests** across six targets, one of them ignored. Re-measured
 2026-08-16.
 
-One of those 873 does not run here. `golden_corpus` early-returns when
-`data/chibipop.sqlite` is absent and is reported as a **pass**, not as the one
-ignored test, so every total on this page and in Tier 0 includes a test that
-asserted nothing on any tree without a built database. Pre-existing; see
+One of those 873 only runs where a dictionary does. `golden_corpus` grades
+deconjugation against a real library and resolves one the way the product does
+(`$CHIBIPOP_GOLDEN_DB`, then `$XDG_DATA_HOME/chibipop/chibipop.sqlite`, then
+`data/chibipop.sqlite` in a cargo tree); with none of those present it prints
+every path it looked at and returns, which libtest reports as a **pass**, not as
+the one ignored test. So a total measured on a tree without a built database —
+a fresh clone, or CI — includes one test that did not run. See
 [`BACKLOG.md`](BACKLOG.md) §27.
 
 Tier 0 of [`REGRESSION.md`](REGRESSION.md) is the authority on this number
@@ -458,6 +476,19 @@ cheapest-first checklist: the automated gate, then what can be verified
 against real pixels with `probe`, then the dozen things only a human at the
 keyboard can check. It also lists the traps that have bitten more than once.
 
+One target is deliberately **not** in that sweep:
+
+```bash
+cargo test -p chibipop-linux --test ocr_gate -- --nocapture
+```
+
+the Linux OCR quality gate (ADR-0009), which runs the committed 152-crop
+benchmark corpus through the three bundled ONNX models and prints a
+measured-vs-reference table. It is deterministic and it is the slowest single
+target in the tree, so CI runs it once in its own step rather than three times
+inside the loop above. Run it after any change under
+`crates/chibipop-linux/src/ocr/`.
+
 Three allow-by-default lints are enabled at both crate roots
 (`missing_unsafe_on_extern`, `unsafe_attr_outside_unsafe`,
 `unsafe_op_in_unsafe_fn`), so every unsafe operation is written inside a
@@ -489,6 +520,18 @@ already selectable) and **M5** (DPI and Magpie polish) are not started.
   non-interactive environment with no screen to hover.
 - **Text clipped by a window edge cannot be read** at any capture shape. The
   glyphs are physically incomplete on screen; a ceiling, not a bug.
+- **Vertical text is beta on Linux.** The Linux OCR engine (meikiocr, ADR-0009)
+  reads horizontal text at **1.8 % CER with 95.1 % hit-scan** and vertical text
+  at **12.5 % CER with 81.3 % hit-scan** over the 152-crop benchmark corpus.
+  Both are enforced as a CI gate — horizontal CER ≤ 5 % / hit-scan ≥ 90 %,
+  vertical CER ≤ 20 % / hit-scan ≥ 75 % — so vertical is degraded, not broken:
+  expect a dropped first glyph or trailing `。` on a column. The known
+  mitigations are all unmeasured, so none ship, and **the UI says nothing about
+  it**: a hover that reads is worth more than a warning. Re-run
+  `cargo test -p chibipop-linux --test ocr_gate` after any model update. The
+  Linux adapter never upscales a capture in any orientation — meikiocr measured
+  1× better than 2× on every slice, because its fixed 960×544 detector
+  letterbox undoes an upscale.
 - **Right-clicking the tray icon does not open its menu.** A real bug with two
   unproven suspects and a one-click diagnosis, written up in
   [`BACKLOG.md`](BACKLOG.md) §7. Everything the menu offered is reachable

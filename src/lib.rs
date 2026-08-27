@@ -3,22 +3,19 @@
 #![warn(unsafe_attr_outside_unsafe)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
-pub mod action;
 pub mod anki;
-pub mod app;
-pub mod clipboard;
 pub mod config;
+pub mod controller;
 pub mod dict;
 pub mod geom;
-pub mod input;
+pub mod image;
 pub mod library;
-pub mod lock;
 pub mod lookup;
 pub mod paths;
-pub mod plugin;
 pub mod present;
-pub mod rebuild;
 pub mod settings;
+pub mod shot;
 pub mod text;
 pub mod ui;
 pub mod update;
+pub mod worker;

@@ -45,6 +45,21 @@ impl PhysRect {
         }
     }
 
+    /// Overlap of two boxes.
+    ///
+    /// Half-open like `contains`: boxes that merely share an edge do not
+    /// intersect.
+    pub fn intersection(&self, other: PhysRect) -> Option<PhysRect> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x.saturating_add(self.w)).min(other.x.saturating_add(other.w));
+        let bottom = (self.y.saturating_add(self.h)).min(other.y.saturating_add(other.h));
+        if right <= x || bottom <= y {
+            return None;
+        }
+        Some(PhysRect { x, y, w: right - x, h: bottom - y })
+    }
+
     /// Truncates toward zero.
     pub fn scaled_down(&self, factor: i32) -> PhysRect {
         PhysRect {
@@ -243,6 +258,44 @@ mod tests {
     #[test]
     fn translated_moves_origin_only() {
         assert_eq!(r(15, 5, 20, 20), r(10, 10, 20, 20).translated(5, -5));
+    }
+
+    #[test]
+    fn intersection_of_disjoint_boxes_is_none() {
+        assert_eq!(None, r(0, 0, 10, 10).intersection(r(20, 20, 10, 10)));
+    }
+
+    /// Half-open, like `contains`.
+    #[test]
+    fn boxes_sharing_only_an_edge_do_not_intersect() {
+        assert_eq!(None, r(0, 0, 10, 10).intersection(r(10, 0, 10, 10)), "right edge");
+        assert_eq!(None, r(0, 0, 10, 10).intersection(r(0, 10, 10, 10)), "bottom edge");
+    }
+
+    #[test]
+    fn intersection_of_a_corner_overlap_is_the_shared_corner() {
+        assert_eq!(Some(r(5, 5, 5, 5)), r(0, 0, 10, 10).intersection(r(5, 5, 10, 10)));
+    }
+
+    #[test]
+    fn intersection_with_a_containing_box_is_the_contained_one() {
+        let inner = r(4, 4, 2, 2);
+        assert_eq!(Some(inner), inner.intersection(r(0, 0, 10, 10)));
+        assert_eq!(Some(inner), r(0, 0, 10, 10).intersection(inner));
+    }
+
+    #[test]
+    fn intersection_is_symmetric() {
+        let (a, b) = (r(0, 0, 10, 10), r(-5, 3, 8, 2));
+        assert_eq!(a.intersection(b), b.intersection(a));
+        assert_eq!(Some(r(0, 3, 3, 2)), a.intersection(b));
+    }
+
+    /// A zero-area box overlaps nothing, itself included.
+    #[test]
+    fn a_degenerate_box_intersects_nothing() {
+        assert_eq!(None, r(5, 5, 0, 0).intersection(r(0, 0, 10, 10)));
+        assert_eq!(None, r(0, 0, 10, 0).intersection(r(0, 0, 10, 10)));
     }
 
     #[test]

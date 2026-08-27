@@ -1,0 +1,255 @@
+{
+  "fixture": "kitchen_sink",
+  "variants": {
+    "default": {
+      "anki_button": {
+        "color": [
+          110,
+          112,
+          120
+        ],
+        "label": "✓ Added"
+      },
+      "content": {
+        "content_w": "321.00",
+        "origin": "12.00",
+        "used_h": "282.76"
+      },
+      "elements": [
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "kind": "BackButton",
+          "lines": 1,
+          "text": "← Back",
+          "top_gap": "0.00",
+          "w": "43.09",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "0.00",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 1,
+          "kind": "Corner",
+          "lines": 1,
+          "text": "freq 890",
+          "top_gap": "0.00",
+          "w": "47.63",
+          "wrap_w": "321.00",
+          "x": "285.37",
+          "y": "29.29"
+        },
+        {
+          "advance": "26.60",
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 2,
+          "kind": "Headword",
+          "lines": 1,
+          "text": "面白い",
+          "top_gap": "4.00",
+          "w": "56.32",
+          "wrap_w": "265.37",
+          "x": "12.00",
+          "y": "33.29"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 3,
+          "kind": "Text",
+          "lines": 1,
+          "text": "おもしろい",
+          "top_gap": "4.00",
+          "w": "57.67",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "63.89"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "kind": "Text",
+          "lines": 1,
+          "text": "i-adjective",
+          "top_gap": "4.00",
+          "w": "59.15",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "87.84"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 5,
+          "kind": "Text",
+          "lines": 1,
+          "text": "Jitendex",
+          "top_gap": "10.00",
+          "w": "46.77",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "115.13"
+        },
+        {
+          "advance": "59.85",
+          "font_size": "15.00",
+          "h": "59.85",
+          "i": 6,
+          "kind": "Text",
+          "lines": 3,
+          "text": "interesting; fascinating; intriguing; enthralling; amusing; funny; comical; enjoyable; fun; entertaining; pleasant; agreeable",
+          "top_gap": "4.00",
+          "w": "302.56",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "136.43"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 7,
+          "kind": "Text",
+          "lines": 1,
+          "text": "大辞林",
+          "top_gap": "10.00",
+          "w": "39.00",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "206.28"
+        },
+        {
+          "advance": "39.90",
+          "font_size": "15.00",
+          "h": "39.90",
+          "i": 8,
+          "kind": "Text",
+          "lines": 2,
+          "text": "心が引かれて、楽しい気持ちになるさま。興味をそそられるさま。",
+          "top_gap": "4.00",
+          "w": "309.87",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "227.57"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 9,
+          "kind": "Text",
+          "lines": 1,
+          "text": "新明解国語辞典",
+          "top_gap": "10.00",
+          "w": "91.00",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "277.47"
+        }
+      ],
+      "hits": [
+        {
+          "action": "Back",
+          "h": "17.29",
+          "i": 0,
+          "w": null,
+          "x": null,
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"面\")",
+          "h": "26.60",
+          "i": 1,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "33.29"
+        },
+        {
+          "action": "DrillDown(\"白\")",
+          "h": "26.60",
+          "i": 2,
+          "w": "20.00",
+          "x": "32.00",
+          "y": "33.29"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "kitchen_sink",
+        "max_h": 300,
+        "max_w": 480,
+        "scroll_requested": 40,
+        "show_back": true,
+        "side_panel": true,
+        "variant": "default"
+      },
+      "match_highlight": {
+        "h": 46,
+        "w": 96,
+        "x": 157,
+        "y": 197
+      },
+      "measure": {
+        "content_h": 307,
+        "total_w": 480,
+        "view_h": 300
+      },
+      "scroll": {
+        "max_scroll": 7,
+        "scroll_used": 7,
+        "thumb": {
+          "h": 269,
+          "top": 7
+        }
+      },
+      "side_panel": {
+        "col_w": "110.00",
+        "col_x": "358.00",
+        "height": "106.46",
+        "rows": [
+          {
+            "h": "17.29",
+            "idx": null,
+            "text": "See also",
+            "y": "0.00"
+          },
+          {
+            "h": "17.29",
+            "idx": 0,
+            "text": "面",
+            "y": "21.29"
+          },
+          {
+            "h": "17.29",
+            "idx": 1,
+            "text": "白い",
+            "y": "42.58"
+          },
+          {
+            "h": "17.29",
+            "idx": 2,
+            "text": "おも",
+            "y": "63.87"
+          },
+          {
+            "h": "17.29",
+            "idx": 3,
+            "text": "面白",
+            "y": "85.16"
+          }
+        ],
+        "separator_x": "345.00"
+      }
+    }
+  }
+}

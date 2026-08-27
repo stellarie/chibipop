@@ -72,39 +72,60 @@ pub fn model_field_names(url: &str, model: &str) -> Result<Vec<String>> {
 }
 
 /// Expressions already in Anki.
+///
+/// The probe notes carry the word routed through `field_map`, exactly
+/// as an add would: `canAddNotes` answers `false` for *any* reason a
+/// note cannot be filed, and a note built from field names the note
+/// type does not have is empty, not a duplicate.
 pub fn find_duplicates(
     url: &str,
     deck: &str,
     model: &str,
     expressions: &[&str],
+    field_map: &[crate::config::FieldMapping],
 ) -> Result<HashSet<String>> {
     if expressions.is_empty() {
         return Ok(HashSet::new());
     }
-    let notes: Vec<_> = expressions
-        .iter()
-        .map(|&e| {
-            serde_json::json!({
-                "deckName": deck,
-                "modelName": model,
-                "fields": { "Expression": e },
-                "options": {
-                    "allowDuplicate": false,
-                },
-            })
-        })
-        .collect();
-    let body = serde_json::json!({
-        "action": "canAddNotes",
-        "version": VERSION,
-        "params": { "notes": notes },
-    });
+    require_expression_route(field_map)?;
+    let body = build_can_add_notes_body(deck, model, expressions, field_map);
     let resp = post(url, &body)?;
     let arr = resp
         .get("result")
         .and_then(|r| r.as_array())
         .context("canAddNotes: no result")?;
     Ok(collect_dupes(expressions, arr))
+}
+
+/// Builds a canAddNotes probe.
+///
+/// One note per word, through the same `mapped_fields` router the add
+/// uses, so Anki judges the note this word would really be filed as.
+fn build_can_add_notes_body(
+    deck: &str,
+    model: &str,
+    expressions: &[&str],
+    field_map: &[crate::config::FieldMapping],
+) -> serde_json::Value {
+    let notes: Vec<_> = expressions
+        .iter()
+        .map(|&e| {
+            let fields = HashMap::from([("expression".to_string(), e.to_string())]);
+            serde_json::json!({
+                "deckName": deck,
+                "modelName": model,
+                "fields": mapped_fields(&fields, field_map),
+                "options": {
+                    "allowDuplicate": false,
+                },
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "action": "canAddNotes",
+        "version": VERSION,
+        "params": { "notes": notes },
+    })
 }
 
 /// Inverts canAddNotes booleans.
@@ -151,6 +172,23 @@ fn field_map_routes(field_map: &[crate::config::FieldMapping], source: &str) -> 
     field_map.iter().any(|m| m.source == source)
 }
 
+/// Refuses a map that never sends the word.
+///
+/// Every AnkiConnect call about a looked-up word - the add and the
+/// dupe probe alike - is meaningless without it: an add would file a
+/// note with no word in it, and a probe would ask Anki about an empty
+/// note.
+fn require_expression_route(field_map: &[crate::config::FieldMapping]) -> Result<()> {
+    if field_map_routes(field_map, "expression") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "field_map has no entry mapping the \"expression\" source, so the \
+         looked-up word would never reach Anki - fix the mapping in \
+         Settings, Anki tab"
+    )
+}
+
 /// Adds a note, returns its id.
 pub fn add_note(
     url: &str,
@@ -159,13 +197,7 @@ pub fn add_note(
     fields: &HashMap<String, String>,
     field_map: &[crate::config::FieldMapping],
 ) -> Result<i64> {
-    if !field_map_routes(field_map, "expression") {
-        anyhow::bail!(
-            "field_map has no entry mapping the \"expression\" source, so the \
-             looked-up word would never reach Anki - fix the mapping in \
-             Settings, Anki tab"
-        );
-    }
+    require_expression_route(field_map)?;
     let body = serde_json::json!({
         "action": "addNote",
         "version": VERSION,
@@ -231,13 +263,7 @@ pub fn add_note_with_picture(
     field_map: &[crate::config::FieldMapping],
     picture: Option<&NotePicture>,
 ) -> Result<i64> {
-    if !field_map_routes(field_map, "expression") {
-        anyhow::bail!(
-            "field_map has no entry mapping the \"expression\" source, so the \
-             looked-up word would never reach Anki - fix the mapping in \
-             Settings, Anki tab"
-        );
-    }
+    require_expression_route(field_map)?;
     let body = build_add_note_body(deck, model, fields, field_map, picture);
     let resp = post(url, &body)?;
     resp.get("result")
@@ -652,5 +678,229 @@ mod tests {
         let body = build_add_note_body("Default", "Lapis", &fields, &field_map, None);
         let note = &body["params"]["note"];
         assert!(note.get("picture").is_none());
+    }
+
+    // -- the dupe probe (upstream-merge-fallout 03) --
+
+    /// The Lapis default, plus a JP Mining Note-shaped map: the same
+    /// sources, none of the same Anki field names.
+    fn mining_note_map() -> Vec<crate::config::FieldMapping> {
+        vec![
+            crate::config::FieldMapping {
+                anki_field: "VocabKanji".into(),
+                source: "expression".into(),
+            },
+            crate::config::FieldMapping {
+                anki_field: "VocabFurigana".into(),
+                source: "reading".into(),
+            },
+            crate::config::FieldMapping {
+                anki_field: "SelectionText".into(),
+                source: "glossary".into(),
+            },
+        ]
+    }
+
+    /// The probe must name the field the map names, or AnkiConnect
+    /// judges a note the note type has no fields for - which it
+    /// refuses as empty, and `collect_dupes` reads as a duplicate.
+    #[test]
+    fn the_dupe_probe_routes_the_word_through_the_field_map() {
+        let body = build_can_add_notes_body(
+            "Mining",
+            "JP Mining Note",
+            &["猫", "犬"],
+            &mining_note_map(),
+        );
+        assert_eq!(Some("canAddNotes"), body["action"].as_str());
+        let notes = body["params"]["notes"].as_array().expect("one note per word");
+        assert_eq!(2, notes.len());
+        assert_eq!(Some("猫"), notes[0]["fields"]["VocabKanji"].as_str());
+        assert_eq!(Some("犬"), notes[1]["fields"]["VocabKanji"].as_str());
+        assert!(
+            notes[0]["fields"].get("Expression").is_none(),
+            "a field the note type does not have makes the probe note empty: {}",
+            notes[0],
+        );
+    }
+
+    /// Only the word: the probe has no reading and no glossary to send,
+    /// and a blank in a field would be a lie about the note an add
+    /// would file.
+    #[test]
+    fn the_dupe_probe_sends_the_word_and_nothing_else() {
+        let body = build_can_add_notes_body("Mining", "JP Mining Note", &["猫"], &mining_note_map());
+        let fields = body["params"]["notes"][0]["fields"]
+            .as_object()
+            .expect("the mapped fields");
+        assert_eq!(1, fields.len(), "one field, the word's: {fields:?}");
+        assert_eq!(Some("猫"), fields["VocabKanji"].as_str());
+    }
+
+    /// One source, two Anki fields: the add sends both, so must the
+    /// probe - Anki dupe-checks the note type's first field, and which
+    /// of the two that is is not ours to guess.
+    #[test]
+    fn the_dupe_probe_fills_every_field_the_word_is_routed_to() {
+        let map = vec![
+            crate::config::FieldMapping { anki_field: "Word".into(), source: "expression".into() },
+            crate::config::FieldMapping { anki_field: "Key".into(), source: "expression".into() },
+        ];
+        let body = build_can_add_notes_body("Default", "Custom", &["猫"], &map);
+        let fields = &body["params"]["notes"][0]["fields"];
+        assert_eq!(Some("猫"), fields["Word"].as_str());
+        assert_eq!(Some("猫"), fields["Key"].as_str());
+    }
+
+    /// No network before the check, as with the add.
+    #[test]
+    fn find_duplicates_rejects_a_field_map_that_drops_the_word() {
+        let field_map = vec![crate::config::FieldMapping {
+            anki_field: "Expression".into(),
+            source: "frequency".into(),
+        }];
+        let err = find_duplicates("not-a-url", "Default", "Lapis", &["猫"], &field_map)
+            .expect_err("a map that never sends the word cannot answer for one");
+        assert!(format!("{err:#}").contains("expression"));
+    }
+
+    #[test]
+    fn find_duplicates_asks_nothing_for_no_expressions() {
+        assert!(find_duplicates("not-a-url", "Default", "Lapis", &[], &[])
+            .expect("no words, no question, no network")
+            .is_empty());
+    }
+
+    /// A fake AnkiConnect that judges `canAddNotes` the way Anki does.
+    ///
+    /// Anki's own answer is `duplicate_or_empty` over the note type's
+    /// **first field**: blank is Empty, a repeat of an existing note's
+    /// is Duplicate, and `canAddNotes` reports both as a bare `false`.
+    /// So the fake needs the first field's name and what is already in
+    /// the collection, and nothing else - and a probe that names some
+    /// other field gets `false` for every word, which is the bug this
+    /// reproduces.
+    struct FakeAnki {
+        url: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl FakeAnki {
+        /// Answers one request, then closes.
+        fn start(first_field: &str, collection: &[&str]) -> FakeAnki {
+            use std::io::Write;
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+            let url = format!("http://{}", listener.local_addr().expect("the bound address"));
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = seen.clone();
+            let first_field = first_field.to_string();
+            let held: Vec<String> = collection.iter().map(|s| s.to_string()).collect();
+            std::thread::spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let request: serde_json::Value =
+                    serde_json::from_str(&read_body(&mut stream)).unwrap_or(serde_json::Value::Null);
+                let reply = can_add_reply(&request, &first_field, &held);
+                recorded.lock().expect("the request log").push(request);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+            });
+            FakeAnki { url, seen }
+        }
+
+        fn seen(&self) -> Vec<serde_json::Value> {
+            self.seen.lock().expect("the request log").clone()
+        }
+    }
+
+    /// One HTTP request's body, by its `Content-Length`.
+    fn read_body(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut raw = Vec::new();
+        let mut byte = [0u8; 1];
+        // Headers first, one byte at a time, so the body is not
+        // swallowed into a buffer this function cannot give back.
+        while !raw.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => raw.push(byte[0]),
+                _ => return String::new(),
+            }
+        }
+        let headers = String::from_utf8_lossy(&raw).to_lowercase();
+        let len = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = vec![0u8; len];
+        if stream.read_exact(&mut body).is_err() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&body).to_string()
+    }
+
+    /// `canAddNotes`, per note: false when the first field is blank
+    /// (Anki's Empty) or already in the collection (its Duplicate).
+    fn can_add_reply(
+        request: &serde_json::Value,
+        first_field: &str,
+        collection: &[String],
+    ) -> String {
+        let notes = request["params"]["notes"].as_array().cloned().unwrap_or_default();
+        let flags: Vec<&str> = notes
+            .iter()
+            .map(|note| {
+                let word = note["fields"][first_field].as_str().unwrap_or("");
+                let can_add = !word.is_empty() && !collection.iter().any(|held| held == word);
+                if can_add { "true" } else { "false" }
+            })
+            .collect();
+        format!("{{\"result\":[{}],\"error\":null}}", flags.join(","))
+    }
+
+    /// The bug, end to end: with a note type whose word field is not
+    /// called `Expression`, every word came back a duplicate - the
+    /// popup flagged words that were nowhere in the collection, while
+    /// the add itself (routed through the same map) filed them fine.
+    #[test]
+    fn a_word_not_in_the_collection_is_no_dupe_for_a_note_type_of_its_own_naming() {
+        let anki = FakeAnki::start("VocabKanji", &["猫"]);
+        let dupes = find_duplicates(
+            &anki.url,
+            "Mining",
+            "JP Mining Note",
+            &["猫", "犬"],
+            &mining_note_map(),
+        )
+        .expect("the fake answers");
+        assert!(dupes.contains("猫"), "猫 is in the collection: {dupes:?}");
+        assert!(
+            !dupes.contains("犬"),
+            "犬 is in no deck; a probe Anki refuses as empty is not a duplicate: {dupes:?}",
+        );
+        let sent = anki.seen();
+        assert_eq!(
+            Some("犬"),
+            sent[0]["params"]["notes"][1]["fields"]["VocabKanji"].as_str(),
+            "the wire carried the mapped field: {sent:?}",
+        );
+    }
+
+    /// The Lapis default is unchanged: same wire, same answers.
+    #[test]
+    fn the_default_map_still_probes_the_expression_field() {
+        let anki = FakeAnki::start("Expression", &["猫"]);
+        let map = crate::config::AnkiConfig::default().field_map;
+        let dupes = find_duplicates(&anki.url, "Mining", "Lapis", &["猫", "犬"], &map)
+            .expect("the fake answers");
+        assert_eq!(HashSet::from(["猫".to_string()]), dupes);
+        assert_eq!(
+            Some("猫"),
+            anki.seen()[0]["params"]["notes"][0]["fields"]["Expression"].as_str(),
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! The settings window's model.
 
-use crate::config::{Config, FieldMapping, OcrClipboardConfig, TriggerMode};
+use crate::config::{Config, FieldMapping, OcrClipboardConfig, SentenceMode, TriggerMode};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
@@ -58,12 +58,21 @@ pub struct SettingsForm {
     pub anki_deck: String,
     pub anki_model: String,
     pub anki_add_key: String,
-    pub field_map: Vec<FieldMapping>,
+    /// `None`: this window has no answer about the field map, so Apply
+    /// leaves the saved one alone. Windows fills its rows from a live
+    /// AnkiConnect `modelFieldNames` call that answers with an empty
+    /// vector whenever Anki is unreachable
+    /// (`crates/chibipop-windows/src/app.rs:797-806`), and a window that
+    /// was never told the field names must not wipe a good mapping.
+    /// `Some(vec![])` is a user who mapped nothing, which is an answer
+    /// and saves (ticket 20).
+    pub field_map: Option<Vec<FieldMapping>>,
     pub notify_on_add: bool,
-    pub sentence_mode: String,
+    pub sentence_mode: SentenceMode,
     pub static_region_key: String,
     pub show_static_overlay: bool,
-    pub ocr_clipboard_key: String,
+    /// `None`: the action is off.
+    pub ocr_clipboard_key: Option<String>,
     pub include_screenshot: bool,
     /// Only the top dict's entry.
     pub first_dict_only: bool,
@@ -160,7 +169,7 @@ pub fn shown_name(source: &Path) -> Option<String> {
 }
 
 /// Split still trustworthy?
-pub(crate) fn is_scoped(form: &SettingsForm) -> bool {
+pub fn is_scoped(form: &SettingsForm) -> bool {
     form.dict_list_language == form.ocr_language
         && (form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty())
 }
@@ -336,17 +345,16 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         anki_deck: cfg.anki.deck.clone(),
         anki_model: cfg.anki.model.clone(),
         anki_add_key: cfg.anki.add_key.clone(),
-        field_map: cfg.anki.field_map.clone(),
+        field_map: Some(cfg.anki.field_map.clone()),
         notify_on_add: cfg.anki.notify_on_add,
-        sentence_mode: cfg.anki.sentence_mode.clone(),
+        sentence_mode: cfg.anki.sentence_mode,
         static_region_key: cfg.anki.static_region_key.clone(),
         show_static_overlay: cfg.anki.show_static_overlay,
         ocr_clipboard_key: cfg
             .actions
             .ocr_clipboard
             .as_ref()
-            .and_then(|action| action.hotkey.clone())
-            .unwrap_or_default(),
+            .and_then(|action| action.hotkey.clone()),
         include_screenshot: cfg.actions.screenshot.include_on_add,
         first_dict_only: cfg.anki.first_dict_only,
         enabled_plugins: cfg.plugins.enabled.clone(),
@@ -362,7 +370,7 @@ fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> 
 }
 
 /// `None`: leave the entry be.
-pub(crate) fn scoped_entry(
+pub fn scoped_entry(
     names: &[String],
     unreadable: &[String],
     existing: &[String],
@@ -404,19 +412,23 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.model = form.anki_model.clone();
     out.anki.add_key = form.anki_add_key.clone();
     out.anki.notify_on_add = form.notify_on_add;
-    if !form.field_map.is_empty() {
-        out.anki.field_map = form.field_map.clone();
+    if let Some(field_map) = &form.field_map {
+        out.anki.field_map = field_map.clone();
     }
-    out.anki.sentence_mode = form.sentence_mode.clone();
+    out.anki.sentence_mode = form.sentence_mode;
     out.anki.static_region_key = form.static_region_key.clone();
     out.anki.show_static_overlay = form.show_static_overlay;
     out.anki.first_dict_only = form.first_dict_only;
-    out.actions.ocr_clipboard = if form.ocr_clipboard_key.is_empty() {
-        None
-    } else {
-        Some(OcrClipboardConfig {
-            hotkey: Some(form.ocr_clipboard_key.clone()),
-        })
+    // ADR-0012: the form renders the Windows chord only, so the Linux
+    // twin rides through untouched - turning one off never deletes the
+    // other, and the section survives while either is set.
+    let hotkey_linux = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone());
+    out.actions.ocr_clipboard = match (&form.ocr_clipboard_key, &hotkey_linux) {
+        (None, None) => None,
+        (hotkey, hotkey_linux) => Some(OcrClipboardConfig {
+            hotkey: hotkey.clone(),
+            hotkey_linux: hotkey_linux.clone(),
+        }),
     };
     out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
@@ -648,6 +660,35 @@ mod tests {
         );
     }
 
+    /// ADR-0012: the Windows Apply pipeline renders its subset and
+    /// carries the Linux platform fields untouched.
+    #[test]
+    fn applying_the_form_preserves_the_other_platforms_fields() {
+        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        cfg.trigger.trigger_key_linux = "SUPER+J".to_string();
+        cfg.anki.add_key_linux = "SUPER+K".to_string();
+        cfg.anki.static_region_key_linux = "SUPER+R".to_string();
+        cfg.actions.screenshot.hotkey_linux = Some("SUPER+S".to_string());
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".into()),
+            hotkey_linux: Some("SUPER+C".into()),
+        });
+        cfg.popup.layer = crate::config::PopupLayer::Top;
+        let mut form = from_config(&cfg, &dicts());
+        form.theme = "light".to_string();
+        let out = apply_to(&form, &cfg);
+        assert_eq!("SUPER+J", out.trigger.trigger_key_linux);
+        assert_eq!("SUPER+K", out.anki.add_key_linux);
+        assert_eq!("SUPER+R", out.anki.static_region_key_linux);
+        assert_eq!(
+            Some("SUPER+C".to_string()),
+            out.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone())
+        );
+        assert_eq!(Some("SUPER+S".to_string()), out.actions.screenshot.hotkey_linux);
+        assert_eq!(crate::config::PopupLayer::Top, out.popup.layer);
+        assert_eq!("light", out.popup.theme);
+    }
+
     #[test]
     fn a_never_ordered_dictionary_derives_a_key_without_the_date() {
         let cfg = cfg_with(&[]);
@@ -768,7 +809,7 @@ mod tests {
             source: "expression".into(),
         }];
         let form = from_config(&cfg, &dicts());
-        assert_eq!(cfg.anki.field_map, form.field_map);
+        assert_eq!(Some(cfg.anki.field_map.clone()), form.field_map);
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
     }
 
@@ -778,6 +819,37 @@ mod tests {
         let cfg = cfg_with(&[]);
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
+    }
+
+    /// A user who removes every row is saying "map nothing": an answer,
+    /// and a storable state.
+    #[test]
+    fn emptying_the_field_map_saves_an_empty_map() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.field_map =
+            vec![FieldMapping { anki_field: "Front".into(), source: "expression".into() }];
+        let mut form = from_config(&cfg, &dicts());
+        form.field_map = Some(Vec::new());
+        assert!(
+            apply_to(&form, &cfg).anki.field_map.is_empty(),
+            "the user emptied the map; Apply must save that"
+        );
+    }
+
+    /// A window whose rows never loaded has no answer, which is not the
+    /// same value as an empty answer.
+    #[test]
+    fn a_window_with_nothing_to_say_cannot_wipe_the_field_map() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.field_map =
+            vec![FieldMapping { anki_field: "Front".into(), source: "expression".into() }];
+        let mut form = from_config(&cfg, &dicts());
+        form.field_map = None;
+        assert_eq!(
+            cfg.anki.field_map,
+            apply_to(&form, &cfg).anki.field_map,
+            "Anki was unreachable; Apply must leave the saved map alone"
+        );
     }
 
     #[test]
@@ -823,10 +895,11 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
             hotkey: Some("f9".into()),
+            hotkey_linux: None,
         });
 
         let form = from_config(&cfg, &dicts());
-        assert_eq!("f9", form.ocr_clipboard_key);
+        assert_eq!(Some("f9".to_string()), form.ocr_clipboard_key);
 
         let out = apply_to(&form, &cfg);
         assert_eq!(
@@ -835,16 +908,45 @@ mod tests {
         );
     }
 
+    /// No section, no key: `None` all the way through, no sentinel.
     #[test]
-    fn empty_ocr_clipboard_key_disables_the_action() {
+    fn an_absent_ocr_clipboard_action_reads_as_none() {
+        let cfg = cfg_with(&[]);
+        assert_eq!(None, cfg.actions.ocr_clipboard);
+
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(None, form.ocr_clipboard_key);
+        assert_eq!(None, apply_to(&form, &cfg).actions.ocr_clipboard);
+    }
+
+    #[test]
+    fn an_unset_ocr_clipboard_key_disables_the_action() {
         let mut cfg = cfg_with(&[]);
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
             hotkey: Some("f9".into()),
+            hotkey_linux: None,
         });
         let mut form = from_config(&cfg, &dicts());
-        form.ocr_clipboard_key.clear();
+        form.ocr_clipboard_key = None;
 
         assert_eq!(None, apply_to(&form, &cfg).actions.ocr_clipboard);
+    }
+
+    /// Clearing the Windows chord must not evict the Linux one.
+    #[test]
+    fn an_unset_ocr_clipboard_key_keeps_the_linux_twin() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            hotkey: Some("f9".into()),
+            hotkey_linux: Some("SUPER+C".into()),
+        });
+        let mut form = from_config(&cfg, &dicts());
+        form.ocr_clipboard_key = None;
+
+        assert_eq!(
+            Some(OcrClipboardConfig { hotkey: None, hotkey_linux: Some("SUPER+C".into()) }),
+            apply_to(&form, &cfg).actions.ocr_clipboard
+        );
     }
 
     #[test]
@@ -867,18 +969,18 @@ mod tests {
     #[test]
     fn sentence_mode_round_trips() {
         let mut cfg = cfg_with(&[]);
-        cfg.anki.sentence_mode = "all".to_string();
+        cfg.anki.sentence_mode = SentenceMode::All;
         let form = from_config(&cfg, &dicts());
-        assert_eq!("all", form.sentence_mode);
+        assert_eq!(SentenceMode::All, form.sentence_mode);
         let out = apply_to(&form, &cfg);
-        assert_eq!("all", out.anki.sentence_mode);
+        assert_eq!(SentenceMode::All, out.anki.sentence_mode);
     }
 
     #[test]
     fn sentence_mode_defaults_to_line_in_the_form() {
         let cfg = Config::default();
         let form = from_config(&cfg, &dicts());
-        assert_eq!("line", form.sentence_mode);
+        assert_eq!(SentenceMode::Line, form.sentence_mode);
     }
 
     #[test]
@@ -894,11 +996,11 @@ mod tests {
     #[test]
     fn sentence_mode_static_round_trips() {
         let mut cfg = cfg_with(&[]);
-        cfg.anki.sentence_mode = "static".to_string();
+        cfg.anki.sentence_mode = SentenceMode::Static;
         let form = from_config(&cfg, &dicts());
-        assert_eq!("static", form.sentence_mode);
+        assert_eq!(SentenceMode::Static, form.sentence_mode);
         let out = apply_to(&form, &cfg);
-        assert_eq!("static", out.anki.sentence_mode);
+        assert_eq!(SentenceMode::Static, out.anki.sentence_mode);
     }
 
     #[test]
@@ -1213,7 +1315,7 @@ mod tests {
         assert_eq!(
             vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
             form.dict_names,
-            "the tab must match resolve_dict_filter's fallback",
+            "the tab must match present_config's fallback",
         );
         assert!(form.dict_excluded.is_empty());
     }

@@ -1,5 +1,27 @@
-[package]
-name = "chibipop"
+[workspace]
+# ADR-0001: core lib `chibipop` (this package, at the repo root so
+# `use chibipop::…` and the `data/` + `tests/fixtures/` paths it resolves
+# against are untouched by the split) plus one bin crate per platform.
+# `chibipop-linux` joins as a sibling.
+members = ["crates/chibipop-windows", "crates/chibipop-linux"]
+# Both bins are deliberately named `chibipop` (ADR-0001), and cargo uplifts
+# every bin to target/<profile>/chibipop - so any single link-producing
+# invocation (test/build/run) that spans BOTH bin crates races two linkers
+# over one output path and fails. Check-shaped commands (`cargo check`,
+# `cargo clippy`) link nothing and are collision-free, which is why each bin
+# still cfg-stubs to a refusal `main` on foreign targets (see the bins'
+# main.rs, platform deps under [target.'cfg(...)'.dependencies]): one
+# `cargo clippy --workspace` lints every member on both CI runners.
+# Test/build therefore exclude the foreign bin crate instead:
+#   Windows tier0:  cargo test --workspace --exclude chibipop-linux
+#   Linux job:      cargo test --workspace --exclude chibipop-windows
+# default-members makes the bare commands serve the dev box: this project
+# is developed on Linux and Windows is CI-verified (tier0), so bare
+# `cargo test` covers core + the Linux bin; per-crate work uses `-p`.
+default-members = [".", "crates/chibipop-linux"]
+resolver = "2"
+
+[workspace.package]
 # 0.7.2 is deliberately never tagged: its headline feature was the
 # rebuild-and-promote path, and that path deadlocks on JoinHandle::join.
 # 0.8.0 deletes it. See docs/REGRESSION.md and docs/BACKLOG.md.
@@ -7,15 +29,9 @@ version = "0.9.3"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
-[lib]
-name = "chibipop"
-path = "src/lib.rs"
-
-[[bin]]
-name = "chibipop"
-path = "src/main.rs"
-
-[dependencies]
+# One pin per dependency for the whole workspace: two crates disagreeing on
+# a version is how a "pure move" stops being one.
+[workspace.dependencies]
 anyhow = "1.0.104"
 base64 = "0.22"
 clap = { version = "4.6.4", features = ["derive"] }
@@ -24,43 +40,118 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.3"
 ureq = { version = "3", features = ["json"] }
-windows = { version = "0.62.2", features = [
-  "Win32_Graphics_Gdi",
-  "Win32_UI_HiDpi",
-  "Win32_System_WinRT",
-  "Win32_System_DataExchange",
-  "Win32_System_Memory",
-  "Win32_System_Ole",
-  "Media_Ocr",
-  "Graphics_Imaging",
-  "Globalization",
-  "Storage_Streams",
-  "Security_Cryptography",
-  "Win32_Foundation",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_UI_Input_KeyboardAndMouse",
-  "Win32_UI_Shell",
-  "Win32_UI_Controls",
-  "Win32_UI_Controls_Dialogs",
-  "Win32_Graphics_Direct3D",
-  "Win32_Graphics_Direct3D11",
-  "Win32_Graphics_Direct2D",
-  "Win32_Graphics_Direct2D_Common",
-  "Win32_Graphics_Dxgi",
-  "Win32_Graphics_Dxgi_Common",
-  "Win32_Graphics_DirectWrite",
-  "Win32_System_LibraryLoader",
-  # CreateMutexW takes SECURITY_ATTRIBUTES.
-  "Win32_Security",
-  "Win32_System_Threading",
-  "Win32_System_JobObjects",
-  "Win32_System_Console",
-] }
-windows-future = "0.3.2"
-# Only for `Vector2`, the origin type `ID2D1RenderTarget::DrawTextLayout`
-# requires (render.rs, M3 Task 5). Already resolved at this exact version as
-# a transitive dependency of `windows` itself (see Cargo.lock) - naming it
-# directly here does not change what gets built, only what render.rs is
-# allowed to import by name.
-windows-numerics = "0.3.1"
+
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# Linux bin only (ADR-0006/0007); listed here to keep the one-pin rule.
+calloop = "0.14.4"
+calloop-wayland-source = "0.4.1"
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client", "staging", "unstable"] }
+# wlr-screencopy (ADR-0002's primary capture rung): the only protocol with
+# compositor-side region capture. Same wayland-rs generation as the pin above.
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+# The popup's own stack (ADR-0004, ticket 32): SCTK 0.21 drives the
+# wlr-layer surface and the `wl_shm` SlotPool behind it, tiny-skia
+# rasters the panel, cosmic-text shapes and rasterizes text with locale
+# `ja` (Han unification: kanji must be JP variants). No GPU context -
+# all three are resident in the daemon. cosmic-text carries its own
+# fontdb, so the JP-family probe asks the popup's own `FontSystem` and
+# binds no second font stack. iced pulls an older cosmic-text of its
+# own; that copy serves the settings process only and this pin is the
+# one the daemon paints with.
+#
+# `default-features = false`: SCTK's default `xkbcommon` feature links
+# the system libxkbcommon through pkg-config, and this popup has no
+# keyboard by construction (`keyboard_interactivity: none`, ADR-0004),
+# so the dependency would buy nothing and cost a build-time system
+# package on every CI runner and packaging target. Its `calloop` feature
+# stays off with it: the daemon owns the loop and already drives the
+# Wayland queue through `calloop-wayland-source`.
+smithay-client-toolkit = { version = "0.21.1", default-features = false }
+tiny-skia = "0.12.0"
+cosmic-text = "0.19.0"
+# The settings window's toolkit (ADR-0005): a separate `chibipop settings`
+# process, so none of this is resident in the daemon.
+iced = "0.14.0"
+# Font-family enumeration for the settings font combo; the same fontdb
+# iced already carries via cosmic-text, so no second font stack.
+fontdb = "0.23"
+# The Linux OCR engine (ADR-0009): meikiocr's three ONNX models driven by
+# ONNX Runtime. `ndarray` and `tracing` stay off - outputs are read as flat
+# slices and the daemon already owns its stderr log. The two distribution
+# paths ADR-0009 names are cargo features on chibipop-linux, not settings
+# here: the default downloads a pinned prebuilt runtime at build time (the
+# release tarball, and the only thing that makes `cargo test` work on a
+# bare ubuntu runner), the source-AUR path dlopens the system library.
+# Exact-pinned: an rc line reserves the right to move its API under us.
+# No `api-N` feature on purpose: `ort` then asks the backend for API 17,
+# its floor, which is the one setting under which both distribution paths
+# work - the pinned 1.28 download and a distro `libonnxruntime` as old as
+# 1.17 (Arch ships 1.24). Nothing here reaches past that API.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "copy-dylibs"] }
+# Verifies the bundled model files against their committed digests before
+# a session is built (ADR-0009 "hash-pinned, no first-run download").
+sha2 = "0.10.9"
+# The SNI tray (ADR-0006): ksni runs its own D-Bus thread. `async-io`, not
+# the default `tokio` feature — ADR-0001's sync/calloop daemon must not
+# import a second async runtime, and ksni's feature unification would.
+# `blocking` is only a sync wrapper over that runtime: the daemon thread
+# gets a Handle it can update without hosting an executor.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
+# Decodes the embedded tray PNGs into the ARGB32 pixmaps SNI asks for (the
+# `.ico` frame parser stays Windows-only, ADR-0006); the OCR fixture gate
+# also decodes the committed corpus PNGs in tests.
+png = "0.18.1"
+# Test-only: the OCR gate mirrors the benchmark harness's NFKC step when it
+# scores a prediction (tools/ocr-bench/bench/common.py normalise()).
+unicode-normalization = "0.1.24"
+# The POSIX signal mask (ticket 13): the daemon blocks SIGINT/SIGTERM for
+# every thread and hands the default disposition back to every child it
+# execs. `calloop`'s `signals` feature already resolves exactly this
+# version - its `Signal` enum is its own, so the mask itself has to come
+# from here - and its `signal` feature is the one calloop enables, so the
+# one-pin rule costs no new package and no new feature in the lockfile.
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }
+
+# --- ticket 34 (portal ScreenCast capture backend, ADR-0002 rung 2) ---
+# The portal handshake is D-Bus, and zbus is already in this tree: ksni's
+# `async-io` feature resolves exactly this version, so the one-pin rule
+# costs nothing new and the daemon still hosts no executor of its own -
+# `zbus::blocking` (the default `blocking-api`) is called from the portal's
+# own thread. Default features deliberately: they are `async-io` +
+# `blocking-api`, the same pair ksni already unifies to. Naming `tokio`
+# here would pull a second runtime into the daemon, which ADR-0001 forbids.
+zbus = "5.19.0"
+# PipeWire is dlopened, never linked: `libpipewire-0.3.so.0` at runtime, no
+# `libpipewire-0.3-dev` at build time. Same bargain ADR-0009 already struck
+# for `ort`'s system path, and it is what keeps one `cargo test --workspace`
+# green on a runner with no PipeWire pkg-config file. `ort` already resolves
+# this exact version, so the lockfile gains no package.
+libloading = "0.9.0"
+
+[package]
+name = "chibipop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "chibipop"
+path = "src/lib.rs"
+
+# No `windows` here, and none arriving by cfg either: the platform crates
+# are named only by the bins (ADR-0001). This crate builds on stable Linux.
+[dependencies]
+anyhow.workspace = true
+# The Anki picture payload: AnkiConnect takes attachments as base64.
+base64.workspace = true
+# The one PNG encoder (spec D3, src/image.rs). Pure Rust, so it costs the
+# Windows bin nothing and it is the same version the Linux bin already
+# decodes its tray icons with.
+png.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+ureq.workspace = true
+zip.workspace = true

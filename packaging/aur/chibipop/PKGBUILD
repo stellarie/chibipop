@@ -1,0 +1,131 @@
+# Maintainer: unusualcrow <unusualcrow@protonmail.com>
+#
+# Built from the release tag (ADR-0007), against the distro's ONNX Runtime.
+#
+# The one thing that makes this package different from a `cargo build`:
+# `--no-default-features --features system-onnxruntime`. The default
+# feature downloads a pinned ONNX Runtime prebuilt at build time and links
+# it statically - fine for the release tarball and `chibipop-bin`, not fine
+# for a distro package, which must not fetch a binary blob mid-build and
+# should share the system library. `system-onnxruntime` switches `ort` to
+# dlopening `libonnxruntime.so` at runtime instead: nothing is downloaded,
+# nothing is linked against onnxruntime at build time, and the `onnxruntime`
+# dependency below is what has to be present when the OCR engine opens
+# (ADR-0009).
+#
+# The OCR models are *not* downloaded either: they are committed, so the
+# tag archive already carries them. ADR-0009 planned a Hugging Face fetch
+# here; it is unnecessary, and the digests are checked from the same
+# SHA256SUMS.txt the tarball ships.
+#
+# Update this file with `packaging/aur/bump.sh vX.Y.Z`, never by hand. The
+# checked-in pkgver/checksum are a rehearsal's - v0.8.2 has no tag yet, so
+# the archive this was built against was produced locally with
+# `git archive`; `bump.sh` makes them real for a tag that exists.
+
+pkgname=chibipop
+pkgver=0.8.2
+pkgrel=1
+pkgdesc="Hover-to-read Japanese lookup for Wayland"
+arch=('x86_64')
+url="https://github.com/unusualcrow/chibipop"
+# The app is GPL-3.0-or-later; the bundled meikiocr weights are LGPL-3.0
+# data files. ONNX Runtime is not ours here - it is the distro's package.
+license=('GPL-3.0-or-later' 'LGPL-3.0-only')
+# `onnxruntime` is a runtime dependency, not a build one: `ort` dlopens
+# `libonnxruntime.so` when the first OCR session opens. Without it the
+# daemon still starts, but lookups are dead - so it is a hard dependency.
+# SQLite is compiled in (rusqlite's `bundled` feature), and the whole
+# Wayland/tray/popup stack is pure Rust, so nothing else is linked.
+# `hicolor-icon-theme` owns the directories the .desktop entry's icon goes
+# into; namcap makes that an error, and it is right - without it the icon
+# lands in a tree nothing indexes.
+depends=('glibc' 'gcc-libs' 'onnxruntime' 'hicolor-icon-theme')
+makedepends=('cargo')
+optdepends=(
+	'noto-fonts-cjk: Japanese glyphs in the popup - without a JP font kanji render as tofu'
+	'xdg-desktop-portal: capture and global-shortcut channels on KDE and GNOME'
+	'pipewire: the portal capture stream (dlopened, only on that rung)'
+)
+# `!lto`: makepkg's LTO puts GCC bitcode in the objects rusqlite's build
+# script compiles for its bundled SQLite, and rustc links that archive
+# with lld, which cannot read them.
+# `!debug`: this makepkg.conf sets no DEBUG_RUSTFLAGS, so the default
+# would split a `chibipop-debug` package with nothing in it.
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/unusualcrow/chibipop/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('b4d06361f72f921f573882255f0d57f389a54caac49b7dca38209c6f102c19ca')
+
+prepare() {
+	cd "$pkgname-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+
+	# The models are hash-pinned (ADR-0009) and `models::verify` re-checks
+	# these same digests when the engine opens. Checking here turns a
+	# truncated archive into a build failure instead of an engine that
+	# refuses itself on the user's machine.
+	(cd crates/chibipop-linux/models/meiki && sha256sum --check --strict SHA256SUMS.txt)
+}
+
+build() {
+	cd "$pkgname-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	# `-p chibipop-linux` and nothing else: the workspace also holds the
+	# Windows bin, which is a two-line refusal on this target and produces
+	# a binary with the same name (see the workspace Cargo.toml).
+	cargo build --frozen --release -p chibipop-linux \
+		--no-default-features --features system-onnxruntime
+}
+
+check() {
+	cd "$pkgname-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	# Same feature set as the build, so this exercises the package's own
+	# linkage. The tests that need a compositor self-skip when
+	# WAYLAND_DISPLAY is unset, which it is in a chroot.
+	cargo test --frozen --release -p chibipop-linux \
+		--no-default-features --features system-onnxruntime
+}
+
+package() {
+	cd "$pkgname-$pkgver"
+
+	install -Dm755 target/release/chibipop "$pkgdir/usr/bin/chibipop"
+
+	# The binary finds its data by walking up from its own directory, so
+	# an FHS install is not free-form: `/usr/bin/chibipop` looks for
+	# `../share/chibipop/models/meiki` (models::LAYOUTS) and
+	# `../share/chibipop/data/deconjugator.json` (the daemon's rules
+	# search). Move either one and the OCR engine refuses to open or every
+	# conjugated form stops resolving.
+	install -Dm644 data/deconjugator.json "$pkgdir/usr/share/$pkgname/data/deconjugator.json"
+	install -Dm644 -t "$pkgdir/usr/share/$pkgname/models/meiki" \
+		crates/chibipop-linux/models/meiki/*.onnx \
+		crates/chibipop-linux/models/meiki/SHA256SUMS.txt \
+		crates/chibipop-linux/models/meiki/LICENSE.md
+
+	# Session integration. The systemd unit is the packaged one - it
+	# already names /usr/bin/chibipop, which is where this package puts
+	# the binary - and it is a *user* unit: the daemon needs a Wayland
+	# session, not a boot.
+	install -Dm644 extras/chibipop.desktop "$pkgdir/usr/share/applications/chibipop.desktop"
+	install -Dm644 extras/chibipop.service "$pkgdir/usr/lib/systemd/user/chibipop.service"
+	# `Icon=chibipop` in the .desktop entry resolves to this. The tray
+	# icon does not - those pixmaps are compiled into the binary, so the
+	# tray works on installs that have no hicolor tree at all.
+	install -Dm644 crates/chibipop-windows/assets/chibipop.svg \
+		"$pkgdir/usr/share/icons/hicolor/scalable/apps/chibipop.svg"
+
+	# The Hyprland snippet and its README are documentation, not config:
+	# they are copied into a user's own dotfiles, never read from here.
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+	install -Dm644 extras/README.md "$pkgdir/usr/share/doc/$pkgname/extras/README.md"
+	install -Dm644 extras/hyprland.conf "$pkgdir/usr/share/doc/$pkgname/extras/hyprland.conf"
+
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 crates/chibipop-linux/models/meiki/LICENSE.md \
+		"$pkgdir/usr/share/licenses/$pkgname/LICENSE.models.md"
+}

@@ -11,8 +11,11 @@ __pycache__/
 /docs/superpowers/
 /.superpowers/
 
-# Local-only scripts.
-/scripts/
+# Domain docs, agent docs, and issue tracker - local only.
+/AGENTS.md
+/CONTEXT.md
+/docs/agents/
+/.scratch/
 
 # Project memory - local only.
 /MEMORY.md

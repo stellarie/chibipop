@@ -1,5 +1,7 @@
 //! What the popup shows.
 
+use std::collections::HashSet;
+
 use crate::geom::PhysRect;
 use crate::lookup::model::Hit;
 use crate::text::layout::union_chars;
@@ -12,7 +14,7 @@ pub struct Presentation {
     pub collapsed: Vec<CollapsedRow>,
     /// Every group as a full card.
     pub all_cards: Vec<Card>,
-    /// The OCR line; set by app.rs.
+    /// The OCR line; set by worker.rs.
     pub sentence: Option<String>,
 }
 
@@ -52,6 +54,47 @@ pub struct CollapsedRow {
 pub struct DictInfo {
     pub dict_id: i64,
     pub name: String,
+}
+
+/// Anki state for this popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnkiPopupState {
+    pub dupes: HashSet<String>,
+    pub added: HashSet<String>,
+    pub enabled: bool,
+    pub adding: bool,
+    /// Dupe check in flight.
+    pub checking: bool,
+    /// AnkiConnect reachable.
+    pub connected: bool,
+    /// Last add-note failed.
+    pub failed: bool,
+}
+
+impl AnkiPopupState {
+    /// Disabled, no markers.
+    pub fn disabled() -> Self {
+        Self {
+            dupes: HashSet::new(),
+            added: HashSet::new(),
+            enabled: false,
+            adding: false,
+            checking: false,
+            connected: false,
+            failed: false,
+        }
+    }
+
+    /// A brand-new popup's state:
+    /// checking iff Anki is on.
+    pub fn fresh(enabled: bool) -> Self {
+        Self {
+            enabled,
+            checking: enabled,
+            connected: enabled,
+            ..Self::disabled()
+        }
+    }
 }
 
 /// Presentation knobs.
@@ -606,16 +649,14 @@ mod tests {
         assert!(p.sentence.is_none());
     }
 
+    /// Guards the payload path, not a
+    /// hand-rolled copy of it.
     #[test]
     fn sentence_source_appears_in_fields_when_set() {
         let mut p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg());
         p.sentence = Some("その猫はかわいい。".to_string());
-        let card = p.top.as_ref().unwrap();
 
-        let mut fields = crate::anki::fields_from_card(card, &card.blocks);
-        if let Some(sentence) = &p.sentence {
-            fields.insert("sentence".to_string(), sentence.clone());
-        }
+        let (_, fields) = crate::controller::note_payload(&p, false);
 
         assert_eq!(Some(&"その猫はかわいい。".to_string()), fields.get("sentence"));
     }

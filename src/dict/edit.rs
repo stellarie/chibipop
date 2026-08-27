@@ -149,7 +149,7 @@ pub fn reapply_frequencies(
 }
 
 /// Adds one archive to meta.
-pub(crate) fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
+pub fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
     let record = serde_json::to_value(crate::dict::build::source_hash(archive)?)
         .context("encoding the source record")?;
     let raw: Option<String> = conn
@@ -210,7 +210,7 @@ fn delete_rows(conn: &Connection, table: &str, dict_id: i64) -> Result<usize> {
 }
 
 /// Drops one archive from meta.
-pub(crate) fn forget_source(conn: &Connection, archive: &Path) -> Result<usize> {
+pub fn forget_source(conn: &Connection, archive: &Path) -> Result<usize> {
     let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let raw: Option<String> = conn
         .query_row("SELECT v FROM meta WHERE k = 'source_hashes'", [], |r| r.get(0))
@@ -598,7 +598,10 @@ mod tests {
     #[test]
     fn a_full_archive_path_matches_the_recorded_file_name() {
         let (mut conn, _guard) = fixture_db("full_path_still_matches");
-        let path = Path::new("C:\\Users\\Stella\\chibipop\\library\\terms.zip");
+        // Forward slashes on purpose: `Path` parses them as separators on
+        // both Windows and Linux, so this exercises the same contract on the
+        // platform-neutral core's whole build matrix.
+        let path = Path::new("C:/Users/Stella/chibipop/library/terms.zip");
 
         let gone = remove_dictionary(&mut conn, 1, path).unwrap();
 

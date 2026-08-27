@@ -1,0 +1,23 @@
+# chibipop daemon as a systemd user unit, for sessions without XDG
+# autostart (bare Hyprland/sway under uwsm or a hand-rolled session).
+#
+# Install:  cp chibipop.service ~/.config/systemd/user/
+# Enable:   systemctl --user enable --now chibipop.service
+#
+# Adjust ExecStart if chibipop is not on the system path. The unit binds
+# to graphical-session.target so it starts with the compositor and stops
+# with it - it is useless without a Wayland display.
+
+[Unit]
+Description=chibipop Japanese lookup daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/chibipop run
+Restart=on-failure
+Slice=app.slice
+
+[Install]
+WantedBy=graphical-session.target
