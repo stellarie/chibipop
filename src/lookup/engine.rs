@@ -25,19 +25,21 @@ fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
 
-/// From weikipop's priority.
-fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool, steps: usize) -> f64 {
+/// From weikipop's priority. Deliberately no `steps` term: see
+/// `Candidate::whole`.
+fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
     let f = freq.map(|v| v as f64).unwrap_or(DEFAULT_FREQ).max(1.0);
     let mut s = match_len as f64;
     s += 10.0 * (1.0 - f.ln() / DEFAULT_FREQ.ln());
     if kana_bonus {
         s += 3.0;
     }
-    s -= steps as f64;
     s
 }
 
-/// Fine dec_tag to coarse pos.
+/// Fine dec_tag to coarse pos. Having an arm here is also what makes a tag
+/// *terminal* - the `stem-` tags fall through to the fail-open case, and
+/// `all_terminal_dec_tags_are_handled_by_the_mapping` keeps that true.
 fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
     match dec_tag {
         "v5aru" | "v5b" | "v5g" | "v5k" | "v5k-s" | "v5m" | "v5n" | "v5r"
@@ -57,16 +59,30 @@ struct Candidate {
     row: TermRow,
     match_len: usize,
     steps: usize,
+    /// Whether the deconjugator finished. A chain ending on a `stem-` tag
+    /// stopped mid-morphology, so the row it landed on is a spelling
+    /// coincidence with a stem rather than a word the input is a form of.
+    /// An unconjugated form needs no chain and is whole by definition.
+    whole: bool,
     process: Vec<String>,
+}
+
+/// Unconjugated all-kana only.
+fn kana_bonus(c: &Candidate) -> bool {
+    c.steps == 0 && c.row.surface.chars().all(is_kana)
 }
 
 /// One result slot.
 type GroupKey = (Option<String>, Option<String>, i64);
 
-/// Deterministic total order.
+/// Deterministic total order. Mirrors the ranking below down to `steps`: the
+/// representative kept for a group must be the parse that group would be
+/// ranked on.
 fn is_better(new: &Candidate, existing: &Candidate) -> bool {
-    fn rank(c: &Candidate) -> (usize, Reverse<usize>, Reverse<&Vec<String>>, Reverse<i64>) {
-        (c.match_len, Reverse(c.steps), Reverse(&c.process), Reverse(c.row.entry_id))
+    fn rank(
+        c: &Candidate,
+    ) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>, Reverse<i64>) {
+        (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process), Reverse(c.row.entry_id))
     }
     rank(new) > rank(existing)
 }
@@ -99,8 +115,15 @@ impl LookupEngine {
                 .collect();
 
             for form in &forms {
-                let required_pos =
-                    form.tags.last().map(String::as_str).and_then(dict_pos_for).flatten();
+                // The POS the chain demands, and whether it got far enough to
+                // demand one at all.
+                let (whole, required_pos) = match form.tags.last() {
+                    None => (true, None),
+                    Some(tag) => match dict_pos_for(tag) {
+                        Some(pos) => (true, pos),
+                        None => (false, None),
+                    },
+                };
                 for row in dict.terms_for(&form.text)? {
                     if let Some(need) = required_pos {
                         if !row.pos.is_empty()
@@ -114,6 +137,7 @@ impl LookupEngine {
                         row,
                         match_len: prefix_len,
                         steps: form.process.len(),
+                        whole,
                         process: form.process.clone(),
                     };
                     let should_replace = match best.get(&key) {
@@ -129,23 +153,21 @@ impl LookupEngine {
 
         let mut ranked: Vec<Candidate> = best.into_values().collect();
 
-        // Unconjugated all-kana only.
         ranked.sort_by(|a, b| {
-            let sa = score(
-                a.match_len,
-                a.row.freq,
-                a.steps == 0 && a.row.surface.chars().all(is_kana),
-                a.steps,
-            );
-            let sb = score(
-                b.match_len,
-                b.row.freq,
-                b.steps == 0 && b.row.surface.chars().all(is_kana),
-                b.steps,
-            );
+            let sa = score(a.match_len, a.row.freq, kana_bonus(a));
+            let sb = score(b.match_len, b.row.freq, kana_bonus(b));
             b.match_len
                 .cmp(&a.match_len)
+                // Among candidates explaining the same span, a form the
+                // deconjugator actually resolved to a word class beats one
+                // that only got as far as a stem - however common the stem's
+                // homograph is. Needing more rules to get there is not what
+                // makes a parse worse.
+                .then(b.whole.cmp(&a.whole))
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
+                // Occam, once everything above ties: a nudge, never the
+                // discriminator.
+                .then(a.steps.cmp(&b.steps))
                 // dict_id ascends by priority.
                 .then(a.row.dict_id.cmp(&b.row.dict_id))
                 .then(a.row.entry_id.cmp(&b.row.entry_id))
@@ -163,10 +185,8 @@ impl LookupEngine {
             .into_iter()
             .filter_map(|c| {
                 let entry = entries.get(&c.row.entry_id)?.clone();
-                let kana_bonus =
-                    c.steps == 0 && c.row.surface.chars().all(is_kana);
                 Some(Hit {
-                    score: score(c.match_len, c.row.freq, kana_bonus, c.steps),
+                    score: score(c.match_len, c.row.freq, kana_bonus(&c)),
                     written: c.row.written.clone(),
                     reading: c.row.reading.clone(),
                     match_len: c.match_len,
@@ -315,6 +335,42 @@ mod tests {
             hits.iter().any(|h| h.written.as_deref() == Some("する")),
             "expected する among hits, got {:?}",
             hits.iter().map(|h| h.written.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The test above cannot see a ranking defect: with one term in the
+    /// dictionary する wins by default. A ranking defect needs a crowd, so
+    /// this one reproduces the shape of a real frequency-less library at
+    /// してしまった - every row consumes the whole input, none carries a
+    /// frequency, and the only form the deconjugator resolves all the way to
+    /// a word class is also the one that took the most rules to reach. The
+    /// nouns are homographs of the stems on the way there (し, して), which
+    /// is the only reason they are candidates at all.
+    #[test]
+    fn whole_parse_survives_a_crowd_of_stem_homographs() {
+        const SHI: &[&str] = &[
+            "梓", "仕", "刺", "市", "死", "誌", "巳", "四", "肆", "士", "子",
+            "師", "詩", "私",
+        ];
+        let mut d = FakeDictionary::new();
+        for (i, written) in SHI.iter().enumerate() {
+            let id = i as i64 + 1;
+            d.add_term("し", Some(written), Some("し"), "", None, id, 1);
+            d.add_entry(id, 1, vec![sense("a noun read し", "")]);
+        }
+        d.add_term("して", Some("仕手"), Some("して"), "", None, 90, 1);
+        d.add_entry(90, 1, vec![sense("speculator", "")]);
+        d.add_term("する", Some("為る"), Some("する"), "vs", None, 91, 1);
+        d.add_entry(91, 1, vec![sense("to do", "vs")]);
+
+        let hits = engine().run(&d, "してしまった").unwrap();
+        let shown: Vec<Option<String>> = hits.iter().map(|h| h.written.clone()).collect();
+        // Otherwise nothing was crowded out and the assertion below is free.
+        assert_eq!(MAX_RESULTS, hits.len(), "expected a full window, got {shown:?}");
+        assert_eq!(
+            Some(&Some("為る".to_string())),
+            shown.first(),
+            "the verb してしまった is a form of must lead its own homographs, got {shown:?}"
         );
     }
 
