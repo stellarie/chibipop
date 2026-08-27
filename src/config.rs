@@ -424,6 +424,32 @@ pub struct FieldMapping {
     pub source: String,
 }
 
+/// Every `source` a field-map row may name, in the order a picker
+/// offers them.
+///
+/// A `source` is the key [`crate::anki::mapped_fields`] looks up in the
+/// note's `fields` map; a row whose source is absent from that map
+/// contributes nothing to the note. `expression`, `reading`, `glossary`
+/// and `glossary_html` always come from `anki::fields_from_card`, which
+/// adds `frequency` only when the card carries one;
+/// `controller::note_payload` adds `sentence` when the hover produced
+/// one. `screenshot` is the odd one out: it is never a `fields` key at
+/// all, and `shot::plan` reads it straight off this list's row to learn
+/// which Anki field the picture belongs in.
+///
+/// Windows' combo prepends `"(none)"`, which is that one UI's idiom for
+/// "this field is unmapped" and is filtered out by its `row_mapping`
+/// before a save; it is never a stored value, so it is not a source.
+pub const FIELD_SOURCES: [&str; 7] = [
+    "expression",
+    "reading",
+    "glossary",
+    "frequency",
+    "glossary_html",
+    "screenshot",
+    "sentence",
+];
+
 /// `[anki]`. Optional section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnkiConfig {
@@ -885,6 +911,34 @@ mod tests {
     /// Unique per process and test.
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("chibipop_cfg_{}_{}.toml", std::process::id(), name))
+    }
+
+    /// `controller::note_payload` can supply a sentence, so a picker
+    /// must be able to route it.
+    #[test]
+    fn field_sources_offers_sentence() {
+        assert!(FIELD_SOURCES.contains(&"sentence"));
+    }
+
+    /// Without this row a mining screenshot has no field to land in:
+    /// `shot::plan` finds the picture field by this source alone.
+    #[test]
+    fn field_sources_offers_screenshot() {
+        assert!(FIELD_SOURCES.contains(&"screenshot"));
+    }
+
+    /// A shipped default a picker cannot offer would be unreproducible
+    /// from the settings window.
+    #[test]
+    fn every_default_field_map_source_is_offered() {
+        for mapping in default_field_map() {
+            assert!(
+                FIELD_SOURCES.contains(&mapping.source.as_str()),
+                "default row {} maps source {:?}, which no picker offers",
+                mapping.anki_field,
+                mapping.source
+            );
+        }
     }
 
     #[test]

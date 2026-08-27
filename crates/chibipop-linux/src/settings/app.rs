@@ -23,8 +23,8 @@ use crate::control::Verb;
 use crate::lock::{self, LockError};
 use anyhow::Context;
 use chibipop::config::{
-    PopupLayer, SentenceMode, TriggerMode, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
-    SUMMARY_RANGE,
+    FieldMapping, PopupLayer, SentenceMode, TriggerMode, FIELD_SOURCES, MAX_HEIGHT_RANGE,
+    MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
 };
 use chibipop::settings::SettingsForm;
 use iced::widget::{
@@ -274,6 +274,15 @@ impl App {
         };
         self.form.capture_width = w;
         self.form.capture_height = h;
+        // A field-map row with no Anki field is not a storable state:
+        // Anki has no field called "", so core would look that name up
+        // on every add and place nothing under it forever. Add seeds
+        // exactly such a row on purpose (only the user's note type
+        // knows its field names), so this is the one place a row they
+        // opened and left blank stops - on the way to the file, not in
+        // core and not per keystroke, because a half-typed name is a
+        // normal thing for a text box to hold.
+        self.form.field_map.retain(|mapping| !mapping.anki_field.trim().is_empty());
         match apply::apply(&self.form, &self.linux, &self.config_path, &self.socket_path) {
             Ok(applied) => {
                 // The file now holds the clamped truth; show it.
@@ -456,8 +465,21 @@ enum Message {
     SentenceModePicked(String),
     ShowStaticOverlay(bool),
     StaticRegionKey(String),
+    /// A field-map row's Anki field name, as typed. Free text because
+    /// only the user's note type knows its own field names and this
+    /// window never asks Anki for them (see [`field_map_rows`]).
     FieldMapAnki(usize, String),
+    /// A field-map row's picked source, mapped back through
+    /// [`FIELD_SOURCES`] by [`field_source_of`] rather than trusted as
+    /// it arrives: the vocabulary is closed, and `anki::mapped_fields`
+    /// drops a row naming anything outside it without a word.
     FieldMapSource(usize, String),
+    /// Append a field-map row, seeded on [`NEW_ROW_SOURCE`]. Until this
+    /// existed the shipped `field_map` was the only one a Linux user
+    /// could have - `screenshot` included, which is to say excluded.
+    FieldMapAdd,
+    /// Drop the field-map row at this position.
+    FieldMapRemove(usize),
     /// Copy the trigger chord's press/release bind.
     CopyBind,
     /// Copy the add-card chord's one-press bind.
@@ -544,9 +566,30 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 m.anki_field = v;
             }
         }
+        // The picker hands out [`FIELD_SOURCES`] entries and nothing
+        // else, so the vocabulary check is unreachable through the UI.
+        // It is here because this arm is the only way a source reaches
+        // the form, and a row naming something outside the closed set
+        // is one core silently contributes nothing for (`anki.rs`'s
+        // `mapped_fields`) - a mapping that looks set and is not.
         Message::FieldMapSource(i, v) => {
-            if let Some(m) = app.form.field_map.get_mut(i) {
-                m.source = v;
+            if let (Some(source), Some(m)) = (field_source_of(&v), app.form.field_map.get_mut(i)) {
+                m.source = source.to_string();
+            }
+        }
+        // The Anki field starts blank: it is the user's note type that
+        // names its fields. `App::apply` is what refuses to store the
+        // row if they never fill it in.
+        Message::FieldMapAdd => app.form.field_map.push(FieldMapping {
+            anki_field: String::new(),
+            source: NEW_ROW_SOURCE.to_string(),
+        }),
+        // The index is a position in the list the last frame rendered,
+        // so a stale one would panic `Vec::remove`; bounds-checked
+        // rather than trusting message ordering to rule that out.
+        Message::FieldMapRemove(i) => {
+            if i < app.form.field_map.len() {
+                app.form.field_map.remove(i);
             }
         }
         Message::CopyBind => return iced::clipboard::write(app.bind_snippet()),
@@ -1184,7 +1227,8 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
         text(
             "Asking for a card dims the screen: drag the area to capture, release to \
              confirm. Esc or a right-click skips the picture and files the card without \
-             one. Map it to a field with source = \"screenshot\" below."
+             one. Add a field mapping below with source \"screenshot\" to say which Anki \
+             field the picture lands in."
         )
         .size(13)
         .into(),
@@ -1211,6 +1255,83 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
         ),
         screenshot_bind(app),
     ]
+}
+
+/// The source a picked item names, or `None` when core's vocabulary
+/// does not hold it.
+///
+/// [`FIELD_SOURCES`] is one ordered sequence serving both halves of the
+/// UI edge - the items going out and the source coming back - so nothing
+/// in between gets to decide the mapping, exactly as [`SENTENCE_MODES`]
+/// does for the sentence picker. `None` is unreachable from the picker;
+/// it is what a source hand-written into the TOML gets, and it is why
+/// such a row renders unset rather than dressing an unknown string up
+/// as a mapping core would honour.
+fn field_source_of(picked: &str) -> Option<&'static str> {
+    FIELD_SOURCES.iter().copied().find(|&source| source == picked)
+}
+
+/// The source a freshly added row starts on.
+///
+/// `screenshot`, not the vocabulary's first entry: `default_field_map`
+/// ships no row for `glossary_html`, `sentence` or `screenshot`, and of
+/// those three only `screenshot`'s absence makes another setting inert -
+/// `actions.screenshot.include_on_add` can be on and still put no
+/// picture anywhere, because `shot::plan_add` reads the picture's field
+/// name straight off this row. That gap is the whole reason this section
+/// grew an Add button, so it is what Add guesses; a wrong guess costs
+/// one pick.
+const NEW_ROW_SOURCE: &str = "screenshot";
+
+/// The field-map group: one row per mapping, and the two controls that
+/// make the list growable.
+///
+/// Windows builds its rows from a live AnkiConnect `modelFieldNames`
+/// call - one combo per field the note type actually has
+/// (`ui/settings_window.rs`) - and this deliberately does not. Fetching
+/// makes the row list a property of whichever model happened to be
+/// reachable, which is why the Windows window drops a config row for a
+/// field the fetched model lacks: a silent edit to a saved mapping
+/// whenever Anki is closed or pointed at another note type. These rows
+/// are the config's rows, so an explicit Add/Remove pair is both simpler
+/// and free of that failure mode. The cost is that the Anki field name
+/// is typed rather than picked; the source, which is core's closed
+/// vocabulary and not the user's, is picked.
+fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let mut rows: Vec<Element<'_, Message>> = app
+        .form
+        .field_map
+        .iter()
+        .enumerate()
+        .map(|(i, mapping)| {
+            row![
+                text_input("Anki field", &mapping.anki_field)
+                    .on_input(move |v| Message::FieldMapAnki(i, v))
+                    .width(220),
+                text("<-").size(14),
+                pick_list(FIELD_SOURCES, field_source_of(&mapping.source), move |source| {
+                    Message::FieldMapSource(i, source.to_string())
+                })
+                .placeholder("source")
+                .width(220),
+                button("Remove").on_press(Message::FieldMapRemove(i)),
+            ]
+            .spacing(10)
+            .align_y(iced::Center)
+            .into()
+        })
+        .collect();
+    rows.push(button("Add field mapping").on_press(Message::FieldMapAdd).into());
+    rows.push(
+        text(format!(
+            "A new row arrives on \"{NEW_ROW_SOURCE}\", the one source the shipped \
+             defaults leave out; type the Anki field it belongs in, or pick another \
+             source. A row with no field name is dropped on Apply."
+        ))
+        .size(13)
+        .into(),
+    );
+    rows
 }
 
 fn anki_section(app: &App) -> Element<'_, Message> {
@@ -1253,7 +1374,7 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         .into(),
     };
 
-    let mut body = column![
+    let body = column![
         checkbox(app.form.anki_enabled)
             .label("Enable Anki integration")
             .on_toggle(Message::AnkiEnabled),
@@ -1288,23 +1409,9 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         column(screenshot_rows(app)).spacing(10),
         column(sentence_rows(app)).spacing(10),
         text("Field mappings").size(14),
+        column(field_map_rows(app)).spacing(10),
     ]
     .spacing(10);
-    for (i, mapping) in app.form.field_map.iter().enumerate() {
-        body = body.push(
-            row![
-                text_input("Anki field", &mapping.anki_field)
-                    .on_input(move |v| Message::FieldMapAnki(i, v))
-                    .width(220),
-                text("<-").size(14),
-                text_input("source", &mapping.source)
-                    .on_input(move |v| Message::FieldMapSource(i, v))
-                    .width(220),
-            ]
-            .spacing(10)
-            .align_y(iced::Center),
-        );
-    }
     section("Anki", body)
 }
 
@@ -1854,6 +1961,170 @@ mod tests {
             app.static_region_bind_snippet().is_some(),
             "the region can be set in any mode, so its bind is offered in any mode"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ticket: until this window could add a row and pick a source,
+    /// `shot::plan` had nothing to find and a Linux user's only way to
+    /// name the picture's field was hand-editing the TOML. Asserted the
+    /// way `plan` reads it - the first row whose source is `screenshot`,
+    /// and the Anki field named on that row.
+    #[test]
+    fn adding_a_row_can_finally_name_the_screenshot_field() {
+        let dir = scratch("fmadd");
+        let mut app = app(&dir);
+        assert!(
+            !app.form.field_map.iter().any(|m| m.source == "screenshot"),
+            "the shipped default_field_map has no screenshot row - that is the gap"
+        );
+
+        let _ = update(&mut app, Message::FieldMapAdd);
+        let at = app.form.field_map.len() - 1;
+        // The seed is a pickable source, so the row means something
+        // before the user has touched the picker at all.
+        assert_eq!(Some(NEW_ROW_SOURCE), field_source_of(&app.form.field_map[at].source));
+        let _ = update(&mut app, Message::FieldMapAnki(at, "Picture".to_string()));
+
+        assert_eq!(
+            Some("Picture".to_string()),
+            app.form
+                .field_map
+                .iter()
+                .find(|m| m.source == "screenshot")
+                .map(|m| m.anki_field.clone()),
+            "this is the row and the field name `shot::plan` looks for"
+        );
+
+        // And the picker moves that row to any other source without the
+        // typed field name following it.
+        let _ = update(&mut app, Message::FieldMapSource(at, "sentence".to_string()));
+        assert_eq!("sentence", app.form.field_map[at].source);
+        assert_eq!("Picture", app.form.field_map[at].anki_field);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An off-by-one here silently destroys a mapping the user still
+    /// wants, so the survivors are asserted by name and not by count.
+    #[test]
+    fn removing_a_row_takes_the_one_that_was_pressed() {
+        let dir = scratch("fmremove");
+        let mut app = app(&dir);
+        app.form.field_map.clear();
+        for name in ["First", "Middle", "Last"] {
+            let _ = update(&mut app, Message::FieldMapAdd);
+            let at = app.form.field_map.len() - 1;
+            let _ = update(&mut app, Message::FieldMapAnki(at, name.to_string()));
+        }
+
+        let _ = update(&mut app, Message::FieldMapRemove(1));
+        let names: Vec<&str> =
+            app.form.field_map.iter().map(|m| m.anki_field.as_str()).collect();
+        assert_eq!(vec!["First", "Last"], names);
+
+        // A press that arrived after its row was already gone is inert
+        // rather than a `Vec::remove` panic in the UI thread.
+        let _ = update(&mut app, Message::FieldMapRemove(9));
+        assert_eq!(2, app.form.field_map.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row the user added and never named cannot be stored: Anki has
+    /// no field called "", so such a row is a mapping that looks set and
+    /// can never place anything. Driven through Apply, the one place
+    /// that filter lives, and read back off the file Apply wrote.
+    #[test]
+    fn a_row_with_no_anki_field_never_reaches_the_saved_config() {
+        let dir = scratch("fmblank");
+        let mut app = app(&dir);
+        let shipped = app.form.field_map.len();
+
+        let _ = update(&mut app, Message::FieldMapAdd);
+        let named = app.form.field_map.len() - 1;
+        let _ = update(&mut app, Message::FieldMapAnki(named, "Picture".to_string()));
+        // One row the user opened and walked away from, and one they
+        // filled with spaces, which is no more a field name than "".
+        let _ = update(&mut app, Message::FieldMapAdd);
+        let _ = update(&mut app, Message::FieldMapAdd);
+        let blank = app.form.field_map.len() - 1;
+        let _ = update(&mut app, Message::FieldMapAnki(blank, "   ".to_string()));
+
+        let _ = update(&mut app, Message::Apply);
+        let saved = chibipop::config::load_or_create(&app.config_path).expect("Apply wrote it");
+        assert_eq!(
+            shipped + 1,
+            saved.anki.field_map.len(),
+            "the named row landed and the two nameless ones did not: {:?}",
+            saved.anki.field_map
+        );
+        assert_eq!(
+            Some("Picture".to_string()),
+            saved
+                .anki
+                .field_map
+                .iter()
+                .find(|m| m.source == "screenshot")
+                .map(|m| m.anki_field.clone()),
+            "the sibling rows are untouched and the screenshot row is the saved one"
+        );
+        // The window shows what the file holds, the same way Apply
+        // re-reads the clamped capture size.
+        assert_eq!(shipped + 1, app.form.field_map.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The vocabulary is core's [`FIELD_SOURCES`] and this window keeps
+    /// no second copy: every item it offers round-trips to itself, and a
+    /// source the set does not hold never reaches the form -
+    /// `anki::mapped_fields` drops such a row without a word, so a
+    /// picker that accepted one would be showing a mapping that is not.
+    #[test]
+    fn the_source_picker_only_ever_yields_a_source_core_understands() {
+        let dir = scratch("fmvocab");
+        let mut app = app(&dir);
+        for source in FIELD_SOURCES {
+            assert_eq!(Some(source), field_source_of(source), "{source} must be offered");
+        }
+        // Windows' combo prepends this for "unmapped": that one UI's
+        // idiom for no row, never a storable source.
+        assert_eq!(None, field_source_of("(none)"));
+        assert_eq!(None, field_source_of("sceenshot"));
+
+        let _ = update(&mut app, Message::FieldMapAdd);
+        let at = app.form.field_map.len() - 1;
+        let _ = update(&mut app, Message::FieldMapSource(at, "sceenshot".to_string()));
+        assert_eq!(
+            NEW_ROW_SOURCE, app.form.field_map[at].source,
+            "an unlisted source leaves the row on the one it had"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Row *count* is the observable, as with the sentence rows: iced
+    /// widgets are opaque, and what matters is that every mapping is
+    /// rendered and that the affordances the section grew - Add and its
+    /// caption - are there even when the list is empty, which is the
+    /// state a user who removed everything is left in.
+    #[test]
+    fn every_mapping_is_rendered_and_the_add_control_always_is() {
+        let dir = scratch("fmrows");
+        let mut app = app(&dir);
+        let shipped = app.form.field_map.len();
+        assert_eq!(
+            shipped + 2,
+            field_map_rows(&app).len(),
+            "one row per mapping, plus Add and its caption"
+        );
+
+        let _ = update(&mut app, Message::FieldMapAdd);
+        assert_eq!(shipped + 3, field_map_rows(&app).len(), "the new row renders at once");
+
+        app.form.field_map.clear();
+        assert_eq!(2, field_map_rows(&app).len(), "an emptied map still offers Add");
+
+        // The whole window builds with a screenshot row in the map: the
+        // picker is real widgetry, not just a lookup.
+        let _ = update(&mut app, Message::FieldMapAdd);
+        let _ = view(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

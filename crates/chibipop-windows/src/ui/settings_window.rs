@@ -3,7 +3,7 @@
 //! Modeless - see D9.
 //! Numbers are combos, not spins.
 
-use crate::config::SentenceMode;
+use crate::config::{SentenceMode, FIELD_SOURCES};
 use crate::library::Kind;
 use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use crate::text::ocr::tag_matches;
@@ -139,17 +139,29 @@ const ID_OCR_CLIPBOARD_KEY: i32 = 162;
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
 
-/// Field-map combo choices.
-const FIELD_MAP_SOURCES: [&str; 8] = [
-    "(none)",
-    "expression",
-    "reading",
-    "glossary",
-    "frequency",
-    "glossary_html",
-    "screenshot",
-    "sentence",
-];
+/// Field-map combo choices, in the order they are filled.
+///
+/// A Win32 combo answers with the index it was filled at, so the fill in
+/// `build_field_map_rows` and the read-back in `form` are two halves of
+/// one edge and must walk this single sequence. Two lists that merely
+/// agree today would map every field to the wrong source the day one of
+/// them gains an entry.
+///
+/// Which sources a mapping may name is a core rule, so the vocabulary is
+/// `chibipop::config::FIELD_SOURCES` and this window only renders it. The
+/// `"(none)"` sentinel prepended here is not one of them: it is this
+/// window's idiom for "this field maps to nothing", dropped by
+/// `row_mapping` before save, never a stored value. Prepending it is also
+/// why the read-back is offset by one.
+const FIELD_MAP_SOURCES: [&str; FIELD_SOURCES.len() + 1] = {
+    let mut all = ["(none)"; FIELD_SOURCES.len() + 1];
+    let mut i = 0;
+    while i < FIELD_SOURCES.len() {
+        all[i + 1] = FIELD_SOURCES[i];
+        i += 1;
+    }
+    all
+};
 
 /// The sentence-capture combo, in the order it is filled.
 ///
@@ -3666,9 +3678,13 @@ mod tests {
         assert_eq!("(none)", default_source(&[], "Expression"));
     }
 
+    /// The combo is core's vocabulary behind this window's sentinel, and
+    /// the offset that introduces is what the save read-back decodes by
+    /// index. Off by one here maps every field to the wrong source.
     #[test]
-    fn field_map_sources_offers_sentence() {
-        assert!(FIELD_MAP_SOURCES.contains(&"sentence"));
+    fn field_map_combo_is_the_none_sentinel_then_core_sources() {
+        assert_eq!("(none)", FIELD_MAP_SOURCES[0]);
+        assert_eq!(&FIELD_SOURCES[..], &FIELD_MAP_SOURCES[1..]);
     }
 
     #[test]
