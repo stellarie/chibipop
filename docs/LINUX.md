@@ -69,12 +69,18 @@ directories.
 
 **From source.** See [Quick start](#quick-start-hyprland) above.
 
-Runtime dependencies: glibc, libstdc++ and a CJK font such as Noto Sans CJK,
-for the tarball and `-bin` builds. The release run prints the exact glibc and
-libstdc++ floors it built against; the source AUR package takes the distro's
-ONNX Runtime instead of the bundled one. Optional: `xdg-desktop-portal`
-(capture and trigger on KDE/GNOME) and `pipewire` (the portal capture
-stream).
+Runtime dependencies for the tarball and `-bin` builds: glibc, libstdc++ and a
+CJK font such as Noto Sans CJK. Nothing else — the OCR runtime is linked in.
+
+**The v0.9.9 tarball needs `GLIBC_2.39` and `GLIBCXX_3.4.31` or newer.** Those
+are measured, not estimated: the release run reads the highest versioned symbol
+the binary references from each library. They are Ubuntu 24.04's versions,
+which is the image the asset is built on. A distro older than either needs the
+source AUR package or a source build, both of which link against whatever the
+distro ships.
+
+Optional: `xdg-desktop-portal` (capture and trigger on KDE/GNOME) and
+`pipewire` (the portal capture stream).
 
 The packaging is built by [`scripts/package-linux.sh`](../scripts/package-linux.sh)
 and templated in [`packaging/aur/`](../packaging/aur/). Both are described in
