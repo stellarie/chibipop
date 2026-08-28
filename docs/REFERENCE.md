@@ -270,10 +270,22 @@ install.
 > `target/` builds. `Stop-Process -Name chibipop` closes all of them,
 > including the real install. See [`REGRESSION.md`](REGRESSION.md) tier 0.
 
-The copy is a **local build**, not the released artifact. Its bytes differ
-from the zip's — different toolchain, and different line endings on
-`LICENSE`. Verify a *release* against the zip from the draft, per
+**After a release, copy from the published zip instead of `target/release`.**
+Unzip the asset and use its `chibipop.exe`, `data/deconjugator.json`,
+`README.md` and `LICENSE`. The install then runs the exact bytes everyone else
+downloaded, and `Get-FileHash` against the zip's copy proves it. Done this way
+for v0.9.9 on 2026-08-29, on all three installs.
+
+Copying from `target/release` is still right between releases, for a nightly
+off a branch. That copy is a **local build**, not the released artifact: its
+bytes differ from the zip's — different toolchain, and different line endings
+on `LICENSE`. Verify a *release* against the zip from the draft, per
 [`RELEASING.md`](RELEASING.md) step 6.
+
+**`chibipop-latest` carries no `plugins/` folder** as of 2026-08-29, though the
+shipped zip has one. A refresh does not create it: seeding a plugin into a
+configured install is a change, not a refresh. Copy `plugins/meikiocr/` in by
+hand to bring it level with a fresh install.
 
 ---
 

@@ -1562,7 +1562,14 @@ what a green run looks like on this machine: 1338 passed, 1 failed, and the fail
 
 ---
 
-## 38. `release.yml` runs the geometry goldens on `windows-latest`, which ADR-0011 forbids
+## 38. ~~`release.yml` runs the geometry goldens on `windows-latest`, which ADR-0011 forbids~~ — **FIXED 2026-08-29**
+
+> [!note] Fixed the same day it was found, on oniichan's instruction
+> `release.yml`'s Windows job is now `runs-on: windows-2025`, matching
+> `ci.yml`'s tier0 job, and carries a comment saying why and naming this item.
+> Moving either pin now means moving both, in the same commit as the re-blessed
+> goldens. The v0.9.9 release was already built and drafted on the old label —
+> which resolved to `windows-2025` anyway, so those assets are unaffected.
 
 **Found 2026-08-29, reading the release workflow before tagging v0.9.9.**
 `ci.yml`'s tier 0 job is pinned to `windows-2025`, with a comment explaining that the
@@ -1582,9 +1589,9 @@ is already pushed and permanent, the release job reds on a test that has nothing
 with the release, and no asset is produced.
 
 **The fix is one word** — `windows-2025`, matching `ci.yml`, with the same comment. It was
-left alone deliberately on 2026-08-29 rather than folded into a release commit: changing
-the release workflow is a change to what gets released, and that is oniichan's call, not a
-side effect of cutting a tag.
+left out of the v0.9.9 release commit deliberately: changing the release workflow is a
+change to what gets released, and that is oniichan's call, not a side effect of cutting a
+tag. He made it the same day, and the pin landed on its own branch.
 
 **Evidence:** `.github/workflows/release.yml`; `.github/workflows/ci.yml` tier 0's
 `runs-on` and its comment; `docs/adr/0011-layout-golden-verification.md`, "tier0 pins its
