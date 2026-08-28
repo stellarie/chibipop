@@ -48,9 +48,19 @@ jobs:
           fi
           echo "version=v$crate" >> "$GITHUB_OUTPUT"
 
+  # Pinned to windows-2025, matching ci.yml's tier0 job, and for its
+  # reason: the Tests step below runs the geometry goldens, which assert
+  # exact DirectWrite metrics with no tolerance (ADR-0011). The runner
+  # image's font files are part of that baseline. `windows-latest`
+  # resolves to windows-2025 today, so this was green - but the label
+  # migrates, and the failure it would cause is the worst-shaped one
+  # available: the tag is already pushed and permanent, the release job
+  # reds on a test unrelated to the release, and no asset is produced.
+  # Move this pin only together with ci.yml's, in the same commit as the
+  # re-blessed goldens. See docs/BACKLOG.md 38.
   windows:
     name: Build and package (Windows)
-    runs-on: windows-latest
+    runs-on: windows-2025
     needs: version
 
     steps:
