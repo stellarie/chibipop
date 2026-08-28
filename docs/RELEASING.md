@@ -9,6 +9,9 @@ chibipop-vX.Y.Z-windows-x64.zip
 chibipop-vX.Y.Z-linux-x64.tar.gz
 ```
 
+**The Linux asset starts at v0.9.9.** Every release up to and including
+v0.9.3 carried the zip alone.
+
 **Both names are a forever contract.** Every shipped binary's update check
 parses asset names off `releases/latest` (ADR-0007), so the `chibipop-v`
 prefix and the `-windows-x64.zip` / `-linux-x64.tar.gz` suffixes cannot
@@ -269,12 +272,11 @@ install an icon into that theme's directories, so both depend on it.
    `chibipop-bin` is the one an Arch user gets in seconds; the source package
    is the one that works on a distro whose glibc the tarball is too new for.
 8. **Refresh the latest-build copy** so `Documents\chibipop-latest` runs the
-   version you just shipped:
-   ```powershell
-   pwsh -File scripts/blank-copy.ps1
-   ```
-   It swaps the executable and keeps any config, library and database that
-   folder holds. See [`REFERENCE.md`](REFERENCE.md#the-latest-build-copy).
+   version you just shipped. It is a manual PowerShell copy — the
+   `scripts/blank-copy.ps1` this step named until 2026-08-29 does not exist,
+   in this repository or anywhere on the machine. The commands, and the list
+   of files that must never be touched, are in
+   [`REFERENCE.md`](REFERENCE.md#the-latest-build-copy).
 
 Step 6 is not ceremony. Nothing in CI can hover over Japanese text, so the
 first real exercise of a release build is a human doing it.
@@ -339,14 +341,17 @@ not "the popup works". Tier 2 is still a human, every time.
 
 ## If the icon or manifest changes
 
-`assets/chibipop.res` is committed rather than compiled, so no build depends
+`crates/chibipop-windows/assets/chibipop.res` is committed rather than
+compiled, so no build depends
 on locating a Windows SDK. Regenerate it from **PowerShell** — MSYS2 mangles
 `rc.exe`'s `/flag` arguments under git-bash:
 
 ```powershell
 $rc = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter rc.exe |
       Where-Object { $_.FullName -like "*x64*" } | Select-Object -Last 1
-Push-Location assets; & $rc.FullName /nologo /fo chibipop.res chibipop.rc; Pop-Location
+Push-Location crates/chibipop-windows/assets
+& $rc.FullName /nologo /fo chibipop.res chibipop.rc
+Pop-Location
 ```
 
 ## Open decisions

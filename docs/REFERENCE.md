@@ -8,8 +8,24 @@ the limits that were measured rather than assumed.
 
 ## Toolchain
 
-- **Rust** stable, MSVC toolchain (`stable-x86_64-pc-windows-msvc`).
+- **Rust** stable. MSVC on Windows (`stable-x86_64-pc-windows-msvc`), the
+  default toolchain on Linux.
 - `data/deconjugator.json` ships with the repository. No build step.
+- The Linux OCR models ship with the repository too
+  (`crates/chibipop-linux/models/meiki/`). Nothing is downloaded.
+
+**One repository, two binaries** (ADR-0001). The core library is the root
+package. One bin crate per platform sits under `crates/`, and both produce a
+binary named `chibipop`, so cargo uplifts both to one path. Any command that
+links must exclude the foreign bin crate:
+
+| Command | Windows | Linux |
+|---|---|---|
+| Test | `cargo test --workspace --exclude chibipop-linux` | `cargo test --workspace --exclude chibipop-windows` |
+| Build | `cargo build --release --workspace --exclude chibipop-linux` | `cargo build --release --workspace --exclude chibipop-windows` |
+
+Check-shaped commands link nothing, so `cargo clippy --workspace` spans every
+member on either host.
 
 The dictionary database is **not** in the repository (232 MiB). Build it from
 Yomitan format-3 archives, either in the settings window or from the command
@@ -27,6 +43,10 @@ dictionary, ranked in filename order. Roughly 70 seconds.
 
 ## Subcommands
 
+The two binaries do not share a command line. Windows first, then Linux.
+
+### Windows
+
 | Command | What it does |
 |---|---|
 | `chibipop run` | The popup application. |
@@ -36,6 +56,32 @@ dictionary, ranked in filename order. Roughly 70 seconds.
 | `chibipop probe --at 1200,400` | One point, every stage printed: capture region → OCR lines and word boxes → resolved span → ranked hits → match box. Tells apart "OCR saw nothing" from "OCR saw text but nothing near the cursor". |
 | `chibipop watch` | Follows the cursor and prints a lookup whenever the hovered word changes. Ctrl-C to stop. |
 | `chibipop build-dict --library DIR --out FILE` | Builds `chibipop.sqlite` from a folder of Yomitan `.zip` archives, printing one line per archive. Term archives are ordered by filename, which is what assigns `dict_id`; frequency archives are detected by their `index.json`. |
+
+### Linux
+
+The daemon holds every capability, so the Linux commands are a daemon, a
+settings process, one control verb, and three diagnostics.
+
+| Command | What it does |
+|---|---|
+| `chibipop run` | The daemon. The default when no subcommand is given. |
+| `chibipop settings` | The settings window, in its own process (ADR-0005). A settings crash cannot take live hover down. |
+| `chibipop ctl VERB` | Sends one verb to the running daemon over its control socket. Bind these in your compositor. |
+| `chibipop probe` | Connects to the Wayland display, prints the capability report, exits. |
+| `chibipop capture-dump` | Grabs screen regions with the selected capture backend and writes PNGs. |
+| `chibipop clipboard-check` | Takes the clipboard selection with a known string and holds it. |
+
+`--config PATH` is global on Linux and skips config discovery entirely.
+
+**The `ctl` verb set is fixed** (ADR-0003): `reload`, `trigger-down`,
+`trigger-up`, `toggle`, `anki-add`, `screenshot`, `ocr-clipboard`,
+`static-region`. One verb per global action, never a scripting API. The
+settings window prints a ready-to-paste compositor bind for each one, naming
+the running binary's real path.
+
+The three diagnostics are lock-free and socket-free, so all three are safe to
+run beside a live daemon. [`LINUX.md`](LINUX.md#command-line) carries the
+worked examples.
 
 `build-dict` writes to `<out>.tmp` and renames on success only, so a failed
 build leaves the previous database byte-identical. It holds the whole frequency
@@ -168,31 +214,61 @@ same copy the other way. The log and cache are disposable; don't bother.
 ### The latest-build copy
 
 `C:\Users\Stella\Documents\chibipop-latest` holds the latest build. Refresh it
-after every release build:
+after every release build.
+
+> [!important] `scripts/blank-copy.ps1` does not exist — corrected 2026-08-29
+> This section named that script until today, and so did `RELEASING.md` step 8
+> and two tier 1 items. All of them named a command nobody could run. The
+> script is absent from the repository, from every worktree, and from all
+> three installs. `scripts/` stopped being gitignored on 2026-08-27, so a
+> replacement would be tracked if anyone writes one. Until then the refresh is
+> the manual copy below.
+
+**Copy five files, and nothing else.** The refresh replaces the executable,
+the deconjugation rules, the README, and the two plugin files that are not
+machine-specific.
 
 ```powershell
-pwsh -File scripts/blank-copy.ps1
+$src = "C:\Users\Stella\chibipop"
+$dst = "C:\Users\Stella\Documents\chibipop-latest"
+
+Copy-Item "$src\target\release\chibipop.exe" "$dst\chibipop.exe" -Force
+Copy-Item "$src\data\deconjugator.json" "$dst\data\deconjugator.json" -Force
+Copy-Item "$src\README.md" "$dst\README.md" -Force
+
+$cfg = $null
+if (Test-Path "$dst\plugins\meikiocr\config.toml") {
+    $cfg = Get-Content "$dst\plugins\meikiocr\config.toml" -Raw
+}
+Copy-Item "$src\plugins\meikiocr\plugin.toml" "$dst\plugins\meikiocr\plugin.toml" -Force
+Copy-Item "$src\plugins\meikiocr\adapter.py" "$dst\plugins\meikiocr\adapter.py" -Force
+if ($cfg) { Set-Content "$dst\plugins\meikiocr\config.toml" $cfg -NoNewline }
 ```
 
-**The script deletes nothing.** It picks one of two modes from what it finds:
+Then verify: `& "$dst\chibipop.exe" --version`.
 
-| Destination | Mode | Effect |
-|---|---|---|
-| no `chibipop.exe` | seed | writes the exe, `data/deconjugator.json`, `README.md`, `LICENSE` |
-| an existing install | refresh | replaces `chibipop.exe` only |
+**Never touch these**, in any install. Each one is the user's, not the
+build's:
 
-A seeded folder carries no `chibipop.toml` and no database. Its first launch
-therefore takes the **first-run path**: the settings window, and a config
-written with defaults. Once someone configures that folder, a refresh keeps
-their `chibipop.toml`, `library/` and `data/`, and prints what it kept.
+- `chibipop.toml` — their settings
+- `library/` — their dictionary archives, hundreds of MB
+- `data/chibipop.sqlite` — their built database
+- `popup.css` — their theming
+- `screenshots/`
+- `plugins/meikiocr/config.toml` — their machine-specific paths
 
-`-Destination` seeds another path. Use it to test the first-run experience
-without disturbing an install.
+**Seeding a fresh folder** is the same copy into an empty directory, plus
+`LICENSE`. A seeded folder carries no `chibipop.toml` and no database, so its
+first launch takes the **first-run path**: the settings window, and a config
+written with defaults. Seed a scratch folder to test that path, never an
+install.
 
-> [!warning] Quit chibipop first
-> Windows will not overwrite a running executable. The script checks whether
-> a chibipop is running **from that folder** and stops with its pid rather
-> than failing halfway.
+> [!warning] Quit chibipop first, by pid or by path — never by name
+> Windows will not overwrite a running executable. Three separate installs on
+> this machine are called `chibipop.exe` — `chibipop-latest`,
+> `chibipop-nightly` and `chibipop-nightly-jp` — plus the repository's
+> `target/` builds. `Stop-Process -Name chibipop` closes all of them,
+> including the real install. See [`REGRESSION.md`](REGRESSION.md) tier 0.
 
 The copy is a **local build**, not the released artifact. Its bytes differ
 from the zip's — different toolchain, and different line endings on
@@ -210,18 +286,29 @@ Malformed TOML is a **hard error naming the file**, never a silent fallback —
 that is how a typo quietly erases someone's settings. A value that parses but
 is out of range is **clamped on load and named on stderr**.
 
+This is the whole file, at its defaults, as `Config::default()` serializes it
+on 2026-08-29. Both platforms read the same schema (ADR-0012); the keys that
+end in `_linux` are the Linux twin of the key above them, and Windows ignores
+them.
+
 ```toml
 [trigger]
-mode = "live"           # "live" | "hold-shift"
+mode = "live"               # "live" | "hold-key" | "hold-shift" (legacy)
+trigger_key = "shift"       # Windows: the key held in hold-key mode
+trigger_key_linux = "ALT+F" # Linux: the chord, in portal syntax
+per_character_lookup = false
 
 [popup]
-theme = "dark"          # "dark" | "light"
+theme = "dark"              # "dark" | "light"
 exclude_from_capture = false
-max_height_percent = 45 # 10-90; cap as a percentage of the monitor's height
-summary_chars = 40      # 10-200; collapsed-row summary length
+max_width_percent = 25      # 10-90; cap as a percentage of the monitor's width
+max_height_percent = 45     # 10-90; and of its height
+summary_chars = 40          # 10-200; collapsed-row summary length
 font = "Yu Gothic UI"
-highlight_match = true  # box the characters the popup is defining
-scroll_popup = true     # let the wheel scroll a popup that overflows
+highlight_match = true      # box the characters the popup is defining
+scroll_popup = true         # let the wheel scroll a popup that overflows
+side_panel = false
+layer = "overlay"           # Linux: "overlay" | "top" (below fullscreen clients)
 
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
@@ -230,19 +317,69 @@ display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in pr
 "ja"         = ["大辞林", "Jitendex"]    # these, in this order, and nothing else
 "zh-Hans-CN" = ["中日大辞典"]
 
+[plugins]
+enabled = []                # Windows only; discovery extends this in memory
+
 [ocr]
-max_ocr_passes = 1      # 1-5; 1 = no forward tiling (the default)
+max_ocr_passes = 1          # 1-5; 1 = no forward tiling (the default)
+prefer_vertical = false     # swap capture_width and capture_height
+capture_width = 500         # 100-1600 px, centred on the cursor
+capture_height = 100        # 80-600 px
+scan_alphanumeric = true
+language = "ja"             # Windows recogniser tag; Linux always reads ja
+engine = "builtin"          # Windows: "builtin", or a discovered plugin name
 
 [debug]
-show_scan_region = false   # outline what each hover captured
-show_lookup_log = false    # a console printing each resolved hover
+show_scan_region = false    # outline what each hover captured
+show_lookup_log = false     # a console printing each resolved hover
+show_engine_log = false     # name the active OCR engine in the status bar
+show_adapter_log = false    # stream the plugin adapter's stderr
+
+[anki]
+enabled = false
+url = "http://localhost:8765"
+deck = "Default"
+model = "Lapis"
+add_key = "a"               # Windows
+add_key_linux = "ALT+A"     # Linux, portal syntax
+notify_on_add = true
+sentence_mode = "line"      # "line" | "all" | "static"
+static_region_key = ""      # Windows; empty leaves it unbound
+static_region_key_linux = ""    # Linux; a compositor bind, not portal syntax
+show_static_overlay = true
+first_dict_only = false
+
+[[anki.field_map]]          # one block per Anki field
+anki_field = "Expression"
+source = "expression"       # see the field-map table in the README
+
+[actions]
+enabled = true
+
+[actions.screenshot]
+hotkey = "ctrl+shift+s"     # Windows
+# hotkey_linux = "ALT+S"    # Linux; absent leaves it unbound
+save_dir = "screenshots"
+include_on_add = false
+
+# [actions.ocr_clipboard]   # absent by default; both keys optional
+# hotkey = "ctrl+shift+c"       # Windows
+# hotkey_linux = "ALT+C"        # Linux
 ```
+
+The five default `[[anki.field_map]]` blocks are `Expression`/`expression`,
+`ExpressionReading`/`reading`, `Glossary`/`glossary`, `Frequency`/`frequency`
+and `FreqSort`/`frequency`.
 
 **Every setting is read once at startup.** Edit the file with chibipop
 stopped, or use the settings window — pressing Apply there rewrites the whole
 file from memory, so it would overwrite a hand-edit made while it was
 running. The write goes to a temp file and is renamed into place, so an
 interrupted save cannot leave a half-written config.
+
+Two Linux exceptions. `chibipop ctl reload` makes the running daemon re-read
+the file, and `anki.static_region` is picked up the moment it is written, with
+no restart and no Apply.
 
 ### `exclude_from_capture`
 
@@ -430,14 +567,31 @@ highlight on you get one box, not four.
 
 ## Tests
 
+Each host runs the workspace minus the foreign bin crate. The two numbers
+differ because the two bin crates carry different tests, not because either
+host skips core.
+
 ```bash
-cargo test
+cargo test --workspace --exclude chibipop-linux     # Windows
+cargo test --workspace --exclude chibipop-windows   # Linux
 ```
 
-**873 tests** across six targets, one of them ignored. Re-measured
-2026-08-16.
+| Host | Passing | Ignored | Measured |
+|---|---|---|---|
+| Windows | **1339** across 13 targets | 3 | 2026-08-29, and CI at `98b133c` |
+| Linux | **1591** | not recorded | CI at `98b133c`, 2026-08-27 |
 
-One of those 873 only runs where a dictionary does. `golden_corpus` grades
+> [!warning] One Windows target cannot pass off the CI runner image
+> `geometry_golden_full_chrome` asserts DirectWrite metrics with **no
+> tolerance** (ADR-0011), against goldens blessed on `windows-2025`. On this
+> development machine it fails on one field — `variants.default.elements.3.w`,
+> golden `46.43` against measured `47.03`, the reading 「ざつだん」 in Yu
+> Gothic UI. Nothing else in the suite diverges, and CI is green on the same
+> commit. **This is font drift between two machines, not a regression, and it
+> must not be blessed locally** — blessing here would red CI. See
+> [`REGRESSION.md`](REGRESSION.md) tier 0 and [`BACKLOG.md`](BACKLOG.md) §37.
+
+One of the Windows tests only runs where a dictionary does. `golden_corpus` grades
 deconjugation against a real library and resolves one the way the product does
 (`$CHIBIPOP_GOLDEN_DB`, then `$XDG_DATA_HOME/chibipop/chibipop.sqlite`, then
 `data/chibipop.sqlite` in a cargo tree); with none of those present it prints
@@ -470,6 +624,15 @@ they tested — there is no promote left to decide about and no staged file left
 to notice — so this is a re-baseline. Tier 0 carries the per-commit arithmetic,
 and it is the per-commit split that is truthful here: a whole-branch
 `git diff` collapses the deletions and reports `+82 −3`.
+
+**873 → 1339 is four rounds, not one**, and this page recorded none of them
+until 2026-08-29: the v1.0.0-rc round, the action system, the v0.9.x releases,
+and the Linux port (PR #29). Tier 0 carries the per-round arithmetic. Two
+things changed shape at the same time and are worth separating from the
+count. The workspace split means "the total" is now **two** totals, one per
+host. And Tier 0's own table read **1546 across 17 targets, 0 ignored** until
+today, which matches neither host: `98b133c` measures 1339 on Windows and
+1591 on Linux, on CI and on this machine alike.
 
 **After any large change, work through [`REGRESSION.md`](REGRESSION.md)** — a
 cheapest-first checklist: the automated gate, then what can be verified
@@ -504,6 +667,19 @@ covering every option plus dictionary order.
 
 **M4** (UI Automation tier, for a cheaper path than OCR where the text is
 already selectable) and **M5** (DPI and Magpie polish) are not started.
+
+**Linux ships from v0.9.9**, the first release carrying a Linux asset. One
+shared core, one bin crate per platform (ADR-0001). The Wayland build brings
+its own stack at five seams:
+
+- the capture ladder — ADR-0002
+- the input ladder — ADR-0003
+- the popup surface and renderer — ADR-0004
+- the settings process — ADR-0005
+- the OCR engine — ADR-0009
+
+The decisions are in [`adr/`](adr/). The measurements behind them are in
+[`research/`](research/). Vertical text is beta there. See the limits below.
 
 ### Known limits, measured rather than assumed
 
