@@ -119,6 +119,13 @@ objdump -T target/release/chibipop | grep -oE 'GLIBC_2\.[0-9]+'    | sort -uV | 
 objdump -T target/release/chibipop | grep -oE 'GLIBCXX_3\.4\.[0-9]+' | sort -uV | tail -1
 ```
 
+**Measured on the v0.9.9 run: `GLIBC_2.39` and `GLIBCXX_3.4.31`**, over
+`libstdc++.so.6`, `libgcc_s.so.1`, `libm.so.6` and `libc.so.6`. No
+`libonnxruntime.so`, as designed. Quote those two numbers when someone asks
+whether the tarball runs on their distro; a distro older than either needs the
+source AUR package or a source build. Re-read them from each release run —
+they move when the runner pin does.
+
 (`ci.yml`'s Linux *gate* is pinned separately and for a different reason — it
 only has to compile and test, not define anyone's floor.)
 
