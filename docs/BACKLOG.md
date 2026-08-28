@@ -1513,3 +1513,79 @@ Item **35**, raised the day before against this same function, is the check's ot
 — the missing reverse direction, `!claimed && got`. That item's code quote and line
 citation were not re-verified against this fix and may now be stale; item 35 itself
 stays open, per this plan.
+
+
+---
+
+## 37. Tier 0 cannot be all-green on a developer machine: the geometry goldens are pinned to the CI image
+
+**Found 2026-08-29, running tier 0 before tagging v0.9.9 at `98b133c`.**
+`geometry_golden_full_chrome` fails on the Windows development box and passes on CI, on
+the same commit. One field diverges:
+
+```
+variants.default.elements.3.w: golden "46.43" -> measured "47.03"  ["Text" "ざつだん"]
+```
+
+Everything else matches: the other seven golden fixtures pass, and the rest of the suite
+is 1338 green. Clippy is exactly 1 and the release build finishes.
+
+**This is not a regression.** ADR-0011 asserts DirectWrite metrics with **no tolerance**,
+against goldens blessed on `windows-2025`, and it names the mechanism: "Drift enters only
+via runner-image font updates." Two machines with different Yu Gothic UI files measure the
+same string differently, and 0.6 px is exactly that size of difference. What the ADR did
+not anticipate is that a *developer box* is a second image, permanently.
+
+**The consequence is a process one.** `RELEASING.md` step 2 says "Run tier 0 locally. Do
+not tag a commit you have not gated." That instruction can no longer be satisfied on this
+machine: its test line is red before any change is made. A reader who does not know why
+has two bad options — bless locally, which reds CI for everyone else, or stop reading the
+line, which is how the next real golden failure gets waved through.
+
+### What would fix it, and what would not
+
+| Option | Why it is not free |
+|---|---|
+| Widen to a tolerance | ADR-0011 rejects this explicitly. A tolerance masks the bug class the gate exists for: rounding moved into core, off-by-one gap accounting, scroll-culling boundary shifts. |
+| Bless locally | Reds CI. The goldens are one file, shared. |
+| Skip the goldens off CI (`CI` env var) | Cheap, and it makes the local gate green — but it also means the adapter's only regression net never runs where the code is written. |
+| A second golden set per machine | Two baselines to keep honest, and nothing tells you when they disagree for a real reason. |
+| Ship the font with the fixtures | The measurement would stop depending on the machine at all. Largest change; also the only one that makes local and CI mean the same thing. |
+
+**Not decided.** The cheap option and the correct option are not the same one here, which
+is why this is a backlog item and not a fix. Until it is picked up, tier 0's table says
+what a green run looks like on this machine: 1338 passed, 1 failed, and the failure named.
+
+**Evidence:** `docs/REGRESSION.md` tier 0; CI run 33111391694 (all four jobs green at
+`98b133c`); `crates/chibipop-windows/tests/geometry_goldens.rs`;
+`docs/adr/0011-layout-golden-verification.md`.
+
+---
+
+## 38. `release.yml` runs the geometry goldens on `windows-latest`, which ADR-0011 forbids
+
+**Found 2026-08-29, reading the release workflow before tagging v0.9.9.**
+`ci.yml`'s tier 0 job is pinned to `windows-2025`, with a comment explaining that the
+runner image is part of the goldens' baseline. `release.yml`'s Windows job runs
+`cargo test --workspace --exclude chibipop-linux` — the same suite, including the same
+goldens — on `runs-on: windows-latest`.
+
+```yaml
+  windows:
+    name: Build and package (Windows)
+    runs-on: windows-latest
+```
+
+**It works today**, because `windows-latest` currently resolves to `windows-2025`. It
+stops working the day GitHub migrates the label. The failure mode is the bad one: the tag
+is already pushed and permanent, the release job reds on a test that has nothing to do
+with the release, and no asset is produced.
+
+**The fix is one word** — `windows-2025`, matching `ci.yml`, with the same comment. It was
+left alone deliberately on 2026-08-29 rather than folded into a release commit: changing
+the release workflow is a change to what gets released, and that is oniichan's call, not a
+side effect of cutting a tag.
+
+**Evidence:** `.github/workflows/release.yml`; `.github/workflows/ci.yml` tier 0's
+`runs-on` and its comment; `docs/adr/0011-layout-golden-verification.md`, "tier0 pins its
+image".

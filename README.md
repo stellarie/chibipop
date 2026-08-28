@@ -1,12 +1,17 @@
 # chibipop
 
+A screen-wide Japanese pop-up dictionary. Hover any Japanese text on screen.
+chibipop reads the pixels with OCR, looks the word up, and shows the
+definition. It runs on Windows and on Wayland Linux.
+
 <img width="2560" height="1080" alt="image" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
 ---
 
 ## Requirements
 
-- **Windows 10 or 11** with Japanese language support.
+- **Windows 10 or 11** with Japanese language support, **or Linux on a
+  Wayland compositor**. See [Linux](#linux).
 - **Your own dictionaries.** chibipop does not include any.
   See [Dictionaries](#dictionaries).
 
@@ -14,11 +19,23 @@
 
 ## Quick start
 
-1. Download the latest **`chibipop-vX.Y.Z-windows-x64.zip`** from
-   [Releases](../../releases). Unzip it anywhere.
-2. Run `chibipop.exe`. The settings window opens on first launch.
+1. Download the asset for your platform from [Releases](../../releases).
+
+   | Platform | Asset | Unpack |
+   |---|---|---|
+   | Windows | `chibipop-vX.Y.Z-windows-x64.zip` | unzip it anywhere |
+   | Linux | `chibipop-vX.Y.Z-linux-x64.tar.gz` | `tar xzf` it anywhere |
+
+   Arch users install `chibipop-bin` from the AUR instead. See
+   [Linux](#linux).
+2. Run it. On Windows, `chibipop.exe` opens the settings window on first
+   launch. On Linux, open it yourself with `chibipop settings`.
 3. Add your dictionary archives. Press **Apply**.
-4. Hover Japanese text anywhere on screen.
+4. Hover Japanese text anywhere on screen. On Linux, hold the trigger chord
+   while you hover.
+
+Linux needs one more step, because the compositor owns the trigger key. See
+[Linux](#linux).
 
 ---
 
@@ -51,13 +68,16 @@ the database is damaged.
   words. Mixed text like 「3人」 still resolves.
 - **Per-character lookup** (*OCR / Debug* tab) — off by default. Turn it on
   to look up each character as you move the cursor. Live mode only.
-- **OCR language** (*OCR / Debug* tab) — the Windows recogniser language.
-  Add more in Windows Settings > Language & region.
+- **OCR language** (*OCR / Debug* tab) — **Windows only.** The Windows
+  recogniser language. Add more in Windows Settings > Language & region.
+  Linux always reads Japanese with the bundled engine.
 - **Per-language dictionary list** (*Dictionaries* tab) — each OCR language
   can have its own dictionary order. A language with no list searches all
   dictionaries.
 
-Settings live in `chibipop.toml` beside the executable.
+Settings live in `chibipop.toml`. It sits beside the executable on
+Windows, and under `~/.config/chibipop/` on Linux. See
+[`docs/REFERENCE.md`](docs/REFERENCE.md#paths).
 
 ---
 
@@ -142,7 +162,7 @@ midnight-purple, ocean-breeze, sakura-light, and warm-paper.
 2. Edit the CSS. Click **Save & Apply**.
 3. The popup repaints immediately.
 
-The file is `popup.css` beside the executable. Delete it to revert.
+The file is `popup.css`, beside `chibipop.toml`. Delete it to revert.
 See [`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) for the selector reference.
 
 ---
@@ -178,8 +198,10 @@ notification when a card is added** on the Anki tab.
 
 ## OCR plugins
 
-chibipop uses Windows OCR by default. You can replace it with a different
-engine through the plugin system.
+**Windows only.** chibipop uses Windows OCR by default. You can replace it
+with a different engine through the plugin system. The Linux build has no
+plugin host: it always uses the bundled meikiocr engine, which ships with
+it. See [`docs/LINUX.md`](docs/LINUX.md).
 
 A plugin runs as a separate process. chibipop sends it a screenshot. The
 plugin returns text with per-character bounding boxes. chibipop handles
@@ -251,11 +273,22 @@ Tested with:
 
 ## Linux
 
-Linux support is **in development** and not yet in any release. It targets
-Wayland compositors that speak the wlroots protocol family — **Hyprland is the
-reference compositor**, with sway and friends first-class alongside it. KDE
-Plasma works through the desktop portals; GNOME is best-effort. X11 is not a
-target.
+**Linux ships from v0.9.9.** It targets Wayland compositors that speak the
+wlroots protocol family. **Hyprland is the reference compositor**, with sway
+and friends first-class alongside it. KDE Plasma works through the desktop
+portals. GNOME is best-effort. X11 is not a target.
+
+Three ways to install:
+
+| Route | Command | ONNX Runtime |
+|---|---|---|
+| Tarball | `tar xzf chibipop-vX.Y.Z-linux-x64.tar.gz` | inside the binary |
+| AUR, binary | `chibipop-bin` | inside the binary |
+| AUR, source | `chibipop` | the distro's `onnxruntime` |
+
+The tarball needs glibc, libstdc++ and a CJK font, and nothing else. It
+carries the OCR models, so it works with no network and no first-run
+download.
 
 Wayland has no global key observation, so the compositor's own keybind is the
 trigger. Two lines bind the default `ALT+F` chord on Hyprland:
@@ -265,10 +298,17 @@ bind  = ALT, F, exec, chibipop ctl trigger-down
 bindr = ALT, F, exec, chibipop ctl trigger-up
 ```
 
-Everything else lives in [`docs/LINUX.md`](docs/LINUX.md): building and
-quick start, the trigger key's design (and Hyprland's release-bind defect),
-per-compositor support including KDE and GNOME, file locations, the command
-line, differences from Windows, and troubleshooting. Ready-to-copy session
+Two differences are worth knowing before you start:
+
+- **OCR is the bundled meikiocr engine**, not Windows OCR. Vertical text is
+  beta — see [`docs/REFERENCE.md`](docs/REFERENCE.md#known-limits-measured-rather-than-assumed).
+- **chibipop never replaces its own binary.** *Check for updates* reports a
+  newer release and stops there. Update with your package manager.
+
+Everything else lives in [`docs/LINUX.md`](docs/LINUX.md): quick start, the
+trigger key's design (and Hyprland's release-bind defect), per-compositor
+support including KDE and GNOME, file locations, the command line,
+differences from Windows, and troubleshooting. Ready-to-copy session
 snippets live in [`extras/`](extras/).
 
 ---
@@ -283,8 +323,26 @@ no Windows SDK is required.
 
 - [`docs/REFERENCE.md`](docs/REFERENCE.md) — config reference, diagnostics,
   tests, measured limits.
+- [`docs/LINUX.md`](docs/LINUX.md) — the Linux build, in full.
+- [`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) — the popup's CSS selectors.
+- [`docs/REGRESSION.md`](docs/REGRESSION.md) — the checklist that proves a
+  build still works, tiered by who can run it.
 - [`docs/RELEASING.md`](docs/RELEASING.md) — how to cut a release.
 - [`docs/BACKLOG.md`](docs/BACKLOG.md) — deferred work with evidence.
+- [`docs/adr/`](docs/adr/) — the decisions the code cannot state itself.
+- [`docs/research/`](docs/research/) — the measurements the ADRs cite.
+
+**One repository, two binaries.** The core library is the root package, and
+one bin crate per platform sits under `crates/`. Both bin crates produce a
+binary named `chibipop`, so a build or test that spans both races two
+linkers over one path. Exclude the foreign crate:
+
+```bash
+cargo test --workspace --exclude chibipop-linux     # Windows
+cargo test --workspace --exclude chibipop-windows   # Linux
+```
+
+See [ADR-0001](docs/adr/0001-workspace-and-platform-seams.md).
 
 ## Licence
 
