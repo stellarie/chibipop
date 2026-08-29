@@ -6,7 +6,7 @@ use chibipop::controller::{LookupOutcome, RequestId};
 use chibipop::geom::{PhysPoint, PhysRect, ScanDisplay};
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;
-use chibipop::lookup::model::{FakeDictionary, Sense};
+use chibipop::lookup::model::FakeDictionary;
 use chibipop::present::DictInfo;
 use chibipop::text::layout::{CaptureSize, OcrLine, OcrWord};
 use chibipop::text::mask::{CaptureMask, CaptureMode};
@@ -102,10 +102,6 @@ impl OcrEngine for FakeOcr {
     }
 }
 
-fn senses() -> Vec<Sense> {
-    serde_json::from_str(r#"[{"glosses":["to eat"],"pos":[],"misc":[]}]"#).unwrap()
-}
-
 /// One term, one entry, one dictionary.
 fn dict() -> FakeDictionary {
     dict_named("FakeDict")
@@ -116,7 +112,7 @@ fn dict_named(name: &str) -> FakeDictionary {
     let mut d = FakeDictionary::new();
     d.add_dict(1, name);
     d.add_term("食", None, None, "", None, 10, 1);
-    d.add_entry(10, 1, senses());
+    d.add_entry(10, 1, r#"["to eat"]"#);
     d
 }
 

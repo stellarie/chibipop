@@ -32,7 +32,8 @@
 use anyhow::{Context, Result};
 use chibipop::lookup::deconj::{Deconjugator, Form};
 use chibipop::lookup::engine::{clean_input, LookupEngine, MAX_LOOKUP_CHARS, MAX_RESULTS};
-use chibipop::lookup::model::{Dictionary, Entry, Sense, TermRow};
+use chibipop::dict::gloss::GlossDoc;
+use chibipop::lookup::model::{Dictionary, Entry, TermRow};
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
 use chibipop::present::DictInfo;
@@ -67,7 +68,7 @@ const SHORT_INPUT: usize = 8;
 /// splits below are meaningless if these drift.
 const TERM_SQL: &str = "SELECT surface, written, reading, pos, freq, entry_id, dict_id \
      FROM term WHERE surface = ?1";
-const ENTRY_SQL: &str = "SELECT entry_id, dict_id, senses FROM entry WHERE entry_id = ?1";
+const ENTRY_SQL: &str = "SELECT entry_id, dict_id, glossary FROM entry WHERE entry_id = ?1";
 
 fn results_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/hover-parse-bench/results")
@@ -282,9 +283,9 @@ impl Raw {
         Ok(acc)
     }
 
-    /// `entries` minus the parse: step, then borrow the `senses` TEXT
+    /// `entries` minus the parse: step, then borrow the `glossary` TEXT
     /// without copying it out of SQLite.
-    fn senses_borrowed(&self, ids: &[i64]) -> Result<u64> {
+    fn glossary_borrowed(&self, ids: &[i64]) -> Result<u64> {
         let mut stmt = self.conn.prepare_cached(ENTRY_SQL)?;
         let mut acc = 0u64;
         for id in ids {
@@ -299,8 +300,9 @@ impl Raw {
     }
 
     /// What `SqliteDictionary::entries` actually does before it parses:
-    /// `r.get::<_, String>(2)`, one owned heap copy of the JSON per entry.
-    fn senses_owned(&self, ids: &[i64], out: &mut Vec<String>) -> Result<()> {
+    /// One owned heap copy of the JSON per entry - what `entries` used to do
+    /// before it borrowed the column straight into the parser.
+    fn glossary_owned(&self, ids: &[i64], out: &mut Vec<String>) -> Result<()> {
         out.clear();
         let mut stmt = self.conn.prepare_cached(ENTRY_SQL)?;
         for id in ids {
@@ -823,7 +825,7 @@ fn report_fanout(b: &Bench, title: &str, inputs: &[String], f: FanOut) {
             summarise("  terms_for on hits", f.hit_us.clone()),
             summarise("  terms_for on misses", f.miss_us.clone()),
             summarise("  fan-out subtotal (hits + misses)", fan),
-            summarise("  entries() incl. today's Vec<Sense> parse", f.entry_us.clone()),
+            summarise("  entries() incl. the GlossDoc parse", f.entry_us.clone()),
             summarise("  residual: group + rank + sort + build Hits", f.residual.clone()),
             summarise("run, instrumented (shows probe overhead)", f.instr_total),
         ],
@@ -893,20 +895,20 @@ fn mode_entries(b: &Bench) -> Result<()> {
     let mut bytes = 0u64;
     let mut buf: Vec<String> = Vec::new();
     for ids in &idsets {
-        b.raw.senses_owned(ids, &mut buf)?;
+        b.raw.glossary_owned(ids, &mut buf)?;
         bytes += buf.iter().map(|s| s.len() as u64).sum::<u64>();
     }
 
     let scratch = RefCell::new(Vec::<String>::new());
     let step = sweep(&idsets, |ids| {
         time_us(|| {
-            black_box(b.raw.senses_borrowed(ids)?);
+            black_box(b.raw.glossary_borrowed(ids)?);
             Ok(())
         })
     })?;
     let owned = sweep(&idsets, |ids| {
         time_us(|| {
-            b.raw.senses_owned(ids, &mut scratch.borrow_mut())?;
+            b.raw.glossary_owned(ids, &mut scratch.borrow_mut())?;
             black_box(&*scratch.borrow());
             Ok(())
         })
@@ -917,20 +919,20 @@ fn mode_entries(b: &Bench) -> Result<()> {
         let mut v: Vec<Vec<String>> = Vec::with_capacity(idsets.len());
         for ids in &idsets {
             let mut one = Vec::new();
-            b.raw.senses_owned(ids, &mut one)?;
+            b.raw.glossary_owned(ids, &mut one)?;
             v.push(one);
         }
         v
     };
     for v in &prefetched {
         for s in v {
-            black_box(serde_json::from_str::<Vec<Sense>>(s)?);
+            black_box(GlossDoc::parse(s));
         }
     }
     let parsed = sweep(&prefetched, |v| {
         time_us(|| {
             for s in v {
-                black_box(serde_json::from_str::<Vec<Sense>>(s)?);
+                black_box(GlossDoc::parse(s));
             }
             Ok(())
         })
@@ -960,7 +962,7 @@ fn mode_entries(b: &Bench) -> Result<()> {
     print_table(
         &format!(
             "{}: entries() for the top {MAX_RESULTS} ids, split \
-             ({:.1} MB of senses json over {} headwords)",
+             ({:.1} MB of glossary json over {} headwords)",
             b.label,
             bytes as f64 / 1e6,
             idsets.len()
@@ -970,7 +972,7 @@ fn mode_entries(b: &Bench) -> Result<()> {
             summarise("SQL fetch, borrowed (step + column, no copy)", step.clone()),
             summarise("SQL fetch, owned String (what entries() does)", owned),
             summarise("  the String copy alone (owned - borrowed)", copy),
-            summarise("serde_json::from_str::<Vec<Sense>>", parsed.clone()),
+            summarise("GlossDoc::parse", parsed.clone()),
             summarise("SqliteDictionary::entries, whole", whole),
             summarise("terms_for + entries(top 10) = hover-parse-cost.md's 63.3 µs", doc),
         ],

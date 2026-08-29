@@ -3970,7 +3970,7 @@ mod tests {
 
     use chibipop::lookup::deconj::Deconjugator;
     use chibipop::lookup::engine::LookupEngine;
-    use chibipop::lookup::model::{FakeDictionary, Sense};
+    use chibipop::lookup::model::FakeDictionary;
     use chibipop::text::layout::{OcrLine, OcrWord};
     use chibipop::text::{Frame, OcrEngine, RegionCapture};
     use chibipop::worker::WorkerParts;
@@ -4113,16 +4113,7 @@ mod tests {
                 let mut dict = FakeDictionary::new();
                 dict.add_dict(1, "FakeDict");
                 dict.add_term(WORD, None, None, "", None, 10, 1);
-                dict.add_entry(
-                    10,
-                    1,
-                    vec![Sense {
-                        glosses: vec!["to eat".to_string()],
-                        glosses_html: Vec::new(),
-                        pos: Vec::new(),
-                        misc: Vec::new(),
-                    }],
-                );
+                dict.add_entry(10, 1, r#"["to eat"]"#);
                 Ok(WorkerParts {
                     capture: Box::new(FakeCapture { log: capture_log, gate, entered }),
                     ocr: Box::new(FakeOcr { log: ocr_log }),

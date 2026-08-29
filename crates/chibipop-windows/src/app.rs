@@ -3403,7 +3403,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.execute_batch(
                 "INSERT INTO dict (dict_id, name, priority) VALUES (9, 'extra.zip', 8);
-                 INSERT INTO entry (entry_id, dict_id, senses) VALUES (900, 9, '[]');
+                 INSERT INTO entry (entry_id, dict_id, glossary) VALUES (900, 9, '[]');
                  INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id)
                      VALUES ('x', 'x', 'x', '', NULL, 900, 9);",
             )

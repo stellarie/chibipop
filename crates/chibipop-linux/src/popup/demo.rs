@@ -63,26 +63,17 @@ pub fn canned() -> Presentation {
             pos: vec!["n".to_string()],
             freq: Some(1042),
             blocks: vec![
-                GlossBlock {
-                    dict_name: "JMdict".to_string(),
-                    glosses: vec![
-                        "Chinese character; Chinese characters".to_string(),
-                        "kanji".to_string(),
-                    ],
-                    glosses_html: Vec::new(),
-                },
-                GlossBlock {
-                    dict_name: "variants".to_string(),
-                    glosses: vec![
-                        // Every one of these is drawn differently by
-                        // the JP and the SC faces of Noto Sans CJK:
-                        //骨 直 今 雪 兵 令 具 単 説 対
-                        "\u{9aa8} \u{76f4} \u{4eca} \u{96ea} \u{5175} \u{4ee4} \u{5177} \
-                         \u{5358} \u{8aac} \u{5bfe}"
-                            .to_string(),
-                    ],
-                    glosses_html: Vec::new(),
-                },
+                GlossBlock::parse(
+                    "JMdict",
+                    r#"["Chinese character; Chinese characters","kanji"]"#,
+                ),
+                // Every one of these is drawn differently by the JP and the
+                // SC faces of Noto Sans CJK: 骨 直 今 雪 兵 令 具 単 説 対
+                GlossBlock::parse(
+                    "variants",
+                    "[\"\u{9aa8} \u{76f4} \u{4eca} \u{96ea} \u{5175} \u{4ee4} \u{5177} \
+                      \u{5358} \u{8aac} \u{5bfe}\"]",
+                ),
             ],
             match_len: 2,
         }),

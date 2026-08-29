@@ -266,11 +266,14 @@ fn card(
     }
 }
 
+/// The layout pass reads `glosses` and nothing else, so a geometry fixture
+/// carries an empty document and the exact strings the snapshot was blessed
+/// against.
 fn block(dict: &str, glosses: &[&str]) -> GlossBlock {
     GlossBlock {
         dict_name: dict.to_string(),
         glosses: glosses.iter().map(|s| s.to_string()).collect(),
-        glosses_html: vec![],
+        doc: std::sync::Arc::new(chibipop::dict::gloss::GlossDoc::empty()),
     }
 }
 

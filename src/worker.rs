@@ -535,7 +535,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::lookup::deconj::Deconjugator;
-    use crate::lookup::model::{FakeDictionary, Sense};
+    use crate::lookup::model::FakeDictionary;
     use crate::text::layout::{Orientation, TextGeom};
     use crate::text::TextSpan;
 
@@ -738,16 +738,7 @@ mod tests {
         let mut d = FakeDictionary::new();
         d.add_dict(1, "FakeDict");
         d.add_term("食", Some("食"), None, "", None, 10, 1);
-        d.add_entry(
-            10,
-            1,
-            vec![Sense {
-                glosses: vec!["to eat".to_string()],
-                glosses_html: Vec::new(),
-                pos: Vec::new(),
-                misc: Vec::new(),
-            }],
-        );
+        d.add_entry(10, 1, r#"["to eat"]"#);
         d
     }
 

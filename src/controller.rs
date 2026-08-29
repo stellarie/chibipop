@@ -1954,10 +1954,8 @@ mod tests {
     /// One rule, three shapes.
     #[test]
     fn the_note_payload_trims_to_the_first_dict_and_carries_the_sentence() {
-        let block = |name: &str, gloss: &str| GlossBlock {
-            dict_name: name.to_string(),
-            glosses: vec![gloss.to_string()],
-            glosses_html: vec![gloss.to_string()],
+        let block = |name: &str, gloss: &str| {
+            GlossBlock::parse(name, &serde_json::json!([gloss]).to_string())
         };
         let mut p = Presentation {
             top: Some(Card {

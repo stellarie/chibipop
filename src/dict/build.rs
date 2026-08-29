@@ -2,8 +2,7 @@
 
 use crate::dict::archive::{for_each_freq_row, for_each_term, read_index};
 use crate::dict::frequency::{lookup_freq, merge_freq_row, FreqTable};
-use crate::dict::glossary::{extract_pos, flatten_glossary, render_glossary_html};
-use crate::lookup::model::Sense;
+use crate::dict::gloss::{renders_text, GlossDoc};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -12,7 +11,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 2;
+/// Bumped to 3 by ticket 02: the `entry` record now stores the dictionary's
+/// own structured-content glossary in place of two flattened vecs, and
+/// ticket 03's media table lands under the same bump. Costs every user one
+/// rebuild, once - a rebuild, not a re-import, because the library directory
+/// keeps the archives and the rebuild flow replays them.
+const SCHEMA_VERSION: i64 = 3;
 #[cfg(test)]
 const BATCH_ROWS: usize = 2;
 #[cfg(not(test))]
@@ -32,7 +36,11 @@ CREATE TABLE dict (
 CREATE TABLE entry (
     entry_id INTEGER PRIMARY KEY,
     dict_id  INTEGER NOT NULL REFERENCES dict(dict_id),
-    senses   TEXT NOT NULL
+    -- The dictionary's raw structured-content glossary, verbatim. Parsed per
+    -- hover into a `GlossDoc` behind a parsed-tree cache, so a parser or
+    -- renderer fix ships as a patch and never as a rebuild
+    -- (docs/research/hover-parse-cost.md).
+    glossary TEXT NOT NULL
 );
 
 CREATE TABLE term (              -- the hot index; ~25 point queries per hover
@@ -249,8 +257,18 @@ pub(crate) fn insert_archive(
     let mut term_rows: i64 = 0;
 
     for_each_term(archive, |t| {
-        let glosses = flatten_glossary(&t.glossary);
-        if glosses.is_empty() {
+        // Serialise first, then parse the stored text: the record is what a
+        // hover will read, so a term row that renders nothing here renders
+        // nothing there either, and the emptiness test cannot drift from it.
+        batches.json_buf.clear();
+        serde_json::to_writer(&mut batches.json_buf, &t.glossary)?;
+        let glossary = std::str::from_utf8(&batches.json_buf)
+            .context("json output was not utf-8")?
+            .to_string();
+        // An image-only or whitespace-only glossary is not an entry. Same
+        // rule as before the tree existed; it is what keeps a gaiji-only
+        // term row out of the term index.
+        if !renders_text(&GlossDoc::parse(&glossary)) {
             return Ok(());
         }
         entry_id += 1;
@@ -258,22 +276,7 @@ pub(crate) fn insert_archive(
             on_progress(&format!("progress  {entry_id} / ?"));
         }
 
-        let sense = Sense {
-            glosses,
-            glosses_html: render_glossary_html(&t.glossary),
-            pos: extract_pos(&t.glossary),
-            misc: Vec::new(),
-        };
-
-        batches.json_buf.clear();
-        {
-            let mut ser = serde_json::Serializer::with_formatter(&mut batches.json_buf, PySpaced);
-            [&sense].serialize(&mut ser)?;
-        }
-        let senses_json = std::str::from_utf8(&batches.json_buf)
-            .context("json output was not utf-8")?
-            .to_string();
-        batches.entries.push((entry_id, dict_id, senses_json));
+        batches.entries.push((entry_id, dict_id, glossary));
         if batches.entries.len() >= BATCH_ROWS {
             flush_entries(tx, &mut batches.entries)?;
         }
@@ -330,7 +333,7 @@ fn flush_entries(tx: &rusqlite::Transaction, batch: &mut Vec<(i64, i64, String)>
         })
         .collect();
     let sql = format!(
-        "INSERT INTO entry (entry_id, dict_id, senses) VALUES {}",
+        "INSERT INTO entry (entry_id, dict_id, glossary) VALUES {}",
         placeholders.join(","),
     );
     let mut stmt = tx.prepare_cached(&sql)?;
@@ -633,8 +636,8 @@ fn civil_from_days(z_in: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dict::gloss::plain_items;
     use rusqlite::OpenFlags;
-    use serde_json::json;
 
     struct TempDbGuard(PathBuf);
 
@@ -669,15 +672,19 @@ mod tests {
         to_hex(&hasher.finalize())
     }
 
-    fn senses_for(conn: &Connection, surface: &str) -> serde_json::Value {
-        let row: String = conn
-            .query_row(
-                "SELECT senses FROM entry JOIN term USING(entry_id) WHERE surface = ?1",
-                [surface],
-                |r| r.get(0),
-            )
-            .unwrap();
-        serde_json::from_str(&row).unwrap()
+    /// The record as stored, and as a hover reads it.
+    fn stored_glossary(conn: &Connection, surface: &str) -> String {
+        conn.query_row(
+            "SELECT glossary FROM entry JOIN term USING(entry_id) WHERE surface = ?1",
+            [surface],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The gloss tree a hover would parse out of the record.
+    fn stored_doc(conn: &Connection, surface: &str) -> GlossDoc {
+        GlossDoc::parse(&stored_glossary(conn, surface))
     }
 
     #[test]
@@ -697,34 +704,52 @@ mod tests {
         assert_eq!("FixtureTerms", name);
     }
 
+    /// The record keeps the dictionary's own structured content, not a
+    /// rendering of it: that is what makes a renderer or parser fix a patch
+    /// instead of a rebuild.
     #[test]
-    fn structured_content_flattens_to_one_gloss() {
-        let (conn, _guard) = build_fixture_db("structured_content_flattens_to_one_gloss");
-        let senses = senses_for(&conn, "食べる");
-        assert_eq!(json!(["to eat"]), senses[0]["glosses"]);
+    fn the_record_stores_the_raw_structured_content() {
+        let (conn, _guard) = build_fixture_db("the_record_stores_the_raw_structured_content");
+        let stored: serde_json::Value =
+            serde_json::from_str(&stored_glossary(&conn, "食べる")).unwrap();
+        assert_eq!("structured-content", stored[0]["type"]);
+        assert!(
+            stored.to_string().contains("part-of-speech-info"),
+            "the part-of-speech markup is kept, not lifted out at build time: {stored}"
+        );
     }
 
     #[test]
-    fn structured_content_also_gets_an_html_rendering() {
-        let (conn, _guard) = build_fixture_db("structured_content_also_gets_an_html_rendering");
-        let senses = senses_for(&conn, "食べる");
-        assert_eq!(json!(["<span>to eat</span>"]), senses[0]["glosses_html"]);
+    fn structured_content_renders_to_one_gloss() {
+        let (conn, _guard) = build_fixture_db("structured_content_renders_to_one_gloss");
+        assert_eq!(vec!["to eat".to_string()], plain_items(&stored_doc(&conn, "食べる")));
+    }
+
+    #[test]
+    fn structured_content_also_renders_as_html() {
+        let (conn, _guard) = build_fixture_db("structured_content_also_renders_as_html");
+        assert_eq!(
+            vec!["<span>to eat</span>".to_string()],
+            crate::dict::gloss::render_html(&stored_doc(&conn, "食べる"))
+        );
     }
 
     #[test]
     fn a_plain_string_glossary_gets_a_matching_html_rendering() {
         let (conn, _guard) =
             build_fixture_db("a_plain_string_glossary_gets_a_matching_html_rendering");
-        let senses = senses_for(&conn, "ねこ");
-        assert_eq!(json!(["cat"]), senses[0]["glosses"]);
-        assert_eq!(json!(["cat"]), senses[0]["glosses_html"]);
+        let doc = stored_doc(&conn, "ねこ");
+        assert_eq!(vec!["cat".to_string()], plain_items(&doc));
+        assert_eq!(vec!["cat".to_string()], crate::dict::gloss::render_html(&doc));
     }
 
     #[test]
     fn part_of_speech_spans_are_separated_from_glosses() {
         let (conn, _guard) = build_fixture_db("part_of_speech_spans_are_separated_from_glosses");
-        let senses = senses_for(&conn, "食べる");
-        assert_eq!(json!(["1-dan", "transitive"]), senses[0]["pos"]);
+        assert_eq!(
+            vec!["1-dan".to_string(), "transitive".to_string()],
+            crate::dict::gloss::pos_labels(&stored_doc(&conn, "食べる"))
+        );
     }
 
     #[test]
@@ -957,9 +982,9 @@ mod tests {
             "the same archive twice must parse to the same term rows"
         );
         assert_eq!(
-            cells(&conn, "SELECT senses FROM entry WHERE dict_id = 1 ORDER BY entry_id"),
-            cells(&conn, "SELECT senses FROM entry WHERE dict_id = 2 ORDER BY entry_id"),
-            "and to the same senses"
+            cells(&conn, "SELECT glossary FROM entry WHERE dict_id = 1 ORDER BY entry_id"),
+            cells(&conn, "SELECT glossary FROM entry WHERE dict_id = 2 ORDER BY entry_id"),
+            "and to the same glossary records"
         );
     }
 

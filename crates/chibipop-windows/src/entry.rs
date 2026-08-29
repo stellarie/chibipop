@@ -622,12 +622,11 @@ fn print_hits(hits: &[chibipop::lookup::model::Hit]) {
         if !h.process.is_empty() {
             println!("     via: {}", h.process.join(" -> "));
         }
-        for sense in &h.entry.senses {
-            // One row per sense. A gloss carries the dictionary's own line
-            // breaks now, and a listing row cannot hold one, so they fold
-            // into the same inline separator the vec already uses.
-            let lines: Vec<&str> = sense.glosses.iter().flat_map(|g| g.split('\n')).collect();
-            println!("     {}", lines.join("; "));
-        }
+        // One row per entry. A gloss carries the dictionary's own line
+        // breaks, and a listing row cannot hold one, so they fold into the
+        // same inline separator the glosses already use.
+        let glosses = h.entry.glosses();
+        let lines: Vec<&str> = glosses.iter().flat_map(|g| g.split('\n')).collect();
+        println!("     {}", lines.join("; "));
     }
 }

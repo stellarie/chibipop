@@ -313,7 +313,7 @@ mod tests {
 
     fn add_entry(conn: &Connection, entry_id: i64, dict_id: i64) {
         conn.execute(
-            "INSERT INTO entry (entry_id, dict_id, senses) VALUES (?1, ?2, '[]')",
+            "INSERT INTO entry (entry_id, dict_id, glossary) VALUES (?1, ?2, '[]')",
             rusqlite::params![entry_id, dict_id],
         )
         .unwrap();
@@ -496,7 +496,7 @@ mod tests {
         add_dict(conn, dict_id);
         let base = dict_id * 1_000_000;
         conn.execute_batch(&format!(
-            "INSERT INTO entry (entry_id, dict_id, senses)
+            "INSERT INTO entry (entry_id, dict_id, glossary)
                WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i < {n})
                SELECT i + {base}, {dict_id}, '[]' FROM s;
              INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id)
@@ -736,12 +736,12 @@ mod tests {
     #[test]
     fn an_addition_never_lands_on_an_existing_entry_id() {
         let (mut conn, _guard) = fixture_db("add_never_reuses_an_entry_id");
-        let before = rows(&conn, "SELECT entry_id, dict_id, senses FROM entry ORDER BY entry_id");
+        let before = rows(&conn, "SELECT entry_id, dict_id, glossary FROM entry ORDER BY entry_id");
         assert_eq!(3, before.len());
 
         let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
 
-        let after = rows(&conn, "SELECT entry_id, dict_id, senses FROM entry WHERE dict_id = 1 \
+        let after = rows(&conn, "SELECT entry_id, dict_id, glossary FROM entry WHERE dict_id = 1 \
                                  ORDER BY entry_id");
         assert_eq!(before, after, "no existing entry row may change");
         assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM entry"), "3 kept + 3 inserted");
@@ -768,10 +768,10 @@ mod tests {
             "an incremental add must write exactly what a rebuild writes"
         );
         assert_eq!(
-            rows(&reference, "SELECT senses FROM entry ORDER BY entry_id"),
+            rows(&reference, "SELECT glossary FROM entry ORDER BY entry_id"),
             of_dict(
                 &conn,
-                "SELECT senses FROM entry WHERE dict_id = {d} ORDER BY entry_id",
+                "SELECT glossary FROM entry WHERE dict_id = {d} ORDER BY entry_id",
                 made.dict_id
             ),
         );

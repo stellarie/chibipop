@@ -105,11 +105,14 @@ impl TextMeasure for BrokenMeasure {
 
 // ---- fixtures ----
 
+/// The layout pass reads `glosses` and nothing else - ticket 08 is what
+/// teaches it to walk the tree - so these fixtures carry an empty document
+/// and the exact strings the geometry assertions expect.
 fn block(dict: &str, glosses: &[&str]) -> GlossBlock {
     GlossBlock {
         dict_name: dict.to_string(),
         glosses: glosses.iter().map(|s| s.to_string()).collect(),
-        glosses_html: vec![],
+        doc: std::sync::Arc::new(crate::dict::gloss::GlossDoc::empty()),
     }
 }
 

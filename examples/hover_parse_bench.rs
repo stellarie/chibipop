@@ -27,7 +27,7 @@
 //! scratch path: never the user's `~/.local/share/chibipop/chibipop.sqlite`.
 //!
 //! `hover` is the baseline: `terms_for` then `entries` against a database,
-//! including the `Vec<Sense>` deserialization `entries` already does today.
+//! including the `GlossDoc` parse `entries` already does today.
 //! It opens through `SqliteDictionary::open`, which passes
 //! `SQLITE_OPEN_READ_ONLY` with no `SQLITE_OPEN_CREATE` and runs no
 //! migration, so pointing it at the live database cannot modify it.
@@ -36,6 +36,7 @@
 
 use anyhow::{Context, Result};
 use chibipop::dict::build::build;
+use chibipop::dict::gloss::{GlossDoc, Tag};
 use chibipop::lookup::engine::MAX_RESULTS;
 use chibipop::lookup::model::Dictionary;
 use chibipop::lookup::sqlite::SqliteDictionary;
@@ -182,16 +183,51 @@ fn walk(v: &Value) -> usize {
     }
 }
 
+/// Every node of a parsed `GlossDoc`, and every byte of its text. The
+/// arena's equivalent of `walk`: a linear sweep of the node vector, which is
+/// also how ticket 17's style matcher will read it.
+fn walk_doc(doc: &GlossDoc) -> usize {
+    doc.all_nodes()
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            1 + doc.text(i as u32).len()
+                + doc.data(i as u32).len()
+                + doc.style(i as u32).len()
+                + usize::from(n.tag != Tag::None)
+        })
+        .sum()
+}
+
+/// Which representation a timing pass builds.
+#[derive(Clone, Copy)]
+enum Rep {
+    /// What `docs/research/hover-parse-cost.md` measured, kept so its
+    /// numbers stay reproducible from this harness.
+    Value,
+    /// What ticket 02 shipped.
+    Typed,
+}
+
 /// One hover's worth of parsing: every payload behind one headword, parsed
 /// and walked. Repeated until `MIN_SAMPLE` elapses, then averaged.
-fn time_parse(payloads: &[String]) -> f64 {
+fn time_parse(rep: Rep, payloads: &[String]) -> f64 {
     let started = Instant::now();
     let mut iters: u32 = 0;
     loop {
         let mut acc = 0usize;
         for p in payloads {
-            let tree: Value = serde_json::from_str(p).expect("payload.py wrote valid json");
-            acc = acc.wrapping_add(walk(&tree));
+            match rep {
+                Rep::Value => {
+                    let tree: Value =
+                        serde_json::from_str(p).expect("payload.py wrote valid json");
+                    acc = acc.wrapping_add(walk(&tree));
+                }
+                Rep::Typed => {
+                    let doc = GlossDoc::parse(p);
+                    acc = acc.wrapping_add(walk_doc(&doc));
+                }
+            }
         }
         black_box(acc);
         iters += 1;
@@ -213,6 +249,14 @@ fn mode_parse() -> Result<()> {
         records.iter().map(|r| r.rows).sum::<usize>(),
         records.iter().map(|r| r.bytes).sum::<usize>() as f64 / 1e6,
     );
+    // Both representations, over the same payloads in the same run: the
+    // `Value` row anchors the published numbers and the `GlossDoc` row is
+    // the one ticket 02 is answerable for.
+    parse_pass(&records, Rep::Value, "serde_json::Value + full walk")?;
+    parse_pass(&records, Rep::Typed, "GlossDoc::parse + full walk")
+}
+
+fn parse_pass(records: &[Record], rep: Rep, label: &str) -> Result<()> {
 
     // Three slices of every headword, because they answer different halves
     // of the question:
@@ -246,8 +290,8 @@ fn mode_parse() -> Result<()> {
     let mut worst_top = Vec::new();
     let mut worst_top_bytes = 0.0;
 
-    for rec in &records {
-        let us = time_parse(&rec.payloads);
+    for rec in records {
+        let us = time_parse(rep, &rec.payloads);
         if rec.worst {
             worst_all.push(us);
             worst_all_bytes += rec.bytes as f64;
@@ -256,7 +300,7 @@ fn mode_parse() -> Result<()> {
             freq_all_bytes += rec.bytes as f64;
         }
         if rec.lib_rows > 0 {
-            let us = time_parse(&rec.payloads[..rec.lib_rows]);
+            let us = time_parse(rep, &rec.payloads[..rec.lib_rows]);
             if rec.worst {
                 worst_lib.push(us);
                 worst_lib_bytes += rec.lib_bytes as f64;
@@ -267,7 +311,7 @@ fn mode_parse() -> Result<()> {
         }
         let top = &rec.payloads[..rec.payloads.len().min(MAX_RESULTS)];
         let bytes: usize = top.iter().map(String::len).sum();
-        let us = time_parse(top);
+        let us = time_parse(rep, top);
         if rec.worst {
             worst_top.push(us);
             worst_top_bytes += bytes as f64;
@@ -278,7 +322,7 @@ fn mode_parse() -> Result<()> {
     }
 
     print_table(
-        "structured-content parse cost per hover (serde_json::Value + full walk)",
+        &format!("structured-content parse cost per hover ({label})"),
         &[
             summarise("frequency, top 10 rendered", freq_top, Some(freq_top_bytes)),
             summarise("frequency, every library row", freq_lib, Some(freq_lib_bytes)),
@@ -341,7 +385,7 @@ fn mode_build(args: &[String]) -> Result<()> {
 
 // ---- mode: hover ----
 
-/// A second read-only handle, used only to weigh the `senses` JSON a hover
+/// A second read-only handle, used only to weigh the glossary JSON a hover
 /// deserializes. `length()` on TEXT counts characters, so the cast to BLOB
 /// is what makes this a byte count. Opened once: it is a measurement aid,
 /// never on a timed path.
@@ -355,13 +399,13 @@ impl Scale {
             db,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .with_context(|| format!("opening {} read-only to weigh senses", db.display()))?;
+        .with_context(|| format!("opening {} read-only to weigh glossaries", db.display()))?;
         Ok(Scale { conn })
     }
 
     fn weigh(&self, ids: &[i64]) -> Result<usize> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT length(CAST(senses AS BLOB)) FROM entry WHERE entry_id = ?1",
+            "SELECT length(CAST(glossary AS BLOB)) FROM entry WHERE entry_id = ?1",
         )?;
         let mut total = 0usize;
         for id in ids {
@@ -396,10 +440,10 @@ fn mode_hover(args: &[String]) -> Result<()> {
     let scale = Scale::open(&db)?;
     let mut hits: Vec<(&str, bool)> = Vec::new();
     let mut total_entries = 0usize;
-    let mut total_senses = 0usize;
+    let mut total_glossary = 0usize;
     let mut per_term_entries = Vec::new();
-    let mut per_term_senses = Vec::new();
-    let mut per_term_top_senses = Vec::new();
+    let mut per_term_glossary = Vec::new();
+    let mut per_term_top_glossary = Vec::new();
     let mut weighed: Vec<(f64, f64)> = Vec::new();
     for rec in &records {
         let rows = dict.terms_for(&rec.term)?;
@@ -411,12 +455,12 @@ fn mode_hover(args: &[String]) -> Result<()> {
         let bytes = scale.weigh(&ids)?;
         let top_bytes = scale.weigh(&ids[..ids.len().min(MAX_RESULTS)])?;
         total_entries += entries.len();
-        total_senses += bytes;
+        total_glossary += bytes;
         weighed.push((top_bytes as f64, bytes as f64));
         if !rec.worst {
             per_term_entries.push(entries.len() as f64);
-            per_term_senses.push(bytes as f64);
-            per_term_top_senses.push(top_bytes as f64);
+            per_term_glossary.push(bytes as f64);
+            per_term_top_glossary.push(top_bytes as f64);
         }
         hits.push((rec.term.as_str(), rec.worst));
     }
@@ -472,7 +516,7 @@ fn mode_hover(args: &[String]) -> Result<()> {
     print_table(
         &format!(
             "{label}: terms_for + entries over {} dictionaries \
-             (includes today's Vec<Sense> parse)",
+             (includes the GlossDoc parse)",
             names.len()
         ),
         &[
@@ -486,16 +530,16 @@ fn mode_hover(args: &[String]) -> Result<()> {
         &format!("{label}: what one hover deserializes today (frequency sample)"),
         &[
             summarise("entries matched per hover", per_term_entries, None),
-            summarise("senses bytes, top 10", per_term_top_senses, None),
-            summarise("senses bytes, every match", per_term_senses, None),
+            summarise("glossary bytes, top 10", per_term_top_glossary, None),
+            summarise("glossary bytes, every match", per_term_glossary, None),
         ],
     );
     println!(
-        "\n{label}: {} of {} sampled headwords hit; {} entries, {:.1} MB of senses json total",
+        "\n{label}: {} of {} sampled headwords hit; {} entries, {:.1} MB of glossary json total",
         hits.len(),
         records.len(),
         total_entries,
-        total_senses as f64 / 1e6,
+        total_glossary as f64 / 1e6,
     );
     Ok(())
 }

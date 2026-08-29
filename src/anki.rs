@@ -1,5 +1,6 @@
 //! AnkiConnect v6 client.
 
+use crate::dict::gloss::render_html;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -304,10 +305,12 @@ pub fn fields_from_card(
         .map(plain_dict_group)
         .collect::<Vec<_>>()
         .join("\n\n");
-    // \n is a no-op; use <li> tags.
+    // \n is a no-op; use <li> tags. Rendered here rather than carried on the
+    // block: HTML is wanted when a card is mined, which is once, and every
+    // hover was paying for it.
     let glossary_html = blocks.iter()
         .map(|b| {
-            let items: String = b.glosses_html.iter()
+            let items: String = render_html(&b.doc).iter()
                 .map(|g| format!("<li>{g}</li>"))
                 .collect();
             format!(
@@ -332,6 +335,15 @@ pub fn fields_from_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::present::GlossBlock;
+    use serde_json::json;
+
+    /// One block from a glossary payload in the form the record stores, so
+    /// the field builder is fed by the real parser and the real renderers
+    /// rather than by hand-written strings that no dictionary could produce.
+    fn block(dict: &str, glossary: serde_json::Value) -> GlossBlock {
+        GlossBlock::parse(dict, &glossary.to_string())
+    }
 
     #[test]
     fn fields_from_card_formats_glossary() {
@@ -344,16 +356,19 @@ mod tests {
             match_len: 1,
         };
         let blocks = vec![
-            crate::present::GlossBlock {
-                dict_name: "大辞林".into(),
-                glosses: vec!["ネコ科の哺乳類。".into()],
-                glosses_html: vec!["ネコ科の<b>哺乳類</b>。".into()],
-            },
-            crate::present::GlossBlock {
-                dict_name: "Jitendex".into(),
-                glosses: vec!["cat".into(), "feline".into()],
-                glosses_html: vec!["cat".into(), "<i>feline</i>".into()],
-            },
+            block(
+                "大辞林",
+                json!([{"type": "structured-content", "content": [
+                    "ネコ科の", {"tag": "b", "content": "哺乳類"}, "。"
+                ]}]),
+            ),
+            block(
+                "Jitendex",
+                json!([
+                    "cat",
+                    {"type": "structured-content", "content": {"tag": "i", "content": "feline"}}
+                ]),
+            ),
         ];
         let f = fields_from_card(&card, &blocks);
         assert_eq!(Some(&"猫".to_string()), f.get("expression"));
@@ -379,11 +394,7 @@ mod tests {
             blocks: vec![],
             match_len: 1,
         };
-        let blocks = vec![crate::present::GlossBlock {
-            dict_name: "A & B <dict>".into(),
-            glosses: vec!["cat".into()],
-            glosses_html: vec!["cat".into()],
-        }];
+        let blocks = vec![block("A & B <dict>", json!(["cat"]))];
         let f = fields_from_card(&card, &blocks);
         assert_eq!(
             Some(&"<b>A &amp; B &lt;dict&gt;</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
@@ -401,11 +412,7 @@ mod tests {
             blocks: vec![],
             match_len: 1,
         };
-        let blocks = vec![crate::present::GlossBlock {
-            dict_name: "Wenlin".into(),
-            glosses: vec!["supper".into(), "dinner".into()],
-            glosses_html: vec!["supper".into(), "dinner".into()],
-        }];
+        let blocks = vec![block("Wenlin", json!(["supper", "dinner"]))];
         let f = fields_from_card(&card, &blocks);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
@@ -426,16 +433,8 @@ mod tests {
             match_len: 1,
         };
         let blocks = vec![
-            crate::present::GlossBlock {
-                dict_name: "Wenlin".into(),
-                glosses: vec!["supper".into()],
-                glosses_html: vec!["supper".into()],
-            },
-            crate::present::GlossBlock {
-                dict_name: "CC-CEDICT".into(),
-                glosses: vec!["evening meal".into()],
-                glosses_html: vec!["evening meal".into()],
-            },
+            block("Wenlin", json!(["supper"])),
+            block("CC-CEDICT", json!(["evening meal"])),
         ];
         let f = fields_from_card(&card, &blocks);
         let html = f.get("glossary_html").unwrap();
@@ -458,16 +457,8 @@ mod tests {
             match_len: 1,
         };
         let blocks = vec![
-            crate::present::GlossBlock {
-                dict_name: "大辞林".into(),
-                glosses: vec!["イヌ科の哺乳類。".into()],
-                glosses_html: vec!["イヌ科の哺乳類。".into()],
-            },
-            crate::present::GlossBlock {
-                dict_name: "Jitendex".into(),
-                glosses: vec!["dog".into()],
-                glosses_html: vec!["dog".into()],
-            },
+            block("大辞林", json!(["イヌ科の哺乳類。"])),
+            block("Jitendex", json!(["dog"])),
         ];
         let f = fields_from_card(&card, &blocks);
 

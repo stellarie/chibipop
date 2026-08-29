@@ -11,9 +11,13 @@ It exists because the spec closes that question on an unmeasured assertion -
 assertion decides whether a parser fix costs a schema bump and a full
 dictionary rebuild or costs nothing. Two competing pieces of evidence say the
 opposite: Hoshi Reader runs `JSON.parse` per glossary row per hover on an
-iPhone, and chibipop's own `SqliteDictionary::entries` already runs
-`serde_json::from_str::<Vec<Sense>>` per matched entry on every hover today.
-Only a measurement settles it.
+iPhone, and chibipop's own `SqliteDictionary::entries` already parses JSON per
+matched entry on every hover today. Only a measurement settles it.
+
+The question is settled - the record keeps the raw glossary JSON and the tree
+is parsed per hover - so `parse` now reports two rows: the
+`serde_json::Value` baseline the verdict was stated against, and
+`GlossDoc::parse`, the typed parser that shipped. Same payloads, same run.
 
 Stdlib Python for the extraction, the `chibipop` crate itself for the timing.
 No setup step, nothing installed on the host.
@@ -131,7 +135,7 @@ context; the multi-dictionary baseline is the `build`-then-`hover` pair above.
 Reads are read-only by construction. `hover` opens through
 `SqliteDictionary::open`, which passes `SQLITE_OPEN_READ_ONLY` without
 `SQLITE_OPEN_CREATE` and runs no migration, and the second connection that
-weighs the `senses` column uses the same flags. Opening any WAL database does
+weighs the `glossary` column uses the same flags. Opening any WAL database does
 touch its `-shm` sidecar; the database file itself is untouched.
 
 ## Layout
@@ -146,13 +150,15 @@ touch its `-shm` sidecar; the database file itself is untouched.
 
 ## What it deliberately does not measure
 
-The typed `GlossDoc` tree the spec proposes does not exist yet, so `parse`
-times `serde_json::Value` plus a full recursive walk instead. That is an
-**over-estimate** of the typed cost: `Value` allocates a `BTreeMap` per
-object and a `String` per key, and deserializing into a typed enum with
-borrowed or interned tags does neither. The walk is there so the optimizer
-cannot delete the parse and so the number includes traversal work comparable
-to building a typed tree.
+Both `parse` rows include a full walk of the parsed tree, so the optimizer
+cannot delete the parse and both numbers include traversal work. The walk is
+not free and is not subtracted: read the rows against each other, not as an
+absolute parse cost.
+
+The `GlossDoc` row does not measure the parsed-tree cache
+`SqliteDictionary` keeps, only one cold parse per payload. What a cached
+entry costs in allocations and retained heap is
+`examples/gloss_doc_alloc.rs`.
 
 It also times one `terms_for` plus one `entries`, not the roughly 25 point
 queries a full deconjugation fan-out issues. The parse cost it is compared

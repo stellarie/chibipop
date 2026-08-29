@@ -2,6 +2,9 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::dict::gloss::GlossDoc;
 
 use crate::geom::PhysRect;
 use crate::lookup::model::Hit;
@@ -32,13 +35,34 @@ pub struct Card {
     pub match_len: usize,
 }
 
-/// One dict's glosses, flat.
+/// One dict's glosses, plus the tree they came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlossBlock {
     pub dict_name: String,
+    /// The plain-text render, one string per glossary item. Precomputed
+    /// because `layout::scene` runs per frame and the panel needs a string.
     pub glosses: Vec<String>,
-    /// Same glosses, HTML-formatted. Empty wherever `glosses` is empty.
-    pub glosses_html: Vec<String>,
+    /// The parsed tree the glosses were rendered from, shared with the
+    /// parsed-tree cache. Every other view of this gloss is a renderer over
+    /// it - the Anki HTML field today, the popup scene once ticket 08 lands -
+    /// so the card and the panel cannot drift apart again.
+    pub doc: Arc<GlossDoc>,
+}
+
+impl GlossBlock {
+    /// A block from one raw glossary payload, in the form the record stores.
+    ///
+    /// The hover path goes through `Hit`, which already carries a parsed
+    /// tree; this is for callers that hold the stored text - the popup demo,
+    /// the geometry fixtures, and tests.
+    pub fn parse(dict_name: &str, glossary: &str) -> GlossBlock {
+        let doc = Arc::new(GlossDoc::parse(glossary));
+        GlossBlock {
+            dict_name: dict_name.to_string(),
+            glosses: crate::dict::gloss::plain_items(&doc),
+            doc,
+        }
+    }
 }
 
 /// A non-top group, one line.
@@ -169,7 +193,7 @@ fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Car
     Card {
         written: group.written,
         reading: group.reading,
-        pos: best.entry.senses.first().map(|s| s.pos.clone()).unwrap_or_default(),
+        pos: best.entry.pos.clone(),
         freq: best.freq,
         blocks: ordered_blocks(&group.hits, dicts, cfg),
         match_len: best.match_len,
@@ -221,10 +245,9 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
             let dict_id = hit.entry.dict_id;
             let dict_name = dict_name_for(dict_id, dicts);
             let rank = dict_order_rank(&dict_name, &cfg.dict_order).unwrap_or(usize::MAX);
-            let glosses = hit.entry.senses.iter().flat_map(|s| s.glosses.clone()).collect();
-            let glosses_html =
-                hit.entry.senses.iter().flat_map(|s| s.glosses_html.clone()).collect();
-            (rank, dict_id, GlossBlock { dict_name, glosses, glosses_html })
+            let glosses = hit.entry.glosses();
+            let doc = Arc::clone(&hit.entry.gloss);
+            (rank, dict_id, GlossBlock { dict_name, glosses, doc })
         })
         .collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -286,7 +309,7 @@ fn one_line(s: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lookup::model::{Entry, Hit, Sense};
+    use crate::lookup::model::{Entry, Hit};
 
     fn dicts() -> Vec<DictInfo> {
         vec![
@@ -303,7 +326,21 @@ mod tests {
         }
     }
 
+    /// A block whose glosses arrive as a plain-string glossary - the shape
+    /// 20 of the census's 72 dictionaries emit, and the one that round-trips
+    /// a literal string unchanged.
+    fn strings(dict: &str, glosses: &[&str]) -> GlossBlock {
+        GlossBlock::parse(dict, &serde_json::json!(glosses).to_string())
+    }
+
+    /// One hit whose gloss arrives the way a record stores it: a
+    /// structured-content item with a part-of-speech pill and one block.
     fn hit(written: &str, reading: &str, dict_id: i64, gloss: &str) -> Hit {
+        let glossary = serde_json::json!([{"type": "structured-content", "content": [
+            {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": "noun"},
+            {"tag": "div", "content": gloss}
+        ]}])
+        .to_string();
         Hit {
             written: Some(written.to_string()),
             reading: Some(reading.to_string()),
@@ -311,16 +348,7 @@ mod tests {
             freq: Some(365),
             score: 7.7,
             process: vec![],
-            entry: Entry {
-                entry_id: dict_id * 100,
-                dict_id,
-                senses: vec![Sense {
-                    glosses: vec![gloss.to_string()],
-                    glosses_html: vec![],
-                    pos: vec!["noun".into()],
-                    misc: vec![],
-                }],
-            },
+            entry: Entry::parse(dict_id * 100, dict_id, &glossary),
         }
     }
 
@@ -552,11 +580,7 @@ mod tests {
             reading: Some("ねこ".into()),
             pos: vec!["noun".into()],
             freq: Some(100),
-            blocks: vec![GlossBlock {
-                dict_name: "Test".into(),
-                glosses: vec!["cat".into(), "feline".into()],
-                glosses_html: vec![],
-            }],
+            blocks: vec![strings("Test", &["cat", "feline"])],
             match_len: 1,
         };
         let row = collapsed_from_card(&card, 40);
@@ -573,11 +597,7 @@ mod tests {
             reading: None,
             pos: vec![],
             freq: None,
-            blocks: vec![GlossBlock {
-                dict_name: "D".into(),
-                glosses: vec![long],
-                glosses_html: vec![],
-            }],
+            blocks: vec![strings("D", &[&long])],
             match_len: 1,
         };
         let row = collapsed_from_card(&card, 40);
@@ -601,11 +621,7 @@ mod tests {
             reading: None,
             pos: vec![],
             freq: None,
-            blocks: vec![GlossBlock {
-                dict_name: "D".into(),
-                glosses: vec!["to run\nto flow".into()],
-                glosses_html: vec![],
-            }],
+            blocks: vec![strings("D", &["to run\nto flow"])],
             match_len: 1,
         };
         let row = collapsed_from_card(&card, 40);
@@ -622,11 +638,7 @@ mod tests {
             reading: None,
             pos: vec![],
             freq: None,
-            blocks: vec![GlossBlock {
-                dict_name: "D".into(),
-                glosses: vec![format!("{}\n{}", "あ".repeat(30), "い".repeat(30))],
-                glosses_html: vec![],
-            }],
+            blocks: vec![strings("D", &[&format!("{}\n{}", "あ".repeat(30), "い".repeat(30))])],
             match_len: 1,
         };
         let row = collapsed_from_card(&card, 40);

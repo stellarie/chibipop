@@ -1,8 +1,9 @@
 //! Core data types and the `Dictionary` abstraction.
 
+use crate::dict::gloss::{plain_items, pos_labels, GlossDoc};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TermRow {
@@ -24,28 +25,45 @@ pub struct TermRow {
     pub dict_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Sense {
-    pub glosses: Vec<String>,
-    /// Same glosses, HTML-formatted, for callers that want formatting (the
-    /// Anki `glossary_html` field) instead of flattened text. Absent in
-    /// databases built before this field existed - `serde(default)` reads
-    /// those as empty rather than failing, though `SqliteDictionary::open`'s
-    /// schema_version check means that path is only reachable in tests, not
-    /// in a real chibipop.sqlite.
-    #[serde(default)]
-    pub glosses_html: Vec<String>,
-    #[serde(default)]
-    pub pos: Vec<String>,
-    #[serde(default)]
-    pub misc: Vec<String>,
-}
-
+/// One dictionary's record for one headword - the unit a lookup returns.
+///
+/// There used to be a `Vec<Sense>` here. It was a pass-through: the builder
+/// always wrote exactly one, its gloss vec held the whole term-bank row's
+/// flattened glossary, and its `misc` field was never populated anywhere in
+/// the codebase - so every call site flat-mapped over a one-element vec.
+/// `CONTEXT.md` reserves the word Sense for what it means: one distinct
+/// meaning, living inside the tree as a sibling block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub entry_id: i64,
     pub dict_id: i64,
-    pub senses: Vec<Sense>,
+    /// The Entry's gloss content, parsed from the raw structured content the
+    /// record stores. Shared rather than owned because
+    /// `SqliteDictionary`'s parsed-tree cache hands out clones of one parse,
+    /// and cloning an `Arc` is what makes that cache worth having.
+    pub gloss: Arc<GlossDoc>,
+    /// Part-of-speech labels lifted out of the tree, which the popup renders
+    /// as the card's own field rather than inline.
+    pub pos: Vec<String>,
+}
+
+impl Entry {
+    /// Wraps an already-parsed tree, lifting its labels out.
+    pub fn new(entry_id: i64, dict_id: i64, gloss: Arc<GlossDoc>) -> Entry {
+        let pos = pos_labels(&gloss);
+        Entry { entry_id, dict_id, gloss, pos }
+    }
+
+    /// Parses a raw glossary payload. The hover path goes through
+    /// `SqliteDictionary`'s cache instead; this is the fixture path.
+    pub fn parse(entry_id: i64, dict_id: i64, glossary: &str) -> Entry {
+        Entry::new(entry_id, dict_id, Arc::new(GlossDoc::parse(glossary)))
+    }
+
+    /// The plain-text glosses, one per glossary item.
+    pub fn glosses(&self) -> Vec<String> {
+        plain_items(&self.gloss)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -104,8 +122,11 @@ impl FakeDictionary {
         });
     }
 
-    pub fn add_entry(&mut self, entry_id: i64, dict_id: i64, senses: Vec<Sense>) {
-        self.entries.insert(entry_id, Entry { entry_id, dict_id, senses });
+    /// Seeds one entry from a raw glossary payload, exactly as the record
+    /// stores it - so a fixture exercises the real parser instead of a
+    /// hand-built tree that could not occur.
+    pub fn add_entry(&mut self, entry_id: i64, dict_id: i64, glossary: &str) {
+        self.entries.insert(entry_id, Entry::parse(entry_id, dict_id, glossary));
     }
 
     pub fn add_dict(&mut self, dict_id: i64, name: &str) {
@@ -131,28 +152,37 @@ impl Dictionary for FakeDictionary {
 mod tests {
     use super::*;
 
-    #[test]
-    fn sense_roundtrips_through_json() {
-        let json = r#"[{"glosses":["to eat"],"pos":["v1"],"misc":[]}]"#;
-        let senses: Vec<Sense> = serde_json::from_str(json).unwrap();
-        assert_eq!(vec!["to eat".to_string()], senses[0].glosses);
-        assert_eq!(vec!["v1".to_string()], senses[0].pos);
+    /// A structured-content glossary with one part-of-speech pill and one
+    /// gloss - the shape 64 of 72 census dictionaries emit.
+    fn one_sense(gloss: &str, pos: &str) -> String {
+        serde_json::json!([{"type": "structured-content", "content": [
+            {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": pos},
+            {"tag": "div", "content": gloss}
+        ]}])
+        .to_string()
     }
 
     #[test]
-    fn sense_tolerates_missing_optional_fields() {
-        let senses: Vec<Sense> =
-            serde_json::from_str(r#"[{"glosses":["cat"]}]"#).unwrap();
-        assert!(senses[0].pos.is_empty());
-        assert!(senses[0].misc.is_empty());
-        assert!(senses[0].glosses_html.is_empty());
+    fn an_entry_carries_its_glosses_and_its_labels_directly() {
+        let e = Entry::parse(1, 1, &one_sense("to eat", "v1"));
+        assert_eq!(vec!["to eat".to_string()], e.glosses());
+        assert_eq!(vec!["v1".to_string()], e.pos);
     }
 
     #[test]
-    fn sense_roundtrips_glosses_html() {
-        let json = r#"[{"glosses":["to eat"],"glosses_html":["<b>to eat</b>"]}]"#;
-        let senses: Vec<Sense> = serde_json::from_str(json).unwrap();
-        assert_eq!(vec!["<b>to eat</b>".to_string()], senses[0].glosses_html);
+    fn a_plain_string_glossary_needs_no_structured_content() {
+        let e = Entry::parse(1, 1, r#"["cat","feline"]"#);
+        assert_eq!(vec!["cat".to_string(), "feline".to_string()], e.glosses());
+        assert!(e.pos.is_empty());
+    }
+
+    /// An unreadable record is an entry with no glosses, never a failed
+    /// lookup: a hover has nothing useful to do with an error here.
+    #[test]
+    fn an_unreadable_record_yields_an_empty_entry() {
+        let e = Entry::parse(1, 1, "not json");
+        assert!(e.glosses().is_empty());
+        assert!(e.pos.is_empty());
     }
 
     #[test]
@@ -166,12 +196,7 @@ mod tests {
     #[test]
     fn fake_dictionary_returns_seeded_entries() {
         let mut d = FakeDictionary::new();
-        d.add_entry(1, 1, vec![Sense {
-            glosses: vec!["to eat".into()],
-            glosses_html: vec![],
-            pos: vec!["v1".into()],
-            misc: vec![],
-        }]);
+        d.add_entry(1, 1, &one_sense("to eat", "v1"));
         assert_eq!(1, d.entries(&[1]).unwrap().len());
     }
 }

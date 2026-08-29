@@ -202,7 +202,7 @@ impl LookupEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lookup::model::{FakeDictionary, Sense};
+    use crate::lookup::model::FakeDictionary;
     use crate::lookup::rules::load_rules;
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -213,19 +213,20 @@ mod tests {
         LookupEngine::new(Deconjugator::new(load_rules(&p).unwrap()))
     }
 
-    fn sense(gloss: &str, pos: &str) -> Sense {
-        Sense {
-            glosses: vec![gloss.to_string()],
-            glosses_html: vec![],
-            pos: vec![pos.to_string()],
-            misc: vec![],
-        }
+    /// A glossary payload in the form the record stores: one
+    /// part-of-speech pill and one gloss block.
+    fn glossary(gloss: &str, pos: &str) -> String {
+        serde_json::json!([{"type": "structured-content", "content": [
+            {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": pos},
+            {"tag": "div", "content": gloss}
+        ]}])
+        .to_string()
     }
 
     fn taberu_dict() -> FakeDictionary {
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(500), 1, 1);
-        d.add_entry(1, 1, vec![sense("to eat", "v1")]);
+        d.add_entry(1, 1, &glossary("to eat", "v1"));
         d
     }
 
@@ -233,7 +234,7 @@ mod tests {
     fn exact_match_found() {
         let hits = engine().run(&taberu_dict(), "食べる").unwrap();
         assert_eq!(1, hits.len());
-        assert_eq!(vec!["to eat".to_string()], hits[0].entry.senses[0].glosses);
+        assert_eq!(vec!["to eat".to_string()], hits[0].entry.glosses());
     }
 
     #[test]
@@ -270,7 +271,7 @@ mod tests {
     fn pos_filter_rejects_mismatched_part_of_speech() {
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v5r", Some(500), 1, 1);
-        d.add_entry(1, 1, vec![sense("wrong pos", "v5r")]);
+        d.add_entry(1, 1, &glossary("wrong pos", "v5r"));
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
     }
@@ -315,7 +316,7 @@ mod tests {
         // v5k form, v5 row.
         let mut d = FakeDictionary::new();
         d.add_term("行く", Some("行く"), Some("いく"), "v5", Some(50), 1, 1);
-        d.add_entry(1, 1, vec![sense("to go", "v5")]);
+        d.add_entry(1, 1, &glossary("to go", "v5"));
         let hits = engine().run(&d, "行かなかった").unwrap();
         assert!(
             hits.iter().any(|h| h.written.as_deref() == Some("行く")),
@@ -329,7 +330,7 @@ mod tests {
         // vs-i form, vs row.
         let mut d = FakeDictionary::new();
         d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1, 1);
-        d.add_entry(1, 1, vec![sense("to do", "vs")]);
+        d.add_entry(1, 1, &glossary("to do", "vs"));
         let hits = engine().run(&d, "してしまった").unwrap();
         assert!(
             hits.iter().any(|h| h.written.as_deref() == Some("する")),
@@ -356,12 +357,12 @@ mod tests {
         for (i, written) in SHI.iter().enumerate() {
             let id = i as i64 + 1;
             d.add_term("し", Some(written), Some("し"), "", None, id, 1);
-            d.add_entry(id, 1, vec![sense("a noun read し", "")]);
+            d.add_entry(id, 1, &glossary("a noun read し", ""));
         }
         d.add_term("して", Some("仕手"), Some("して"), "", None, 90, 1);
-        d.add_entry(90, 1, vec![sense("speculator", "")]);
+        d.add_entry(90, 1, &glossary("speculator", ""));
         d.add_term("する", Some("為る"), Some("する"), "vs", None, 91, 1);
-        d.add_entry(91, 1, vec![sense("to do", "vs")]);
+        d.add_entry(91, 1, &glossary("to do", "vs"));
 
         let hits = engine().run(&d, "してしまった").unwrap();
         let shown: Vec<Option<String>> = hits.iter().map(|h| h.written.clone()).collect();
@@ -379,7 +380,7 @@ mod tests {
         // The filter must still bite.
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1, 1);
-        d.add_entry(1, 1, vec![sense("wrong pos", "v5")]);
+        d.add_entry(1, 1, &glossary("wrong pos", "v5"));
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
     }
@@ -424,7 +425,7 @@ mod tests {
     fn empty_pos_column_is_never_filtered_out() {
         let mut d = FakeDictionary::new();
         d.add_term("ねこ", None, Some("ねこ"), "", None, 1, 1);
-        d.add_entry(1, 1, vec![sense("cat", "")]);
+        d.add_entry(1, 1, &glossary("cat", ""));
         assert_eq!(1, engine().run(&d, "ねこ").unwrap().len());
     }
 
@@ -433,20 +434,20 @@ mod tests {
         // Distinct ids: no grouping.
         let mut d = FakeDictionary::new();
         d.add_term("はし", None, Some("はし"), "", Some(50), 1, 1);
-        d.add_entry(1, 1, vec![sense("chopsticks", "")]);
+        d.add_entry(1, 1, &glossary("chopsticks", ""));
         d.add_term("はし", None, Some("はし"), "", Some(9000), 2, 2);
-        d.add_entry(2, 2, vec![sense("bridge", "")]);
+        d.add_entry(2, 2, &glossary("bridge", ""));
         let hits = engine().run(&d, "はし").unwrap();
-        assert_eq!(vec!["chopsticks".to_string()], hits[0].entry.senses[0].glosses);
+        assert_eq!(vec!["chopsticks".to_string()], hits[0].entry.glosses());
     }
 
     #[test]
     fn longer_match_outranks_shorter() {
         let mut d = FakeDictionary::new();
         d.add_term("日本", Some("日本"), Some("にほん"), "", Some(100), 1, 1);
-        d.add_entry(1, 1, vec![sense("Japan", "")]);
+        d.add_entry(1, 1, &glossary("Japan", ""));
         d.add_term("日本語", Some("日本語"), Some("にほんご"), "", Some(900), 2, 1);
-        d.add_entry(2, 1, vec![sense("Japanese language", "")]);
+        d.add_entry(2, 1, &glossary("Japanese language", ""));
         let hits = engine().run(&d, "日本語").unwrap();
         assert_eq!(Some("日本語".to_string()), hits[0].written);
     }
@@ -457,7 +458,7 @@ mod tests {
         for i in 1..=25 {
             // Distinct ids, else grouped.
             d.add_term("あ", None, Some("あ"), "", Some(i), i, i);
-            d.add_entry(i, i, vec![sense("x", "")]);
+            d.add_entry(i, i, &glossary("x", ""));
         }
         assert_eq!(MAX_RESULTS, engine().run(&d, "あ").unwrap().len());
     }
