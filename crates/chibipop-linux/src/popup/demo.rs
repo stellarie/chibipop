@@ -118,7 +118,7 @@ mod tests {
     fn the_canned_presentation_carries_variant_kanji() {
         let p = canned();
         let card = p.top.expect("a top card");
-        let glosses: String = card.blocks.iter().flat_map(|b| b.glosses.clone()).collect();
+        let glosses: String = card.blocks.iter().flat_map(GlossBlock::glosses).collect();
         for ch in ['\u{9aa8}', '\u{76f4}', '\u{4eca}', '\u{96ea}'] {
             assert!(glosses.contains(ch), "{ch} is missing from the demo scene");
         }

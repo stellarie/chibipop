@@ -674,10 +674,32 @@ mod tests {
         fn measure(
             &mut self,
             run: chibipop::ui::layout::MeasureRun<'_>,
-        ) -> Result<chibipop::ui::layout::Metrics, chibipop::ui::layout::MeasureError> {
-            let w = run.text.chars().count() as f32 * run.size * 0.5;
-            let lines = if run.max_w > 0.0 { (w / run.max_w).ceil().max(1.0) } else { 1.0 };
-            Ok(chibipop::ui::layout::Metrics { w, h: lines * run.size * 1.4, lines: lines as u32 })
+            out: &mut chibipop::ui::layout::Measured,
+        ) -> Result<(), chibipop::ui::layout::MeasureError> {
+            use chibipop::ui::layout::{LineBox, Metrics, SpanBox};
+            out.clear();
+            // Half an em per character, spans laid end to end: this
+            // one only ever needs the aggregate, but it fills the
+            // detail so the seam's contract is not half-honoured.
+            let mut x = 0.0f32;
+            let mut h = 0.0f32;
+            for (i, span) in run.spans.iter().enumerate() {
+                let w = span.text.chars().count() as f32 * span.size * 0.5;
+                out.spans.push(SpanBox { span: i as u32, line: 0, x, w, h: span.size * 1.4 });
+                x += w;
+                h = h.max(span.size * 1.4);
+            }
+            let lines = if run.max_w > 0.0 { (x / run.max_w).ceil().max(1.0) } else { 1.0 };
+            for line in 0..lines as u32 {
+                out.lines.push(LineBox {
+                    y: line as f32 * h,
+                    w: x.min(run.max_w.max(1.0)),
+                    h,
+                    baseline: h,
+                });
+            }
+            out.metrics = Metrics { w: x, h: lines * h, lines: lines as u32 };
+            Ok(())
         }
 
         fn caret_boxes(
@@ -686,12 +708,13 @@ mod tests {
             at: &[u32],
             out: &mut Vec<chibipop::ui::layout::GlyphBox>,
         ) -> Result<(), chibipop::ui::layout::MeasureError> {
-            let adv = run.size * 0.5;
+            let size = run.spans.first().map_or(0.0, |s| s.size);
+            let adv = size * 0.5;
             out.extend(at.iter().map(|i| chibipop::ui::layout::GlyphBox {
                 x: *i as f32 * adv,
                 y: 0.0,
                 w: adv,
-                h: run.size * 1.4,
+                h: size * 1.4,
             }));
             Ok(())
         }

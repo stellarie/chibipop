@@ -27,10 +27,13 @@
 //! UTF-16 offsets core zips against kanji have to be walked back into
 //! byte offsets here ([`byte_offset`]).
 
-use chibipop::ui::layout::{GlyphBox, MeasureError, MeasureRun, Metrics, TextMeasure};
+use chibipop::ui::layout::{
+    GlyphBox, LineBox, MeasureError, MeasureRun, Measured, Metrics, SpanBox, StyledSpan,
+    TextMeasure,
+};
 use cosmic_text::{
-    fontdb, Attrs, Buffer, Color, Family, FontSystem, Metrics as CosmicMetrics, Shaping, Style,
-    SwashCache, Weight, Wrap,
+    fontdb, Attrs, Buffer, Color, Family, FontSystem, LayoutRun, Metrics as CosmicMetrics,
+    Shaping, Style, SwashCache, Weight, Wrap,
 };
 use tiny_skia::{PixmapMut, PremultipliedColorU8};
 
@@ -166,10 +169,16 @@ impl TextEngine {
 
     /// The one shaping call.
     ///
+    /// Measure and paint both come through here, on the same styled
+    /// spans, so a run is never wrapped one way and painted another
+    /// (ADR-0004).
+    ///
     /// An associated function, not a method, so a caller can hand it
     /// `&mut self.fonts` while still holding `&self.family`.
-    fn shape(fonts: &mut FontSystem, run: Shaped<'_>) -> Buffer {
-        let size = run.size.max(MIN_SIZE);
+    fn shape(fonts: &mut FontSystem, spans: &[StyledSpan<'_>], max_w: f32) -> Buffer {
+        // The buffer's own metrics answer for a line with no glyphs on
+        // it, which is the only line the spans cannot speak for.
+        let size = spans.first().map_or(MIN_SIZE, |s| s.size).max(MIN_SIZE);
         let mut buffer = Buffer::new_empty(CosmicMetrics::new(size, size * LINE_HEIGHT));
         // No height bound: shape every wrapped line, not just the ones
         // that would fit a viewport. Core culls off-panel runs itself
@@ -178,81 +187,60 @@ impl TextEngine {
         // The width clamp is the same one DirectWrite gets on Windows: a
         // measurer that cannot wrap at zero clamps itself, and the scene
         // still reports the width it asked for.
-        buffer.set_size(Some(run.max_w.max(1.0)), None);
+        buffer.set_size(Some(max_w.max(1.0)), None);
         // Words first, glyphs when a "word" cannot fit alone. Japanese
         // has no spaces, so the segmenter treats runs of ideographs as
         // their own words and this behaves like CJK line breaking; the
         // glyph fallback is what keeps a long Latin headword inside a
         // narrow panel.
         buffer.set_wrap(Wrap::WordOrGlyph);
-        // Weight and style are the theme's, per role (CSS theming):
-        // fontdb weights are the same 100-900 numbers DirectWrite
-        // takes, so the scene's number travels unconverted. A family
-        // with no bold or italic face still shapes - fontdb picks the
-        // nearest weight it has, and cosmic-text does not synthesize -
-        // so a missing face costs the emphasis, never the run.
-        let attrs = Attrs::new()
-            .family(Family::Name(run.family))
-            .weight(Weight(run.weight))
-            .style(if run.italic { Style::Italic } else { Style::Normal });
-        buffer.set_text(run.text, &attrs, Shaping::Advanced, None);
+        // `set_rich_text`, not `set_text`: the spans wrap as one
+        // paragraph, so a span boundary is not a line boundary and bold
+        // text can share a line with normal text (ADR-0013). Per-span
+        // `metrics` is what carries each span's own size into the line
+        // height cosmic-text takes the maximum of - the default attrs
+        // deliberately carry none, so a glyphless line still falls back
+        // to the buffer's.
+        let default = spans.first().map_or_else(Attrs::new, attrs_of);
+        let styled = spans.iter().map(|s| {
+            let size = s.size.max(MIN_SIZE);
+            (s.text, attrs_of(s).metrics(CosmicMetrics::new(size, line_height(size))))
+        });
+        buffer.set_rich_text(styled, &default, Shaping::Advanced, None);
         buffer.shape_until_scroll(fonts, false);
         buffer
     }
 }
 
-/// What [`TextEngine::shape`] needs.
+/// One span's shaping attributes, minus its size.
 ///
-/// A `MeasureRun` and a `DrawRun` differ only in where the family comes
-/// from - the scene's theme when measuring, the resolved family when
-/// painting - so both funnel through this and hit one shaping path.
-#[derive(Debug, Clone, Copy)]
-struct Shaped<'a> {
-    text: &'a str,
-    family: &'a str,
-    size: f32,
-    weight: u16,
-    italic: bool,
-    max_w: f32,
+/// Weight and style are the theme's, per role (CSS theming): fontdb
+/// weights are the same 100-900 numbers DirectWrite takes, so the
+/// scene's number travels unconverted. A family with no bold or italic
+/// face still shapes - fontdb picks the nearest weight it has, and
+/// cosmic-text does not synthesize - so a missing face costs the
+/// emphasis, never the run.
+fn attrs_of<'a>(span: &StyledSpan<'a>) -> Attrs<'a> {
+    Attrs::new()
+        .family(Family::Name(span.font))
+        .weight(Weight(span.weight))
+        .style(if span.italic { Style::Italic } else { Style::Normal })
 }
 
-impl<'a> Shaped<'a> {
-    /// One run to measure, as the scene
-    /// named it.
-    fn measuring(run: MeasureRun<'a>) -> Shaped<'a> {
-        Shaped {
-            text: run.text,
-            family: run.font,
-            size: run.size,
-            weight: run.weight,
-            italic: run.italic,
-            max_w: run.max_w,
-        }
-    }
-
-    /// One run to paint, in the family
-    /// the config resolved to.
-    fn painting(run: DrawRun<'a>, family: &'a str) -> Shaped<'a> {
-        Shaped {
-            text: run.text,
-            family,
-            size: run.size,
-            weight: run.weight,
-            italic: run.italic,
-            max_w: run.max_w,
-        }
-    }
-
-    /// One coverage probe.
-    ///
-    /// Regular and upright: a probe
-    /// asks which face answers for a
-    /// character, and a family's bold
-    /// or italic face - if it has one -
-    /// covers what its regular one
-    /// does.
-    fn probing(text: &'a str, family: &'a str, size: f32, max_w: f32) -> Shaped<'a> {
-        Shaped { text, family, size, weight: Weight::NORMAL.0, italic: false, max_w }
+/// One coverage probe's span.
+///
+/// Regular and upright: a probe asks which face answers for a
+/// character, and a family's bold or italic face - if it has one -
+/// covers what its regular one does. Colour is not a measurement
+/// input, so black is as good as any.
+fn probe_span<'a>(text: &'a str, family: &'a str, size: f32) -> StyledSpan<'a> {
+    StyledSpan {
+        text,
+        font: family,
+        size,
+        weight: Weight::NORMAL.0,
+        italic: false,
+        color: (0, 0, 0),
     }
 }
 
@@ -269,20 +257,66 @@ impl TextMeasure for TextEngine {
     /// failure here either - cosmic-text falls back and then emits
     /// `.notdef`, which measures like any other glyph. Tofu is reported
     /// once at startup by [`TextEngine::probe`], not per run.
-    fn measure(&mut self, run: MeasureRun<'_>) -> Result<Metrics, MeasureError> {
-        let buffer = TextEngine::shape(&mut self.fonts, Shaped::measuring(run));
+    fn measure(&mut self, run: MeasureRun<'_>, out: &mut Measured) -> Result<(), MeasureError> {
+        out.clear();
+        let buffer = TextEngine::shape(&mut self.fonts, run.spans, run.max_w);
         let mut w = 0.0f32;
-        let mut lines = 0u32;
-        for line in buffer.layout_runs() {
+        // Summed wide and rounded once. Every line of a one-style run
+        // is the same advance, and the seam this widened reported
+        // `lines × advance` - which repeated `f32` addition drifts an
+        // ulp below by the eighth line. A block stack that moves is a
+        // golden that moves, so the drift is not affordable.
+        let mut h = 0.0f64;
+        let mut bases = LineBases::default();
+        for (i, line) in buffer.layout_runs().enumerate() {
+            let base = bases.advance(run.spans, &line);
             w = w.max(line.line_w);
-            lines += 1;
+            h += f64::from(line.line_height);
+            out.lines.push(LineBox {
+                y: line.line_top,
+                w: line.line_w,
+                h: line.line_height,
+                // `line_y` is the baseline in buffer space; a line box
+                // reports it from the line's own top.
+                baseline: line.line_y - line.line_top,
+            });
+            for glyph in line.glyphs {
+                let Some((s, span)) = span_at(run.spans, base + glyph.start) else {
+                    continue;
+                };
+                let (s, i) = (s as u32, i as u32);
+                // Glyphs arrive in visual order, so a span's box on
+                // this line is the last one pushed for it and only
+                // ever grows.
+                match out.spans.iter_mut().rev().find(|b| b.span == s && b.line == i) {
+                    Some(b) => {
+                        let right = (b.x + b.w).max(glyph.x + glyph.w);
+                        b.x = b.x.min(glyph.x);
+                        b.w = right - b.x;
+                    }
+                    None => out.spans.push(SpanBox {
+                        span: s,
+                        line: i,
+                        x: glyph.x,
+                        w: glyph.w,
+                        h: line_height(span.size),
+                    }),
+                }
+            }
         }
-        // An empty string is one empty line, not zero: core stacks the
-        // gap after it either way.
-        let lines = lines.max(1);
+        // An empty run is one empty line, not zero: core stacks the gap
+        // after it either way.
+        if out.lines.is_empty() {
+            h = f64::from(line_height(run.spans.first().map_or(0.0, |s| s.size)));
+            // cosmic-text centres a glyphless line's baseline in it,
+            // there being no ascent to hang it from.
+            let h = h as f32;
+            out.lines.push(LineBox { y: 0.0, w: 0.0, h, baseline: h / 2.0 });
+        }
         // Stackable by construction - a whole number of line advances,
         // never an ink box. Core's walk adds these up.
-        Ok(Metrics { w, h: lines as f32 * line_height(run.size), lines })
+        out.metrics = Metrics { w, h: h as f32, lines: out.lines.len() as u32 };
+        Ok(())
     }
 
     fn caret_boxes(
@@ -291,13 +325,12 @@ impl TextMeasure for TextEngine {
         at: &[u32],
         out: &mut Vec<GlyphBox>,
     ) -> Result<(), MeasureError> {
-        let buffer = TextEngine::shape(&mut self.fonts, Shaped::measuring(run));
-        let h = line_height(run.size);
+        let buffer = TextEngine::shape(&mut self.fonts, run.spans, run.max_w);
         // Exactly one box per offset, in order: core zips these 1:1 with
         // the kanji of a headword to build per-character hit targets, so
         // a skipped offset would silently shift every target after it.
         for &offset in at {
-            out.push(caret_box(&buffer, run.text, offset, h));
+            out.push(caret_box(&buffer, run.spans, offset));
         }
         Ok(())
     }
@@ -305,8 +338,18 @@ impl TextMeasure for TextEngine {
 
 impl PanelText for TextEngine {
     fn draw_run(&mut self, run: DrawRun<'_>, target: &mut PixmapMut<'_>) {
-        let shaped = Shaped::painting(run, &self.family);
-        let mut buffer = TextEngine::shape(&mut self.fonts, shaped);
+        let spans = [StyledSpan {
+            text: run.text,
+            // The family the config resolved to, not the theme's name:
+            // measuring takes the name the scene carries, painting
+            // takes the one that is actually installed.
+            font: &self.family,
+            size: run.size,
+            weight: run.weight,
+            italic: run.italic,
+            color: run.color,
+        }];
+        let mut buffer = TextEngine::shape(&mut self.fonts, &spans, run.max_w);
         let (r, g, b) = run.color;
         // The glyph raster is already snapped to the pixel grid by
         // cosmic-text, so the wrap box's own origin is too; a fractional
@@ -381,7 +424,39 @@ fn round(v: f32) -> i32 {
     v.round() as i32
 }
 
-/// The byte offset `utf16` names in `text`.
+/// Where the current buffer line starts, over a run's whole text.
+///
+/// Glyph offsets are relative to their *buffer line*, and
+/// `set_rich_text` splits the spans' text on line endings and strips
+/// them, so anything mapping a glyph back to the text it came from has
+/// to accumulate the lines' bases. Core's runs are single lines today;
+/// this keeps the answer right if one ever is not.
+#[derive(Default)]
+struct LineBases {
+    /// Bytes before the current line.
+    base: usize,
+    /// The buffer line it counts to.
+    line: Option<usize>,
+    /// That line's length in bytes.
+    len: usize,
+}
+
+impl LineBases {
+    /// The base for `line`, which must not precede the last one asked
+    /// for: layout runs arrive top down.
+    fn advance(&mut self, spans: &[StyledSpan<'_>], line: &LayoutRun<'_>) -> usize {
+        if self.line != Some(line.line_i) {
+            if self.line.is_some() {
+                self.base += self.len + ending_len(spans, self.base + self.len);
+            }
+            self.line = Some(line.line_i);
+            self.len = line.text.len();
+        }
+        self.base
+    }
+}
+
+/// The byte offset `utf16` names in a run's spans, end to end.
 ///
 /// DirectWrite hit-tests UTF-16 code-unit offsets natively; cosmic-text
 /// is UTF-8 and its glyph clusters are byte ranges, so the conversion
@@ -389,15 +464,37 @@ fn round(v: f32) -> i32 {
 /// no arithmetic relation to a byte offset once the text leaves the BMP,
 /// and Japanese text reaches into it (astral kanji, emoji in a gloss).
 /// An offset past the end answers the end.
-fn byte_offset(text: &str, utf16: u32) -> usize {
+fn byte_offset(spans: &[StyledSpan<'_>], utf16: u32) -> usize {
     let mut units = 0u32;
-    for (byte, ch) in text.char_indices() {
-        if units >= utf16 {
-            return byte;
+    let mut base = 0usize;
+    for span in spans {
+        for (byte, ch) in span.text.char_indices() {
+            if units >= utf16 {
+                return base + byte;
+            }
+            units += ch.len_utf16() as u32;
         }
-        units += ch.len_utf16() as u32;
+        base += span.text.len();
     }
-    text.len()
+    base
+}
+
+/// The span covering byte offset `at`, and its index.
+///
+/// Linear: a paragraph carries a handful of spans and a search
+/// structure would cost more to build than it saves.
+fn span_at<'a, 's>(
+    spans: &'a [StyledSpan<'s>],
+    at: usize,
+) -> Option<(usize, &'a StyledSpan<'s>)> {
+    let mut end = 0usize;
+    for (i, span) in spans.iter().enumerate() {
+        end += span.text.len();
+        if at < end {
+            return Some((i, span));
+        }
+    }
+    None
 }
 
 /// The box of the cluster covering UTF-16 offset `utf16`.
@@ -405,25 +502,18 @@ fn byte_offset(text: &str, utf16: u32) -> usize {
 /// An offset that no glyph covers - past the end of the text, or inside
 /// a cluster boundary core did not expect - answers a zero-width box at
 /// the end of the last line rather than panicking or being skipped.
-fn caret_box(buffer: &Buffer, text: &str, utf16: u32, h: f32) -> GlyphBox {
-    let target = byte_offset(text, utf16);
-    let mut end = GlyphBox { x: 0.0, y: 0.0, w: 0.0, h };
-    // Glyph offsets are relative to their *buffer line*, and `set_text`
-    // splits on line endings, so a run carrying a newline needs its
-    // lines' bases accumulated. Core's runs are single lines today; this
-    // keeps the answer right if one ever is not.
-    let mut base = 0usize;
-    let mut line = usize::MAX;
-    let mut line_len = 0usize;
+fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox {
+    let target = byte_offset(spans, utf16);
+    // A run with no lines at all has no shaped height to report, so the
+    // first span's own advance stands in.
+    let empty = line_height(spans.first().map_or(0.0, |s| s.size));
+    let mut end = GlyphBox { x: 0.0, y: 0.0, w: 0.0, h: empty };
+    let mut bases = LineBases::default();
     for run in buffer.layout_runs() {
-        if run.line_i != line {
-            if line != usize::MAX {
-                base += line_len;
-                base += ending_len(&text[base.min(text.len())..]);
-            }
-            line = run.line_i;
-            line_len = run.text.len();
-        }
+        let base = bases.advance(spans, &run);
+        // The caret is as tall as the line it lands on, so a small span
+        // beside a large one still gives a full-height hit target.
+        let h = run.line_height;
         end = GlyphBox { x: run.line_w, y: run.line_top, w: 0.0, h };
         for glyph in run.glyphs {
             if (base + glyph.start..base + glyph.end).contains(&target) {
@@ -434,14 +524,25 @@ fn caret_box(buffer: &Buffer, text: &str, utf16: u32, h: f32) -> GlyphBox {
     end
 }
 
-/// The line ending `set_text` stripped at the head of `rest`.
-fn ending_len(rest: &str) -> usize {
-    if rest.starts_with("\r\n") {
-        2
-    } else if rest.starts_with('\n') || rest.starts_with('\r') {
-        1
-    } else {
-        0
+/// The byte at `at`, over a run's spans end to end.
+fn byte_at(spans: &[StyledSpan<'_>], at: usize) -> Option<u8> {
+    let mut base = 0usize;
+    for span in spans {
+        let bytes = span.text.as_bytes();
+        if let Some(b) = at.checked_sub(base).and_then(|i| bytes.get(i)) {
+            return Some(*b);
+        }
+        base += bytes.len();
+    }
+    None
+}
+
+/// The line ending `set_rich_text` stripped at `at`.
+fn ending_len(spans: &[StyledSpan<'_>], at: usize) -> usize {
+    match byte_at(spans, at) {
+        Some(b'\r') if byte_at(spans, at + 1) == Some(b'\n') => 2,
+        Some(b'\r' | b'\n') => 1,
+        _ => 0,
     }
 }
 
@@ -449,7 +550,7 @@ fn ending_len(rest: &str) -> usize {
 fn covers(fonts: &mut FontSystem, family: &str, text: &str) -> bool {
     // Wide enough that nothing wraps; the probe only cares about glyph
     // ids, but a wrap would not change them anyway.
-    let buffer = TextEngine::shape(fonts, Shaped::probing(text, family, 16.0, 1024.0));
+    let buffer = TextEngine::shape(fonts, &[probe_span(text, family, 16.0)], 1024.0);
     let mut any = false;
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
@@ -718,24 +819,39 @@ mod tests {
         }
     }
 
-    fn run<'a>(text: &'a str, size: f32, max_w: f32) -> MeasureRun<'a> {
-        MeasureRun { text, font: JP, size, weight: 400, italic: false, max_w }
+    /// One themed span, as the scene names it.
+    fn span(text: &str, size: f32) -> StyledSpan<'_> {
+        StyledSpan { text, font: JP, size, weight: 400, italic: false, color: (0, 0, 0) }
     }
 
-    /// The same run, in `weight`.
-    fn heavy<'a>(text: &'a str, size: f32, max_w: f32, weight: u16) -> MeasureRun<'a> {
-        MeasureRun { weight, ..run(text, size, max_w) }
+    /// The same span, in `weight`.
+    fn heavy(text: &str, size: f32, weight: u16) -> StyledSpan<'_> {
+        StyledSpan { weight, ..span(text, size) }
+    }
+
+    /// One run's measurement, through the seam.
+    fn measured(engine: &mut TextEngine, spans: &[StyledSpan<'_>], max_w: f32) -> Measured {
+        let mut out = Measured::default();
+        engine
+            .measure(MeasureRun { spans, max_w }, &mut out)
+            .expect("cosmic-text never refuses a run");
+        out
     }
 
     /// The face a shaped run's glyphs came from, as fontdb names it.
-    fn face_of_shape(engine: &mut TextEngine, shaped: Shaped<'_>) -> Option<String> {
-        let buffer = TextEngine::shape(&mut engine.fonts, shaped);
-        let id = buffer.layout_runs().flat_map(|line| line.glyphs.iter()).map(|g| g.font_id).next()?;
+    fn face_of_shape(
+        engine: &mut TextEngine,
+        spans: &[StyledSpan<'_>],
+        max_w: f32,
+    ) -> Option<String> {
+        let buffer = TextEngine::shape(&mut engine.fonts, spans, max_w);
+        let mut glyphs = buffer.layout_runs().flat_map(|line| line.glyphs.iter());
+        let id = glyphs.next()?.font_id;
         engine.fonts.db().face(id).map(|face| face.post_script_name.clone())
     }
 
     fn face_of(engine: &mut TextEngine, text: &str, family: &str) -> Option<String> {
-        face_of_shape(engine, Shaped::probing(text, family, 20.0, 400.0))
+        face_of_shape(engine, &[probe_span(text, family, 20.0)], 400.0)
     }
 
     /// Does `family` ship a bold face?
@@ -760,9 +876,8 @@ mod tests {
             eprintln!("skipping: {JP} ships no bold face");
             return;
         }
-        let regular = face_of_shape(&mut engine, Shaped::measuring(run(PROBE_TEXT, 20.0, 400.0)));
-        let bold =
-            face_of_shape(&mut engine, Shaped::measuring(heavy(PROBE_TEXT, 20.0, 400.0, 700)));
+        let regular = face_of_shape(&mut engine, &[span(PROBE_TEXT, 20.0)], 400.0);
+        let bold = face_of_shape(&mut engine, &[heavy(PROBE_TEXT, 20.0, 700)], 400.0);
         assert!(regular.is_some(), "the probe text must shape");
         assert_ne!(regular, bold, "a bold role must not shape in the regular face");
     }
@@ -910,13 +1025,21 @@ mod tests {
         assert_eq!(JpFonts::Present { family: JP.to_string() }, engine.probe());
     }
 
+    /// The safety property ADR-0013 turns on: widening the seam must
+    /// not move a number. Every assertion here is the arithmetic the
+    /// one-string seam did - `lines × size × LINE_HEIGHT` for the
+    /// height, the widest `line_w` for the width - so a single-span
+    /// request that drifts fails here rather than in a golden.
     #[test]
     fn an_empty_run_measures_no_width_and_exactly_one_line() {
         let Some(mut engine) = jp_engine() else { return };
-        let m = engine.measure(run("", 16.0, 200.0)).expect("shapeable");
-        assert_eq!(0.0, m.w);
-        assert_eq!(1, m.lines);
-        assert_eq!(16.0 * LINE_HEIGHT, m.h);
+        let m = measured(&mut engine, &[span("", 16.0)], 200.0);
+        assert_eq!(0.0, m.metrics.w);
+        assert_eq!(1, m.metrics.lines);
+        assert_eq!(16.0 * LINE_HEIGHT, m.metrics.h);
+        assert_eq!(1, m.lines.len(), "one line box per counted line");
+        assert_eq!(16.0 * LINE_HEIGHT, m.lines[0].h);
+        assert!(m.spans.is_empty(), "no glyphs, no span boxes");
     }
 
     #[test]
@@ -925,18 +1048,127 @@ mod tests {
         let text = "\u{8f9e}\u{66f8}\u{306e}\u{8aac}\u{660e}\u{6587}\u{3092}\u{72ed}\u{3044}\
                     \u{5e45}\u{3067}\u{6298}\u{308a}\u{8fd4}\u{3059}\u{305f}\u{3081}\u{306e}\
                     \u{9577}\u{3044}\u{6587}\u{7ae0}";
-        let m = engine.measure(run(text, 16.0, 60.0)).expect("shapeable");
-        assert!(m.lines > 1, "{} lines at max_w 60", m.lines);
-        assert_eq!(m.lines as f32 * 16.0 * LINE_HEIGHT, m.h, "runs stack by whole lines");
-        assert!(m.w <= 60.0, "wrapped width {} exceeds the wrap box", m.w);
+        let m = measured(&mut engine, &[span(text, 16.0)], 60.0);
+        let n = m.metrics.lines;
+        assert!(n > 1, "{n} lines at max_w 60");
+        assert_eq!(n as f32 * 16.0 * LINE_HEIGHT, m.metrics.h, "runs stack by whole lines");
+        assert!(m.metrics.w <= 60.0, "wrapped width {} exceeds the wrap box", m.metrics.w);
+        // The detail agrees with the aggregate it sits beside.
+        assert_eq!(n as usize, m.lines.len());
+        let widest = m.lines.iter().fold(0.0f32, |a, l| a.max(l.w));
+        assert_eq!(m.metrics.w, widest, "the aggregate width is the widest line");
+        assert_eq!(0.0, m.lines[0].y, "the first line sits at the run's top");
+        for pair in m.lines.windows(2) {
+            // The shaper's own running top, which is what it paints
+            // from; the aggregate height is summed wide and rounded
+            // once instead, so the two can differ by an ulp at eight
+            // lines and the block stack still may not move.
+            assert_eq!(pair[0].y + pair[0].h, pair[1].y, "a line starts where the last ended");
+        }
+        for line in &m.lines {
+            assert_eq!(16.0 * LINE_HEIGHT, line.h);
+            assert!(line.baseline > 0.0 && line.baseline < line.h, "{line:?}");
+        }
+        // One span, so one box per line, each starting at the margin.
+        assert_eq!(n as usize, m.spans.len());
+        for (i, b) in m.spans.iter().enumerate() {
+            assert_eq!((0, i as u32), (b.span, b.line));
+            assert_eq!(0.0, b.x);
+            assert_eq!(m.lines[i].w, b.w, "the only span on a line fills it");
+            assert_eq!(16.0 * LINE_HEIGHT, b.h);
+        }
+    }
+
+    /// The whole point of the widening: two styles on one line, each
+    /// with its own box, all hung off one baseline. Asserted against
+    /// real cosmic-text output rather than a fake, because it is the
+    /// shaper - not core - that decides a mixed line's height.
+    #[test]
+    fn spans_of_two_sizes_share_a_line_and_a_baseline() {
+        let Some(mut engine) = jp_engine() else { return };
+        // 漢 at body size, 字 half of it: wide enough that neither wraps.
+        let spans = [span("\u{6f22}", 20.0), span("\u{5b57}", 10.0)];
+        let m = measured(&mut engine, &spans, 400.0);
+        assert_eq!(1, m.metrics.lines, "both spans fit one line");
+        assert_eq!(2, m.spans.len(), "one box per span");
+
+        let (big, small) = (m.spans[0], m.spans[1]);
+        assert_eq!((0, 0), (big.span, big.line));
+        assert_eq!((1, 0), (small.span, small.line));
+        assert_eq!(0.0, big.x, "the first span starts at the margin");
+        assert!(big.w > small.w, "a 20px kanji is wider than a 10px one");
+        assert_eq!(big.w, small.x, "the second span starts where the first ends");
+        assert_eq!(small.x + small.w, m.lines[0].w, "the spans sum to the line");
+
+        // Each span asks for its own advance; the line takes the max.
+        assert_eq!(line_height(20.0), big.h);
+        assert_eq!(line_height(10.0), small.h);
+        assert_eq!(line_height(20.0), m.lines[0].h, "the taller span sets the line");
+        assert_eq!(m.lines[0].h, m.metrics.h);
+        // One baseline for the line, inside it, which is the whole
+        // reason ADR-0013 made it a required output.
+        let base = m.lines[0].baseline;
+        assert!(base > 0.0 && base < m.lines[0].h, "baseline {base} outside the line");
+    }
+
+    /// The walk hands one `Measured` to every element in a panel, so a
+    /// measurer that appended instead of clearing would grow each
+    /// element's geometry by every element before it - and the panel
+    /// would still lay out, just wrong.
+    #[test]
+    fn one_buffer_measures_two_runs_without_carrying_the_first_over() {
+        let Some(mut engine) = jp_engine() else { return };
+        let long = measured(&mut engine, &[span("\u{6f22}\u{5b57}\u{8f9e}\u{66f8}", 16.0)], 400.0);
+
+        let mut scratch = long.clone();
+        engine
+            .measure(MeasureRun { spans: &[span(PROBE_TEXT, 16.0)], max_w: 400.0 }, &mut scratch)
+            .expect("shapeable");
+        let fresh = measured(&mut engine, &[span(PROBE_TEXT, 16.0)], 400.0);
+        assert_eq!(fresh, scratch, "a reused buffer answers the run it was just given");
+        assert!(scratch.metrics.w < long.metrics.w, "two kanji are narrower than four");
+    }
+
+    /// The one place the real shaper meets the real walk: everything
+    /// else drives `layout::scene` from a fake and this module from
+    /// core's types, so nothing else would notice the two disagreeing.
+    #[test]
+    fn the_real_engine_lays_out_a_whole_panel() {
+        let Some(mut engine) = jp_engine() else { return };
+        let theme = crate::popup::physical_theme(&chibipop::ui::theme::Theme::dark(), 1.0);
+        let p = crate::popup::canned();
+        let scene = chibipop::ui::layout::scene(
+            &chibipop::ui::layout::SceneRequest {
+                presentation: &p,
+                theme: &theme,
+                max_w: 424.0,
+                max_h: 4000.0,
+                show_back: true,
+                side_panel: true,
+                anki: None,
+            },
+            &mut engine,
+        )
+        .expect("cosmic-text never refuses a run");
+
+        assert!(!scene.elems.is_empty(), "the canned card has content");
+        let mut bottom = 0.0f32;
+        for elem in &scene.elems {
+            assert!(elem.rect.y >= 0.0, "{elem:?} sits above the panel");
+            assert!(elem.rect.y >= bottom - f32::EPSILON, "elements go backwards at {elem:?}");
+            assert!(elem.rect.w <= scene.content_w + 1.0, "{elem:?} overflows the column");
+            bottom = elem.rect.y;
+        }
+        assert!(scene.used_h > 0.0);
+        assert!(scene.content_h >= scene.used_h, "the panel holds what the walk stacked");
     }
 
     #[test]
     fn a_zero_wrap_width_clamps_instead_of_panicking() {
         let Some(mut engine) = jp_engine() else { return };
-        let m = engine.measure(run(PROBE_TEXT, 16.0, 0.0)).expect("shapeable");
-        assert!(m.lines >= 1);
-        assert!(m.h > 0.0);
+        let m = measured(&mut engine, &[span(PROBE_TEXT, 16.0)], 0.0);
+        assert!(m.metrics.lines >= 1);
+        assert!(m.metrics.h > 0.0);
     }
 
     #[test]
@@ -946,7 +1178,11 @@ mod tests {
         let text = "\u{6f22}\u{5b57}\u{8f9e}\u{66f8}";
         let mut out = Vec::new();
         engine
-            .caret_boxes(run(text, 20.0, 400.0), &[0, 1, 2, 3], &mut out)
+            .caret_boxes(
+                MeasureRun { spans: &[span(text, 20.0)], max_w: 400.0 },
+                &[0, 1, 2, 3],
+                &mut out,
+            )
             .expect("shapeable");
         assert_eq!(4, out.len());
         for pair in out.windows(2) {
@@ -958,12 +1194,33 @@ mod tests {
         }
     }
 
+    /// Drill-down probes a headword that ticket 07 may hand over as
+    /// several styled spans, so an offset has to be counted over the
+    /// run's whole text and not just the first span's.
+    #[test]
+    fn caret_offsets_run_on_across_a_span_boundary() {
+        let Some(mut engine) = jp_engine() else { return };
+        let spans = [span("\u{6f22}", 20.0), span("\u{5b57}", 20.0)];
+        let mut out = Vec::new();
+        engine
+            .caret_boxes(MeasureRun { spans: &spans, max_w: 400.0 }, &[0, 1], &mut out)
+            .expect("shapeable");
+        assert_eq!(2, out.len());
+        assert_eq!(0.0, out[0].x, "the first kanji sits at the margin");
+        assert!(out[1].x >= out[0].w, "the second kanji is in the second span: {out:?}");
+        assert!(out[1].w > 0.0, "an offset in a later span still finds a glyph");
+    }
+
     #[test]
     fn an_offset_past_the_text_answers_a_zero_width_box_rather_than_nothing() {
         let Some(mut engine) = jp_engine() else { return };
         let mut out = Vec::new();
         engine
-            .caret_boxes(run(PROBE_TEXT, 20.0, 400.0), &[0, 99], &mut out)
+            .caret_boxes(
+                MeasureRun { spans: &[span(PROBE_TEXT, 20.0)], max_w: 400.0 },
+                &[0, 99],
+                &mut out,
+            )
             .expect("shapeable");
         assert_eq!(2, out.len(), "core zips these 1:1 and cannot take a gap");
         assert_eq!(0.0, out[1].w);
@@ -976,9 +1233,11 @@ mod tests {
         // UTF-16 offset 2 and byte offset 4. A naive offset-as-index
         // would land inside the emoji.
         let text = "\u{1f363}\u{5bff}";
-        assert_eq!(4, byte_offset(text, 2));
+        assert_eq!(4, byte_offset(&[span(text, 20.0)], 2));
         let mut out = Vec::new();
-        engine.caret_boxes(run(text, 20.0, 400.0), &[2], &mut out).expect("shapeable");
+        engine
+            .caret_boxes(MeasureRun { spans: &[span(text, 20.0)], max_w: 400.0 }, &[2], &mut out)
+            .expect("shapeable");
         assert_eq!(1, out.len());
         assert!(out[0].x > 0.0, "寿 sits after the emoji: {:?}", out[0]);
         assert!(out[0].w > 0.0);

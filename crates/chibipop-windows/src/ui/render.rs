@@ -21,8 +21,8 @@
 use crate::controller::HitAction;
 use crate::present::Presentation;
 use crate::ui::layout::{
-    self, Align, ElemKind, GlyphBox, HitTarget, MeasureError, MeasureRun, Metrics,
-    PopupScene, SceneElem, SceneRequest, TextMeasure,
+    self, Align, ElemKind, GlyphBox, HitTarget, LineBox, MeasureError, MeasureRun, Measured,
+    Metrics, PopupScene, SceneElem, SceneRequest, SpanBox, StyledSpan, TextMeasure,
 };
 use crate::ui::theme::{Theme, SCROLLBAR_W};
 use anyhow::{Context, Result};
@@ -101,11 +101,7 @@ impl Text {
             }
         }
 
-        let style = if italic {
-            DWRITE_FONT_STYLE_ITALIC
-        } else {
-            DWRITE_FONT_STYLE_NORMAL
-        };
+        let style = style_of(italic);
         let created = unsafe {
             self.dwrite.CreateTextFormat(
                 &HSTRING::from(font),
@@ -129,23 +125,146 @@ impl Text {
 
     /// One wrapped layout.
     ///
-    /// The one shaping call in the bin:
-    /// measure and paint both come
+    /// The one shaping call in the
+    /// bin: measure and paint both come
     /// through here, and through the
     /// same `MeasureRun`, so a run is
     /// never wrapped two ways nor
     /// painted in a weight it was not
     /// measured in.
+    ///
+    /// The whole run is one layout, so
+    /// its spans wrap as one paragraph
+    /// and a bold span can share a line
+    /// with a normal one (ADR-0013).
+    /// The first span's cached
+    /// `IDWriteTextFormat` is the base
+    /// and the rest override their own
+    /// ranges, so a one-span run makes
+    /// exactly the calls it always did.
+    /// Colour is not here: it changes
+    /// no geometry and needs a brush,
+    /// which only the paint side has.
     fn layout(&self, run: MeasureRun<'_>) -> windows::core::Result<IDWriteTextLayout> {
-        let format = self.format(run.font, run.size, run.weight, run.italic)?;
-        let wide: Vec<u16> = run.text.encode_utf16().collect();
-        unsafe { self.dwrite.CreateTextLayout(&wide, &format, run.max_w.max(1.0), f32::MAX) }
+        let base = run.spans.first().copied().unwrap_or(NO_SPAN);
+        let format = self.format(base.font, base.size, base.weight, base.italic)?;
+        let mut wide: Vec<u16> = Vec::new();
+        for span in run.spans {
+            wide.extend(span.text.encode_utf16());
+        }
+        let layout = unsafe {
+            self.dwrite
+                .CreateTextLayout(&wide, &format, run.max_w.max(1.0), f32::MAX)
+        }?;
+        for (span, range) in run.spans.iter().zip(ranges(run.spans)).skip(1) {
+            // SAFETY: each range names
+            // UTF-16 positions inside the
+            // string the layout was just
+            // built from.
+            unsafe {
+                layout.SetFontFamilyName(&HSTRING::from(span.font), range)?;
+                layout.SetFontWeight(DWRITE_FONT_WEIGHT(span.weight as i32), range)?;
+                layout.SetFontStyle(style_of(span.italic), range)?;
+                layout.SetFontSize(span.size, range)?;
+            }
+        }
+        Ok(layout)
     }
 
     /// Borrows it as a `TextMeasure`.
     fn measurer(&self) -> Measurer<'_> {
         Measurer(self)
     }
+}
+
+/// What a run with no spans formats as.
+///
+/// Core never builds one - every
+/// element it measures carries a styled
+/// span - but a layout needs a family
+/// and a size whatever its text is, and
+/// an unnamed family is DirectWrite's
+/// to refuse rather than this module's
+/// to guess at.
+const NO_SPAN: StyledSpan<'static> = StyledSpan {
+    text: "",
+    font: "",
+    size: 1.0,
+    weight: 400,
+    italic: false,
+    color: (0, 0, 0),
+};
+
+fn style_of(italic: bool) -> DWRITE_FONT_STYLE {
+    if italic {
+        DWRITE_FONT_STYLE_ITALIC
+    } else {
+        DWRITE_FONT_STYLE_NORMAL
+    }
+}
+
+/// Each span's UTF-16 range in the run.
+///
+/// The layout is one string end to end,
+/// so a span is a range in it - which
+/// is the unit both the per-range
+/// formatting and `HitTestTextRange`
+/// take.
+fn ranges<'a>(
+    spans: &'a [StyledSpan<'a>],
+) -> impl Iterator<Item = DWRITE_TEXT_RANGE> + 'a {
+    let mut start = 0u32;
+    spans.iter().map(move |span| {
+        let length = span.text.encode_utf16().count() as u32;
+        let range = DWRITE_TEXT_RANGE { startPosition: start, length };
+        start += length;
+        range
+    })
+}
+
+/// The line UTF-16 position `at` is on.
+fn line_of(lines: &[DWRITE_LINE_METRICS], at: u32) -> usize {
+    let mut end = 0u32;
+    for (i, line) in lines.iter().enumerate() {
+        end += line.length;
+        if at < end {
+            return i;
+        }
+    }
+    lines.len().saturating_sub(1)
+}
+
+/// The rects `[at, at + len)` fills.
+///
+/// One per line the range touches, and
+/// one more per bidi run on a line.
+/// `HitTestTextRange` reports how many
+/// it needed when the buffer was too
+/// small, so `hint` covers the ordinary
+/// case in one call and the retry
+/// covers the rest.
+fn hit_range(
+    layout: &IDWriteTextLayout,
+    at: u32,
+    len: u32,
+    hint: usize,
+    out: &mut Vec<DWRITE_HIT_TEST_METRICS>,
+) -> windows::core::Result<()> {
+    out.clear();
+    out.resize(hint.max(1), DWRITE_HIT_TEST_METRICS::default());
+    let mut got = 0u32;
+    // SAFETY: `at` and `len` name UTF-16
+    // positions inside the layout's own
+    // text, and the buffer is sized
+    // before each call.
+    let mut hr = unsafe { layout.HitTestTextRange(at, len, 0.0, 0.0, Some(out), &mut got) };
+    if hr.is_err() && got as usize > out.len() {
+        out.resize(got as usize, DWRITE_HIT_TEST_METRICS::default());
+        hr = unsafe { layout.HitTestTextRange(at, len, 0.0, 0.0, Some(out), &mut got) };
+    }
+    hr?;
+    out.truncate(got as usize);
+    Ok(())
 }
 
 /// `Text`, seen through the seam.
@@ -161,11 +280,87 @@ fn refused(e: windows::core::Error) -> MeasureError {
 }
 
 impl TextMeasure for Measurer<'_> {
-    fn measure(&mut self, run: MeasureRun<'_>) -> std::result::Result<Metrics, MeasureError> {
+    fn measure(
+        &mut self,
+        run: MeasureRun<'_>,
+        out: &mut Measured,
+    ) -> std::result::Result<(), MeasureError> {
+        out.clear();
         let layout = self.0.layout(run).map_err(refused)?;
+        // The aggregate is still
+        // `GetMetrics`, untouched, so a
+        // one-span run measures exactly
+        // what it did before the seam
+        // widened. Everything below is
+        // detail beside it.
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut m) }.map_err(refused)?;
-        Ok(Metrics { w: m.width, h: m.height, lines: m.lineCount })
+        out.metrics = Metrics { w: m.width, h: m.height, lines: m.lineCount };
+
+        let mut lines = vec![DWRITE_LINE_METRICS::default(); m.lineCount.max(1) as usize];
+        let mut got = 0u32;
+        unsafe { layout.GetLineMetrics(Some(&mut lines), &mut got) }.map_err(refused)?;
+        lines.truncate(got as usize);
+
+        let mut rects = Vec::new();
+        let (mut y, mut start) = (0.0f32, 0u32);
+        for line in &lines {
+            // Trailing whitespace out, so
+            // a line's width means what
+            // `GetMetrics` means by width.
+            let visible = line.length.saturating_sub(line.trailingWhitespaceLength);
+            let w = if visible == 0 {
+                0.0
+            } else {
+                hit_range(&layout, start, visible, 1, &mut rects).map_err(refused)?;
+                rects.iter().fold(0.0f32, |a, r| a.max(r.left + r.width))
+            };
+            out.lines.push(LineBox { y, w, h: line.height, baseline: line.baseline });
+            y += line.height;
+            start += line.length;
+        }
+        // A line box per counted line,
+        // whatever DirectWrite filled:
+        // core stacks the gap after an
+        // empty run either way.
+        if out.lines.is_empty() {
+            out.lines.push(LineBox { y: 0.0, w: m.width, h: m.height, baseline: m.height });
+        }
+
+        for (i, range) in ranges(run.spans).enumerate() {
+            if range.length == 0 {
+                continue;
+            }
+            hit_range(&layout, range.startPosition, range.length, lines.len(), &mut rects)
+                .map_err(refused)?;
+            for rect in &rects {
+                let line = line_of(&lines, rect.textPosition) as u32;
+                match out.spans.iter_mut().rev().find(|b| b.span == i as u32 && b.line == line) {
+                    // One box per span per
+                    // line: a bidi split
+                    // reports the same line
+                    // twice and the box is
+                    // their union.
+                    Some(b) => {
+                        let right = (b.x + b.w).max(rect.left + rect.width);
+                        b.x = b.x.min(rect.left);
+                        b.w = right - b.x;
+                    }
+                    None => out.spans.push(SpanBox {
+                        span: i as u32,
+                        line,
+                        x: rect.left,
+                        w: rect.width,
+                        // Filled below: a
+                        // span's own advance
+                        // needs its line's.
+                        h: 0.0,
+                    }),
+                }
+            }
+        }
+        span_heights(run.spans, out);
+        Ok(())
     }
 
     fn caret_boxes(
@@ -188,6 +383,46 @@ impl TextMeasure for Measurer<'_> {
             out.push(GlyphBox { x: hm.left, y: hm.top, w: hm.width, h: hm.height });
         }
         Ok(())
+    }
+}
+
+/// What each span asked its line for.
+///
+/// DirectWrite reports a line's advance
+/// but never a range's share of it:
+/// `HitTestTextRange` answers with the
+/// line's own box for every fragment on
+/// it. The share is recoverable from
+/// the line, though, because
+/// DirectWrite sizes a line at the
+/// largest of `size × the face's
+/// advance per em` over its ranges - so
+/// the tallest span on a line fixes
+/// that ratio, and every other span on
+/// it asked for its own size times the
+/// same number. Exact for one family at
+/// mixed sizes, which is what the
+/// census's 18 `fontSize` dictionaries
+/// produce; a fallback face on the same
+/// line makes it the tallest face's
+/// ratio for all of them, which is
+/// never more than the line.
+fn span_heights(spans: &[StyledSpan<'_>], out: &mut Measured) {
+    for (i, geom) in out.lines.iter().enumerate() {
+        let i = i as u32;
+        let tallest = out
+            .spans
+            .iter()
+            .filter(|b| b.line == i)
+            .filter_map(|b| spans.get(b.span as usize))
+            .fold(0.0f32, |a, s| a.max(s.size));
+        if tallest <= 0.0 {
+            continue;
+        }
+        let per_em = geom.h / tallest;
+        for b in out.spans.iter_mut().filter(|b| b.line == i) {
+            b.h = spans.get(b.span as usize).map_or(geom.h, |s| s.size * per_em);
+        }
     }
 }
 
@@ -464,28 +699,19 @@ impl Renderer {
                 unsafe { target.FillRectangle(&sep, &sep_brush) };
 
                 for painted in side.visible(scroll as f32, h as f32) {
-                    let brush = unsafe {
-                        target.CreateSolidColorBrush(&color_f(painted.row.color), None)
-                    }?;
-                    // One format for the
+                    // One role for the
                     // whole column, the
-                    // collapsed role's.
-                    let layout = self.text.layout(MeasureRun {
+                    // collapsed one.
+                    let span = StyledSpan {
                         text: &painted.row.text,
                         font: &theme.font_name,
                         size: theme.collapsed_size,
                         weight: theme.collapsed_weight,
                         italic: theme.collapsed_italic,
-                        max_w: side.col_w,
-                    })?;
-                    unsafe {
-                        target.DrawTextLayout(
-                            Vector2 { X: side.col_x, Y: painted.y },
-                            &layout,
-                            &brush,
-                            D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        );
-                    }
+                        color: painted.row.color,
+                    };
+                    let at = Vector2 { X: side.col_x, Y: painted.y };
+                    self.draw_spans(target, &[span], side.col_w, at, false)?;
                 }
             }
 
@@ -540,24 +766,56 @@ impl Renderer {
             return Ok(());
         }
 
-        let layout = self.text.layout(MeasureRun {
+        let span = StyledSpan {
             text: &elem.text,
             font: &theme.font_name,
             size: elem.font_size,
             weight: elem.weight,
             italic: elem.italic,
-            max_w: elem.wrap_w,
-        })?;
-        if elem.align == Align::Trailing {
+            color: elem.color,
+        };
+        let at = Vector2 { X: pen.0, Y: pen.1 };
+        self.draw_spans(target, &[span], elem.wrap_w, at, elem.align == Align::Trailing)
+    }
+
+    /// Draws one run's spans, each in
+    /// its own colour.
+    ///
+    /// One layout - the same shaping
+    /// path the scene was measured
+    /// against - with a drawing effect
+    /// per span range. The first span's
+    /// brush is also the layout's
+    /// default, so a one-span run draws
+    /// exactly what it drew before the
+    /// seam widened. Colour is the one
+    /// styled-span field measurement
+    /// ignores (ADR-0013), and this is
+    /// where it is answered.
+    fn draw_spans(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        spans: &[StyledSpan<'_>],
+        max_w: f32,
+        at: Vector2,
+        trailing: bool,
+    ) -> windows::core::Result<()> {
+        let layout = self.text.layout(MeasureRun { spans, max_w })?;
+        if trailing {
             unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
         }
+        let mut first = None;
+        for (span, range) in spans.iter().zip(ranges(spans)) {
+            let brush = unsafe { target.CreateSolidColorBrush(&color_f(span.color), None) }?;
+            // SAFETY: the range names
+            // UTF-16 positions inside the
+            // layout's own text.
+            unsafe { layout.SetDrawingEffect(&brush, range) }?;
+            first.get_or_insert(brush);
+        }
+        let Some(default) = first else { return Ok(()) };
         unsafe {
-            target.DrawTextLayout(
-                Vector2 { X: pen.0, Y: pen.1 },
-                &layout,
-                &brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
+            target.DrawTextLayout(at, &layout, &default, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
         Ok(())
     }

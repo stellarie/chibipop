@@ -1,6 +1,6 @@
 //! AnkiConnect v6 client.
 
-use crate::dict::gloss::render_html;
+use crate::dict::gloss::{render_html, RoleFilter, Selection};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -280,8 +280,11 @@ fn escape_html(s: &str) -> String {
 }
 
 /// One dict's glosses, numbered.
+///
+/// Flattened across the dictionary's matched term-bank rows, so the field a
+/// one-row block produces is unchanged.
 fn plain_dict_group(b: &crate::present::GlossBlock) -> String {
-    let numbered = b.glosses.iter()
+    let numbered = b.glosses()
         .enumerate()
         .map(|(i, g)| format!("{}. {g}", i + 1))
         .collect::<Vec<_>>()
@@ -310,7 +313,8 @@ pub fn fields_from_card(
     // hover was paying for it.
     let glossary_html = blocks.iter()
         .map(|b| {
-            let items: String = render_html(&b.doc).iter()
+            let items: String = b.entries.iter()
+                .flat_map(|e| render_html(&e.doc, Selection::Whole, RoleFilter::CARD))
                 .map(|g| format!("<li>{g}</li>"))
                 .collect();
             format!(
@@ -345,16 +349,36 @@ mod tests {
         GlossBlock::parse(dict, &glossary.to_string())
     }
 
-    #[test]
-    fn fields_from_card_formats_glossary() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: Some("ねこ".into()),
+    /// One dictionary's block over several matched term-bank rows, which is
+    /// what a headword with more than one row now produces.
+    fn rows(dict: &str, glossaries: [serde_json::Value; 2]) -> GlossBlock {
+        let entries = glossaries
+            .into_iter()
+            .filter_map(|g| block(dict, g).entries.into_iter().next())
+            .collect();
+        GlossBlock { dict_name: dict.to_string(), entries }
+    }
+
+    /// The headword half of a card. The blocks are passed to
+    /// `fields_from_card` separately, so the field builder never reads this
+    /// one's own `blocks`.
+    fn card(
+        written: Option<&str>,
+        reading: Option<&str>,
+        freq: Option<i64>,
+    ) -> crate::present::Card {
+        crate::present::Card {
+            written: written.map(str::to_string),
+            reading: reading.map(str::to_string),
             pos: vec![],
-            freq: Some(42),
+            freq,
             blocks: vec![],
             match_len: 1,
-        };
+        }
+    }
+
+    #[test]
+    fn fields_from_card_formats_glossary() {
         let blocks = vec![
             block(
                 "大辞林",
@@ -370,7 +394,7 @@ mod tests {
                 ]),
             ),
         ];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks);
         assert_eq!(Some(&"猫".to_string()), f.get("expression"));
         assert_eq!(Some(&"ねこ".to_string()), f.get("reading"));
         assert_eq!(
@@ -386,16 +410,8 @@ mod tests {
 
     #[test]
     fn glossary_html_escapes_a_dictionary_name_with_markup_looking_characters() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: None,
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
         let blocks = vec![block("A & B <dict>", json!(["cat"]))];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
         assert_eq!(
             Some(&"<b>A &amp; B &lt;dict&gt;</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
             f.get("glossary_html"),
@@ -404,16 +420,8 @@ mod tests {
 
     #[test]
     fn glossary_html_wraps_one_dictionary_in_a_list_with_no_divider() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: None,
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
         let blocks = vec![block("Wenlin", json!(["supper", "dinner"]))];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
             "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li><li>dinner</li></ol>",
@@ -424,19 +432,11 @@ mod tests {
 
     #[test]
     fn glossary_html_separates_multiple_dictionaries_with_a_divider() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: None,
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
         let blocks = vec![
             block("Wenlin", json!(["supper"])),
             block("CC-CEDICT", json!(["evening meal"])),
         ];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
             "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>evening meal</li></ol>",
@@ -448,19 +448,11 @@ mod tests {
 
     #[test]
     fn glossary_separates_dictionaries_with_headers_and_dividers() {
-        let card = crate::present::Card {
-            written: Some("犬".into()),
-            reading: Some("いぬ".into()),
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
         let blocks = vec![
             block("大辞林", json!(["イヌ科の哺乳類。"])),
             block("Jitendex", json!(["dog"])),
         ];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("犬"), Some("いぬ"), None), &blocks);
 
         let glossary = f.get("glossary").unwrap();
         assert!(glossary.contains("[大辞林]"));
@@ -475,17 +467,74 @@ mod tests {
 
     #[test]
     fn fields_falls_back_to_reading() {
-        let card = crate::present::Card {
-            written: None,
-            reading: Some("ねこ".into()),
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
-        let f = fields_from_card(&card, &[]);
+        let f = fields_from_card(&card(None, Some("ねこ"), None), &[]);
         assert_eq!(Some(&"ねこ".to_string()), f.get("expression"));
         assert_eq!(None, f.get("frequency"));
+    }
+
+    /// Story 42: popup density and card completeness are separate choices.
+    /// Both fields come off one parsed tree in one call, so the disagreement
+    /// here is two filters, not two configurations - the popup's plain-text
+    /// summary still drops what the card keeps.
+    #[test]
+    fn an_example_the_popup_summary_drops_still_reaches_the_html_field() {
+        let blocks = vec![block(
+            "Jitendex",
+            json!([{"type": "structured-content", "content": [
+                {"tag": "span", "content": "to eat"},
+                {"tag": "div", "data": {"content": "example-sentence"}, "content": [
+                    {"tag": "span", "content": "ご飯を食べる"}
+                ]}
+            ]}]),
+        )];
+        let f = fields_from_card(&card(Some("食べる"), None, None), &blocks);
+        assert_eq!(Some(&"[Jitendex]\n1. to eat".to_string()), f.get("glossary"));
+        let html = f.get("glossary_html").expect("the html field");
+        assert!(html.contains("ご飯を食べる"), "the card keeps the example: {html}");
+    }
+
+    /// Anki has no copy of the dictionary's assets - `src/anki.rs` sends a
+    /// screenshot and nothing else - so an image mines as the character it
+    /// stands for rather than as a picture the note can never load.
+    #[test]
+    fn an_image_mines_as_its_alt_text_and_no_field_carries_a_src() {
+        let blocks = vec![block(
+            "字通",
+            json!([{"type": "structured-content", "content": [
+                {"tag": "img", "path": "gaiji/x.svg", "alt": "𠮟"},
+                {"tag": "span", "content": "to scold"}
+            ]}]),
+        )];
+        let f = fields_from_card(&card(Some("𠮟る"), None, None), &blocks);
+        let html = f.get("glossary_html").expect("the html field");
+        assert!(html.contains("𠮟<span>to scold</span>"), "the alt text stands in: {html}");
+        for (name, value) in &f {
+            assert!(!value.contains("<img"), "{name} carries an image tag: {value}");
+            assert!(!value.contains("src="), "{name} carries an unresolvable source: {value}");
+            assert!(!value.contains("gaiji/x.svg"), "{name} carries an archive path: {value}");
+        }
+    }
+
+    /// A block is one dictionary, not one matched term-bank row, so both
+    /// fields number across the rows it holds: a reader wants "sense 3 of
+    /// 大辞林", never "sense 1 of row 2" under a repeated heading.
+    #[test]
+    fn both_fields_number_a_dictionarys_matched_rows_continuously() {
+        let blocks = vec![rows("大辞林", [json!(["to run"]), json!(["to flow", "to stream"])])];
+        let f = fields_from_card(&card(Some("走る"), None, None), &blocks);
+        assert_eq!(
+            Some(&"[大辞林]\n1. to run\n2. to flow\n3. to stream".to_string()),
+            f.get("glossary"),
+        );
+        let html = f.get("glossary_html").expect("the html field");
+        assert_eq!(
+            concat!(
+                "<b>大辞林</b><ol style=\"margin:2px 0 2px 20px;padding:0\">",
+                "<li>to run</li><li>to flow</li><li>to stream</li></ol>",
+            ),
+            html,
+        );
+        assert!(!html.contains("<hr"), "one dictionary, one heading, no divider: {html}");
     }
 
     #[test]

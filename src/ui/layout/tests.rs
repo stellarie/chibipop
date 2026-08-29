@@ -5,7 +5,7 @@
 //! font, no platform: these run in both CI jobs, forever.
 
 use super::*;
-use crate::present::{Card, CollapsedRow, GlossBlock};
+use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
 
 /// Advance per UTF-16 unit, as a
 /// fraction of the font size.
@@ -17,21 +17,22 @@ const LINE_H: f32 = 2.0;
 ///
 /// One rectangle per UTF-16 unit,
 /// wrapped greedily. Records every
-/// run it was asked for, so a test
+/// span it was asked for, so a test
 /// can assert what layout measured
 /// and at what width.
 #[derive(Default)]
 struct FakeMeasure {
-    /// Every run asked for, in order.
+    /// Every span asked for, in order.
     asked: Vec<Asked>,
 }
 
-/// One run a measurer was handed.
+/// One span a measurer was handed.
 ///
-/// The whole `MeasureRun`, minus the
-/// font: a test asserts what layout
-/// asked for, at what width, in what
-/// weight and style.
+/// A `StyledSpan` minus the font and
+/// the colour, plus its run's width: a
+/// test asserts what layout asked for,
+/// at what width, in what weight and
+/// style.
 #[derive(Debug, Clone, PartialEq)]
 struct Asked {
     text: String,
@@ -41,29 +42,125 @@ struct Asked {
     max_w: f32,
 }
 
-/// `(advance, units per line, units)`.
-fn wrap(run: MeasureRun<'_>) -> (f32, usize, usize) {
-    let advance = run.size * ADVANCE;
-    let per_line = (run.max_w.max(1.0) / advance).floor().max(1.0) as usize;
-    (advance, per_line, run.text.encode_utf16().count())
+/// One span's piece of one line.
+struct Frag {
+    span: usize,
+    line: usize,
+    /// Pen at its start, in its line.
+    x: f32,
+    /// UTF-16 units before it, over
+    /// the whole run.
+    from: usize,
+    /// Units in it.
+    units: usize,
+    /// One unit's width.
+    advance: f32,
+    /// The span's own line advance.
+    h: f32,
+}
+
+/// The fake's greedy wrap.
+///
+/// Lays one rectangle per UTF-16 unit
+/// end to end and breaks when the next
+/// would not fit, so every expectation
+/// below stays arithmetic a reader can
+/// redo by hand. A one-span run
+/// reduces to `floor(max_w / advance)`
+/// units per line, which is what this
+/// fake always did.
+fn wrap(run: MeasureRun<'_>) -> (Vec<Frag>, Measured) {
+    let max_w = run.max_w.max(1.0);
+    let mut frags = Vec::new();
+    let (mut line, mut x, mut from) = (0usize, 0.0f32, 0usize);
+    for (span, s) in run.spans.iter().enumerate() {
+        let advance = s.size * ADVANCE;
+        let h = s.size * LINE_H;
+        let mut left = s.text.encode_utf16().count();
+        loop {
+            // Never zero at the head of
+            // a line: a measurer that
+            // cannot wrap narrower than
+            // one glyph overflows rather
+            // than loops.
+            let mut room = ((max_w - x) / advance).floor().max(0.0) as usize;
+            if room == 0 && x == 0.0 {
+                room = 1;
+            }
+            let take = left.min(room);
+            if take > 0 {
+                frags.push(Frag { span, line, x, from, units: take, advance, h });
+                x += take as f32 * advance;
+                from += take;
+                left -= take;
+            }
+            if left == 0 {
+                break;
+            }
+            line += 1;
+            x = 0.0;
+        }
+    }
+
+    let mut out = Measured::default();
+    for f in &frags {
+        while out.lines.len() <= f.line {
+            out.lines.push(LineBox::default());
+        }
+        let w = f.units as f32 * f.advance;
+        let l = &mut out.lines[f.line];
+        l.w = l.w.max(f.x + w);
+        l.h = l.h.max(f.h);
+        out.spans.push(SpanBox {
+            span: f.span as u32,
+            line: f.line as u32,
+            x: f.x,
+            w,
+            h: f.h,
+        });
+    }
+    // An empty run is one empty line,
+    // not none: the walk stacks the gap
+    // after it either way.
+    if out.lines.is_empty() {
+        let size = run.spans.first().map_or(0.0, |s| s.size);
+        out.lines.push(LineBox { h: size * LINE_H, ..LineBox::default() });
+    }
+    let mut y = 0.0;
+    for l in &mut out.lines {
+        l.y = y;
+        // Every span on a line shares
+        // one baseline, an ascent of the
+        // tallest span's own size above
+        // the line's floor.
+        l.baseline = l.h / LINE_H;
+        y += l.h;
+    }
+    out.metrics = Metrics {
+        w: out.lines.iter().fold(0.0f32, |a, l| a.max(l.w)),
+        h: y,
+        lines: out.lines.len() as u32,
+    };
+    (frags, out)
 }
 
 impl TextMeasure for FakeMeasure {
-    fn measure(&mut self, run: MeasureRun<'_>) -> Result<Metrics, MeasureError> {
-        self.asked.push(Asked {
-            text: run.text.to_string(),
-            size: run.size,
-            weight: run.weight,
-            italic: run.italic,
-            max_w: run.max_w,
-        });
-        let (advance, per_line, units) = wrap(run);
-        let lines = units.div_ceil(per_line).max(1);
-        Ok(Metrics {
-            w: units.min(per_line) as f32 * advance,
-            h: lines as f32 * run.size * LINE_H,
-            lines: lines as u32,
-        })
+    fn measure(
+        &mut self,
+        run: MeasureRun<'_>,
+        out: &mut Measured,
+    ) -> Result<(), MeasureError> {
+        for s in run.spans {
+            self.asked.push(Asked {
+                text: s.text.to_string(),
+                size: s.size,
+                weight: s.weight,
+                italic: s.italic,
+                max_w: run.max_w,
+            });
+        }
+        *out = wrap(run).1;
+        Ok(())
     }
 
     fn caret_boxes(
@@ -72,15 +169,28 @@ impl TextMeasure for FakeMeasure {
         at: &[u32],
         out: &mut Vec<GlyphBox>,
     ) -> Result<(), MeasureError> {
-        let (advance, per_line, units) = wrap(run);
+        let (frags, m) = wrap(run);
+        // Past the end - which core
+        // never asks for, since every
+        // offset it probes is the start
+        // of a kanji it just walked -
+        // answers the pen after the last
+        // unit.
+        let after = frags.last().map_or_else(GlyphBox::default, |f| GlyphBox {
+            x: f.x + f.units as f32 * f.advance,
+            y: m.lines[f.line].y,
+            w: 0.0,
+            h: f.h,
+        });
         for &o in at {
-            let o = (o as usize).min(units);
-            out.push(GlyphBox {
-                x: (o % per_line) as f32 * advance,
-                y: (o / per_line) as f32 * run.size * LINE_H,
-                w: advance,
-                h: run.size * LINE_H,
-            });
+            let o = o as usize;
+            let found = frags.iter().find(|f| (f.from..f.from + f.units).contains(&o));
+            out.push(found.map_or(after, |f| GlyphBox {
+                x: f.x + (o - f.from) as f32 * f.advance,
+                y: m.lines[f.line].y,
+                w: f.advance,
+                h: f.h,
+            }));
         }
         Ok(())
     }
@@ -90,7 +200,7 @@ impl TextMeasure for FakeMeasure {
 struct BrokenMeasure;
 
 impl TextMeasure for BrokenMeasure {
-    fn measure(&mut self, _: MeasureRun<'_>) -> Result<Metrics, MeasureError> {
+    fn measure(&mut self, _: MeasureRun<'_>, _: &mut Measured) -> Result<(), MeasureError> {
         Err(MeasureError::new("no font"))
     }
     fn caret_boxes(
@@ -103,15 +213,49 @@ impl TextMeasure for BrokenMeasure {
     }
 }
 
+/// One span, styled only by size.
+///
+/// Nothing the fake measures depends
+/// on the family or the colour, so a
+/// seam test names neither.
+fn styled(text: &str, size: f32) -> StyledSpan<'_> {
+    StyledSpan { text, font: "", size, weight: 400, italic: false, color: (0, 0, 0) }
+}
+
+/// `spans` through the seam, at `max_w`.
+fn fake_measure(spans: &[StyledSpan<'_>], max_w: f32) -> Measured {
+    let mut out = Measured::default();
+    FakeMeasure::default()
+        .measure(MeasureRun { spans, max_w }, &mut out)
+        .expect("FakeMeasure never refuses a run");
+    out
+}
+
 // ---- fixtures ----
 
 /// The layout pass reads `glosses` and nothing else - ticket 08 is what
 /// teaches it to walk the tree - so these fixtures carry an empty document
 /// and the exact strings the geometry assertions expect.
+///
+/// One row per block, the shape a one-hit dictionary produces; `rows` is
+/// for the grouped case.
 fn block(dict: &str, glosses: &[&str]) -> GlossBlock {
+    rows(dict, &[glosses])
+}
+
+/// One dictionary's block, several matched term-bank rows.
+fn rows(dict: &str, per_row: &[&[&str]]) -> GlossBlock {
     GlossBlock {
         dict_name: dict.to_string(),
+        entries: per_row.iter().map(|glosses| entry(glosses, &[])).collect(),
+    }
+}
+
+/// One matched row, with its tags.
+fn entry(glosses: &[&str], tags: &[&str]) -> GlossEntry {
+    GlossEntry {
         glosses: glosses.iter().map(|s| s.to_string()).collect(),
+        tags: tags.iter().map(|s| s.to_string()).collect(),
         doc: std::sync::Arc::new(crate::dict::gloss::GlossDoc::empty()),
     }
 }
@@ -185,6 +329,34 @@ fn find(s: &PopupScene, kind: ElemKind) -> &SceneElem {
         .iter()
         .find(|e| e.kind == kind)
         .unwrap_or_else(|| panic!("no {} element in the scene", kind.as_str()))
+}
+
+/// Every run in the scene, in draw
+/// order: what a reader sees, top to
+/// bottom.
+fn texts(s: &PopupScene) -> Vec<&str> {
+    s.elems.iter().map(|e| e.text.as_str()).collect()
+}
+
+/// A card carrying exactly the blocks
+/// the caller built, so a test can
+/// state the grouped shape
+/// `present::build` now produces.
+fn card_with(blocks: Vec<GlossBlock>) -> Presentation {
+    let card = Card {
+        written: Some("雑談".into()),
+        reading: None,
+        pos: vec![],
+        freq: None,
+        blocks,
+        match_len: 2,
+    };
+    Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+    }
 }
 
 /// A scene under `theme`, plus every
@@ -755,6 +927,75 @@ fn a_refused_run_abandons_the_walk() {
     assert_eq!("measuring text failed: no font", err.to_string());
 }
 
+/// One span in, the aggregate the
+/// walk stacks out - and the detail
+/// beside it saying the same thing.
+#[test]
+fn one_span_measures_to_one_line_box_that_fills_the_run() {
+    let spans = [styled("abcd", 10.0)];
+    let m = fake_measure(&spans, 100.0);
+
+    assert_eq!(Metrics { w: 20.0, h: 20.0, lines: 1 }, m.metrics);
+    assert_eq!(vec![LineBox { y: 0.0, w: 20.0, h: 20.0, baseline: 10.0 }], m.lines);
+    assert_eq!(vec![SpanBox { span: 0, line: 0, x: 0.0, w: 20.0, h: 20.0 }], m.spans);
+}
+
+/// The contract ticket 07's inline
+/// pass is written against: spans that
+/// fit share one line, sit end to end
+/// across it, and hang off one
+/// baseline whatever their own heights
+/// are (ADR-0013).
+#[test]
+fn spans_that_fit_share_one_line_and_one_baseline() {
+    // 4 units at 10px plus 4 at 20px:
+    // 4×5 + 4×10 = 60 wide, inside 100.
+    let spans = [styled("abcd", 10.0), styled("wxyz", 20.0)];
+    let m = fake_measure(&spans, 100.0);
+
+    assert_eq!(1, m.metrics.lines, "60 units of text fit a 100px line");
+    assert_eq!(2, m.spans.len(), "one box per span");
+    let (small, big) = (m.spans[0], m.spans[1]);
+    assert_eq!((0, 0, 0.0, 20.0), (small.span, small.line, small.x, small.w));
+    assert_eq!((1, 0, 20.0, 40.0), (big.span, big.line, big.x, big.w));
+    assert_eq!(m.lines[0].w, big.x + big.w, "the spans sum to the line's width");
+
+    // Each span asks for its own
+    // advance; the line takes the
+    // largest, and one baseline serves
+    // both.
+    assert_eq!((20.0, 40.0), (small.h, big.h));
+    assert_eq!(40.0, m.lines[0].h, "the taller span sets the line");
+    assert_eq!(20.0, m.lines[0].baseline);
+    assert_eq!(Metrics { w: 60.0, h: 40.0, lines: 1 }, m.metrics);
+}
+
+/// A span boundary is not a line
+/// boundary: the second span keeps
+/// filling the line the first left off
+/// on, and wraps mid-span when it runs
+/// out. That is the single fact
+/// ADR-0013 exists to change.
+#[test]
+fn a_span_wraps_within_itself_rather_than_at_its_boundary() {
+    // 5px units, 8 to a 40px line.
+    let spans = [styled("abcde", 10.0), styled("fghijk", 10.0)];
+    let m = fake_measure(&spans, 40.0);
+
+    assert_eq!(2, m.metrics.lines);
+    assert_eq!(
+        vec![
+            SpanBox { span: 0, line: 0, x: 0.0, w: 25.0, h: 20.0 },
+            SpanBox { span: 1, line: 0, x: 25.0, w: 15.0, h: 20.0 },
+            SpanBox { span: 1, line: 1, x: 0.0, w: 15.0, h: 20.0 },
+        ],
+        m.spans,
+        "the second span finishes line one and continues on line two"
+    );
+    assert_eq!(40.0, m.lines[0].w);
+    assert_eq!(20.0, m.lines[1].y, "line two starts under line one");
+}
+
 // ---- element construction ----
 
 /// It must lead the list.
@@ -1028,6 +1269,86 @@ fn side_entries_show_headword_only() {
     let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true);
     assert!(!side[0].text.contains("noise"));
     assert!(!side[1].text.contains("magazine"));
+}
+
+// ---- one label per dictionary ----
+
+/// The defect ticket 16 fixes: a headword with eleven 大辞林 rows used to
+/// draw eleven 大辞林 headings, one gloss under each.
+#[test]
+fn three_rows_from_one_dictionary_draw_one_label() {
+    let p = card_with(vec![rows("大辞林", &[&["ある"], &["いる"], &["うる"]])]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    assert_eq!(
+        1,
+        s.elems.iter().filter(|e| e.text == "大辞林").count(),
+        "one dictionary, one heading: {:?}",
+        texts(&s)
+    );
+    assert_eq!(
+        vec!["雑談", "大辞林", "1. ある", "2. いる", "3. うる"],
+        texts(&s),
+        "the headword, one label, and three numbered gloss entries"
+    );
+}
+
+/// Yomitan's `<ol>` holds one item per matched term-bank row, and Hoshi
+/// Reader emits the list at all only when a dictionary contributed more
+/// than one row - so a lone row carries no number, and the glossary items
+/// inside it are never numbered either.
+#[test]
+fn a_single_row_dictionary_is_not_numbered() {
+    let p = card_with(vec![block("Jitendex", &["chatting", "idle talk"])]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    assert_eq!(vec!["雑談", "Jitendex", "chatting; idle talk"], texts(&s));
+}
+
+#[test]
+fn two_dictionaries_draw_two_labels_in_the_cards_order() {
+    let p = card_with(vec![
+        rows("大辞林", &[&["ある"], &["いる"]]),
+        block("Jitendex", &["chatting"]),
+    ]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    assert_eq!(
+        vec!["雑談", "大辞林", "1. ある", "2. いる", "Jitendex", "chatting"],
+        texts(&s)
+    );
+}
+
+/// A row's tags are dimmed metadata, like the card's own tag line. An empty
+/// set draws nothing: that is how `present` says "the row above already
+/// printed this one".
+#[test]
+fn a_rows_tags_draw_a_dimmed_line_and_an_empty_set_draws_none() {
+    let theme = Theme::dark();
+    let p = card_with(vec![GlossBlock {
+        dict_name: "大辞林".into(),
+        entries: vec![entry(&["ある"], &["noun", "suru"]), entry(&["いる"], &[])],
+    }]);
+    let (elems, _) = build_elements(&p, &theme, false, false);
+    let tag = elems
+        .iter()
+        .find_map(|e| match e {
+            Elem::Text(line) if line.text.contains("noun") => Some(line),
+            _ => None,
+        })
+        .expect("a tag line must be drawn");
+    assert_eq!("noun · suru", tag.text);
+    assert_eq!(theme.dimmed_text, tag.color);
+    assert_eq!(theme.dimmed_size, tag.size);
+
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    assert_eq!(vec!["雑談", "大辞林", "noun · suru", "1. ある", "2. いる"], texts(&s));
+}
+
+/// A dictionary that matched but rendered nothing still names itself, and
+/// draws no empty body line - the `minimal_edge` golden's shape.
+#[test]
+fn a_dictionary_with_no_glosses_draws_only_its_label() {
+    let p = card_with(vec![block("大辞林", &[])]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    assert_eq!(vec!["雑談", "大辞林"], texts(&s));
 }
 
 // ---- the Anki label ----

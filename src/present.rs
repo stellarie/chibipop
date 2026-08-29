@@ -35,13 +35,31 @@ pub struct Card {
     pub match_len: usize,
 }
 
-/// One dict's glosses, plus the tree they came from.
+/// One dict's contribution to a card, plus the trees it came from.
+///
+/// One dictionary, one block - not one matched term-bank row, one block.
+/// The census found 6 220 大辞林 headwords with more than one row and a
+/// worst case of eleven, so the panel used to repeat that dictionary's
+/// name up to eleven times with one gloss under each.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlossBlock {
     pub dict_name: String,
+    /// One per matched term-bank row, in the order the rows ranked.
+    pub entries: Vec<GlossEntry>,
+}
+
+/// One matched term-bank row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlossEntry {
     /// The plain-text render, one string per glossary item. Precomputed
     /// because `layout::scene` runs per frame and the panel needs a string.
     pub glosses: Vec<String>,
+    /// This row's part-of-speech set, ready to print: numeric tags dropped,
+    /// and **empty when the row above already printed the same set**. Not
+    /// "this row has no tags" - a reader scanning eleven 大辞林 rows wants
+    /// the tags where they change, and Yomitan and Hoshi Reader both dedupe
+    /// them the same way.
+    pub tags: Vec<String>,
     /// The parsed tree the glosses were rendered from, shared with the
     /// parsed-tree cache. Every other view of this gloss is a renderer over
     /// it - the Anki HTML field today, the popup scene once ticket 08 lands -
@@ -50,7 +68,8 @@ pub struct GlossBlock {
 }
 
 impl GlossBlock {
-    /// A block from one raw glossary payload, in the form the record stores.
+    /// A one-row block from one raw glossary payload, in the form the
+    /// record stores.
     ///
     /// The hover path goes through `Hit`, which already carries a parsed
     /// tree; this is for callers that hold the stored text - the popup demo,
@@ -59,9 +78,17 @@ impl GlossBlock {
         let doc = Arc::new(GlossDoc::parse(glossary));
         GlossBlock {
             dict_name: dict_name.to_string(),
-            glosses: crate::dict::gloss::plain_items(&doc),
-            doc,
+            entries: vec![GlossEntry {
+                glosses: crate::dict::gloss::plain_items(&doc),
+                tags: Vec::new(),
+                doc,
+            }],
         }
+    }
+
+    /// Every gloss under this dictionary, rows flattened.
+    pub fn glosses(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().flat_map(|e| e.glosses.iter().map(String::as_str))
     }
 }
 
@@ -190,12 +217,18 @@ pub fn match_highlight(span: &TextSpan, top: Option<&Card>) -> Option<PhysRect> 
 fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Card {
     // Pre-ranked: first is best.
     let best = group.hits[0];
+    let pos = definition_tags(&best.entry.pos);
+    let mut blocks = ordered_blocks(&group.hits, dicts, cfg);
+    // Seeded with the card's own tag line, which sits directly above the
+    // first dictionary heading: printing the same set again one line later
+    // tells a reader nothing.
+    dedupe_tags(&mut blocks, pos.clone());
     Card {
         written: group.written,
         reading: group.reading,
-        pos: best.entry.pos.clone(),
+        pos,
         freq: best.freq,
-        blocks: ordered_blocks(&group.hits, dicts, cfg),
+        blocks,
         match_len: best.match_len,
     }
 }
@@ -210,8 +243,7 @@ pub fn collapsed_from_card(card: &Card, summary_chars: usize) -> CollapsedRow {
     let first_gloss = card
         .blocks
         .first()
-        .and_then(|b| b.glosses.first())
-        .map(String::as_str)
+        .and_then(|b| b.glosses().next())
         .unwrap_or("");
     CollapsedRow {
         written: card.written.clone(),
@@ -236,22 +268,66 @@ pub fn swap_top(p: &mut Presentation, collapsed_index: usize, summary_chars: usi
         .collect();
 }
 
-
-/// Per hit, not per dict.
+/// Per dict, not per hit.
+///
+/// Grouping is by `dict_id`, the dictionary's identity, and a group's rank
+/// comes from the first row that named it, so the existing name-substring
+/// ordering and the `dict_id` tie-break are untouched: only the number of
+/// blocks changes. Rows keep their arrival order inside a group because the
+/// sort is stable and `hits` arrives rank-ordered.
 fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec<GlossBlock> {
-    let mut ranked: Vec<(usize, i64, GlossBlock)> = hits
-        .iter()
-        .map(|hit| {
-            let dict_id = hit.entry.dict_id;
-            let dict_name = dict_name_for(dict_id, dicts);
-            let rank = dict_order_rank(&dict_name, &cfg.dict_order).unwrap_or(usize::MAX);
-            let glosses = hit.entry.glosses();
-            let doc = Arc::clone(&hit.entry.gloss);
-            (rank, dict_id, GlossBlock { dict_name, glosses, doc })
-        })
-        .collect();
+    let mut ranked: Vec<(usize, i64, GlossBlock)> = Vec::new();
+    for hit in hits {
+        let dict_id = hit.entry.dict_id;
+        let entry = GlossEntry {
+            glosses: hit.entry.glosses(),
+            tags: definition_tags(&hit.entry.pos),
+            doc: Arc::clone(&hit.entry.gloss),
+        };
+        match ranked.iter_mut().find(|(_, id, _)| *id == dict_id) {
+            Some((_, _, block)) => block.entries.push(entry),
+            None => {
+                let dict_name = dict_name_for(dict_id, dicts);
+                let rank = dict_order_rank(&dict_name, &cfg.dict_order).unwrap_or(usize::MAX);
+                ranked.push((rank, dict_id, GlossBlock { dict_name, entries: vec![entry] }));
+            }
+        }
+    }
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     ranked.into_iter().map(|(_, _, block)| block).collect()
+}
+
+/// The tags a row prints, as Yomitan and Hoshi Reader print them.
+///
+/// A tag that is only digits is the term-bank row's own sense number, not a
+/// part of speech. 大辞林 draws its `①②③` inside the tree, so printing that
+/// number again as a tag double-numbers the row.
+fn definition_tags(pos: &[String]) -> Vec<String> {
+    pos.iter().filter(|t| !is_number(t)).cloned().collect()
+}
+
+/// Digits only, in any script: `1`, `１`, and `①` are all sense numbers.
+fn is_number(tag: &str) -> bool {
+    let tag = tag.trim();
+    !tag.is_empty() && tag.chars().all(char::is_numeric)
+}
+
+/// Consecutive rows print one tag set once.
+///
+/// Walks the rows in display order across the whole card, so the run of
+/// identical sets an eleven-row 大辞林 headword produces collapses to one
+/// printed line. `printed` seeds the walk with whatever the caller has
+/// already put on screen.
+fn dedupe_tags(blocks: &mut [GlossBlock], mut printed: Vec<String>) {
+    for block in blocks {
+        for entry in &mut block.entries {
+            if entry.tags == printed {
+                entry.tags.clear();
+            } else {
+                printed = entry.tags.clone();
+            }
+        }
+    }
 }
 
 /// Unknown id: named by id.
@@ -336,11 +412,33 @@ mod tests {
     /// One hit whose gloss arrives the way a record stores it: a
     /// structured-content item with a part-of-speech pill and one block.
     fn hit(written: &str, reading: &str, dict_id: i64, gloss: &str) -> Hit {
-        let glossary = serde_json::json!([{"type": "structured-content", "content": [
-            {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": "noun"},
-            {"tag": "div", "content": gloss}
-        ]}])
-        .to_string();
+        hit_tagged(written, reading, dict_id, gloss, &["noun"])
+    }
+
+    /// The same, with the row's part-of-speech set chosen by the caller -
+    /// the field the tag dedupe reads. Pills, not a hand-built `pos` vec, so
+    /// the labels travel the route a real record's do: through the tree and
+    /// out of `pos_labels`.
+    fn hit_tagged(
+        written: &str,
+        reading: &str,
+        dict_id: i64,
+        gloss: &str,
+        pos: &[&str],
+    ) -> Hit {
+        let mut content: Vec<serde_json::Value> = pos
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "tag": "span",
+                    "data": {"content": "part-of-speech-info"},
+                    "content": p,
+                })
+            })
+            .collect();
+        content.push(serde_json::json!({"tag": "div", "content": gloss}));
+        let glossary =
+            serde_json::json!([{"type": "structured-content", "content": content}]).to_string();
         Hit {
             written: Some(written.to_string()),
             reading: Some(reading.to_string()),
@@ -350,6 +448,84 @@ mod tests {
             process: vec![],
             entry: Entry::parse(dict_id * 100, dict_id, &glossary),
         }
+    }
+
+    /// The defect ticket 16 fixes. The census found 6 220 大辞林 headwords
+    /// with more than one term-bank row, the worst eleven, and each row used
+    /// to bring its own copy of the dictionary's name.
+    #[test]
+    fn three_rows_from_one_dictionary_become_one_block_with_three_entries() {
+        let hits = vec![
+            hit("昨日", "きのう", 2, "今日の一日前の日。"),
+            hit("昨日", "きのう", 2, "過ぎ去った日。"),
+            hit("昨日", "きのう", 2, "近い過去。"),
+        ];
+        let p = build(&hits, &dicts(), &cfg());
+        let blocks = &p.top.as_ref().unwrap().blocks;
+        assert_eq!(1, blocks.len(), "one dictionary, one block");
+        assert_eq!(3, blocks[0].entries.len(), "one entry per matched row");
+        assert_eq!(
+            vec!["今日の一日前の日。", "過ぎ去った日。", "近い過去。"],
+            blocks[0].glosses().collect::<Vec<_>>(),
+            "in the order the rows ranked"
+        );
+    }
+
+    /// Grouping must not disturb the ordering configuration: 大辞林 leads
+    /// even though its rows arrive after Jitendex's and its id is higher.
+    #[test]
+    fn a_multi_row_dictionary_still_orders_by_the_configuration() {
+        let hits = vec![
+            hit("昨日", "きのう", 1, "yesterday"),
+            hit("昨日", "きのう", 2, "今日の一日前の日。"),
+            hit("昨日", "きのう", 2, "過ぎ去った日。"),
+        ];
+        let p = build(&hits, &dicts(), &cfg());
+        let blocks = &p.top.as_ref().unwrap().blocks;
+        assert_eq!(2, blocks.len(), "two dictionaries, two blocks");
+        assert!(blocks[0].dict_name.contains("大辞林"), "got {:?}", blocks[0].dict_name);
+        assert_eq!(2, blocks[0].entries.len());
+        assert!(blocks[1].dict_name.contains("Jitendex"));
+        assert_eq!(1, blocks[1].entries.len());
+    }
+
+    /// Consecutive rows carrying one tag set print it once. Without this,
+    /// the eleven-row headword repeats its tag row eleven times under the
+    /// one heading grouping just merged.
+    #[test]
+    fn consecutive_rows_with_one_tag_set_print_it_once() {
+        let hits = vec![
+            hit_tagged("昨日", "きのう", 2, "a", &["noun"]),
+            hit_tagged("昨日", "きのう", 2, "b", &["noun"]),
+            hit_tagged("昨日", "きのう", 2, "c", &["adverb"]),
+            hit_tagged("昨日", "きのう", 2, "d", &["adverb"]),
+        ];
+        let card = build(&hits, &dicts(), &cfg()).top.expect("a top card");
+        assert_eq!(vec!["noun".to_string()], card.pos, "the card's own tag line");
+        let printed: Vec<Vec<String>> =
+            card.blocks[0].entries.iter().map(|e| e.tags.clone()).collect();
+        assert_eq!(
+            vec![vec![], vec![], vec!["adverb".to_string()], vec![]],
+            printed,
+            "the card line already said noun, so only the change prints"
+        );
+    }
+
+    /// A digits-only tag is the row's own sense number in any script. 大辞林
+    /// draws its ①②③ inside the tree, so the number must not also arrive as
+    /// a tag and double-number the row.
+    #[test]
+    fn a_numeric_tag_never_reaches_the_panel() {
+        let hits = vec![
+            hit_tagged("昨日", "きのう", 2, "a", &["1", "noun"]),
+            hit_tagged("昨日", "きのう", 2, "b", &["\u{ff12}", "adverb"]),
+            hit_tagged("昨日", "きのう", 2, "c", &["\u{2462}"]),
+        ];
+        let card = build(&hits, &dicts(), &cfg()).top.expect("a top card");
+        assert_eq!(vec!["noun".to_string()], card.pos, "not \"1 · noun\"");
+        let printed: Vec<Vec<String>> =
+            card.blocks[0].entries.iter().map(|e| e.tags.clone()).collect();
+        assert_eq!(vec![vec![], vec!["adverb".to_string()], vec![]], printed);
     }
 
     #[test]

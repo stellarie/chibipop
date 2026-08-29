@@ -43,12 +43,14 @@
 
 mod html;
 mod parse;
+mod path;
 mod plain;
 
 #[cfg(test)]
 mod tests;
 
-pub use html::render_html;
+pub use html::{render_html, RoleFilter};
+pub use path::{NodePath, Selection};
 pub use plain::{plain_items, pos_labels, renders_text};
 
 /// An index into [`GlossDoc`]'s node vector.

@@ -20,6 +20,10 @@ mod place;
 mod pointer;
 mod surface;
 mod text;
+// `media.rs` is the seventh file here and is deliberately *not* declared
+// from this module: the lib face owns it (`crate::lib.rs`, `#[path]`), so
+// its tests can link against a real built database. Reach it as
+// `chibipop_linux::media`.
 
 pub use demo::{canned, Demo};
 pub use place::{derive, Screen};

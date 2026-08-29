@@ -268,12 +268,16 @@ fn card(
 
 /// The layout pass reads `glosses` and nothing else, so a geometry fixture
 /// carries an empty document and the exact strings the snapshot was blessed
-/// against.
+/// against. One block, one matched term-bank row: the geometry the goldens
+/// hold is one dictionary label with one gloss body under it.
 fn block(dict: &str, glosses: &[&str]) -> GlossBlock {
     GlossBlock {
         dict_name: dict.to_string(),
-        glosses: glosses.iter().map(|s| s.to_string()).collect(),
-        doc: std::sync::Arc::new(chibipop::dict::gloss::GlossDoc::empty()),
+        entries: vec![chibipop::present::GlossEntry {
+            glosses: glosses.iter().map(|s| s.to_string()).collect(),
+            tags: Vec::new(),
+            doc: std::sync::Arc::new(chibipop::dict::gloss::GlossDoc::empty()),
+        }],
     }
 }
 

@@ -72,17 +72,31 @@ fn kana_bonus(c: &Candidate) -> bool {
     c.steps == 0 && c.row.surface.chars().all(is_kana)
 }
 
-/// One result slot.
+/// One term-bank row per headword form: written, reading, and the entry the
+/// row points at.
+///
+/// Not one slot per (headword, dictionary). A dictionary that matched a
+/// headword with several term-bank rows contributes every one of them - the
+/// census found 6 220 大辞林 headwords with more than one row and a worst
+/// case of eleven - and keying the slot on `dict_id` made ten of that
+/// eleven unreachable from the panel, whatever the renderer did. The rows
+/// share the ten `MAX_RESULTS` slots in the ranking order below, and the
+/// cap still applies before `entries` is called, so a hover still parses at
+/// most ten glossaries (docs/research/hover-parse-cost.md).
+///
+/// `entry_id` rather than `dict_id`: `entry.dict_id` determines the
+/// dictionary, so the third component still separates dictionaries, while
+/// one dictionary record reached through two surfaces - つま and 妻 for one
+/// Jitendex entry - remains one row.
 type GroupKey = (Option<String>, Option<String>, i64);
 
 /// Deterministic total order. Mirrors the ranking below down to `steps`: the
 /// representative kept for a group must be the parse that group would be
-/// ranked on.
+/// ranked on. No `entry_id` term, unlike the ranking: the key holds it, so
+/// every candidate in one group already shares it.
 fn is_better(new: &Candidate, existing: &Candidate) -> bool {
-    fn rank(
-        c: &Candidate,
-    ) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>, Reverse<i64>) {
-        (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process), Reverse(c.row.entry_id))
+    fn rank(c: &Candidate) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>) {
+        (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process))
     }
     rank(new) > rank(existing)
 }
@@ -132,7 +146,8 @@ impl LookupEngine {
                             continue;
                         }
                     }
-                    let key: GroupKey = (row.written.clone(), row.reading.clone(), row.dict_id);
+                    let key: GroupKey =
+                        (row.written.clone(), row.reading.clone(), row.entry_id);
                     let candidate = Candidate {
                         row,
                         match_len: prefix_len,
@@ -431,7 +446,7 @@ mod tests {
 
     #[test]
     fn more_common_word_ranks_first() {
-        // Distinct ids: no grouping.
+        // Two entries, two rows.
         let mut d = FakeDictionary::new();
         d.add_term("はし", None, Some("はし"), "", Some(50), 1, 1);
         d.add_entry(1, 1, &glossary("chopsticks", ""));
@@ -456,7 +471,7 @@ mod tests {
     fn results_truncated_to_max() {
         let mut d = FakeDictionary::new();
         for i in 1..=25 {
-            // Distinct ids, else grouped.
+            // One entry each.
             d.add_term("あ", None, Some("あ"), "", Some(i), i, i);
             d.add_entry(i, i, &glossary("x", ""));
         }
@@ -471,5 +486,56 @@ mod tests {
         let before = ids.len();
         ids.dedup();
         assert_eq!(before, ids.len());
+    }
+
+    /// The rows a dictionary gives one headword all reach the panel.
+    ///
+    /// 大辞林 splits one headword's senses across separate term-bank rows -
+    /// 6 220 headwords, worst eleven - and the slot key used to hold
+    /// `dict_id`, so ten of that eleven never left the engine.
+    #[test]
+    fn every_term_bank_row_of_one_headword_survives() {
+        let mut d = FakeDictionary::new();
+        for id in 1..=3 {
+            d.add_term("ふし", Some("節"), Some("ふし"), "", Some(1000), id, 1);
+            d.add_entry(id, 1, &glossary(&format!("sense {id}"), ""));
+        }
+        let hits = engine().run(&d, "ふし").unwrap();
+        assert_eq!(3, hits.len(), "one dictionary, three rows");
+        assert_eq!(
+            vec![
+                vec!["sense 1".to_string()],
+                vec!["sense 2".to_string()],
+                vec!["sense 3".to_string()],
+            ],
+            hits.iter().map(|h| h.entry.glosses()).collect::<Vec<_>>(),
+            "in the term bank's own order, which is the dictionary's sense order"
+        );
+    }
+
+    /// The dedupe that must remain. Jitendex writes one term row per surface
+    /// form, so つま and 妻 both point at the one 妻/つま record; rendering it
+    /// twice under its own heading would be the defect, not the fix.
+    #[test]
+    fn one_record_reached_through_two_surfaces_is_one_row() {
+        let mut d = FakeDictionary::new();
+        d.add_term("つま", Some("妻"), Some("つま"), "", Some(500), 1, 1);
+        d.add_term("妻", Some("妻"), Some("つま"), "", Some(500), 1, 1);
+        d.add_entry(1, 1, &glossary("wife", ""));
+        assert_eq!(1, engine().run(&d, "つま").unwrap().len());
+        assert_eq!(1, engine().run(&d, "妻").unwrap().len());
+    }
+
+    /// The cap is inherited, not chosen: a hover renders at most ten rows
+    /// however many a headword matched, and the cap is counted in rows, not
+    /// in dictionaries.
+    #[test]
+    fn the_ten_row_cap_still_holds_when_one_dictionary_fills_it() {
+        let mut d = FakeDictionary::new();
+        for id in 1..=12 {
+            d.add_term("ふし", Some("節"), Some("ふし"), "", Some(1000), id, 1);
+            d.add_entry(id, 1, &glossary(&format!("sense {id}"), ""));
+        }
+        assert_eq!(MAX_RESULTS, engine().run(&d, "ふし").unwrap().len());
     }
 }

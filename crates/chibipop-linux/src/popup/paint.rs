@@ -28,7 +28,8 @@
 //! same factor.
 
 use crate::popup::{DrawRun, PanelText, PANEL_ALPHA};
-use chibipop::ui::layout::{self, Align, ElemKind, MeasureRun, PopupScene, Rgb};
+use chibipop::ui::layout::{self, Align, ElemKind, Measured, MeasureRun};
+use chibipop::ui::layout::{PopupScene, Rgb, StyledSpan};
 use chibipop::ui::theme::{Theme, SCROLLBAR_W};
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut};
 use tiny_skia::{Rect, Shader, Stroke, Transform};
@@ -145,14 +146,18 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
     if let Some(anki) = &scene.anki {
         let rect = anki.rect;
         fill(target, rect.x, rect.y, rect.w, hairline(p.scale), theme.separator);
-        let measured = text.measure(MeasureRun {
+        let span = StyledSpan {
             text: &anki.label,
             font: &theme.font_name,
             size: theme.collapsed_size,
             weight: theme.collapsed_weight,
             italic: theme.collapsed_italic,
-            max_w: rect.w,
-        });
+            color: anki.color,
+        };
+        let mut scratch = Measured::default();
+        let measured = text
+            .measure(MeasureRun { spans: &[span], max_w: rect.w }, &mut scratch)
+            .map(|()| scratch.metrics);
         let x = match measured {
             Ok(m) => rect.x + ((rect.w - m.w) / 2.0).max(0.0),
             Err(_) => rect.x,
@@ -283,8 +288,8 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chibipop::ui::layout::{AnkiSlot, GlyphBox, Metrics, SceneElem, SceneRect};
-    use chibipop::ui::layout::{MeasureError, SidePanel, SideRow, TextMeasure};
+    use chibipop::ui::layout::{AnkiSlot, GlyphBox, LineBox, SceneElem, SceneRect};
+    use chibipop::ui::layout::{MeasureError, Metrics, SidePanel, SideRow, SpanBox, TextMeasure};
     use tiny_skia::Pixmap;
 
     /// One run the painter asked for.
@@ -309,13 +314,42 @@ mod tests {
     }
 
     impl TextMeasure for Fake {
-        fn measure(&mut self, run: MeasureRun<'_>) -> Result<Metrics, MeasureError> {
+        fn measure(
+            &mut self,
+            run: MeasureRun<'_>,
+            out: &mut Measured,
+        ) -> Result<(), MeasureError> {
+            out.clear();
             if self.broken {
                 return Err(MeasureError::new("no fonts"));
             }
-            let w = run.text.chars().count() as f32 * run.size * 0.5;
-            let lines = if run.max_w > 0.0 { (w / run.max_w).ceil().max(1.0) } else { 1.0 };
-            Ok(Metrics { w, h: lines * run.size * 1.4, lines: lines as u32 })
+            // Half an em per character, laid end to end, and a line
+            // broken whenever the whole run would not fit: enough
+            // geometry for the painter's assertions, no font stack.
+            let mut x = 0.0f32;
+            for (i, span) in run.spans.iter().enumerate() {
+                let w = span.text.chars().count() as f32 * span.size * 0.5;
+                out.spans.push(SpanBox {
+                    span: i as u32,
+                    line: 0,
+                    x,
+                    w,
+                    h: span.size * 1.4,
+                });
+                x += w;
+            }
+            let lines = if run.max_w > 0.0 { (x / run.max_w).ceil().max(1.0) } else { 1.0 };
+            let h = out.spans.iter().fold(0.0f32, |a, b| a.max(b.h)).max(1.4);
+            for line in 0..lines as u32 {
+                out.lines.push(LineBox {
+                    y: line as f32 * h,
+                    w: x.min(run.max_w.max(1.0)),
+                    h,
+                    baseline: h,
+                });
+            }
+            out.metrics = Metrics { w: x, h: lines * h, lines: lines as u32 };
+            Ok(())
         }
 
         fn caret_boxes(
@@ -324,12 +358,13 @@ mod tests {
             at: &[u32],
             out: &mut Vec<GlyphBox>,
         ) -> Result<(), MeasureError> {
-            let adv = run.size * 0.5;
+            let size = run.spans.first().map_or(0.0, |s| s.size);
+            let adv = size * 0.5;
             out.extend(at.iter().map(|i| GlyphBox {
                 x: *i as f32 * adv,
                 y: 0.0,
                 w: adv,
-                h: run.size * 1.4,
+                h: size * 1.4,
             }));
             Ok(())
         }

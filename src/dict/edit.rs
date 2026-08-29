@@ -178,6 +178,11 @@ pub struct Removed {
     pub entries: usize,
     pub terms: usize,
     pub sources: usize,
+    /// Media rows this dictionary owned.
+    pub media: usize,
+    /// Blobs the sweep dropped afterwards, which is fewer than `media`
+    /// whenever another dictionary ships the same asset.
+    pub blobs: usize,
 }
 
 /// Deletes one dictionary.
@@ -189,12 +194,26 @@ pub fn remove_dictionary(conn: &mut Connection, dict_id: i64, archive: &Path) ->
 
     let terms = delete_rows(&tx, "term", dict_id)?;
     let entries = delete_rows(&tx, "entry", dict_id)?;
+    let media = delete_rows(&tx, "media", dict_id)?;
+    let blobs = sweep_orphan_blobs(&tx)?;
     let dicts = delete_rows(&tx, "dict", dict_id)?;
     let sources = if dicts == 0 { 0 } else { forget_source(&tx, archive)? };
     refresh_stats(&tx)?;
 
     tx.commit().context("committing the removal")?;
-    Ok(Removed { dict_id, dicts, entries, terms, sources })
+    Ok(Removed { dict_id, dicts, entries, terms, sources, media, blobs })
+}
+
+/// Drops the blobs no media row references any more.
+///
+/// A content-addressed blob is shared, across dictionaries as well as
+/// across paths, so removing one dictionary's media rows cannot simply
+/// remove its blobs - the next dictionary may ship the same asset. A sweep
+/// is the only correct answer, and its cost lands on removing a dictionary
+/// rather than on any hover.
+fn sweep_orphan_blobs(conn: &Connection) -> Result<usize> {
+    conn.execute("DELETE FROM media_blob WHERE blob_id NOT IN (SELECT blob_id FROM media)", [])
+        .context("dropping unreferenced media blobs")
 }
 
 /// Bounded ANALYZE of changes.
@@ -901,5 +920,51 @@ mod tests {
         let seen: i64 = after.split(' ').next().unwrap().parse().unwrap();
         assert_eq!(6_010, count(&conn, "SELECT COUNT(*) FROM term"), "5 built + 6,000 + 5 added");
         assert!(seen > 1_000, "an edit must not leave the planner reading {after}");
+    }
+
+    // ---- the media store (ticket 03) ----
+
+    fn media_zip() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
+    }
+
+    /// A blob is content-addressed and therefore shared, across
+    /// dictionaries as well as across paths, so removing one dictionary
+    /// cannot simply remove its blobs.
+    #[test]
+    fn removing_a_dictionary_drops_its_media_and_only_the_orphaned_blobs() {
+        let (mut conn, _guard) = fixture_db("remove_media");
+        // Two dictionaries from one archive: every blob is shared.
+        let first = add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
+        let second = add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
+        assert_eq!(14, count(&conn, "SELECT COUNT(*) FROM media"), "seven paths, twice");
+        assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM media_blob"), "and one set of blobs");
+
+        let gone = remove_dictionary(&mut conn, first.dict_id, &media_zip()).unwrap();
+        assert_eq!(7, gone.media);
+        assert_eq!(0, gone.blobs, "the surviving dictionary still ships every asset");
+        assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media"));
+        assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM media_blob"));
+
+        let gone = remove_dictionary(&mut conn, second.dict_id, &media_zip()).unwrap();
+        assert_eq!(7, gone.media);
+        assert_eq!(6, gone.blobs, "the last reference going takes the bytes with it");
+        assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM media_blob"));
+    }
+
+    /// A live database's blob table was filled by an earlier session, so an
+    /// addition has to find an existing row rather than collide with it.
+    #[test]
+    fn adding_a_dictionary_reuses_the_blobs_a_previous_build_wrote() {
+        let (mut conn, _guard) = fixture_db("add_media_reuses_blobs");
+        add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
+        let blobs = ids(&conn, "SELECT blob_id FROM media WHERE path = 'gaiji/one.png'");
+
+        add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
+
+        let after = ids(&conn, "SELECT blob_id FROM media WHERE path = 'gaiji/one.png'");
+        assert_eq!(2, after.len(), "two dictionaries, two rows");
+        assert_eq!(vec![blobs[0], blobs[0]], after, "and one blob behind both");
+        assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM media_blob"));
     }
 }

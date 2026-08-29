@@ -1,11 +1,13 @@
 //! The schema and the writer.
 
-use crate::dict::archive::{for_each_freq_row, for_each_term, read_index};
+use crate::dict::archive::{for_each_freq_row, for_each_media, for_each_term, read_index};
 use crate::dict::frequency::{lookup_freq, merge_freq_row, FreqTable};
-use crate::dict::gloss::{renders_text, GlossDoc};
+use crate::dict::gloss::{renders_text, GlossDoc, Kind, NodeId};
+use crate::dict::media::{self, Intrinsic};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -57,6 +59,37 @@ CREATE TABLE meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
 );
+
+CREATE TABLE media_blob (        -- content-addressed asset bytes
+    blob_id INTEGER PRIMARY KEY,
+    -- SHA-256 of `bytes`, raw. The dedup key, and a database invariant
+    -- rather than a build-time promise: 字通 averages more than four image
+    -- nodes per term row over a few thousand distinct gaiji, so the same
+    -- bytes arrive at many paths and sharing them is load-bearing.
+    hash    BLOB NOT NULL UNIQUE,
+    bytes   BLOB NOT NULL
+);
+
+CREATE TABLE media (             -- one row per referenced (dictionary, path)
+    dict_id INTEGER NOT NULL REFERENCES dict(dict_id),
+    path    TEXT NOT NULL,       -- the image node's own `path`, verbatim
+    blob_id INTEGER NOT NULL REFERENCES media_blob(blob_id),
+    format  TEXT NOT NULL,       -- 'png' | 'jpeg' | 'gif' | 'svg' | 'avif'
+    -- The intrinsic size, in CSS pixels, read out of the container header
+    -- at extraction time. 99 807 census image nodes declare neither `width`
+    -- nor `height`, so without these three columns sizing an image would
+    -- mean decoding it inside the measurement seam. `aspect` is
+    -- `width / height`, carried rather than derived because the common
+    -- `height: 1em` node is sized by multiplying.
+    width   REAL NOT NULL,
+    height  REAL NOT NULL,
+    aspect  REAL NOT NULL,
+    -- WITHOUT ROWID: the primary-key index *is* the table, so a
+    -- (dict_id, path) probe is one B-tree descent with no rowid
+    -- indirection, and a size probe never touches a blob page. The blobs
+    -- live in their own table for exactly that reason.
+    PRIMARY KEY (dict_id, path)
+) WITHOUT ROWID;
 ";
 
 const INDEXES: &str = "
@@ -68,6 +101,52 @@ CREATE INDEX IF NOT EXISTS idx_term_entry_id ON term(entry_id);
 pub struct BuildCounts {
     pub entries: i64,
     pub terms: i64,
+    pub media: MediaCounts,
+}
+
+/// What extracting one corpus's - or one archive's - media produced.
+///
+/// Every field is a diagnostic the acceptance asks for: how many assets the
+/// image nodes named, how many resolved, how much the database grew, and
+/// how many did not resolve. The two failure counts are separate because
+/// they mean different things to a dictionary author: `missing` is an
+/// archive that does not ship what its own nodes reference, `unreadable` is
+/// a file that is there and corrupt.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct MediaCounts {
+    /// Distinct asset paths the kept rows' image nodes referenced.
+    pub referenced: usize,
+    /// Media rows written.
+    pub stored: usize,
+    /// Blobs newly contributed - the count after content deduplication.
+    pub blobs: usize,
+    /// Bytes those new blobs added to the database.
+    pub bytes: u64,
+    /// Referenced, and no usable bytes in the archive.
+    pub missing: usize,
+    /// Present, and with no readable intrinsic size.
+    pub unreadable: usize,
+}
+
+impl MediaCounts {
+    fn add(&mut self, other: MediaCounts) {
+        self.referenced += other.referenced;
+        self.stored += other.stored;
+        self.blobs += other.blobs;
+        self.bytes += other.bytes;
+        self.missing += other.missing;
+        self.unreadable += other.unreadable;
+    }
+
+    /// The one-line diagnostic, in the progress stream's own shape.
+    fn line(&self, what: &str) -> String {
+        let kib = self.bytes.div_ceil(1024);
+        format!(
+            "media     {what}: {} of {} assets in {} blobs, {kib} KiB\
+             ; {} missing, {} unreadable",
+            self.stored, self.referenced, self.blobs, self.missing, self.unreadable,
+        )
+    }
 }
 
 /// json.dumps's separators.
@@ -164,6 +243,7 @@ fn build_into(
 
     let mut entries: i64 = 0;
     let mut term_rows: i64 = 0;
+    let mut media = MediaCounts::default();
     let mut batches = Batches::new();
 
     let tx = conn.transaction()?;
@@ -173,6 +253,7 @@ fn build_into(
         let one = insert_archive(&tx, archive, &slot, &freq_table, &mut batches, on_progress)?;
         entries += one.entries;
         term_rows += one.terms;
+        media.add(one.media);
     }
     batches.flush(&tx)?;
 
@@ -182,7 +263,10 @@ fn build_into(
     tx.commit()?;
     conn.execute_batch("ANALYZE;")?;
 
-    Ok(BuildCounts { entries, terms: term_rows })
+    if media.referenced > 0 {
+        on_progress(&media.line("all dictionaries"));
+    }
+    Ok(BuildCounts { entries, terms: term_rows, media })
 }
 
 /// Merges the freq archives.
@@ -212,6 +296,7 @@ pub(crate) struct Loaded {
     pub(crate) name: String,
     pub(crate) entries: i64,
     pub(crate) terms: i64,
+    pub(crate) media: MediaCounts,
 }
 
 /// Buffers shared by archives.
@@ -219,6 +304,10 @@ pub(crate) struct Batches {
     json_buf: Vec<u8>,
     entries: Vec<(i64, i64, String)>,
     terms: Vec<TermBatchRow>,
+    /// Content hash to `media_blob.blob_id`, across every archive in one
+    /// build, so an asset shared by two dictionaries is stored once and
+    /// costs one `SELECT` the second time instead of one per path.
+    blobs: HashMap<[u8; 32], i64>,
 }
 
 impl Batches {
@@ -227,6 +316,7 @@ impl Batches {
             json_buf: Vec::with_capacity(512),
             entries: Vec::with_capacity(BATCH_ROWS),
             terms: Vec::with_capacity(BATCH_ROWS),
+            blobs: HashMap::new(),
         }
     }
 
@@ -255,6 +345,7 @@ pub(crate) fn insert_archive(
 
     let mut entry_id = slot.first_entry_id - 1;
     let mut term_rows: i64 = 0;
+    let mut assets: BTreeSet<String> = BTreeSet::new();
 
     for_each_term(archive, |t| {
         // Serialise first, then parse the stored text: the record is what a
@@ -268,9 +359,16 @@ pub(crate) fn insert_archive(
         // An image-only or whitespace-only glossary is not an entry. Same
         // rule as before the tree existed; it is what keeps a gaiji-only
         // term row out of the term index.
-        if !renders_text(&GlossDoc::parse(&glossary)) {
+        let doc = GlossDoc::parse(&glossary);
+        if !renders_text(&doc) {
             return Ok(());
         }
+        // Only a kept row's images are collected, and from the parse the
+        // emptiness test already ran: a row that renders no text is not an
+        // entry, so no hover can reach it and its assets are unreachable
+        // too. Walking the tree here also means the build never re-scans
+        // the raw JSON for paths.
+        collect_assets(&doc, &mut assets);
         entry_id += 1;
         if entry_id % 5000 == 0 {
             on_progress(&format!("progress  {entry_id} / ?"));
@@ -318,7 +416,153 @@ pub(crate) fn insert_archive(
         Ok(())
     })?;
 
-    Ok(Loaded { name, entries: entry_id + 1 - slot.first_entry_id, terms: term_rows })
+    let media = insert_media(tx, archive, dict_id, &name, &assets, batches, on_progress)?;
+    Ok(Loaded {
+        name,
+        entries: entry_id + 1 - slot.first_entry_id,
+        terms: term_rows,
+        media,
+    })
+}
+
+/// Every asset path this document's image nodes name.
+///
+/// A linear sweep of the arena rather than a tree walk: `all_nodes` is in
+/// parse order and an image node is a leaf, so there is nothing the tree
+/// shape would add. `Kind::Image` rather than `Tag::Img`, because a
+/// `type: "image"` glossary item is an image with no tag at all.
+fn collect_assets(doc: &GlossDoc, into: &mut BTreeSet<String>) {
+    for (i, node) in doc.all_nodes().iter().enumerate() {
+        if node.kind != Kind::Image {
+            continue;
+        }
+        let path = doc.attr_of(i as NodeId, "path").and_then(|v| doc.scalar_str(v));
+        if let Some(path) = path.filter(|p| !p.is_empty()) {
+            into.insert(path.to_string());
+        }
+    }
+}
+
+/// Extracts one archive's referenced assets into the media store.
+///
+/// The contract a missing asset gets, and the one ticket 12's `alt`-text
+/// ladder is written against: **a media row exists only when the bytes are
+/// in the store and the intrinsic size is known.** An absent path and an
+/// unsizeable file both produce no row and one diagnostic line, and never a
+/// failed build - an archive is third-party bytes, and one corrupt gaiji
+/// must not cost a user their whole rebuild.
+fn insert_media(
+    tx: &rusqlite::Transaction,
+    archive: &Path,
+    dict_id: i64,
+    name: &str,
+    assets: &BTreeSet<String>,
+    batches: &mut Batches,
+    on_progress: &dyn Fn(&str),
+) -> Result<MediaCounts> {
+    let mut counts = MediaCounts { referenced: assets.len(), ..MediaCounts::default() };
+    if assets.is_empty() {
+        return Ok(counts);
+    }
+
+    let mut refused: Vec<String> = Vec::new();
+    let missing = for_each_media(archive, assets, |path, bytes| {
+        let size = match media::probe(bytes) {
+            Ok(size) => size,
+            Err(why) => {
+                counts.unreadable += 1;
+                if refused.len() < DIAGNOSTIC_SAMPLE {
+                    refused.push(format!("{path} ({why})"));
+                }
+                return Ok(());
+            }
+        };
+        let blob_id = blob_id(tx, &mut batches.blobs, bytes, &mut counts)?;
+        insert_media_row(tx, dict_id, path, blob_id, size)?;
+        counts.stored += 1;
+        Ok(())
+    })?;
+    counts.missing = missing.len();
+
+    on_progress(&counts.line(name));
+    for line in refused {
+        on_progress(&format!("media     skipped {line}"));
+    }
+    for path in missing.iter().take(DIAGNOSTIC_SAMPLE) {
+        on_progress(&format!("media     absent from the archive: {path}"));
+    }
+    Ok(counts)
+}
+
+/// How many named offenders a diagnostic lists before it stops.
+///
+/// A dictionary that ships none of its own assets would otherwise print one
+/// line per node, and 字通 has 139 138 of them. The count is always
+/// complete; the names are a sample.
+const DIAGNOSTIC_SAMPLE: usize = 10;
+
+fn insert_media_row(
+    tx: &rusqlite::Transaction,
+    dict_id: i64,
+    path: &str,
+    blob_id: i64,
+    size: Intrinsic,
+) -> Result<()> {
+    tx.prepare_cached(
+        "INSERT INTO media (dict_id, path, blob_id, format, width, height, aspect) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?
+    .execute(params![
+        dict_id,
+        path,
+        blob_id,
+        size.format.as_str(),
+        f64::from(size.width),
+        f64::from(size.height),
+        f64::from(size.aspect),
+    ])
+    .with_context(|| format!("storing media {path} of dictionary {dict_id}"))?;
+    Ok(())
+}
+
+/// The blob holding these bytes, inserting it the first time they are seen.
+///
+/// `INSERT OR IGNORE` and then a read, rather than a read and then an
+/// insert: `edit::add_dictionary` writes into a live database whose blob
+/// table this process did not fill, so an unseen hash can still already
+/// have a row. The in-memory map in front of it is what keeps the whole
+/// build to one statement pair per *distinct* blob.
+fn blob_id(
+    tx: &rusqlite::Transaction,
+    blobs: &mut HashMap<[u8; 32], i64>,
+    bytes: &[u8],
+    counts: &mut MediaCounts,
+) -> Result<i64> {
+    let hash = sha256(bytes);
+    if let Some(&id) = blobs.get(&hash) {
+        return Ok(id);
+    }
+    let inserted = tx
+        .prepare_cached("INSERT OR IGNORE INTO media_blob (hash, bytes) VALUES (?1, ?2)")?
+        .execute(params![&hash[..], bytes])
+        .context("storing an asset's bytes")?;
+    let id: i64 = tx
+        .prepare_cached("SELECT blob_id FROM media_blob WHERE hash = ?1")?
+        .query_row(params![&hash[..]], |r| r.get(0))
+        .context("reading back an asset's blob id")?;
+    if inserted == 1 {
+        counts.blobs += 1;
+        counts.bytes += bytes.len() as u64;
+    }
+    blobs.insert(hash, id);
+    Ok(id)
+}
+
+/// SHA-256 of a slice already in memory.
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize()
 }
 
 /// Flushes buffered entry rows.
@@ -636,7 +880,7 @@ fn civil_from_days(z_in: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dict::gloss::plain_items;
+    use crate::dict::gloss::{plain_items, RoleFilter, Selection};
     use rusqlite::OpenFlags;
 
     struct TempDbGuard(PathBuf);
@@ -730,7 +974,11 @@ mod tests {
         let (conn, _guard) = build_fixture_db("structured_content_also_renders_as_html");
         assert_eq!(
             vec!["<span>to eat</span>".to_string()],
-            crate::dict::gloss::render_html(&stored_doc(&conn, "食べる"))
+            crate::dict::gloss::render_html(
+                &stored_doc(&conn, "食べる"),
+                Selection::Whole,
+                RoleFilter::CARD,
+            )
         );
     }
 
@@ -740,7 +988,10 @@ mod tests {
             build_fixture_db("a_plain_string_glossary_gets_a_matching_html_rendering");
         let doc = stored_doc(&conn, "ねこ");
         assert_eq!(vec!["cat".to_string()], plain_items(&doc));
-        assert_eq!(vec!["cat".to_string()], crate::dict::gloss::render_html(&doc));
+        assert_eq!(
+            vec!["cat".to_string()],
+            crate::dict::gloss::render_html(&doc, Selection::Whole, RoleFilter::CARD)
+        );
     }
 
     #[test]
@@ -1038,5 +1289,175 @@ mod tests {
             chain.contains("readonly"),
             "the ensure needs a writable connection: {chain}"
         );
+    }
+
+    // ---- the media store (ticket 03) ----
+
+    fn media_archive() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
+    }
+
+    /// The media fixture archive built by the real builder, plus the
+    /// progress lines it emitted.
+    fn build_media_db(test_name: &str) -> (Connection, TempDbGuard, BuildCounts, Vec<String>) {
+        let out = out_path(test_name);
+        let guard = TempDbGuard(out.clone());
+        let lines = std::cell::RefCell::new(Vec::new());
+        let counts = build(&[media_archive()], &[], &out, &|line| {
+            lines.borrow_mut().push(line.to_string());
+        })
+        .expect("the media fixture builds");
+        (Connection::open(&out).unwrap(), guard, counts, lines.into_inner())
+    }
+
+    fn media_paths(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT path FROM media ORDER BY path").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    }
+
+    /// Extracting every asset in an archive would store an image
+    /// dictionary's whole glyph set: 30 of 52 structured-content
+    /// dictionaries emit images, and only the paths their nodes name can
+    /// ever be painted.
+    #[test]
+    fn only_the_assets_an_image_node_references_are_extracted() {
+        let (conn, _guard, counts, _lines) = build_media_db("media_only_referenced");
+        assert_eq!(
+            vec![
+                "gaiji/copy.png",
+                "gaiji/five.avif",
+                "gaiji/four.gif",
+                "gaiji/one.png",
+                "gaiji/ratio.svg",
+                "gaiji/three.jpg",
+                "gaiji/two.svg",
+            ],
+            media_paths(&conn),
+        );
+        // `unused.png` is in the archive and named by nothing.
+        assert_eq!(7, counts.media.stored);
+        assert_eq!(9, counts.media.referenced, "seven stored, one absent, one corrupt");
+    }
+
+    /// A term row whose glossary renders no text is not an entry, so no
+    /// hover can reach it - and neither can its images.
+    #[test]
+    fn an_image_only_term_row_contributes_no_media() {
+        let (conn, _guard, ..) = build_media_db("media_image_only_row");
+        assert!(
+            !media_paths(&conn).iter().any(|p| p == "gaiji/dropped.png"),
+            "the archive ships it and only a dropped row references it",
+        );
+    }
+
+    /// 字通 averages more than four image nodes per term row over a few
+    /// thousand distinct gaiji, so sharing bytes across paths is
+    /// load-bearing and not an optimisation.
+    #[test]
+    fn two_identical_assets_at_different_paths_share_one_blob() {
+        let (conn, _guard, counts, _lines) = build_media_db("media_dedup");
+        let blob_of = |path: &str| -> i64 {
+            conn.query_row("SELECT blob_id FROM media WHERE path = ?1", [path], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            blob_of("gaiji/one.png"),
+            blob_of("gaiji/copy.png"),
+            "identical bytes at two paths are one blob",
+        );
+        let blobs: i64 =
+            conn.query_row("SELECT COUNT(*) FROM media_blob", [], |r| r.get(0)).unwrap();
+        assert_eq!(6, blobs, "seven media rows over six distinct assets");
+        assert_eq!(6, counts.media.blobs);
+    }
+
+    /// The load-bearing column set. 99 807 census image nodes declare
+    /// neither `width` nor `height`, so a wrong number here is a
+    /// mis-measured line rather than a mis-drawn picture.
+    #[test]
+    fn the_intrinsic_size_of_every_supported_format_is_recorded() {
+        let (conn, _guard, ..) = build_media_db("media_intrinsics");
+        let recorded = |path: &str| -> (String, f64, f64, f64) {
+            conn.query_row(
+                "SELECT format, width, height, aspect FROM media WHERE path = ?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+        };
+        for (path, format, w, h) in [
+            ("gaiji/one.png", "png", 12.0, 7.0),
+            ("gaiji/three.jpg", "jpeg", 23.0, 11.0),
+            // The logical screen of a two-frame animation, not its 4x3
+            // frames: that is the canvas a browser lays out.
+            ("gaiji/four.gif", "gif", 9.0, 5.0),
+            ("gaiji/two.svg", "svg", 64.0, 32.0),
+            // No width or height on the root element: the viewBox is the
+            // size, which is the common shape for a gaiji SVG.
+            ("gaiji/ratio.svg", "svg", 100.0, 40.0),
+            // The one format whose size lives in an item property rather
+            // than a header, and the one this build cannot rasterize -
+            // which is exactly why the size has to be recorded here.
+            ("gaiji/five.avif", "avif", 480.0, 120.0),
+        ] {
+            let (got_format, got_w, got_h, got_aspect) = recorded(path);
+            assert_eq!(format, got_format, "{path}");
+            assert_eq!((w, h), (got_w, got_h), "{path}");
+            // In `f32`, because that is the type the row is written from
+            // and read back into - the popup's geometry is `f32`
+            // throughout, and `9 / 5` is not exact in either width.
+            assert_eq!(
+                w as f32 / h as f32,
+                got_aspect as f32,
+                "{path}: aspect is a column, not a derivation",
+            );
+        }
+    }
+
+    /// The contract ticket 12's `alt`-text ladder is written against: a
+    /// media row exists only when the bytes are stored and the size is
+    /// known, so a lookup that answers nothing means "fall back".
+    #[test]
+    fn a_missing_or_unreadable_asset_is_counted_and_never_fails_the_build() {
+        let (conn, _guard, counts, lines) = build_media_db("media_absent");
+        let paths = media_paths(&conn);
+        assert!(!paths.iter().any(|p| p == "gaiji/missing.png"), "absent from the archive");
+        assert!(!paths.iter().any(|p| p == "gaiji/broken.png"), "present and unsizeable");
+        assert_eq!(1, counts.media.missing);
+        assert_eq!(1, counts.media.unreadable);
+        // And the entry that referenced them is still an entry, with its
+        // own text intact.
+        assert_eq!(vec!["fish".to_string()], plain_items(&stored_doc(&conn, "さかな")));
+
+        // Each one is named, so a dictionary author can act on it.
+        let joined = lines.join("\n");
+        assert!(joined.contains("gaiji/broken.png"), "the corrupt one is named: {joined}");
+        assert!(joined.contains("gaiji/missing.png"), "the absent one is named: {joined}");
+    }
+
+    #[test]
+    fn the_media_diagnostic_names_the_dictionary_and_its_counts() {
+        let (.., lines) = build_media_db("media_diagnostic");
+        let per_dict = lines.iter().find(|l| l.contains("FixtureMedia"));
+        let per_dict = per_dict.unwrap_or_else(|| panic!("no per-dictionary line: {lines:?}"));
+        assert!(
+            per_dict.contains("7 of 9 assets in 6 blobs"),
+            "the line has to carry the numbers: {per_dict}",
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("all dictionaries")),
+            "and the corpus total: {lines:?}",
+        );
+    }
+
+    /// An archive with no image nodes must cost nothing: no second pass
+    /// over the zip, no rows, and no diagnostic noise.
+    #[test]
+    fn a_dictionary_with_no_image_nodes_writes_no_media_and_says_nothing() {
+        let (conn, _guard) = build_fixture_db("media_none");
+        let rows: i64 =
+            conn.query_row("SELECT COUNT(*) FROM media", [], |r| r.get(0)).unwrap();
+        assert_eq!(0, rows);
     }
 }

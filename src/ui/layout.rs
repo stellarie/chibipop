@@ -46,9 +46,15 @@ pub type Rgb = (u8, u8, u8);
 
 // ---- the measurement seam ----
 
-/// One run to measure.
-#[derive(Debug, Clone, Copy)]
-pub struct MeasureRun<'a> {
+/// One run of text with one style.
+///
+/// The finest unit the seam addresses
+/// (ADR-0013). Colour rides along for
+/// the bin's paint walk, which shapes
+/// the same spans; no measurer reads
+/// it and no geometry depends on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StyledSpan<'a> {
     pub text: &'a str,
     /// Family name, from the theme.
     pub font: &'a str,
@@ -56,6 +62,21 @@ pub struct MeasureRun<'a> {
     /// DirectWrite weight, 100-900.
     pub weight: u16,
     pub italic: bool,
+    pub color: Rgb,
+}
+
+/// One run to measure.
+///
+/// Its spans wrap as one paragraph, so
+/// a span boundary is not a line
+/// boundary. That is the whole of what
+/// ADR-0013 widened: before it, bold
+/// text and normal text could not
+/// share a wrapped line.
+#[derive(Debug, Clone, Copy)]
+pub struct MeasureRun<'a> {
+    /// In reading order.
+    pub spans: &'a [StyledSpan<'a>],
     /// Wrap width. A measurer that
     /// cannot wrap at zero clamps it
     /// itself; the scene reports the
@@ -64,6 +85,12 @@ pub struct MeasureRun<'a> {
 }
 
 /// What one wrapped run measures.
+///
+/// The engine's own aggregate for the
+/// whole run, which is what the block
+/// walk stacks and what the geometry
+/// goldens pin. [`Measured`] carries
+/// the detail beside it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Metrics {
     /// Widest line's width.
@@ -72,6 +99,92 @@ pub struct Metrics {
     pub h: f32,
     /// Wrapped line count.
     pub lines: u32,
+}
+
+/// One wrapped line's geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LineBox {
+    /// Top edge, run-relative.
+    pub y: f32,
+    /// Inked width.
+    pub w: f32,
+    /// Top edge to the next line's.
+    ///
+    /// As tall as the tallest span on
+    /// it, which is why mixed styling
+    /// ended the old `lines × size ×
+    /// LINE_HEIGHT` arithmetic.
+    pub h: f32,
+    /// Baseline, down from `y`.
+    ///
+    /// The one thing `{ w, h, lines }`
+    /// could never say. A superscript,
+    /// a subscript and a gaiji image at
+    /// text size are all positions
+    /// relative to this, so without it
+    /// there is no arithmetic to place
+    /// them, only a guess (ADR-0013).
+    pub baseline: f32,
+}
+
+/// One span's piece of one line.
+///
+/// A span that wraps gets one of these
+/// per line it touches, in line order
+/// then span order.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SpanBox {
+    /// Index into the run's spans.
+    pub span: u32,
+    /// Index into `Measured::lines`.
+    pub line: u32,
+    /// Leading edge, run-relative,
+    /// like the line it sits on.
+    pub x: f32,
+    /// Advance across the line.
+    pub w: f32,
+    /// The line advance this span asks
+    /// for on its own.
+    ///
+    /// Its line's `h` is at least this
+    /// much: a line is as tall as its
+    /// tallest span, so a half-size
+    /// superscript never shrinks the
+    /// line it rides on, and this is
+    /// what says how much shorter than
+    /// the line the span itself is.
+    pub h: f32,
+}
+
+/// What one measured run is.
+///
+/// Handed in and refilled rather than
+/// returned: the walk measures every
+/// element in a panel and the inline
+/// pass measures a paragraph per
+/// block, so one buffer serves them
+/// all instead of two allocations per
+/// element per frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Measured {
+    /// The whole run's box.
+    pub metrics: Metrics,
+    /// Each wrapped line, top down.
+    pub lines: Vec<LineBox>,
+    /// Each span's piece of each line.
+    pub spans: Vec<SpanBox>,
+}
+
+impl Measured {
+    /// Empties it for the next run.
+    ///
+    /// Keeps the capacity: that is the
+    /// point of handing it in.
+    pub fn clear(&mut self) {
+        self.metrics = Metrics::default();
+        self.lines.clear();
+        self.spans.clear();
+    }
 }
 
 /// One caret's box inside a run.
@@ -115,24 +228,32 @@ impl std::error::Error for MeasureError {}
 /// Text measurement, and nothing else.
 ///
 /// Measure-only by construction: wrap
-/// a string at a width, report line
-/// metrics. It never paints, and the
-/// scene it feeds carries positioned
-/// runs as plain data, so layout is
-/// testable against fixed metrics
-/// (ADR-0004).
+/// styled spans at a width, report
+/// line and span geometry. It never
+/// paints, and the scene it feeds
+/// carries positioned runs as plain
+/// data, so layout is testable against
+/// fixed metrics (ADR-0004, amended by
+/// ADR-0013).
 pub trait TextMeasure {
     /// Wrap `run` and measure it.
-    fn measure(&mut self, run: MeasureRun<'_>) -> Result<Metrics, MeasureError>;
+    ///
+    /// `out` is emptied first, so one
+    /// buffer measures a whole panel.
+    fn measure(
+        &mut self,
+        run: MeasureRun<'_>,
+        out: &mut Measured,
+    ) -> Result<(), MeasureError>;
 
     /// Caret boxes inside a run.
     ///
-    /// `at` are UTF-16 offsets into
-    /// `run.text`; one box per offset
-    /// is pushed to `out`, in order.
-    /// Per-character hit targets need
-    /// shaped geometry, which only the
-    /// measurer has.
+    /// `at` are UTF-16 offsets into the
+    /// run's spans end to end; one box
+    /// per offset is pushed to `out`,
+    /// in order. Per-character hit
+    /// targets need shaped geometry,
+    /// which only the measurer has.
     fn caret_boxes(
         &mut self,
         run: MeasureRun<'_>,
@@ -437,6 +558,7 @@ pub fn scene(
     let mut out = Vec::with_capacity(elems.len());
     let mut hits = Vec::new();
     let mut probes = Vec::new();
+    let mut measured = Measured::default();
 
     for elem in &elems {
         let advance = match elem {
@@ -466,7 +588,7 @@ pub fn scene(
                 // the run is measured
                 // pre-alignment, so x comes
                 // from the width.
-                let met = m.measure(run(font, line, content_w))?;
+                let met = measure_line(m, font, line, content_w, &mut measured)?;
                 out.push(SceneElem {
                     kind: ElemKind::Corner,
                     text: line.text.clone(),
@@ -493,7 +615,7 @@ pub fn scene(
             Elem::Text(line) => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                let met = m.measure(run(font, line, avail_w))?;
+                let met = measure_line(m, font, line, avail_w, &mut measured)?;
                 let h = met.h;
                 y += line.top_gap;
                 out.push(text_elem(ElemKind::Text, line, &met, origin, y, avail_w));
@@ -502,7 +624,7 @@ pub fn scene(
             Elem::Collapsed(idx, line) => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                let met = m.measure(run(font, line, avail_w))?;
+                let met = measure_line(m, font, line, avail_w, &mut measured)?;
                 let h = met.h;
                 y += line.top_gap;
                 out.push(text_elem(ElemKind::Collapsed, line, &met, origin, y, avail_w));
@@ -518,7 +640,7 @@ pub fn scene(
             Elem::Headword { headword, prefix_u16, line } => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                let met = m.measure(run(font, line, avail_w))?;
+                let met = measure_line(m, font, line, avail_w, &mut measured)?;
                 let h = met.h;
                 y += line.top_gap;
                 out.push(text_elem(ElemKind::Headword, line, &met, origin, y, avail_w));
@@ -535,7 +657,12 @@ pub fn scene(
                 }
                 if !at.is_empty() {
                     probes.clear();
-                    m.caret_boxes(run(font, line, avail_w), &at, &mut probes)?;
+                    let spans = [span(font, line)];
+                    m.caret_boxes(
+                        MeasureRun { spans: &spans, max_w: avail_w },
+                        &at,
+                        &mut probes,
+                    )?;
                     for (ch, b) in chars.iter().zip(probes.iter()) {
                         hits.push(HitTarget {
                             x: Some(origin + b.x),
@@ -549,7 +676,7 @@ pub fn scene(
                 h
             }
             Elem::BackButton(line) => {
-                let met = m.measure(run(font, line, content_w))?;
+                let met = measure_line(m, font, line, content_w, &mut measured)?;
                 let h = met.h;
                 y += line.top_gap;
                 out.push(text_elem(ElemKind::BackButton, line, &met, origin, y, content_w));
@@ -569,7 +696,7 @@ pub fn scene(
     let used_h = y;
 
     let side = if has_side {
-        Some(side_panel(&entries, theme, origin, content_w, m)?)
+        Some(side_panel(&entries, theme, origin, content_w, m, &mut measured)?)
     } else {
         None
     };
@@ -590,14 +717,19 @@ pub fn scene(
     {
         Some((label, color)) => {
             let w = panel_w.unwrap_or(req.max_w);
-            let met = m.measure(MeasureRun {
-                text: &label,
-                font,
-                size: theme.collapsed_size,
-                weight: theme.collapsed_weight,
-                italic: theme.collapsed_italic,
-                max_w: w,
-            })?;
+            let met = measure_text(
+                m,
+                StyledSpan {
+                    text: &label,
+                    font,
+                    size: theme.collapsed_size,
+                    weight: theme.collapsed_weight,
+                    italic: theme.collapsed_italic,
+                    color,
+                },
+                w,
+                &mut measured,
+            )?;
             Some(AnkiSlot {
                 label,
                 color,
@@ -647,14 +779,69 @@ fn text_elem(
     }
 }
 
-fn run<'a>(font: &'a str, line: &'a Line, max_w: f32) -> MeasureRun<'a> {
-    MeasureRun {
+/// The one span a `Line` is.
+///
+/// Every element core builds today
+/// carries one style, so every run it
+/// measures holds one span; ticket 07's
+/// inline pass is what will hand the
+/// seam more than one.
+fn span<'a>(font: &'a str, line: &'a Line) -> StyledSpan<'a> {
+    StyledSpan {
         text: &line.text,
         font,
         size: line.size,
         weight: line.weight,
         italic: line.italic,
-        max_w,
+        color: line.color,
+    }
+}
+
+/// Measures one styled line's box.
+fn measure_line(
+    m: &mut dyn TextMeasure,
+    font: &str,
+    line: &Line,
+    max_w: f32,
+    scratch: &mut Measured,
+) -> Result<Metrics, MeasureError> {
+    measure_text(m, span(font, line), max_w, scratch)
+}
+
+/// Measures one styled span's box.
+///
+/// The block walk stacks whole
+/// elements and never looks inside a
+/// line, so it keeps the aggregate and
+/// drops the per-line and per-span
+/// detail. `scratch` is what keeps
+/// dropping it from costing an
+/// allocation per element per frame.
+fn measure_text(
+    m: &mut dyn TextMeasure,
+    span: StyledSpan<'_>,
+    max_w: f32,
+    scratch: &mut Measured,
+) -> Result<Metrics, MeasureError> {
+    let spans = [span];
+    m.measure(MeasureRun { spans: &spans, max_w }, scratch)?;
+    Ok(scratch.metrics)
+}
+
+/// One "See also" row's span.
+///
+/// One role for the whole column, the
+/// collapsed one, so its rows differ
+/// only in text and colour - and no
+/// geometry rides on colour.
+fn side_span<'a>(theme: &'a Theme, text: &'a str, color: Rgb) -> StyledSpan<'a> {
+    StyledSpan {
+        text,
+        font: theme.font_name.as_str(),
+        size: theme.collapsed_size,
+        weight: theme.collapsed_weight,
+        italic: theme.collapsed_italic,
+        color,
     }
 }
 
@@ -665,20 +852,10 @@ fn side_panel(
     origin: f32,
     content_w: f32,
     m: &mut dyn TextMeasure,
+    scratch: &mut Measured,
 ) -> Result<SidePanel, MeasureError> {
-    let font = theme.font_name.as_str();
-    let size = theme.collapsed_size;
-    let weight = theme.collapsed_weight;
-    let italic = theme.collapsed_italic;
-    let heading = MeasureRun {
-        text: SIDE_HEADING,
-        font,
-        size,
-        weight,
-        italic,
-        max_w: SIDE_PANEL_W,
-    };
-    let head = m.measure(heading)?;
+    let heading = side_span(theme, SIDE_HEADING, theme.dimmed_text);
+    let head = measure_text(m, heading, SIDE_PANEL_W, scratch)?;
 
     let mut rows = Vec::with_capacity(entries.len() + 1);
     rows.push(SideRow {
@@ -691,14 +868,8 @@ fn side_panel(
     let mut y = head.h + LINE_GAP;
 
     for entry in entries {
-        let met = m.measure(MeasureRun {
-            text: &entry.text,
-            font,
-            size,
-            weight,
-            italic,
-            max_w: SIDE_PANEL_W,
-        })?;
+        let met =
+            measure_text(m, side_span(theme, &entry.text, entry.color), SIDE_PANEL_W, scratch)?;
         rows.push(SideRow {
             idx: Some(entry.idx),
             text: entry.text.clone(),
@@ -888,9 +1059,30 @@ fn build_elements(
                 weight: theme.dict_label_weight,
                 italic: theme.dict_label_italic,
             }));
-            if !block.glosses.is_empty() {
+            // Yomitan's `<ol>` holds one item per matched term-bank row, and
+            // Hoshi Reader emits the list at all only when a dictionary
+            // contributed more than one row - so one row is unnumbered. Never
+            // the Senses inside a row: 大辞林 draws its own ①②③ in the tree,
+            // and an outer number would double-number it.
+            let numbered = block.entries.len() > 1;
+            for (i, entry) in block.entries.iter().enumerate() {
+                // Empty means "same set as the row above" (see `GlossEntry`).
+                if !entry.tags.is_empty() {
+                    out.push(Elem::Text(Line {
+                        text: entry.tags.join(" · "),
+                        color: theme.dimmed_text,
+                        size: theme.dimmed_size,
+                        top_gap: LINE_GAP,
+                        weight: theme.dimmed_weight,
+                        italic: theme.dimmed_italic,
+                    }));
+                }
+                if entry.glosses.is_empty() {
+                    continue;
+                }
+                let body = entry.glosses.join("; ");
                 out.push(Elem::Text(Line {
-                    text: block.glosses.join("; "),
+                    text: if numbered { format!("{}. {body}", i + 1) } else { body },
                     color: theme.body_text,
                     size: theme.body_size,
                     top_gap: LINE_GAP,

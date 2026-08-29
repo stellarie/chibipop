@@ -458,7 +458,7 @@ fn a_malformed_node_does_not_panic() {
         // over the result is what proves the tree is walkable afterwards.
         let _ = plain_items(&d);
         let _ = pos_labels(&d);
-        let _ = render_html(&d);
+        let _ = render_html(&d, Selection::Whole, RoleFilter::CARD);
         assert_eq!(0, d.degraded_items(), "valid JSON never needs the fallback: {case}");
     }
 }
@@ -573,7 +573,7 @@ fn an_empty_document_is_empty() {
     assert!(d.is_empty());
     assert!(plain_items(&d).is_empty());
     assert!(pos_labels(&d).is_empty());
-    assert!(render_html(&d).is_empty());
+    assert!(render_html(&d, Selection::Whole, RoleFilter::CARD).is_empty());
     assert_eq!(0, d.footprint());
 }
 
