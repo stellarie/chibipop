@@ -1513,3 +1513,91 @@ Item **35**, raised the day before against this same function, is the check's ot
 — the missing reverse direction, `!claimed && got`. That item's code quote and line
 citation were not re-verified against this fix and may now be stale; item 35 itself
 stays open, per this plan.
+
+---
+
+## 37. 55% of a hover is SQLite probes that find nothing
+
+Measured, not suspected: [docs/research/lookup-cost.md](research/lookup-cost.md).
+
+A `LookupEngine::run` over a 25-character OCR line issues **139** point queries at p50
+(204 at p95, 291 at max), and **131 of them miss**. Each miss costs 4.2-5.1 µs, almost
+all of it fixed per-call SQLite overhead - `prepare_cached` + bind + step - with under
+0.8 µs of Rust on top. It does not grow with the library: a miss costs 4.22 µs against
+435 k entries and 4.30 µs against 2.6 M.
+
+That is **553.5 µs of a 1 011.7 µs median hover on a 12-dictionary library (54.7%)**,
+and 537.0 of 825.5 µs (65.1%) on a single-dictionary one.
+
+A bloom filter over every distinct `term.surface` was built for real and probed with
+the 37 855 misses recorded from the engine itself:
+
+| | library | live |
+|---|---:|---:|
+| filter size, 10 bits/key, k=7 | 2.1 MB | 1.0 MB |
+| build at startup | 0.2 s | <0.1 s |
+| probe | 0.053 µs | 0.053 µs |
+| false positives | 1.39% | 0.32% |
+| **saved per 25-char hover** | **652.5 µs (54%)** | **525.2 µs (64%)** |
+
+Build it at daemon start and never persist it; 0.2 s is cheaper than invalidating it.
+Rebuild whenever the library changes. Use xxHash rather than the harness's FNV-1a,
+which is faster on short keys and would lower both the probe cost and the
+false-positive rate.
+
+The saving scales with input length because misses do: 131 per 25-char line, 34 per
+8-char line, 4 for a bare headword. On a bare headword this is worth ~20 µs and is not
+worth doing. It earns its keep on running text, which is what OCR hands the engine.
+
+Prior art: `Manhhao/hoshidicts` keeps exactly this - a `bloom.filter` consulted before
+its `hash.table`, both `mmap`'d (`src/query.cpp:46-61,120-151`). Its win is not faster
+glossary decoding; it is never making the call.
+
+---
+
+## 38. `terms_for` spends more time allocating rows than SQLite spends producing them
+
+Measured: [docs/research/lookup-cost.md](research/lookup-cost.md).
+
+For 「こう」, which the 12-dictionary library answers with 862 rows:
+
+| stage | µs | share of `terms_for` |
+|---|---:|---:|
+| SQLite: index seek + 862 steps, no column decoded | 161.1 | 22% |
+| + every column decoded, borrowed `ValueRef`, zero copy | 234.3 | 32% |
+| + mapped into `Vec<TermRow>`, what `terms_for` returns | 734.7 | 100% |
+| **row-mapping allocation alone** | **500.2** | **68%** |
+
+68% of the call is three heap allocations per row. On the worst-case headword set it is
+185 µs p50 (53%); on a median frequency headword it is 5.6 µs (28% of `terms_for`,
+0.6% of a hover), so this is a tail fix, not a median one. The grouping that follows in
+`engine.rs` clones `written` and `reading` a second time, worth up to a further 47 µs
+p50 on that set.
+
+On the worst hover measured - 「ていただく・盗み見る・盗み見する・盗視する・目を通」,
+185 queries, 65 002 term rows - `terms_for` is 38.6 ms and grouping plus sorting
+11.6 ms, together 98% of a **51.3 ms** hover. Three frames, on one real input.
+
+Shape of the fix: hand the ranker borrowed `&str` out of SQLite's page, or one arena
+per lookup, and only materialise owned strings for the `MAX_RESULTS` survivors -
+hoshidicts's `materialize()` pattern (`src/query.cpp:492-496`), which defers
+decompression until after ranking. **[MODELLED]** ceiling is the measured
+`mapped − borrowed` delta, because it cannot touch the step or the column decode.
+
+---
+
+## 39. Deconjugation is 23% of a hover and never touches the database
+
+Measured: [docs/research/lookup-cost.md](research/lookup-cost.md). The prefix loop -
+25 prefixes x 104 rules - costs **228.5 µs at p50** on a 12-dictionary library (22.6%)
+and 224.1 µs (27.1%) on a single-dictionary one. It is identical on both, because it is
+pure CPU with no database involved, and it is larger than everything the dictionary
+rendering work touches.
+
+It is also the source of the 131 misses in item 37: most of what it produces does not
+exist in any dictionary. The two items compose - a bloom filter rejects the products
+cheaply, memoisation stops producing them twice - and neither subsumes the other.
+
+Not investigated: whether the same prefix set is re-deconjugated across consecutive
+hovers on the same OCR line, which is the case a cache would collapse. Measure that
+before building anything.
