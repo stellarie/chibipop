@@ -623,7 +623,11 @@ fn print_hits(hits: &[chibipop::lookup::model::Hit]) {
             println!("     via: {}", h.process.join(" -> "));
         }
         for sense in &h.entry.senses {
-            println!("     {}", sense.glosses.join("; "));
+            // One row per sense. A gloss carries the dictionary's own line
+            // breaks now, and a listing row cannot hold one, so they fold
+            // into the same inline separator the vec already uses.
+            let lines: Vec<&str> = sense.glosses.iter().flat_map(|g| g.split('\n')).collect();
+            println!("     {}", lines.join("; "));
         }
     }
 }

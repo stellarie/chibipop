@@ -1,5 +1,6 @@
 //! What the popup shows.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::geom::PhysRect;
@@ -176,6 +177,11 @@ fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Car
 }
 
 /// Card back to a one-liner.
+///
+/// A gloss now carries the dictionary's own line breaks, and a collapsed
+/// row is one line by construction, so those breaks fold back into the
+/// inline separator the panel still uses between glosses. Folding before
+/// truncating is deliberate: the cap counts the characters a reader sees.
 pub fn collapsed_from_card(card: &Card, summary_chars: usize) -> CollapsedRow {
     let first_gloss = card
         .blocks
@@ -186,7 +192,7 @@ pub fn collapsed_from_card(card: &Card, summary_chars: usize) -> CollapsedRow {
     CollapsedRow {
         written: card.written.clone(),
         reading: card.reading.clone(),
-        summary: truncate_chars(first_gloss, summary_chars),
+        summary: truncate_chars(&one_line(first_gloss), summary_chars),
     }
 }
 
@@ -264,6 +270,16 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         format!("{head}…")
     } else {
         head
+    }
+}
+
+/// A hard break folded into the inline separator, borrowed when there is
+/// nothing to fold.
+fn one_line(s: &str) -> Cow<'_, str> {
+    if s.contains('\n') {
+        Cow::Owned(s.split('\n').collect::<Vec<_>>().join("; "))
+    } else {
+        Cow::Borrowed(s)
     }
 }
 
@@ -574,6 +590,48 @@ mod tests {
         let card = bare_card(1);
         let row = collapsed_from_card(&card, 40);
         assert_eq!("", row.summary);
+    }
+
+    /// A gloss carries the dictionary's line breaks now; a collapsed row
+    /// is one line, so the row must not grow a second one.
+    #[test]
+    fn collapsed_from_card_folds_a_multiline_gloss_onto_one_line() {
+        let card = Card {
+            written: Some("走る".into()),
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![GlossBlock {
+                dict_name: "D".into(),
+                glosses: vec!["to run\nto flow".into()],
+                glosses_html: vec![],
+            }],
+            match_len: 1,
+        };
+        let row = collapsed_from_card(&card, 40);
+        assert_eq!("to run; to flow", row.summary);
+    }
+
+    /// The cap counts what a reader sees, so folding happens first: a
+    /// truncation that ran before the fold would cut at 40 characters of
+    /// the raw string and leave a stray break behind.
+    #[test]
+    fn a_folded_summary_is_truncated_after_folding() {
+        let card = Card {
+            written: None,
+            reading: None,
+            pos: vec![],
+            freq: None,
+            blocks: vec![GlossBlock {
+                dict_name: "D".into(),
+                glosses: vec![format!("{}\n{}", "あ".repeat(30), "い".repeat(30))],
+                glosses_html: vec![],
+            }],
+            match_len: 1,
+        };
+        let row = collapsed_from_card(&card, 40);
+        assert!(!row.summary.contains('\n'));
+        assert_eq!(41, row.summary.chars().count());
     }
 
     #[test]

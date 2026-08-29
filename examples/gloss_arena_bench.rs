@@ -2236,7 +2236,7 @@ fn main() -> Result<()> {
 
     let mut residual = 0i64;
     for (i, (_, payloads)) in slices.iter().enumerate() {
-        for rep in 0..REPS {
+        for (rep, sink) in series.iter_mut().enumerate() {
             COUNT_ON.store(true, Relaxed);
             alloc_reset();
             let (built_stat, nodes) = match rep {
@@ -2279,12 +2279,11 @@ fn main() -> Result<()> {
             let after = alloc_snapshot();
             COUNT_ON.store(false, Relaxed);
             residual = residual.max(after.live);
-            series[rep].allocs.push(built_stat.allocs as f64);
-            series[rep].alloc_bytes.push(built_stat.alloc_bytes as f64);
-            series[rep].retained.push(built_stat.live as f64);
-            series[rep].peak.push(built_stat.peak as f64);
-            series[rep]
-                .blocks
+            sink.allocs.push(built_stat.allocs as f64);
+            sink.alloc_bytes.push(built_stat.alloc_bytes as f64);
+            sink.retained.push(built_stat.live as f64);
+            sink.peak.push(built_stat.peak as f64);
+            sink.blocks
                 .push((built_stat.allocs - built_stat.frees) as f64);
             // Internal consistency of the allocator's own books.
             assert_eq!(

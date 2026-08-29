@@ -97,6 +97,10 @@ one `IDWriteTextLayout` per line per walk) — and both backends absorb it in th
 caches (`FormatCache`; cosmic-text's `FontSystem`). Rejected: an opaque shaped-layout
 handle in the scene (infects core with generics) and a metrics-plus-cache-key scheme (an
 eviction policy in both bins, and stale keys paint text that does not match the geometry).
+**Amended by ADR-0013**: it stays measure-only but stops being one string — an ordered
+list of styled spans plus a wrap width in, per-line and per-span geometry plus baseline
+out, because `verticalAlign` and inline images have nothing to align against without a
+baseline. Both rejections above stand, and both bins still convert together.
 
 **Both bins convert in the same change**, guarded by golden measurement tests: capture
 measured scenes for fixture `Presentation`s from the pre-refactor build, assert identical

@@ -14,6 +14,22 @@ const DROP_CONTENT: [&str; 6] = [
     "example-sentence-b",
 ];
 
+/// Tags that break a line, from the schema's own block/inline division.
+/// Structured content has no `display` property, so the mapping is fixed
+/// and needs no cascade. Only `li` used to be marked, so every other
+/// block fell through to plain concatenation - which is what glued "to
+/// run" and "to flow" into `to runto flow`.
+///
+/// `td`, `th`, `thead` and `tbody` are in neither table on purpose: a
+/// cell is a grid problem rather than a line-break one, and the `tr`
+/// around it already breaks the row.
+const BLOCK_TAGS: [&str; 8] = ["div", "li", "ol", "ul", "table", "tr", "details", "summary"];
+
+/// Tags that never break a line. The only thing this decides here is
+/// whether an array of plain strings under them becomes lines - see
+/// `render_array`.
+const INLINE_TAGS: [&str; 6] = ["span", "a", "ruby", "rt", "rp", "img"];
+
 /// Plain-text glosses.
 pub fn flatten_glossary(glossary: &Value) -> Vec<String> {
     let mut out = Vec::new();
@@ -27,7 +43,7 @@ pub fn flatten_glossary(glossary: &Value) -> Vec<String> {
                     Some("text") => tidy(item.get("text").and_then(Value::as_str).unwrap_or("")),
                     Some("structured-content") => tidy(&content_of(item)),
                     Some("image") => String::new(),
-                    _ => tidy(&render(item)),
+                    _ => tidy(&render(item, true)),
                 }
             }
             _ => String::new(),
@@ -58,11 +74,15 @@ fn content_marker(node: &Value) -> Option<&Value> {
 }
 
 /// One node to plain text.
-fn render(node: &Value) -> String {
+///
+/// `block_ctx` is false only under an inline tag, where the schema admits
+/// no line break: Yomitan appends every child of an inline node into the
+/// one box. It decides nothing else about the walk.
+fn render(node: &Value, block_ctx: bool) -> String {
     match node {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
-        Value::Array(items) => items.iter().map(render).collect(),
+        Value::Array(items) => render_array(items, block_ctx),
         Value::Object(_) => {
             let present = content_marker(node);
             let marker = present.and_then(Value::as_str);
@@ -76,7 +96,7 @@ fn render(node: &Value) -> String {
             if tag == Some("br") {
                 return "\n".to_string();
             }
-            if tag == Some("li") || present.is_some() {
+            if tag.is_some_and(|t| BLOCK_TAGS.contains(&t)) || present.is_some() {
                 let mut marked = String::from(BLOCK_MARK);
                 marked.push_str(&content_of(node));
                 return marked;
@@ -87,9 +107,36 @@ fn render(node: &Value) -> String {
     }
 }
 
+/// A `content` array.
+///
+/// Yomitan concatenates a node's children, with one exception: a glossary
+/// array of plain strings is a list, one line per string - each gets its
+/// own `<li>` in `_createTermDefinitionEntry`. An array mixing strings
+/// with nodes is prose broken up by its own inline markup ("see also",
+/// then a link, then more text), so only an array that is *entirely*
+/// strings, and holds more than one, becomes lines.
+fn render_array(items: &[Value], block_ctx: bool) -> String {
+    if block_ctx && items.len() > 1 && items.iter().all(Value::is_string) {
+        let mut out = String::with_capacity(items.len() * BLOCK_MARK.len());
+        for item in items {
+            out.push_str(BLOCK_MARK);
+            out.push_str(item.as_str().unwrap_or_default());
+        }
+        return out;
+    }
+    items.iter().map(|item| render(item, block_ctx)).collect()
+}
+
 /// A node's content field.
+///
+/// An inline tag's children cannot break a line. Everything else is a
+/// block context: a block tag, a table cell, a tag this walk does not
+/// know, and the `structured-content` item itself, which Yomitan drops
+/// into a block `.gloss-content`.
 fn content_of(node: &Value) -> String {
-    node.get("content").map_or_else(String::new, render)
+    let inline =
+        node.get("tag").and_then(Value::as_str).is_some_and(|t| INLINE_TAGS.contains(&t));
+    node.get("content").map_or_else(String::new, |c| render(c, !inline))
 }
 
 /// POS labels under one node.
@@ -281,13 +328,18 @@ fn escape_attr(s: &str) -> String {
 }
 
 /// Cleans one rendered string.
+///
+/// Every block mark becomes a line break, and an empty part is dropped so
+/// that nested blocks give one line per innermost block instead of a run
+/// of blank ones. Both platform text engines break hard on `\n`, so a
+/// break made here reaches the panel.
 fn tidy(text: &str) -> String {
     let parts: Vec<&str> = text
         .split(BLOCK_MARK)
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .collect();
-    let collapsed = collapse_spaces(&parts.join("; "));
+    let collapsed = collapse_spaces(&parts.join("\n"));
     collapsed
         .split('\n')
         .map(str::trim)
@@ -347,21 +399,21 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_marked_blocks_are_separated_not_fused() {
+    fn adjacent_marked_blocks_are_separated_by_a_line_break() {
         let g = json!([{"type": "structured-content", "content": [
             {"tag": "span", "data": {"content": "sense"}, "content": "one"},
             {"tag": "span", "data": {"content": "sense"}, "content": "two"}
         ]}]);
-        assert_eq!(vec!["one; two".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["one\ntwo".to_string()], flatten_glossary(&g));
     }
 
     #[test]
-    fn a_non_string_marker_still_separates_blocks() {
+    fn a_non_string_marker_still_breaks_the_line() {
         let g = json!([{"type": "structured-content", "content": [
             {"tag": "span", "data": {"content": 5}, "content": "one"},
             {"tag": "span", "data": {"content": true}, "content": "two"}
         ]}]);
-        assert_eq!(vec!["one; two".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["one\ntwo".to_string()], flatten_glossary(&g));
     }
 
     #[test]
@@ -480,13 +532,106 @@ mod tests {
     }
 
     #[test]
-    fn list_items_get_a_separator() {
+    fn a_list_of_three_items_renders_as_three_lines() {
         let g = json!([{"type": "structured-content", "content": {
             "tag": "ul", "content": [
                 {"tag": "li", "content": "first"},
-                {"tag": "li", "content": "second"}
+                {"tag": "li", "content": "second"},
+                {"tag": "li", "content": "third"}
             ]}}]);
-        assert_eq!(vec!["first; second".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["first\nsecond\nthird".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn two_sibling_divs_render_on_two_lines() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "div", "content": "to run"},
+            {"tag": "div", "content": "to flow"}
+        ]}]);
+        assert_eq!(vec!["to run\nto flow".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn nested_blocks_give_one_line_per_innermost_block() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": {"tag": "ul", "content": [
+                {"tag": "li", "content": {"tag": "div", "content": "outer"}},
+                {"tag": "li", "content": {"tag": "div", "content": [
+                    {"tag": "ul", "content": {"tag": "li", "content": "inner"}}
+                ]}}
+            ]}}}]);
+        assert_eq!(vec!["outer\ninner".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn a_br_between_blocks_does_not_double_the_break() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "div", "content": "a"},
+            {"tag": "br"},
+            {"tag": "div", "content": "b"}
+        ]}]);
+        assert_eq!(vec!["a\nb".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn a_br_inside_a_block_breaks_its_line() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": ["one", {"tag": "br"}, "two"]}}]);
+        assert_eq!(vec!["one\ntwo".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn a_table_row_breaks_the_line() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "table", "content": [
+                {"tag": "tr", "content": {"tag": "td", "content": "未然形"}},
+                {"tag": "tr", "content": {"tag": "td", "content": "連用形"}}
+            ]}}]);
+        assert_eq!(vec!["未然形\n連用形".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn a_summary_does_not_run_into_its_details_body() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "details", "content": [
+                {"tag": "summary", "content": "conjugation"},
+                {"tag": "div", "content": "たべる"}
+            ]}}]);
+        assert_eq!(vec!["conjugation\nたべる".to_string()], flatten_glossary(&g));
+    }
+
+    /// LF and CRLF alike: a dictionary that stores its own line breaks
+    /// inside one string keeps them, and each glossary item stays its own
+    /// vec entry.
+    #[test]
+    fn a_plain_string_keeps_its_own_line_breaks() {
+        let g = json!(["one\ntwo", "three\r\nfour"]);
+        let expected = vec!["one\ntwo".to_string(), "three\nfour".to_string()];
+        assert_eq!(expected, flatten_glossary(&g));
+    }
+
+    #[test]
+    fn an_array_of_plain_strings_becomes_one_line_each() {
+        let g = json!([{"type": "structured-content", "content": ["to run", "to flow"]}]);
+        assert_eq!(vec!["to run\nto flow".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn an_inline_array_of_plain_strings_stays_on_one_line() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "span", "content": ["to ", "run"]}}]);
+        assert_eq!(vec!["to run".to_string()], flatten_glossary(&g));
+    }
+
+    /// Prose broken up by its own inline markup, not a list of lines.
+    #[test]
+    fn a_string_array_mixed_with_a_link_stays_on_one_line() {
+        let g = json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": [
+                "see also ",
+                {"tag": "a", "href": "?query=x", "content": "x"}
+            ]}}]);
+        assert_eq!(vec!["see also x".to_string()], flatten_glossary(&g));
     }
 
     #[test]
@@ -527,12 +672,12 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_non_pos_markers_get_a_separator() {
+    fn adjacent_non_pos_markers_get_a_line_break() {
         let g = json!([{"type": "structured-content", "content": [
             {"tag": "span", "data": {"content": "xref"}, "content": "see also"},
             {"tag": "span", "data": {"content": "forms"}, "content": "alt form"}
         ]}]);
-        assert_eq!(vec!["see also; alt form".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["see also\nalt form".to_string()], flatten_glossary(&g));
     }
 
     #[test]
@@ -545,7 +690,7 @@ mod tests {
     #[test]
     fn pos_labels_do_not_leak_into_the_glossary() {
         let g = pos_doc(&["noun", "suru", "intransitive"]);
-        assert_eq!(vec!["chatting; idle talk".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["chatting\nidle talk".to_string()], flatten_glossary(&g));
     }
 
     #[test]
