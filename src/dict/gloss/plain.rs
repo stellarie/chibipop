@@ -23,27 +23,6 @@ use super::{GlossDoc, ItemType, Kind, NodeId, Tag};
 /// renderer decided on.
 const BLOCK_MARK: &str = "\u{0}LI\u{0}";
 
-/// Tags that break a line, from the schema's own block/inline division.
-/// Structured content has no `display` property, so the mapping is fixed and
-/// needs no cascade.
-///
-/// `td`, `th`, `thead` and `tbody` are in neither table on purpose: a cell is
-/// a grid problem rather than a line-break one, and the `tr` around it
-/// already breaks the row.
-fn is_block(tag: Tag) -> bool {
-    matches!(
-        tag,
-        Tag::Div | Tag::Li | Tag::Ol | Tag::Ul | Tag::Table | Tag::Tr | Tag::Details | Tag::Summary
-    )
-}
-
-/// Tags that never break a line. The only thing this decides here is whether
-/// an array of plain strings under them becomes lines - see
-/// [`children_into`].
-fn is_inline(tag: Tag) -> bool {
-    matches!(tag, Tag::Span | Tag::A | Tag::Ruby | Tag::Rt | Tag::Rp | Tag::Img)
-}
-
 /// Furigana and images carry no plain text. `rt`/`rp` would interleave a
 /// reading into its own base text, and an image is a character this renderer
 /// has no way to draw - the popup renderer does, which is why the tree keeps
@@ -131,7 +110,7 @@ fn collect_pos(doc: &GlossDoc, id: NodeId, out: &mut Vec<String>, buf: &mut Stri
         }
         if marker == super::POS_CONTENT {
             buf.clear();
-            children_into(doc, id, !is_inline(doc.node(id).tag), buf);
+            children_into(doc, id, !doc.node(id).tag.is_inline(), buf);
             let label = tidy(buf);
             if !label.is_empty() && !out.contains(&label) {
                 out.push(label);
@@ -166,32 +145,23 @@ fn node_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
         out.push_str(doc.text(id));
         return;
     }
-    if is_block(n.tag) || doc.has_marker(id) {
+    if n.tag.is_block() || doc.has_marker(id) {
         out.push_str(BLOCK_MARK);
     }
-    children_into(doc, id, !is_inline(n.tag), out);
+    children_into(doc, id, !n.tag.is_inline(), out);
 }
 
 /// A node's children.
 ///
-/// Yomitan concatenates them, with one exception: a glossary array of plain
-/// strings is a list, one line per string - each gets its own `<li>` in
-/// `_createTermDefinitionEntry`. An array mixing strings with nodes is prose
-/// broken up by its own inline markup ("see also", then a link, then more
-/// text), so only a run that is *entirely* bare strings, and holds more than
-/// one, becomes lines.
+/// Yomitan concatenates them, with one exception:
+/// [`GlossDoc::is_string_list`] - a glossary array of plain strings is a
+/// list, one line per string.
 ///
 /// `block_ctx` is false only under an inline tag, where the schema admits no
 /// line break: Yomitan appends every child of an inline node into the one
 /// box.
-///
-/// The arena flattens every array level under `content` into one child list,
-/// so the test is on the child list rather than on one JSON array. The two
-/// agree on every shape the census contains; they differ only when a bare
-/// string sits beside a nested string array under one `content`, which no
-/// corpus dictionary does.
 fn children_into(doc: &GlossDoc, id: NodeId, block_ctx: bool, out: &mut String) {
-    if block_ctx && is_string_list(doc, id) {
+    if block_ctx && doc.is_string_list(id) {
         for child in doc.children(id) {
             out.push_str(BLOCK_MARK);
             out.push_str(doc.text(child));
@@ -201,18 +171,6 @@ fn children_into(doc: &GlossDoc, id: NodeId, block_ctx: bool, out: &mut String) 
     for child in doc.children(id) {
         node_into(doc, child, out);
     }
-}
-
-/// More than one child, every one a bare string.
-fn is_string_list(doc: &GlossDoc, id: NodeId) -> bool {
-    let mut n = 0;
-    for child in doc.children(id) {
-        if !doc.is_plain_string(child) {
-            return false;
-        }
-        n += 1;
-    }
-    n > 1
 }
 
 /// Cleans one rendered string.

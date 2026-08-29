@@ -233,9 +233,11 @@ fn fake_measure(spans: &[StyledSpan<'_>], max_w: f32) -> Measured {
 
 // ---- fixtures ----
 
-/// The layout pass reads `glosses` and nothing else - ticket 08 is what
-/// teaches it to walk the tree - so these fixtures carry an empty document
-/// and the exact strings the geometry assertions expect.
+/// The layout pass renders each row's parsed tree, so a fixture carries the
+/// tree its strings parse to: a bare glossary string is one plain-string
+/// item, which is what 20 of the census's 72 dictionaries emit and what
+/// every geometry expectation below is arithmetic over. `tree` is for the
+/// fixtures that need structure.
 ///
 /// One row per block, the shape a one-hit dictionary produces; `rows` is
 /// for the grouped case.
@@ -253,10 +255,21 @@ fn rows(dict: &str, per_row: &[&[&str]]) -> GlossBlock {
 
 /// One matched row, with its tags.
 fn entry(glosses: &[&str], tags: &[&str]) -> GlossEntry {
+    row_of(&serde_json::json!(glosses).to_string(), tags)
+}
+
+/// One dictionary's block, from one row's raw structured content.
+fn tree(dict: &str, glossary: &str) -> GlossBlock {
+    GlossBlock { dict_name: dict.to_string(), entries: vec![row_of(glossary, &[])] }
+}
+
+/// One matched row, from the raw glossary JSON the record stores.
+fn row_of(glossary: &str, tags: &[&str]) -> GlossEntry {
+    let doc = std::sync::Arc::new(crate::dict::gloss::GlossDoc::parse(glossary));
     GlossEntry {
-        glosses: glosses.iter().map(|s| s.to_string()).collect(),
+        glosses: crate::dict::gloss::plain_items(&doc),
         tags: tags.iter().map(|s| s.to_string()).collect(),
-        doc: std::sync::Arc::new(crate::dict::gloss::GlossDoc::empty()),
+        doc,
     }
 }
 
@@ -996,6 +1009,414 @@ fn a_span_wraps_within_itself_rather_than_at_its_boundary() {
     assert_eq!(20.0, m.lines[1].y, "line two starts under line one");
 }
 
+// ---- the inline formatting pass ----
+
+/// A card whose one dictionary row carries `glossary` verbatim.
+///
+/// The headword is kana, so it earns no per-character drill target and
+/// every hit in the scene is one the gloss itself produced.
+fn rich(glossary: &str) -> Presentation {
+    let card = Card {
+        written: None,
+        reading: Some("\u{3055}\u{3064}\u{3060}\u{3093}".into()),
+        pos: vec![],
+        freq: None,
+        blocks: vec![tree("Jitendex", glossary)],
+        match_len: 4,
+    };
+    Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+    }
+}
+
+/// One structured-content item wrapping `content`.
+fn sc(content: &str) -> String {
+    format!(r#"[{{"type":"structured-content","content":{content}}}]"#)
+}
+
+/// Every gloss-body element of `s`, in draw order.
+///
+/// The dictionary label is the `Text` element before them and carries the
+/// label role's size, so the body is what is left at the body size.
+fn bodies(s: &PopupScene) -> Vec<&SceneElem> {
+    let body = Theme::dark().body_size;
+    s.elems
+        .iter()
+        .filter(|e| e.kind == ElemKind::Text && e.font_size == body)
+        .collect()
+}
+
+/// A gloss that is one plain string must still produce the element it
+/// produced before an inline pass existed: one element, one span, the body
+/// role, and one seam request for exactly that text.
+#[test]
+fn a_plain_string_gloss_is_one_element_of_one_span() {
+    let theme = Theme::dark();
+    let (s, asked) = measured(&theme, &one_card(&[], None), false);
+    let gloss = s.elems.iter().find(|e| e.text == "chatting").expect("the gloss");
+
+    assert_eq!(ElemKind::Text, gloss.kind);
+    assert_eq!(1, gloss.lines);
+    assert_eq!(
+        vec![ElemSpan {
+            at: 0,
+            len: "chatting".len() as u32,
+            color: theme.body_text,
+            size: theme.body_size,
+            weight: theme.body_weight,
+            italic: theme.body_italic,
+            shift: 0.0,
+        }],
+        gloss.spans
+    );
+    assert_eq!(1, asked.iter().filter(|a| a.text == "chatting").count());
+}
+
+/// Two top-level glossary items measure as *one* span, not three.
+///
+/// The separator has always been there; what must not change is the request
+/// the seam gets, because that is what the geometry goldens hold. Adjacent
+/// runs in one style are one run.
+#[test]
+fn items_in_one_style_coalesce_into_a_single_span() {
+    let theme = Theme::dark();
+    let p = card_with(vec![block("Jitendex", &["raw; uncooked", "natural"])]);
+    let (s, asked) = measured(&theme, &p, false);
+
+    let gloss = bodies(&s);
+    assert_eq!(1, gloss.len(), "both items share one paragraph");
+    assert_eq!("raw; uncooked; natural", gloss[0].text);
+    assert_eq!(1, gloss[0].spans.len(), "one style, one span");
+    asked_for(&asked, "raw; uncooked; natural");
+}
+
+/// The one thing ADR-0013 exists to change: a bold word and a normal word
+/// adjacent in the source share a line.
+#[test]
+fn a_bold_word_and_a_normal_word_share_one_wrapped_line() {
+    let p = rich(&sc(r#"[{"tag":"b","content":"bold"},"normal text"]"#));
+    // 200px column: 26 units fit, the run is 15.
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len(), "one element, not one per style");
+    assert_eq!(1, gloss[0].lines, "and one line, not one per style");
+    assert_eq!("boldnormal text", gloss[0].text);
+    let weights: Vec<u16> = gloss[0].spans.iter().map(|s| s.weight).collect();
+    assert_eq!(vec![700, Theme::dark().body_weight], weights);
+    assert_eq!(15.0 * 15.0 * ADVANCE, gloss[0].rect.w);
+}
+
+/// And the paragraph rewraps as one unit.
+///
+/// The break lands *inside* the second span, so line one is full: a
+/// renderer that ended a line at every style change would leave line one
+/// four units wide instead of thirteen.
+#[test]
+fn mixed_spans_wrap_as_one_paragraph_and_break_within_a_span() {
+    let p = rich(&sc(r#"[{"tag":"b","content":"bold"},"normal text"]"#));
+    // 100px column: 13 units per line, 15 units of text.
+    let s = laid_out(&p, 124.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len());
+    assert_eq!(2, gloss[0].lines);
+    assert_eq!(
+        13.0 * 15.0 * ADVANCE,
+        gloss[0].rect.w,
+        "line one is full, so the normal span continues it"
+    );
+    assert_eq!(2.0 * 15.0 * LINE_H, gloss[0].rect.h);
+}
+
+/// No spaces to break at, and it still wraps.
+#[test]
+fn a_cjk_run_wraps_without_a_single_space_in_it() {
+    let kanji = "\u{6f22}".repeat(20);
+    let p = card_with(vec![block("\u{5927}\u{8f9e}\u{6797}", &[&kanji])]);
+    let s = laid_out(&p, 124.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len());
+    assert_eq!(2, gloss[0].lines, "20 units at 7.5px do not fit a 100px column");
+}
+
+/// Sibling blocks are separated, and the separator is the gap.
+///
+/// Before the tree reached the panel these two arrived as `to runto flow`.
+#[test]
+fn sibling_blocks_become_two_elements_a_line_gap_apart() {
+    let p = rich(&sc(
+        r#"[{"tag":"div","content":"to run"},{"tag":"div","content":"to flow"}]"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(vec!["to run", "to flow"], gloss.iter().map(|e| e.text.as_str()).collect::<Vec<_>>());
+    assert_eq!(LINE_GAP, gloss[1].top_gap, "the separator is a line gap");
+    assert_eq!(gloss[0].pen.1 + gloss[0].advance + LINE_GAP, gloss[1].pen.1);
+}
+
+/// A `sup` is raised off its line's baseline and takes no height with it.
+///
+/// The line is as tall as the body span alone: a reference mark that grew
+/// the line would push every following block down.
+#[test]
+fn a_superscript_is_raised_without_growing_its_line() {
+    let theme = Theme::dark();
+    let p = rich(&sc(r#"["note",{"tag":"sup","content":"1"}]"#));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len());
+    assert_eq!(1, gloss[0].lines);
+    let (body, mark) = (gloss[0].spans[0], gloss[0].spans[1]);
+    assert_eq!(0.0, body.shift, "the body sits on the baseline");
+    assert_eq!(theme.body_size / 3.0, mark.shift, "and the mark a third of an em above it");
+    assert_eq!(theme.body_size / 1.2, mark.size, "`smaller`, as HTML draws a sup");
+    assert_eq!(theme.body_size * LINE_H, gloss[0].rect.h, "the body span sets the line");
+}
+
+/// A `sub` drops instead, and `verticalAlign` says so directly.
+#[test]
+fn a_subscript_drops_and_an_explicit_vertical_align_agrees() {
+    let theme = Theme::dark();
+    let p = rich(&sc(
+        r#"["x",{"tag":"sub","content":"2"},{"tag":"span","style":{"verticalAlign":"super"},"content":"n"}]"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let spans = &bodies(&s)[0].spans;
+
+    assert_eq!(-theme.body_size / 5.0, spans[1].shift);
+    assert_eq!(theme.body_size / 3.0, spans[2].shift, "a declared `super` raises like a sup");
+    assert_eq!(theme.body_size, spans[2].size, "but changes no size of its own");
+}
+
+/// The text-relative values are answered against the line the span landed
+/// on, which is the one fact only the measurer knows (ADR-0013).
+#[test]
+fn text_top_lifts_a_small_span_to_its_lines_own_text_top() {
+    let theme = Theme::dark();
+    let p = rich(&sc(
+        r#"["big",{"tag":"span","style":{"fontSize":"0.5em","verticalAlign":"text-top"},"content":"small"}]"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+    let small = gloss[0].spans[1];
+
+    // The fake hangs every line off an ascent of its tallest span's own
+    // size, so a half-size span's own ascent is half of one: the lift is
+    // the difference.
+    assert_eq!(theme.body_size / 2.0, small.size);
+    assert_eq!(theme.body_size / 2.0, small.shift);
+    assert_eq!(theme.body_size * LINE_H, gloss[0].rect.h, "and the line is unmoved");
+}
+
+/// An internal cross-reference drills down, and its rect covers its own
+/// spans on every line they reached.
+#[test]
+fn an_internal_link_drills_down_across_a_wrap_boundary() {
+    // "see " then a 12-unit link: 16 units, 13 to a 100px line.
+    let p = rich(&sc(
+        r#"["see ",{"tag":"a","href":"?query=%E7%8C%AB&wildcards=off","content":"cat and kitten"}]"#,
+    ));
+    let s = laid_out(&p, 124.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+    let unit = 15.0 * ADVANCE;
+
+    let drills: Vec<&HitTarget> = s
+        .hits
+        .iter()
+        .filter(|h| matches!(h.action, HitAction::DrillDown(_)))
+        .collect();
+    assert_eq!(2, drills.len(), "one target per line the link touched");
+    for hit in &drills {
+        assert_eq!(HitAction::DrillDown("\u{732B}".into()), hit.action, "percent-decoded");
+    }
+    // Line one: the link starts after "see " and runs to the margin.
+    assert_eq!(Some(s.origin + 4.0 * unit), drills[0].x);
+    assert_eq!(Some(9.0 * unit), drills[0].w);
+    assert_eq!(gloss[0].pen.1, drills[0].y);
+    // Line two: the rest, from the margin.
+    assert_eq!(Some(s.origin), drills[1].x);
+    assert_eq!(Some(5.0 * unit), drills[1].w);
+    assert_eq!(gloss[0].pen.1 + 15.0 * LINE_H, drills[1].y);
+    assert_eq!(15.0 * LINE_H, drills[0].h, "as tall as the line it sits on");
+}
+
+/// A citation opens in a browser instead.
+#[test]
+fn an_external_link_opens_in_the_browser() {
+    let p = rich(&sc(
+        r#"["from ",{"tag":"a","href":"https://example.org/x","content":"the source"}]"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    assert_eq!(
+        vec![HitAction::OpenUrl("https://example.org/x".into())],
+        s.hits.iter().map(|h| h.action.clone()).collect::<Vec<_>>()
+    );
+}
+
+/// A scheme chibipop will not follow earns no target at all - the text
+/// stays, the click does not.
+#[test]
+fn an_unfollowable_link_earns_no_hit_target() {
+    for href in ["javascript:alert(1)", "data:text/html,x", "other.html"] {
+        let p = rich(&sc(&format!(
+            r#"[{{"tag":"a","href":"{href}","content":"click"}}]"#
+        )));
+        let s = laid_out(&p, 424.0, 4000.0, false, false);
+        assert!(s.hits.is_empty(), "{href} must not be clickable");
+        assert!(texts(&s).contains(&"click"), "{href} must keep its text");
+    }
+}
+
+/// Rich content must not disturb the clicks that already worked.
+#[test]
+fn rich_content_leaves_the_existing_hit_targets_alone() {
+    let plain = with_collapsed();
+    let mut rich = plain.clone();
+    let body = tree(
+        "Jitendex",
+        &sc(r#"[{"tag":"b","content":"chat"},{"tag":"div","content":"idle talk"}]"#),
+    );
+    for card in rich.all_cards.iter_mut().chain(rich.top.iter_mut()) {
+        card.blocks = vec![body.clone()];
+    }
+
+    let a = laid_out(&plain, 424.0, 4000.0, true, false);
+    let b = laid_out(&rich, 424.0, 4000.0, true, false);
+    let kept = |s: &PopupScene| -> Vec<HitAction> {
+        s.hit_targets()
+            .iter()
+            .filter(|h| !matches!(h.action, HitAction::OpenUrl(_)))
+            .map(|h| h.action.clone())
+            .collect()
+    };
+    assert_eq!(kept(&a), kept(&b));
+    assert!(
+        kept(&b).contains(&HitAction::DrillDown("\u{96d1}".into())),
+        "the headword still drills through caret_boxes"
+    );
+    assert!(kept(&b).contains(&HitAction::ExpandEntry(0)));
+    assert!(kept(&b).contains(&HitAction::Back));
+
+    // And the Anki slot is still reserved from the same label.
+    let theme = Theme::dark();
+    let anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+    let slot = |p: &Presentation| -> Option<AnkiSlot> {
+        scene(
+            &SceneRequest {
+                presentation: p,
+                theme: &theme,
+                max_w: 424.0,
+                max_h: 4000.0,
+                show_back: false,
+                side_panel: false,
+                anki: Some(&anki),
+            },
+            &mut FakeMeasure::default(),
+        )
+        .unwrap()
+        .anki
+    };
+    assert_eq!(slot(&plain).map(|a| a.rect.h), slot(&rich).map(|a| a.rect.h));
+}
+
+/// Colour and weight from the dictionary's own `style`, on one line beside
+/// the body's.
+#[test]
+fn a_styled_span_carries_its_own_colour_and_weight() {
+    let p = rich(&sc(
+        r##"["plain ",{"tag":"span","style":{"color":"#ff0000","fontWeight":"bold","fontStyle":"italic"},"content":"red"}]"##,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let spans = &bodies(&s)[0].spans;
+
+    assert_eq!(2, spans.len());
+    assert_eq!(Theme::dark().body_text, spans[0].color);
+    assert_eq!(((255, 0, 0), 700, true), (spans[1].color, spans[1].weight, spans[1].italic));
+}
+
+/// A header cell is bold beside its row's data cells, per the spec's
+/// defaults table - the shape a real conjugation table has.
+#[test]
+fn a_header_cell_is_bold_on_the_same_line_as_its_data_cells() {
+    let p = rich(&sc(
+        r#"[{"tag":"table","content":{"tag":"tr","content":[{"tag":"th","content":"past"},{"tag":"td","content":"\u98f2\u3093\u3060"}]}}]"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len(), "a row is one paragraph until ticket 10 grids it");
+    assert_eq!(1, gloss[0].lines);
+    assert_eq!(
+        vec![700, Theme::dark().body_weight],
+        gloss[0].spans.iter().map(|s| s.weight).collect::<Vec<_>>()
+    );
+}
+
+/// Ruby renders its base and drops its reading, which is what the
+/// plain-text renderer has always done. Ticket 11 is what puts the reading
+/// above the base; until then a monolingual definition reads correctly
+/// rather than as 漢かん字じ.
+#[test]
+fn ruby_renders_its_base_and_drops_its_reading_for_now() {
+    let p = rich(&sc(
+        r#"[{"tag":"ruby","content":["\u6f22\u5b57",{"tag":"rt","content":"\u304b\u3093\u3058"},{"tag":"rp","content":"()"}]}]"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len());
+    assert_eq!("\u{6f22}\u{5b57}", gloss[0].text);
+    assert_eq!(1, gloss[0].spans.len());
+}
+
+/// A pathological tree terminates and its outer levels reach the panel.
+#[test]
+fn a_tree_nested_past_the_depth_cap_still_renders_its_outer_levels() {
+    let depth = crate::dict::gloss::MAX_DEPTH as usize + 20;
+    let mut json = String::from("\"deepest\"");
+    for i in (0..depth).rev() {
+        json = format!(r#"{{"tag":"div","content":["level {i}",{json}]}}"#);
+    }
+    let s = laid_out(&rich(&sc(&format!("[{json}]"))), 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert!(texts(&s).contains(&"level 0"), "the outermost level renders");
+    assert!(texts(&s).contains(&"level 1"));
+    assert!(
+        gloss.len() < depth,
+        "the walk stops at the cap: {} paragraphs for {depth} levels",
+        gloss.len()
+    );
+    assert!(!texts(&s).contains(&"deepest"), "and the over-cap subtree is gone");
+}
+
+/// A row's number leads its first paragraph and no other, in the body's own
+/// style - so it joins the span it precedes instead of measuring as one of
+/// its own.
+#[test]
+fn a_numbered_row_numbers_only_its_first_paragraph() {
+    let two = tree(
+        "\u{5927}\u{8f9e}\u{6797}",
+        &sc(r#"[{"tag":"div","content":"first"},{"tag":"div","content":"second"}]"#),
+    );
+    let mut blocks = two.clone();
+    blocks.entries.push(two.entries[0].clone());
+    let s = laid_out(&card_with(vec![blocks]), 424.0, 4000.0, false, false);
+
+    let bodies: Vec<&str> = bodies(&s).iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(vec!["1. first", "second", "2. first", "second"], bodies);
+    let numbered = s.elems.iter().find(|e| e.text == "1. first").unwrap();
+    assert_eq!(1, numbered.spans.len(), "the number joins the text it leads");
+}
+
 // ---- element construction ----
 
 /// It must lead the list.
@@ -1047,14 +1468,19 @@ fn part_of_speech_is_dimmed_metadata_not_body_text() {
 fn each_role_takes_its_own_size() {
     let theme = roled_theme();
     let (elems, _) = build_elements(&one_card(&["noun"], Some(7671)), &theme, true, false);
-    let text_of = |want: &str| -> &Line {
+    let size_of = |want: &str| -> f32 {
         elems
             .iter()
             .find_map(|e| match e {
-                Elem::Text(line) if line.text.contains(want) => Some(line),
+                Elem::Text(line) if line.text.contains(want) => Some(line.size),
+                // The body is a gloss paragraph, not a `Line`: its style
+                // rides on the spans the inline pass built.
+                Elem::Gloss(flow) if flow.text.contains(want) => {
+                    Some(flow.spans[0].style.size)
+                }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("no text line holding {want:?}"))
+            .unwrap_or_else(|| panic!("nothing holding {want:?}"))
     };
     let corner = elems
         .iter()
@@ -1064,10 +1490,10 @@ fn each_role_takes_its_own_size() {
         })
         .expect("a ranked entry draws a corner");
     assert_eq!(theme.frequency_size, corner.size);
-    assert_eq!(theme.reading_size, text_of("ざつだん").size);
-    assert_eq!(theme.dimmed_size, text_of("noun").size);
-    assert_eq!(theme.dict_label_size, text_of("Jitendex").size);
-    assert_eq!(theme.body_size, text_of("chatting").size);
+    assert_eq!(theme.reading_size, size_of("ざつだん"));
+    assert_eq!(theme.dimmed_size, size_of("noun"));
+    assert_eq!(theme.dict_label_size, size_of("Jitendex"));
+    assert_eq!(theme.body_size, size_of("chatting"));
 }
 
 /// Weight and style travel with size.

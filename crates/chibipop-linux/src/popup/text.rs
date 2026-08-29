@@ -337,20 +337,22 @@ impl TextMeasure for TextEngine {
 }
 
 impl PanelText for TextEngine {
+    /// One shaping call, one glyph walk.
+    ///
+    /// `Buffer::draw` would do the walk, but it offers no place to put
+    /// a per-span baseline shift and no place to read a span back off
+    /// a glyph, so the walk is here: cosmic-text's own two lines plus
+    /// the shift, which enters as the glyph's own y offset.
     fn draw_run(&mut self, run: DrawRun<'_>, target: &mut PixmapMut<'_>) {
-        let spans = [StyledSpan {
-            text: run.text,
-            // The family the config resolved to, not the theme's name:
-            // measuring takes the name the scene carries, painting
-            // takes the one that is actually installed.
-            font: &self.family,
-            size: run.size,
-            weight: run.weight,
-            italic: run.italic,
-            color: run.color,
-        }];
-        let mut buffer = TextEngine::shape(&mut self.fonts, &spans, run.max_w);
-        let (r, g, b) = run.color;
+        // The family the config resolved to, not the theme's name:
+        // measuring takes the name the scene carries, painting takes
+        // the one that is actually installed. Disjoint field borrows -
+        // `family` here, `fonts` and `swash` below - are why `shape` is
+        // an associated function.
+        let family = self.family.as_str();
+        let spans: Vec<StyledSpan<'_>> =
+            run.spans.iter().map(|s| StyledSpan { font: family, ..*s }).collect();
+        let buffer = TextEngine::shape(&mut self.fonts, &spans, run.max_w);
         // The glyph raster is already snapped to the pixel grid by
         // cosmic-text, so the wrap box's own origin is too; a fractional
         // pen would only smear the hinting.
@@ -358,33 +360,52 @@ impl PanelText for TextEngine {
         let (w, h) = (target.width() as i32, target.height() as i32);
         let stride = target.width() as usize;
         let px = target.pixels_mut();
-        buffer.draw(
-            &mut self.fonts,
-            &mut self.swash,
-            Color::rgb(r, g, b),
-            |gx, gy, gw, gh, color| {
-                // cosmic-text lays a buffer out from its own (0, 0); the
-                // wrap box's place in the buffer is the run's.
-                let (gx, gy) = (gx.saturating_add(ox), gy.saturating_add(oy));
-                // Straight alpha: for a mask glyph - everything our
-                // faces produce - cosmic-text hands back the base RGB
-                // with the coverage in alpha. Colour bitmaps (emoji)
-                // come through the same arm and are premultiplied a
-                // second time, which costs a shade of saturation on a
-                // path a dictionary popup barely has.
-                let a = u32::from(color.a());
-                if a == 0 {
-                    return;
-                }
-                let (r, g, b) = (u32::from(color.r()), u32::from(color.g()), u32::from(color.b()));
-                let inv = 255 - a;
-                // Clip, don't trust: cosmic-text reports the glyph's ink
-                // box, which overhangs the wrap box on both sides and
-                // goes negative for a leading side bearing.
-                for y in gy.max(0)..gy.saturating_add(gh as i32).min(h) {
-                    let row = y as usize * stride;
-                    for x in gx.max(0)..gx.saturating_add(gw as i32).min(w) {
-                        let i = row + x as usize;
+        let mut bases = LineBases::default();
+        for line in buffer.layout_runs() {
+            let base = bases.advance(&spans, &line);
+            for glyph in line.glyphs {
+                // A glyph no span claims - which the seam's own
+                // measurement also skips - keeps the first span's
+                // colour and sits on the baseline.
+                let (index, span) = match span_at(&spans, base + glyph.start) {
+                    Some(found) => found,
+                    None => (0, &spans[0]),
+                };
+                let shift = run.shifts.get(index).copied().unwrap_or(0.0);
+                // `verticalAlign` raises the glyph off the baseline its
+                // line reported, which is the whole arithmetic
+                // ADR-0013's baseline exists for.
+                let placed = glyph.physical((0.0, line.line_y - shift), 1.0);
+                let (r, g, b) = span.color;
+                let (gx, gy) = (placed.x.saturating_add(ox), placed.y.saturating_add(oy));
+                self.swash.with_pixels(
+                    &mut self.fonts,
+                    placed.cache_key,
+                    Color::rgb(r, g, b),
+                    |dx, dy, color| {
+                        // Straight alpha: for a mask glyph -
+                        // everything our faces produce - cosmic-text
+                        // hands back the base RGB with the coverage in
+                        // alpha. Colour bitmaps (emoji) come through
+                        // the same arm and are premultiplied a second
+                        // time, which costs a shade of saturation on a
+                        // path a dictionary popup barely has.
+                        let a = u32::from(color.a());
+                        if a == 0 {
+                            return;
+                        }
+                        // Clip, don't trust: cosmic-text reports the
+                        // glyph's ink box, which overhangs the wrap box
+                        // on both sides and goes negative for a leading
+                        // side bearing.
+                        let (x, y) = (gx.saturating_add(dx), gy.saturating_add(dy));
+                        if x < 0 || y < 0 || x >= w || y >= h {
+                            return;
+                        }
+                        let (r, g, b) =
+                            (u32::from(color.r()), u32::from(color.g()), u32::from(color.b()));
+                        let inv = 255 - a;
+                        let i = y as usize * stride + x as usize;
                         let dst = px[i];
                         // Premultiplied source-over onto the panel
                         // background, which is already there. The result
@@ -399,10 +420,10 @@ impl PanelText for TextEngine {
                         ) {
                             px[i] = c;
                         }
-                    }
-                }
-            },
-        );
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -1259,16 +1280,17 @@ mod tests {
         let mut target = PixmapMut::from_bytes(front, W as u32, H as u32).expect("pixmap");
 
         let draw = |target: &mut PixmapMut<'_>, engine: &mut TextEngine, origin| {
+            // White on the black fill below, so ink is visible ink.
+            let spans = [StyledSpan {
+                text: PROBE_TEXT,
+                font: "",
+                size: 20.0,
+                weight: 400,
+                italic: false,
+                color: (255, 255, 255),
+            }];
             engine.draw_run(
-                DrawRun {
-                    text: PROBE_TEXT,
-                    size: 20.0,
-                    weight: 400,
-                    italic: false,
-                    max_w: 200.0,
-                    color: (255, 255, 255),
-                    origin,
-                },
+                DrawRun { spans: &spans, shifts: &[0.0], max_w: 200.0, origin },
                 target,
             );
         };

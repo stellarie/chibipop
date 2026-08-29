@@ -34,8 +34,16 @@ pub struct RequestId(pub u64);
 pub enum HitAction {
     /// Expand collapsed row `i`.
     ExpandEntry(usize),
-    /// Look up a single character.
+    /// Look a term up in the panel.
+    ///
+    /// A headword's kanji, one
+    /// character at a time, and a
+    /// glossary cross-reference's
+    /// whole `?query=` target.
     DrillDown(String),
+    /// Hand an `http`/`https` citation
+    /// to the user's browser.
+    OpenUrl(String),
     /// Navigate back in history.
     Back,
 }
@@ -155,6 +163,16 @@ pub enum Command {
     LogLookup { headword: String, match_len: usize },
     WarnLookupFailed(String),
     WarnScrollCaptured { seconds: u32 },
+    /// Hand a glossary citation to
+    /// the desktop's own browser.
+    ///
+    /// `http` or `https` and nothing
+    /// else: `layout::link_action`
+    /// allow-lists the scheme, since
+    /// the URL comes out of a
+    /// dictionary file chibipop did
+    /// not write.
+    OpenUrl(String),
     OpenSettings,
     Exit,
 }
@@ -512,6 +530,7 @@ impl Controller {
                 let id = self.next_request();
                 vec![Command::RequestDrillDown { id, text }]
             }
+            Some(HitAction::OpenUrl(url)) => vec![Command::OpenUrl(url)],
             Some(HitAction::Back) => self.pop_history(),
             // Below the popup: the button.
             None if local.y >= p.popup.h && self.cfg.anki_enabled => self.start_add(),

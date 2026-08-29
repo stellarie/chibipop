@@ -1685,6 +1685,14 @@ impl App {
                     self.show_popup(&req);
                 }
             }
+            // A glossary citation: `xdg-open` is the desktop's own
+            // answer to "which browser", and the scheme was
+            // allow-listed to `http`/`https` by `layout::link_action`
+            // because the URL comes out of a dictionary file. Detached
+            // and unmasked, like the settings child: the daemon blocks
+            // SIGINT/SIGTERM for every thread it owns and a mask
+            // outlives `exec`.
+            Command::OpenUrl(url) => self.open_url(&url),
             Command::HidePopup => self.hide_popup(),
             // Two shipped settings draw through here and nowhere else:
             // `debug.show_scan_region` (the capture boxes) and
@@ -2080,6 +2088,33 @@ impl App {
                 self.log.diag(&format!("settings: already running as pid {pid}"));
             }
             Err(e) => self.log.diag(&format!("settings: spawn failed: {e}")),
+        }
+    }
+
+    /// Hands a glossary citation to the desktop's own browser.
+    ///
+    /// Fire and forget: nothing here waits on `xdg-open`, and its
+    /// stdio is dropped so a browser's chatter never lands in the
+    /// daemon's own output. The child is reaped by `wait` on the next
+    /// citation rather than by SIGCHLD plumbing, the same trade the
+    /// settings guard makes for its one transient child.
+    fn open_url(&mut self, url: &str) {
+        let mut command = std::process::Command::new("xdg-open");
+        command
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::signals::unmasked(&mut command);
+        match command.spawn() {
+            Ok(mut child) => {
+                self.log.diag(&format!("link: opened {url} as pid {}", child.id()));
+                // A browser that is already running exits at once;
+                // one that is not outlives this call and is left to
+                // the session.
+                let _ = child.try_wait();
+            }
+            Err(e) => self.log.diag(&format!("link: xdg-open failed: {e}")),
         }
     }
 

@@ -12,6 +12,7 @@
 //! derived).
 
 use crate::controller::HitAction;
+use crate::dict::gloss::{GlossDoc, ItemType, Kind, NodeId, Scalar, StyleKey, Tag};
 use crate::present::{AnkiPopupState, Presentation};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
 use std::fmt;
@@ -310,6 +311,45 @@ impl ElemKind {
     }
 }
 
+/// One styled piece of an element.
+///
+/// A byte range into
+/// [`SceneElem::text`] plus the style
+/// it draws in, so an element holding
+/// mixed styling costs one string and
+/// a flat vector of `Copy` records -
+/// and a bin rebuilds the exact
+/// [`MeasureRun`] the scene was
+/// measured from by walking it.
+///
+/// No family: no structured-content
+/// property can change one, so every
+/// span in a panel draws in the
+/// theme's own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ElemSpan {
+    /// Byte offset into the text.
+    pub at: u32,
+    pub len: u32,
+    pub color: Rgb,
+    pub size: f32,
+    /// DirectWrite weight, 100-900.
+    pub weight: u16,
+    pub italic: bool,
+    /// Baseline shift, up positive.
+    ///
+    /// `verticalAlign`, already
+    /// resolved against the line the
+    /// span landed on: the seam
+    /// reports the baseline and this
+    /// is the arithmetic ADR-0013
+    /// exists to make possible. Zero
+    /// for every span that sits on
+    /// its line's own baseline, which
+    /// is nearly all of them.
+    pub shift: f32,
+}
+
 /// One measured, positioned element.
 ///
 /// Plain data: everything a bin needs
@@ -343,6 +383,42 @@ pub struct SceneElem {
     pub lines: u32,
     /// What the walk's y advanced by.
     pub advance: f32,
+    /// This element's styled pieces,
+    /// in reading order.
+    ///
+    /// One span for every element the
+    /// panel's own chrome builds, and
+    /// one per style change for a
+    /// gloss. Empty for `Separator`,
+    /// which has no text.
+    pub spans: Vec<ElemSpan>,
+}
+
+impl SceneElem {
+    /// The run a bin re-measures and
+    /// paints this element from.
+    ///
+    /// The same spans, in the same
+    /// order, at the same width the
+    /// scene reports - so the ink
+    /// lands where the hit rects say
+    /// it does. `font` is the bin's,
+    /// because the family that is
+    /// actually installed is the
+    /// bin's own question.
+    pub fn styled_spans<'a>(
+        &'a self,
+        font: &'a str,
+    ) -> impl Iterator<Item = StyledSpan<'a>> {
+        self.spans.iter().map(move |s| StyledSpan {
+            text: &self.text[s.at as usize..(s.at + s.len) as usize],
+            font,
+            size: s.size,
+            weight: s.weight,
+            italic: s.italic,
+            color: s.color,
+        })
+    }
 }
 
 /// A clickable region in the panel.
@@ -559,6 +635,16 @@ pub fn scene(
     let mut hits = Vec::new();
     let mut probes = Vec::new();
     let mut measured = Measured::default();
+    // The gloss walk's two scratch
+    // buffers: one paragraph's spans
+    // as the seam takes them, and the
+    // per-line boxes one link covers.
+    // Both are refilled per element,
+    // so a rich entry costs no
+    // allocation per element per
+    // frame.
+    let mut run: Vec<StyledSpan<'_>> = Vec::new();
+    let mut cover: Vec<(u32, f32, f32)> = Vec::new();
 
     for elem in &elems {
         let advance = match elem {
@@ -579,6 +665,7 @@ pub fn scene(
                     rect: SceneRect { x: origin, y: origin + y, w: content_w, h },
                     lines: 0,
                     advance: h,
+                    spans: Vec::new(),
                 });
                 h
             }
@@ -608,6 +695,7 @@ pub fn scene(
                     },
                     lines: met.lines,
                     advance: 0.0,
+                    spans: one_span(line),
                 });
                 reserved_w = met.w + CORNER_GAP;
                 0.0
@@ -673,6 +761,101 @@ pub fn scene(
                         });
                     }
                 }
+                h
+            }
+            Elem::Gloss(flow) => {
+                let avail_w = (content_w - reserved_w).max(1.0);
+                reserved_w = 0.0;
+                // The whole paragraph in one
+                // request: its spans wrap
+                // together, so a bold word and
+                // a normal one beside it in the
+                // source share a line and the
+                // paragraph rewraps as one unit
+                // (ADR-0013).
+                run.clear();
+                run.extend(flow.styled_spans(font));
+                m.measure(MeasureRun { spans: &run, max_w: avail_w }, &mut measured)?;
+                let met = measured.metrics;
+                let h = met.h;
+                y += flow.top_gap;
+
+                let spans = flow
+                    .spans
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        // A span that wrapped is
+                        // placed against the
+                        // first line it touches;
+                        // one that measured to
+                        // nothing keeps the
+                        // shift its em alone
+                        // decided.
+                        let (line, span_h) = first_box(&measured, i as u32);
+                        ElemSpan {
+                            at: s.at,
+                            len: s.len,
+                            color: s.style.color,
+                            size: s.style.size,
+                            weight: s.style.weight,
+                            italic: s.style.italic,
+                            shift: shift_on(s.style, line, span_h),
+                        }
+                    })
+                    .collect();
+
+                // One target per line a link
+                // touches, so a cross-reference
+                // that wrapped is clickable on
+                // both halves of itself.
+                for (i, action) in flow.links.iter().enumerate() {
+                    cover.clear();
+                    for b in &measured.spans {
+                        let inside = flow
+                            .spans
+                            .get(b.span as usize)
+                            .is_some_and(|s| s.link == i as u32);
+                        if !inside {
+                            continue;
+                        }
+                        match cover.iter_mut().find(|(line, _, _)| *line == b.line) {
+                            Some(seen) => {
+                                seen.1 = seen.1.min(b.x);
+                                seen.2 = seen.2.max(b.x + b.w);
+                            }
+                            None => cover.push((b.line, b.x, b.x + b.w)),
+                        }
+                    }
+                    for &(line, left, right) in &cover {
+                        let line = measured.lines[line as usize];
+                        hits.push(HitTarget {
+                            x: Some(origin + left),
+                            y: origin + y + line.y,
+                            w: Some(right - left),
+                            h: line.h,
+                            action: action.clone(),
+                        });
+                    }
+                }
+
+                let base = flow.base(theme);
+                out.push(SceneElem {
+                    kind: ElemKind::Text,
+                    text: flow.text.clone(),
+                    color: base.color,
+                    font_size: base.size,
+                    weight: base.weight,
+                    italic: base.italic,
+                    top_gap: flow.top_gap,
+                    wrap_w: avail_w,
+                    align: Align::Leading,
+                    pen: (origin, origin + y),
+                    rect: SceneRect { x: origin, y: origin + y, w: met.w, h: met.h },
+                    lines: met.lines,
+                    advance: met.h,
+                    spans,
+                });
                 h
             }
             Elem::BackButton(line) => {
@@ -776,16 +959,58 @@ fn text_elem(
         rect: SceneRect { x: origin, y: origin + y, w: met.w, h: met.h },
         lines: met.lines,
         advance: met.h,
+        spans: one_span(line),
     }
 }
 
-/// The one span a `Line` is.
+/// The one span a `Line` is, as the
+/// scene carries it.
 ///
-/// Every element core builds today
-/// carries one style, so every run it
-/// measures holds one span; ticket 07's
-/// inline pass is what will hand the
-/// seam more than one.
+/// Every element the panel's own
+/// chrome builds has one style, so it
+/// has one span - and the seam gets
+/// exactly the request it got before
+/// the inline pass existed.
+fn one_span(line: &Line) -> Vec<ElemSpan> {
+    vec![ElemSpan {
+        at: 0,
+        len: line.text.len() as u32,
+        color: line.color,
+        size: line.size,
+        weight: line.weight,
+        italic: line.italic,
+        shift: 0.0,
+    }]
+}
+
+/// The line a span first landed on,
+/// and the advance it asked that line
+/// for.
+///
+/// A degenerate `(0, 0)` for a span
+/// the measurer reported no box for -
+/// an empty run, or one whose glyphs
+/// all fell outside it - which
+/// [`shift_on`] reads as "no line to
+/// align against".
+fn first_box(measured: &Measured, span: u32) -> (LineBox, f32) {
+    match measured.spans.iter().find(|b| b.span == span) {
+        Some(b) => (
+            measured.lines.get(b.line as usize).copied().unwrap_or_default(),
+            b.h,
+        ),
+        None => (LineBox::default(), 0.0),
+    }
+}
+
+/// The one span a `Line` is, as the
+/// seam takes it.
+///
+/// Every element the panel's own
+/// chrome builds carries one style; a
+/// gloss paragraph is what hands the
+/// seam more than one, through
+/// [`Flow::styled_spans`].
 fn span<'a>(font: &'a str, line: &'a Line) -> StyledSpan<'a> {
     StyledSpan {
         text: &line.text,
@@ -963,8 +1188,921 @@ enum Elem {
         prefix_u16: usize,
         line: Line,
     },
+    /// One paragraph of a gloss tree.
+    ///
+    /// The only element the panel
+    /// builds that can hold more than
+    /// one style, and the only one
+    /// that can earn a hit target
+    /// inside its own text.
+    Gloss(Flow),
     /// Navigate back in history.
     BackButton(Line),
+}
+
+// ---- the inline formatting pass ----
+
+/// Yomitan's own base font size, in
+/// CSS pixels.
+///
+/// Not a size the popup draws at -
+/// the theme owns that - but the
+/// divisor Yomitan's stylesheet
+/// writes its lengths against: the
+/// spec's defaults table states a
+/// cell border as `1em / 14`, "one
+/// pixel at base size, so it scales
+/// with the panel". So a dictionary
+/// asking for `12px` is asking for
+/// twelve fourteenths of the em it
+/// sits in, and its absolute pixel
+/// scales with the panel instead of
+/// shrinking on a dense screen.
+const YOMITAN_BASE_PX: f32 = 14.0;
+
+/// The ratio CSS's absolute-size
+/// keywords step by, which is also
+/// what `smaller` and `larger` step
+/// by. HTML's own stylesheet gives
+/// `small`, `sub` and `sup` a
+/// `smaller` size and `big` a
+/// `larger` one.
+///
+/// One constant, divided and
+/// multiplied rather than two
+/// reciprocals, so that stepping a
+/// whole-pixel size down and back up
+/// returns to it.
+const FONT_STEP: f32 = 1.2;
+
+/// `font-weight: bold`, on
+/// DirectWrite's scale. HTML's
+/// default for `b` and `strong`, and
+/// the spec's default for a table
+/// header cell.
+const BOLD_WEIGHT: u16 = 700;
+
+/// One step of CSS's relative-weight
+/// table, which over the 400-to-900
+/// range dictionaries use is exactly
+/// what `bolder` and `lighter` mean.
+const WEIGHT_STEP: u16 = 300;
+
+/// `vertical-align: super`, as a
+/// fraction of the em it is raised
+/// inside.
+///
+/// CSS defines it as "the appropriate
+/// superscript position", which is a
+/// face metric, and the seam reports
+/// line and span geometry rather than
+/// a face's tables (ADR-0013). A
+/// third of an em up and a fifth down
+/// are the fallbacks a text engine
+/// uses for a face that declares
+/// neither.
+const SUPER_RISE: f32 = 1.0 / 3.0;
+/// `vertical-align: sub`, likewise.
+const SUB_DROP: f32 = 1.0 / 5.0;
+
+/// What separates two top-level
+/// glossary items.
+///
+/// A dictionary row's `glossary`
+/// array holds exactly one item for
+/// 64 of the census's 72
+/// dictionaries, so this is a no-op
+/// on nearly every entry - and on the
+/// ones that hold more it is what the
+/// panel has always drawn. Ticket 14
+/// is what lets a reader stack them
+/// instead.
+const ITEM_SEPARATOR: &str = "; ";
+
+/// A link's index in [`Flow::links`],
+/// or no link at all.
+const NO_LINK: u32 = u32::MAX;
+
+/// What a span's `verticalAlign`
+/// still needs from its line.
+///
+/// `baseline`, `sub` and `super` are
+/// answered from the em alone, so the
+/// walk resolves them into
+/// [`Inline::shift`] as it descends.
+/// The rest are defined against the
+/// line's own extent, which only the
+/// measurer knows, so they ride along
+/// and are answered afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VAlign {
+    /// Already in [`Inline::shift`].
+    Fixed,
+    /// Its top meets the line's.
+    TextTop,
+    /// Its bottom meets the line's.
+    TextBottom,
+    /// Its middle meets half an
+    /// x-height above the baseline.
+    Middle,
+}
+
+/// One span's resolved inline style,
+/// while a paragraph is being built.
+///
+/// Everything a [`StyledSpan`]
+/// carries bar the family, which no
+/// structured-content property can
+/// change, plus what decides where
+/// the span sits on its line. Two
+/// adjacent runs of text with equal
+/// styles are one span, which is what
+/// `PartialEq` is here for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Inline {
+    size: f32,
+    weight: u16,
+    italic: bool,
+    color: Rgb,
+    /// Baseline shift, up positive.
+    shift: f32,
+    align: VAlign,
+}
+
+impl Inline {
+    /// The body role: what a gloss
+    /// inherits before any node of it
+    /// has spoken.
+    fn body(theme: &Theme) -> Inline {
+        Inline {
+            size: theme.body_size,
+            weight: theme.body_weight,
+            italic: theme.body_italic,
+            color: theme.body_text,
+            shift: 0.0,
+            align: VAlign::Fixed,
+        }
+    }
+}
+
+/// One span of a [`Flow`].
+struct FlowSpan {
+    at: u32,
+    len: u32,
+    style: Inline,
+    /// The `<a>` it sits inside.
+    link: u32,
+}
+
+/// One paragraph of inline content.
+///
+/// The unit this pass measures: one
+/// [`MeasureRun`] in, one
+/// [`SceneElem`] out. The text
+/// accumulates into one string so the
+/// seam gets the paragraph whole -
+/// a span boundary is not a line
+/// boundary (ADR-0013) - and each
+/// span is a byte range into it.
+#[derive(Default)]
+struct Flow {
+    /// Gap owed above it.
+    top_gap: f32,
+    text: String,
+    spans: Vec<FlowSpan>,
+    /// One per `<a>` that earned a hit
+    /// target, indexed by
+    /// [`FlowSpan::link`].
+    links: Vec<HitAction>,
+}
+
+impl Flow {
+    /// Its spans, as the seam takes
+    /// them.
+    fn styled_spans<'a>(&'a self, font: &'a str) -> impl Iterator<Item = StyledSpan<'a>> {
+        self.spans.iter().map(move |s| StyledSpan {
+            text: &self.text[s.at as usize..(s.at + s.len) as usize],
+            font,
+            size: s.style.size,
+            weight: s.style.weight,
+            italic: s.style.italic,
+            color: s.style.color,
+        })
+    }
+
+    /// The element's own style: its
+    /// first span's, which for a gloss
+    /// that is one plain string is the
+    /// body role and nothing else.
+    fn base(&self, theme: &Theme) -> Inline {
+        self.spans.first().map_or_else(|| Inline::body(theme), |s| s.style)
+    }
+
+    /// Prefixes this paragraph with a
+    /// matched row's number.
+    ///
+    /// One number per matched
+    /// term-bank row, as Yomitan
+    /// numbers them, so it belongs to
+    /// the row's first paragraph and
+    /// not to every sibling block
+    /// inside it. Written in the
+    /// body's own style, so it joins
+    /// the span it precedes rather
+    /// than becoming one of its own.
+    fn number(&mut self, n: usize, style: Inline) {
+        let label = format!("{n}. ");
+        let shift = label.len() as u32;
+        self.text.insert_str(0, &label);
+        for span in &mut self.spans {
+            span.at += shift;
+        }
+        match self.spans.first_mut() {
+            Some(first) if first.style == style && first.link == NO_LINK => {
+                first.at = 0;
+                first.len += shift;
+            }
+            _ => self.spans.insert(
+                0,
+                FlowSpan { at: 0, len: shift, style, link: NO_LINK },
+            ),
+        }
+    }
+}
+
+/// Turns one term-bank row's parsed
+/// tree into paragraphs.
+///
+/// The block half of the pass, and
+/// deliberately the same rules the
+/// plain-text renderer uses
+/// (`dict::gloss::plain`): a block tag
+/// or a `data` marker opens a
+/// paragraph, an inline tag adds spans
+/// to the one already open, and a
+/// paragraph with no text is dropped.
+/// Two renderers over one tree must
+/// not disagree about where the lines
+/// are - that disagreement is the bug
+/// class this spec exists to close.
+struct Paragraphs<'a> {
+    doc: &'a GlossDoc,
+    /// Finished, in order.
+    out: Vec<Flow>,
+    /// The one still filling.
+    cur: Flow,
+    /// Every link seen so far;
+    /// [`Flow`] gets the ones it
+    /// reached, renumbered.
+    links: Vec<HitAction>,
+    /// A separator owed to the next
+    /// text this paragraph takes.
+    pending_sep: bool,
+}
+
+/// One row's gloss tree, laid out as
+/// paragraphs at `top_gap` apart.
+fn paragraphs(doc: &GlossDoc, base: Inline, top_gap: f32) -> Vec<Flow> {
+    let mut p = Paragraphs {
+        doc,
+        out: Vec::new(),
+        cur: Flow::default(),
+        links: Vec::new(),
+        pending_sep: false,
+    };
+    for id in doc.items() {
+        p.item(id, base);
+        p.pending_sep = true;
+    }
+    p.flush();
+    for flow in &mut p.out {
+        flow.top_gap = top_gap;
+    }
+    p.out
+}
+
+impl Paragraphs<'_> {
+    /// One top-level glossary item.
+    fn item(&mut self, id: NodeId, base: Inline) {
+        let doc = self.doc;
+        match doc.node(id).item_type {
+            // Ticket 12 owns image
+            // items; today they draw
+            // nothing, which is what
+            // the plain-text walk also
+            // does with them.
+            ItemType::Image => {}
+            ItemType::Text => self.text(doc.text(id), base, NO_LINK),
+            // Yomitan drops a
+            // `structured-content`
+            // item's children straight
+            // into a block container,
+            // so the item itself
+            // neither opens a paragraph
+            // nor takes part in the
+            // drop rules.
+            ItemType::StructuredContent => self.children(id, base, true, NO_LINK),
+            _ if doc.is_plain_string(id) => self.text(doc.text(id), base, NO_LINK),
+            _ => self.node(id, base, NO_LINK),
+        }
+    }
+
+    /// One node.
+    fn node(&mut self, id: NodeId, parent: Inline, link: u32) {
+        let doc = self.doc;
+        let node = *doc.node(id);
+        if doc.is_dropped_subtree(id) || doc.is_part_of_speech(id) {
+            return;
+        }
+        match node.tag {
+            // Ticket 11 owns ruby. Until
+            // it lands a base renders and
+            // its reading does not: `rt`
+            // dropped into the flow would
+            // read as 漢かん字じ, and `rp`
+            // is the fallback for a
+            // renderer that cannot draw
+            // ruby - which this one is
+            // about to stop being. `ruby`
+            // itself is a transparent
+            // inline wrapper, so ticket 11
+            // plugs in at this arm and
+            // nowhere else.
+            Tag::Rt | Tag::Rp => return,
+            // Both engines break hard on
+            // a newline, so a dictionary's
+            // own break reaches the panel
+            // inside the paragraph rather
+            // than splitting it.
+            Tag::Br => return self.text("\n", parent, link),
+            _ => {}
+        }
+        // Ticket 12 owns images.
+        if node.kind == Kind::Image {
+            return;
+        }
+        if node.kind == Kind::Text && node.tag == Tag::None {
+            return self.text(doc.text(id), parent, link);
+        }
+        // A block *opens* a line and
+        // never closes one, exactly as
+        // the plain-text walk's mark
+        // does: text after a block joins
+        // the block's own paragraph.
+        if node.tag.is_block() || doc.has_marker(id) {
+            self.flush();
+        }
+        let style = self.styled(id, parent);
+        let link = self.link_of(id, link);
+        self.children(id, style, !node.tag.is_inline(), link);
+    }
+
+    /// A node's children.
+    ///
+    /// A glossary array of bare strings
+    /// is a list, one paragraph per
+    /// string - Yomitan gives each its
+    /// own `<li>`. An array mixing
+    /// strings with nodes is prose
+    /// broken up by its own markup, so
+    /// only a run that is *entirely*
+    /// bare strings, and holds more
+    /// than one, becomes paragraphs.
+    fn children(&mut self, id: NodeId, style: Inline, block_ctx: bool, link: u32) {
+        let doc = self.doc;
+        if block_ctx && doc.is_string_list(id) {
+            for child in doc.children(id) {
+                self.flush();
+                self.text(doc.text(child), style, link);
+            }
+            return;
+        }
+        for child in doc.children(id) {
+            self.node(child, style, link);
+        }
+    }
+
+    /// Appends text, paying any owed
+    /// item separator first.
+    fn text(&mut self, text: &str, style: Inline, link: u32) {
+        if text.is_empty() {
+            return;
+        }
+        if std::mem::take(&mut self.pending_sep) && !self.cur.text.is_empty() {
+            self.push(ITEM_SEPARATOR, style, link);
+        }
+        self.push(text, style, link);
+    }
+
+    /// Appends one run, joining it to
+    /// the span before it when nothing
+    /// about it differs.
+    ///
+    /// Coalescing is not only economy.
+    /// It is what keeps a gloss that is
+    /// one plain string measuring as
+    /// exactly one span - byte for byte
+    /// the request the panel made
+    /// before this pass existed, which
+    /// is why the geometry goldens do
+    /// not move.
+    fn push(&mut self, text: &str, style: Inline, link: u32) {
+        let at = self.cur.text.len() as u32;
+        let len = text.len() as u32;
+        self.cur.text.push_str(text);
+        match self.cur.spans.last_mut() {
+            Some(last)
+                if last.style == style && last.link == link && last.at + last.len == at =>
+            {
+                last.len += len;
+            }
+            _ => self.cur.spans.push(FlowSpan { at, len, style, link }),
+        }
+    }
+
+    /// Ends the open paragraph.
+    ///
+    /// A paragraph with no text is
+    /// dropped rather than drawn, so
+    /// nested blocks give one paragraph
+    /// per innermost block instead of a
+    /// run of blank ones. What survives
+    /// is trimmed at both ends, because
+    /// Yomitan draws this in a browser
+    /// and a browser does not indent a
+    /// paragraph by the space a
+    /// dictionary happened to leave
+    /// between two nodes.
+    fn flush(&mut self) {
+        if self.cur.text.trim().is_empty() {
+            self.cur.text.clear();
+            self.cur.spans.clear();
+            return;
+        }
+        let mut flow = std::mem::take(&mut self.cur);
+        trim(&mut flow);
+        // Renumber onto this paragraph's
+        // own list: an `<a>` holding a
+        // block spans two paragraphs,
+        // and neither may name an index
+        // the other owns.
+        let mut seen: Vec<(u32, u32)> = Vec::new();
+        for span in &mut flow.spans {
+            if span.link == NO_LINK {
+                continue;
+            }
+            span.link = match seen.iter().find(|(old, _)| *old == span.link) {
+                Some((_, new)) => *new,
+                None => {
+                    let new = flow.links.len() as u32;
+                    flow.links.push(self.links[span.link as usize].clone());
+                    seen.push((span.link, new));
+                    new
+                }
+            };
+        }
+        self.out.push(flow);
+    }
+
+    /// The link a node's content sits
+    /// inside, its own or its
+    /// parent's.
+    fn link_of(&mut self, id: NodeId, inherited: u32) -> u32 {
+        let doc = self.doc;
+        if doc.node(id).kind != Kind::Link {
+            return inherited;
+        }
+        let Some(href) = doc.attr_of(id, "href").and_then(|v| doc.scalar_str(v)) else {
+            return inherited;
+        };
+        match link_action(href) {
+            Some(action) => {
+                self.links.push(action);
+                self.links.len() as u32 - 1
+            }
+            None => inherited,
+        }
+    }
+
+    /// One node's resolved inline
+    /// style.
+    ///
+    /// HTML's own stylesheet first - a
+    /// `b` is bold and a `sup` is a
+    /// raised `smaller` - then the
+    /// node's resolved style record,
+    /// which is the dictionary
+    /// author's last word and which
+    /// ticket 17 will also feed from
+    /// the dictionary's own
+    /// `styles.css`.
+    fn styled(&self, id: NodeId, parent: Inline) -> Inline {
+        let doc = self.doc;
+        let mut style = tag_style(doc.node(id).tag, parent);
+        let record = doc.style(id);
+        for (i, (key, value)) in record.iter().enumerate() {
+            // First occurrence wins,
+            // which is the answer
+            // `GlossDoc::style_of`
+            // gives every other reader
+            // of the record.
+            if record[..i].iter().any(|(seen, _)| seen == key) {
+                continue;
+            }
+            apply_style(doc, *key, *value, parent.size, &mut style);
+        }
+        style
+    }
+}
+
+/// Drops a paragraph's edge
+/// whitespace, spans and all.
+///
+/// The text is rebuilt rather than
+/// sliced in place, since a span is a
+/// byte range into it and every one
+/// after the cut moves. A span left
+/// with nothing goes, which is what
+/// keeps a separator node between two
+/// blocks from measuring as a span of
+/// one space.
+fn trim(flow: &mut Flow) {
+    let start = flow.text.len() - flow.text.trim_start().len();
+    let end = flow.text.trim_end().len();
+    if start == 0 && end == flow.text.len() {
+        return;
+    }
+    let (start, end) = (start as u32, end as u32);
+    flow.text = flow.text[start as usize..end as usize].to_string();
+    flow.spans.retain_mut(|span| {
+        let at = span.at.max(start);
+        let to = (span.at + span.len).min(end);
+        span.at = at.saturating_sub(start);
+        span.len = to.saturating_sub(at);
+        span.len > 0
+    });
+}
+
+/// HTML's own stylesheet, for the tags
+/// structured content admits.
+///
+/// `verticalAlign` is not inherited -
+/// CSS says so - so every node starts
+/// back on its line's baseline and a
+/// `sup` inside a `sup` is raised
+/// once.
+fn tag_style(tag: Tag, parent: Inline) -> Inline {
+    let mut style = Inline { shift: 0.0, align: VAlign::Fixed, ..parent };
+    match tag {
+        // A header cell is bold by the
+        // spec's own defaults table; its
+        // tinted background is a box
+        // property and ticket 08's.
+        Tag::B | Tag::Strong | Tag::Th => style.weight = BOLD_WEIGHT,
+        Tag::I | Tag::Em => style.italic = true,
+        Tag::Sup => {
+            style.size = parent.size / FONT_STEP;
+            style.shift = parent.size * SUPER_RISE;
+        }
+        Tag::Sub => {
+            style.size = parent.size / FONT_STEP;
+            style.shift = -parent.size * SUB_DROP;
+        }
+        Tag::Small => style.size = parent.size / FONT_STEP,
+        Tag::Big => style.size = parent.size * FONT_STEP,
+        _ => {}
+    }
+    style
+}
+
+/// Folds one resolved style property
+/// into a span's style.
+///
+/// The properties a styled span can
+/// carry, and no others: the box
+/// properties are ticket 08's, the
+/// list and table ones are 09's and
+/// 10's, and a value this build
+/// cannot read leaves the inherited
+/// one standing rather than guessing.
+fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut Inline) {
+    match key {
+        StyleKey::FontSize => {
+            if let Some(size) = length_px(doc, value, em) {
+                out.size = size;
+            }
+        }
+        StyleKey::FontWeight => {
+            if let Some(weight) = weight_of(doc, value, out.weight) {
+                out.weight = weight;
+            }
+        }
+        StyleKey::FontStyle => {
+            if let Some(italic) = italic_of(doc, value) {
+                out.italic = italic;
+            }
+        }
+        StyleKey::Color => {
+            if let Some(color) = color_of(doc, value) {
+                out.color = color;
+            }
+        }
+        StyleKey::VerticalAlign => {
+            if let Some((shift, align)) = align_of(doc, value, em) {
+                out.shift = shift;
+                out.align = align;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A CSS length, in the panel's own
+/// pixels.
+///
+/// A number is Yomitan's em-multiplier
+/// convention, the same one the HTML
+/// renderer prints with an `em`
+/// suffix. A string carries its own
+/// unit: `em` and `%` are relative to
+/// the em it sits in, and `px` is
+/// relative to Yomitan's own base (see
+/// [`YOMITAN_BASE_PX`]).
+fn length_px(doc: &GlossDoc, value: Scalar, em: f32) -> Option<f32> {
+    let px = match value {
+        Scalar::Num(n) => em * n as f32,
+        Scalar::Text(span) => {
+            let text = doc.span(span).trim();
+            let at = text
+                .find(|c: char| !matches!(c, '0'..='9' | '.' | '-' | '+'))
+                .unwrap_or(text.len());
+            let n: f32 = text[..at].parse().ok()?;
+            match text[at..].trim() {
+                "em" | "" => em * n,
+                "%" => em * n / 100.0,
+                "px" => em * n / YOMITAN_BASE_PX,
+                _ => return None,
+            }
+        }
+        Scalar::Bool(_) | Scalar::Null => return None,
+    };
+    (px.is_finite() && px > 0.0).then_some(px)
+}
+
+/// `fontWeight` on DirectWrite's
+/// scale, which is also CSS's and
+/// fontdb's.
+fn weight_of(doc: &GlossDoc, value: Scalar, inherited: u16) -> Option<u16> {
+    let number = |n: f64| (n.is_finite() && n >= 1.0).then(|| (n as u16).clamp(100, 900));
+    match value {
+        Scalar::Num(n) => number(n),
+        Scalar::Text(span) => match doc.span(span).trim() {
+            "normal" => Some(REGULAR_WEIGHT),
+            "bold" => Some(BOLD_WEIGHT),
+            "bolder" => Some(inherited.saturating_add(WEIGHT_STEP).min(900)),
+            "lighter" => Some(inherited.saturating_sub(WEIGHT_STEP).max(100)),
+            text => text.parse::<f64>().ok().and_then(number),
+        },
+        Scalar::Bool(_) | Scalar::Null => None,
+    }
+}
+
+/// `fontStyle`. Oblique is italic:
+/// neither engine synthesizes a slant
+/// and a family that has one face for
+/// both is the normal case.
+fn italic_of(doc: &GlossDoc, value: Scalar) -> Option<bool> {
+    match doc.scalar_str(value)?.trim() {
+        "italic" | "oblique" => Some(true),
+        "normal" => Some(false),
+        _ => None,
+    }
+}
+
+/// `verticalAlign`, against the em it
+/// sits in.
+///
+/// A line box here holds one line of
+/// text, so its own edges and its text
+/// edges are the same two edges:
+/// `top` cannot differ from
+/// `text-top`, nor `bottom` from
+/// `text-bottom`.
+fn align_of(doc: &GlossDoc, value: Scalar, em: f32) -> Option<(f32, VAlign)> {
+    Some(match doc.scalar_str(value)?.trim() {
+        "baseline" => (0.0, VAlign::Fixed),
+        "super" => (em * SUPER_RISE, VAlign::Fixed),
+        "sub" => (-em * SUB_DROP, VAlign::Fixed),
+        "text-top" | "top" => (0.0, VAlign::TextTop),
+        "text-bottom" | "bottom" => (0.0, VAlign::TextBottom),
+        "middle" => (0.0, VAlign::Middle),
+        _ => return None,
+    })
+}
+
+/// One span's baseline shift on the
+/// line it landed on.
+///
+/// [`VAlign::Fixed`] needs no line.
+/// The rest are CSS's line-relative
+/// values, and the seam reports
+/// exactly two facts about a line -
+/// how tall it is and how far down it
+/// the baseline sits - so a span's own
+/// ascent is its own advance in the
+/// same proportion (ADR-0013).
+fn shift_on(style: Inline, line: LineBox, span_h: f32) -> f32 {
+    if style.align == VAlign::Fixed || line.h <= 0.0 {
+        return style.shift;
+    }
+    let ascent = line.baseline;
+    let descent = line.h - line.baseline;
+    let own_ascent = span_h * ascent / line.h;
+    let own_descent = span_h - own_ascent;
+    match style.align {
+        VAlign::TextTop => ascent - own_ascent,
+        VAlign::TextBottom => own_descent - descent,
+        // CSS puts the box's middle half
+        // an x-height above the
+        // baseline; with no x-height in
+        // the seam, half the ascent is
+        // the usual stand-in for one.
+        VAlign::Middle => ascent / 4.0 - (own_ascent - own_descent) / 2.0,
+        VAlign::Fixed => style.shift,
+    }
+}
+
+/// What following a glossary link
+/// does.
+///
+/// A dictionary's own cross-references
+/// carry no scheme and name their
+/// target in a `query` parameter
+/// (`?query=見出し語&wildcards=off`),
+/// so they drill down in the panel
+/// exactly as a headword's kanji does.
+/// Its citations are `http` or
+/// `https` and belong in a browser.
+/// Anything else - `javascript:`,
+/// `data:` - arrives from a file
+/// chibipop did not write and earns no
+/// target at all, which is the same
+/// allow-list the Anki HTML renderer
+/// applies. Whitespace and control
+/// characters go first, because a URL
+/// parser ignores them inside a URL
+/// and a naive scheme check would not.
+fn link_action(href: &str) -> Option<HitAction> {
+    let clean: String =
+        href.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect();
+    if let Some(query) = query_param(&clean) {
+        return (!query.is_empty()).then_some(HitAction::DrillDown(query));
+    }
+    let followable = match clean.find([':', '/', '?', '#']) {
+        Some(at) if clean.as_bytes()[at] == b':' => {
+            let scheme = &clean[..at];
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }
+        // No scheme, so relative to a
+        // dictionary archive nothing
+        // here can serve.
+        _ => false,
+    };
+    followable.then_some(HitAction::OpenUrl(clean))
+}
+
+/// A cross-reference's `query`
+/// parameter, percent-decoded.
+fn query_param(url: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    let raw = query
+        .split(['&', '#'])
+        .find_map(|pair| pair.strip_prefix("query="))?;
+    Some(percent_decode(raw))
+}
+
+/// `%XX` back to bytes, leaving
+/// anything malformed as written.
+///
+/// Yomitan writes these with
+/// `encodeURIComponent`, which spells
+/// a space `%20` and never `+`, so `+`
+/// is left alone: in a headword it is
+/// a character rather than a space.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match (bytes[i], hex_pair(bytes, i + 1)) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Two hex digits at `at`, as a byte.
+fn hex_pair(bytes: &[u8], at: usize) -> Option<u8> {
+    let hi = hex_digit(*bytes.get(at)?)?;
+    let lo = hex_digit(*bytes.get(at + 1)?)?;
+    Some(hi << 4 | lo)
+}
+
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// A CSS colour, as the scene carries
+/// them.
+///
+/// Hex in all three lengths,
+/// `rgb()`/`rgba()`, and the sixteen
+/// names CSS has had since level 1
+/// plus `orange` - the whole surface a
+/// dictionary's `color` values use.
+/// Alpha parses and is dropped: `Rgb`
+/// is the scene's colour and the panel
+/// composites its own opacity once, at
+/// the end. Anything else keeps the
+/// colour it inherited.
+fn color_of(doc: &GlossDoc, value: Scalar) -> Option<Rgb> {
+    let text = doc.scalar_str(value)?.trim();
+    if let Some(hex) = text.strip_prefix('#') {
+        return hex_color(hex.as_bytes());
+    }
+    if let Some(args) = text
+        .strip_prefix("rgb(")
+        .or_else(|| text.strip_prefix("rgba("))
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let mut channel = args.split([',', '/', ' ']).filter(|p| !p.trim().is_empty());
+        let mut next = || -> Option<u8> {
+            let raw = channel.next()?.trim();
+            let n: f32 = match raw.strip_suffix('%') {
+                Some(pct) => pct.trim().parse::<f32>().ok()? * 255.0 / 100.0,
+                None => raw.parse().ok()?,
+            };
+            Some(n.round().clamp(0.0, 255.0) as u8)
+        };
+        return Some((next()?, next()?, next()?));
+    }
+    named_color(text)
+}
+
+/// `#rgb`, `#rrggbb` or `#rrggbbaa`.
+fn hex_color(hex: &[u8]) -> Option<Rgb> {
+    let digit = |i: usize| hex_digit(*hex.get(i)?);
+    match hex.len() {
+        3 | 4 => {
+            let (r, g, b) = (digit(0)?, digit(1)?, digit(2)?);
+            Some((r * 17, g * 17, b * 17))
+        }
+        6 | 8 => Some((
+            hex_pair(hex, 0)?,
+            hex_pair(hex, 2)?,
+            hex_pair(hex, 4)?,
+        )),
+        _ => None,
+    }
+}
+
+/// CSS level 1's sixteen, their two
+/// British spellings, and `orange`.
+fn named_color(name: &str) -> Option<Rgb> {
+    let mut lower = name.to_ascii_lowercase();
+    lower.retain(|c| !c.is_whitespace());
+    Some(match lower.as_str() {
+        "black" => (0, 0, 0),
+        "silver" => (192, 192, 192),
+        "gray" | "grey" => (128, 128, 128),
+        "white" => (255, 255, 255),
+        "maroon" => (128, 0, 0),
+        "red" => (255, 0, 0),
+        "purple" => (128, 0, 128),
+        "fuchsia" | "magenta" => (255, 0, 255),
+        "green" => (0, 128, 0),
+        "lime" => (0, 255, 0),
+        "olive" => (128, 128, 0),
+        "yellow" => (255, 255, 0),
+        "navy" => (0, 0, 128),
+        "blue" => (0, 0, 255),
+        "teal" => (0, 128, 128),
+        "aqua" | "cyan" => (0, 255, 255),
+        "orange" => (255, 165, 0),
+        _ => return None,
+    })
 }
 
 /// One "See also" headword.
@@ -1077,18 +2215,17 @@ fn build_elements(
                         italic: theme.dimmed_italic,
                     }));
                 }
-                if entry.glosses.is_empty() {
-                    continue;
+                // The panel renders the parsed tree, not the plain-text
+                // render of it: `GlossEntry::glosses` is what the Anki
+                // plain-text field and the collapsed summary still need,
+                // and a third view of one tree is the bug class this spec
+                // set out to close.
+                let mut flows = paragraphs(&entry.doc, Inline::body(theme), LINE_GAP);
+                let Some(first) = flows.first_mut() else { continue };
+                if numbered {
+                    first.number(i + 1, Inline::body(theme));
                 }
-                let body = entry.glosses.join("; ");
-                out.push(Elem::Text(Line {
-                    text: if numbered { format!("{}. {body}", i + 1) } else { body },
-                    color: theme.body_text,
-                    size: theme.body_size,
-                    top_gap: LINE_GAP,
-                    weight: theme.body_weight,
-                    italic: theme.body_italic,
-                }));
+                out.extend(flows.into_iter().map(Elem::Gloss));
             }
         }
     }

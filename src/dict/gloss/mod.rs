@@ -194,6 +194,34 @@ impl Tag {
             Tag::Ul => "ul",
         }
     }
+
+    /// Does this tag break a line?
+    ///
+    /// The schema's own block/inline division, which every renderer over this
+    /// tree shares: the plain-text walk turns a block into a line break and
+    /// the popup's inline pass ends a paragraph at one. Structured content has
+    /// no `display` property, so the mapping is fixed and needs no cascade.
+    ///
+    /// `td`, `th`, `thead` and `tbody` are in neither table on purpose: a cell
+    /// is a grid problem rather than a line-break one, and the `tr` around it
+    /// already breaks the row.
+    pub fn is_block(self) -> bool {
+        matches!(
+            self,
+            Tag::Div | Tag::Li | Tag::Ol | Tag::Ul | Tag::Table | Tag::Tr | Tag::Details
+                | Tag::Summary
+        )
+    }
+
+    /// Does this tag never break a line?
+    ///
+    /// The other half of [`is_block`](Self::is_block). Not its complement: a
+    /// cell tag is in neither, and an emphasis tag such as `b` is inline by
+    /// having nothing to say about lines at all. What this decides is where a
+    /// run of bare strings under a node becomes lines rather than one flow.
+    pub fn is_inline(self) -> bool {
+        matches!(self, Tag::Span | Tag::A | Tag::Ruby | Tag::Rt | Tag::Rp | Tag::Img)
+    }
 }
 
 /// A glossary item's `type` field.
@@ -497,6 +525,32 @@ impl GlossDoc {
     pub fn is_plain_string(&self, id: NodeId) -> bool {
         let n = &self.nodes[id as usize];
         n.kind == Kind::Text && n.tag == Tag::None && n.item_type == ItemType::None
+    }
+
+    /// Are this node's children more than one child, every one of them a bare
+    /// glossary string?
+    ///
+    /// Yomitan's one exception to concatenating a node's children: such a run
+    /// is a list and each string gets its own `<li>`, so both renderers over
+    /// this tree that have lines - the plain-text walk and the popup's inline
+    /// pass - break between them. An array mixing strings with nodes is prose
+    /// broken up by its own inline markup ("see also", then a link, then more
+    /// text) and is not a list.
+    ///
+    /// The arena flattens every array level under `content` into one child
+    /// list, so the test is on the child list rather than on one JSON array.
+    /// The two agree on every shape the census contains; they differ only
+    /// when a bare string sits beside a nested string array under one
+    /// `content`, which no corpus dictionary does.
+    pub fn is_string_list(&self, id: NodeId) -> bool {
+        let mut n = 0;
+        for child in self.children(id) {
+            if !self.is_plain_string(child) {
+                return false;
+            }
+            n += 1;
+        }
+        n > 1
     }
 
     /// `data.content`, when it is a string. A non-string marker names no

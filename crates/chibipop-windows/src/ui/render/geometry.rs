@@ -266,19 +266,19 @@ fn card(
     }
 }
 
-/// The layout pass reads `glosses` and nothing else, so a geometry fixture
-/// carries an empty document and the exact strings the snapshot was blessed
-/// against. One block, one matched term-bank row: the geometry the goldens
-/// hold is one dictionary label with one gloss body under it.
+/// The layout pass renders each row's parsed tree, so a geometry fixture
+/// carries the tree its own strings parse to - a bare glossary string per
+/// item, the shape 20 of the census's 72 dictionaries emit. The blessed
+/// geometry is unchanged by that: the inline pass joins one row's items
+/// with the same `; ` the panel always drew and coalesces them into one
+/// styled span, so the seam gets the request it got before the pass
+/// existed. Authoring fixtures that *do* carry structure is ticket 13's,
+/// alongside the re-bless.
+///
+/// One block, one matched term-bank row: the geometry the goldens hold is
+/// one dictionary label with one gloss body under it.
 fn block(dict: &str, glosses: &[&str]) -> GlossBlock {
-    GlossBlock {
-        dict_name: dict.to_string(),
-        entries: vec![chibipop::present::GlossEntry {
-            glosses: glosses.iter().map(|s| s.to_string()).collect(),
-            tags: Vec::new(),
-            doc: std::sync::Arc::new(chibipop::dict::gloss::GlossDoc::empty()),
-        }],
-    }
+    GlossBlock::parse(dict, &serde_json::json!(glosses).to_string())
 }
 
 fn row(written: Option<&str>, reading: Option<&str>, summary: &str) -> CollapsedRow {

@@ -680,8 +680,13 @@ impl Renderer {
                 target.DrawRoundedRectangle(&panel, &border_brush, theme.border_width, None);
             }
 
+            // One buffer for every
+            // element's spans: a rich
+            // entry costs no allocation
+            // per element per frame.
+            let mut spans: Vec<StyledSpan<'_>> = Vec::new();
             for painted in scene.visible(scroll as f32, h as f32) {
-                self.draw_elem(target, theme, painted.elem, painted.pen)?;
+                self.draw_elem(target, theme, painted.elem, painted.pen, &mut spans)?;
             }
 
             if let Some(side) = &scene.side {
@@ -711,7 +716,7 @@ impl Renderer {
                         color: painted.row.color,
                     };
                     let at = Vector2 { X: side.col_x, Y: painted.y };
-                    self.draw_spans(target, &[span], side.col_w, at, false)?;
+                    self.draw_spans(target, &[span], &[0.0], side.col_w, at, false)?;
                 }
             }
 
@@ -741,21 +746,16 @@ impl Renderer {
     }
 
     /// Draws one scene element.
-    ///
-    /// Re-shapes the run at the width
-    /// the scene measured it at, so
-    /// the ink lands where the hit
-    /// rects say it does.
-    fn draw_elem(
+    fn draw_elem<'a>(
         &self,
         target: &ID2D1HwndRenderTarget,
-        theme: &Theme,
-        elem: &SceneElem,
+        theme: &'a Theme,
+        elem: &'a SceneElem,
         pen: (f32, f32),
+        spans: &mut Vec<StyledSpan<'a>>,
     ) -> windows::core::Result<()> {
-        let brush = unsafe { target.CreateSolidColorBrush(&color_f(elem.color), None) }?;
-
         if elem.kind == ElemKind::Separator {
+            let brush = unsafe { target.CreateSolidColorBrush(&color_f(elem.color), None) }?;
             let rect = D2D_RECT_F {
                 left: elem.rect.x,
                 top: pen.1,
@@ -766,20 +766,30 @@ impl Renderer {
             return Ok(());
         }
 
-        let span = StyledSpan {
-            text: &elem.text,
-            font: &theme.font_name,
-            size: elem.font_size,
-            weight: elem.weight,
-            italic: elem.italic,
-            color: elem.color,
-        };
+        // One layout for the whole
+        // element, however many styles
+        // it holds: its spans wrap as
+        // one paragraph, so painting
+        // them one at a time would
+        // re-break the lines the scene
+        // already measured (ADR-0013).
+        spans.clear();
+        spans.extend(elem.styled_spans(&theme.font_name));
+        let shifts: Vec<f32> = elem.spans.iter().map(|s| s.shift).collect();
         let at = Vector2 { X: pen.0, Y: pen.1 };
-        self.draw_spans(target, &[span], elem.wrap_w, at, elem.align == Align::Trailing)
+        self.draw_spans(
+            target,
+            spans,
+            &shifts,
+            elem.wrap_w,
+            at,
+            elem.align == Align::Trailing,
+        )
     }
 
     /// Draws one run's spans, each in
-    /// its own colour.
+    /// its own colour and at its own
+    /// baseline.
     ///
     /// One layout - the same shaping
     /// path the scene was measured
@@ -792,34 +802,82 @@ impl Renderer {
     /// styled-span field measurement
     /// ignores (ADR-0013), and this is
     /// where it is answered.
+    ///
+    /// `verticalAlign` costs one draw
+    /// per *distinct* shift, because
+    /// `DrawTextLayout` has no
+    /// per-range baseline: the layout
+    /// is built once, so every pass
+    /// wraps identically, and a pass
+    /// paints only the spans that share
+    /// its shift by handing the rest a
+    /// fully transparent brush. A run
+    /// with no `verticalAlign` - every
+    /// run the panel's own chrome
+    /// builds - is one pass and one
+    /// `DrawTextLayout`, exactly as
+    /// before.
     fn draw_spans(
         &self,
         target: &ID2D1HwndRenderTarget,
         spans: &[StyledSpan<'_>],
+        shifts: &[f32],
         max_w: f32,
         at: Vector2,
         trailing: bool,
     ) -> windows::core::Result<()> {
+        if spans.is_empty() {
+            return Ok(());
+        }
         let layout = self.text.layout(MeasureRun { spans, max_w })?;
         if trailing {
             unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
         }
-        let mut first = None;
-        for (span, range) in spans.iter().zip(ranges(spans)) {
-            let brush = unsafe { target.CreateSolidColorBrush(&color_f(span.color), None) }?;
-            // SAFETY: the range names
-            // UTF-16 positions inside the
-            // layout's own text.
-            unsafe { layout.SetDrawingEffect(&brush, range) }?;
-            first.get_or_insert(brush);
-        }
-        let Some(default) = first else { return Ok(()) };
-        unsafe {
-            target.DrawTextLayout(at, &layout, &default, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        for i in 0..spans.len() {
+            let shift = shift_at(shifts, i);
+            // Each distinct shift once:
+            // the pass that draws it is
+            // the first span asking for
+            // it, so nothing paints
+            // twice.
+            if (0..i).any(|j| shift_at(shifts, j) == shift) {
+                continue;
+            }
+            let mut default = None;
+            for (j, range) in ranges(spans).enumerate() {
+                let color = match shift_at(shifts, j) == shift {
+                    true => color_f(spans[j].color),
+                    false => TRANSPARENT,
+                };
+                let brush = unsafe { target.CreateSolidColorBrush(&color, None) }?;
+                // SAFETY: the range names
+                // UTF-16 positions inside
+                // the layout's own text.
+                unsafe { layout.SetDrawingEffect(&brush, range) }?;
+                default.get_or_insert(brush);
+            }
+            let Some(default) = default else { return Ok(()) };
+            let origin = Vector2 { X: at.X, Y: at.Y - shift };
+            unsafe {
+                target.DrawTextLayout(origin, &layout, &default, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
         }
         Ok(())
     }
 }
+
+/// The baseline shift span `i` asks
+/// for. A run with no shifts at all
+/// hands in an empty slice, so every
+/// span of it sits on its own line's
+/// baseline.
+fn shift_at(shifts: &[f32], i: usize) -> f32 {
+    shifts.get(i).copied().unwrap_or(0.0)
+}
+
+/// A brush that paints nothing, for a
+/// span this pass is not drawing.
+const TRANSPARENT: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
 /// Ends the draw on drop.
 struct DrawScope<'a> {

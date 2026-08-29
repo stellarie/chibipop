@@ -2437,6 +2437,10 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             );
             None
         }
+        Command::OpenUrl(url) => {
+            open_url(&url);
+            None
+        }
         Command::OpenSettings => {
             *x.want_settings = true;
             None
@@ -2446,6 +2450,29 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             unsafe { PostQuitMessage(0) };
             None
         }
+    }
+}
+
+/// Hands a glossary citation to the default browser.
+///
+/// `ShellExecuteW` with the `open` verb, the same call the settings
+/// window already uses to open a plugin directory. The scheme was
+/// allow-listed to `http`/`https` in `layout::link_action`, because the
+/// URL comes out of a dictionary file, and the shell would happily
+/// launch anything else.
+fn open_url(url: &str) {
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is NUL-terminated UTF-16 valid for the call; the
+    // OS only reads it, and a URL it cannot open just fails.
+    unsafe {
+        let _ = windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            windows::core::PCWSTR(wide.as_ptr()),
+            windows::core::PCWSTR::null(),
+            windows::core::PCWSTR::null(),
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
     }
 }
 

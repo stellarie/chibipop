@@ -75,7 +75,11 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
     }
 
     // 4. Elements, in the scene's order, scroll applied and off-panel
-    // runs already culled by core.
+    // runs already culled by core. One paragraph is one run, however
+    // many styles it holds, so the wrap the scene measured is the wrap
+    // that paints (ADR-0013).
+    let mut spans: Vec<StyledSpan<'_>> = Vec::new();
+    let mut shifts: Vec<f32> = Vec::new();
     for painted in scene.visible(p.scroll, scene.view_h) {
         let elem = painted.elem;
         if elem.kind == ElemKind::Separator {
@@ -90,16 +94,11 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
             Align::Trailing => ((elem.rect.x, painted.pen.1), elem.rect.w.max(1.0)),
             Align::Leading => (painted.pen, elem.wrap_w),
         };
-        let run = DrawRun {
-            text: &elem.text,
-            size: elem.font_size,
-            weight: elem.weight,
-            italic: elem.italic,
-            max_w,
-            color: elem.color,
-            origin,
-        };
-        text.draw_run(run, target);
+        spans.clear();
+        spans.extend(elem.styled_spans(&theme.font_name));
+        shifts.clear();
+        shifts.extend(elem.spans.iter().map(|s| s.shift));
+        text.draw_run(DrawRun { spans: &spans, shifts: &shifts, max_w, origin }, target);
     }
 
     // 5. The "See also" column. Its rule divides the whole panel, not
@@ -111,16 +110,16 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
         let rule_h = bottom - side.origin_y;
         fill(target, side.rule_x, side.origin_y, side.rule_w, rule_h, theme.separator);
         for painted in side.visible(p.scroll, scene.view_h) {
-            let run = DrawRun {
-                text: &painted.row.text,
-                size: theme.collapsed_size,
-                weight: theme.collapsed_weight,
-                italic: theme.collapsed_italic,
-                max_w: side.col_w,
-                color: painted.row.color,
-                origin: (side.col_x, painted.y),
-            };
-            text.draw_run(run, target);
+            let span = side_span(theme, &painted.row.text, painted.row.color);
+            text.draw_run(
+                DrawRun {
+                    spans: &[span],
+                    shifts: &[0.0],
+                    max_w: side.col_w,
+                    origin: (side.col_x, painted.y),
+                },
+                target,
+            );
         }
     }
 
@@ -146,14 +145,7 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
     if let Some(anki) = &scene.anki {
         let rect = anki.rect;
         fill(target, rect.x, rect.y, rect.w, hairline(p.scale), theme.separator);
-        let span = StyledSpan {
-            text: &anki.label,
-            font: &theme.font_name,
-            size: theme.collapsed_size,
-            weight: theme.collapsed_weight,
-            italic: theme.collapsed_italic,
-            color: anki.color,
-        };
+        let span = side_span(theme, &anki.label, anki.color);
         let mut scratch = Measured::default();
         let measured = text
             .measure(MeasureRun { spans: &[span], max_w: rect.w }, &mut scratch)
@@ -162,20 +154,36 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
             Ok(m) => rect.x + ((rect.w - m.w) / 2.0).max(0.0),
             Err(_) => rect.x,
         };
-        let run = DrawRun {
-            text: &anki.label,
-            size: theme.collapsed_size,
-            weight: theme.collapsed_weight,
-            italic: theme.collapsed_italic,
-            max_w: rect.w.max(1.0),
-            color: anki.color,
-            origin: (x, rect.y),
-        };
-        text.draw_run(run, target);
+        text.draw_run(
+            DrawRun {
+                spans: &[span],
+                shifts: &[0.0],
+                max_w: rect.w.max(1.0),
+                origin: (x, rect.y),
+            },
+            target,
+        );
     }
 
     // 8. Windows' constant window alpha, per pixel.
     fade(target, PANEL_ALPHA);
+}
+
+/// The collapsed role's span, which the side column and the Anki label
+/// both draw in.
+///
+/// Neither comes off a `SceneElem`, so neither has a span list of its
+/// own: core names their text and their colour, and the role supplies
+/// the rest - the same shape `layout::side_span` measures them at.
+fn side_span<'a>(theme: &'a Theme, text: &'a str, color: Rgb) -> StyledSpan<'a> {
+    StyledSpan {
+        text,
+        font: &theme.font_name,
+        size: theme.collapsed_size,
+        weight: theme.collapsed_weight,
+        italic: theme.collapsed_italic,
+        color,
+    }
 }
 
 /// The hide frame: a fully transparent buffer.
@@ -288,20 +296,46 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chibipop::ui::layout::{AnkiSlot, GlyphBox, LineBox, SceneElem, SceneRect};
+    use chibipop::ui::layout::{AnkiSlot, ElemSpan, GlyphBox, LineBox, SceneElem, SceneRect};
     use chibipop::ui::layout::{MeasureError, Metrics, SidePanel, SideRow, SpanBox, TextMeasure};
     use tiny_skia::Pixmap;
 
     /// One run the painter asked for.
+    ///
+    /// The whole span list, not the first span: an element carrying
+    /// mixed styling must reach the engine whole, and a bin that
+    /// painted only its head would still pass every assertion about
+    /// its head.
     #[derive(Debug, Clone, PartialEq)]
     struct Recorded {
+        spans: Vec<RecordedSpan>,
+        max_w: f32,
+        origin: (f32, f32),
+    }
+
+    /// One span of one recorded run.
+    #[derive(Debug, Clone, PartialEq)]
+    struct RecordedSpan {
         text: String,
         size: f32,
-        max_w: f32,
         weight: u16,
         italic: bool,
         color: Rgb,
-        origin: (f32, f32),
+        shift: f32,
+    }
+
+    impl Recorded {
+        /// What a reader would see.
+        fn text(&self) -> String {
+            self.spans.iter().map(|s| s.text.as_str()).collect()
+        }
+
+        /// Its one span, for a run that
+        /// carries exactly one.
+        fn one(&self) -> &RecordedSpan {
+            assert_eq!(1, self.spans.len(), "expected a single-span run");
+            &self.spans[0]
+        }
     }
 
     /// Fixed metrics and a record of what was drawn: the same trick
@@ -373,12 +407,20 @@ mod tests {
     impl PanelText for Fake {
         fn draw_run(&mut self, run: DrawRun<'_>, target: &mut PixmapMut<'_>) {
             self.runs.push(Recorded {
-                text: run.text.to_string(),
-                size: run.size,
+                spans: run
+                    .spans
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| RecordedSpan {
+                        text: s.text.to_string(),
+                        size: s.size,
+                        weight: s.weight,
+                        italic: s.italic,
+                        color: s.color,
+                        shift: run.shifts.get(i).copied().unwrap_or(0.0),
+                    })
+                    .collect(),
                 max_w: run.max_w,
-                weight: run.weight,
-                italic: run.italic,
-                color: run.color,
                 origin: run.origin,
             });
             // One opaque pixel at the pen, so a test can see that a
@@ -400,13 +442,38 @@ mod tests {
     }
 
     fn text_elem(text: &str, pen: (f32, f32), align: Align) -> SceneElem {
+        styled_elem(pen, align, &[(text, 15.0, 400, false, 0.0)])
+    }
+
+    /// An element carrying one span per
+    /// `(text, size, weight, italic, shift)`.
+    fn styled_elem(
+        pen: (f32, f32),
+        align: Align,
+        parts: &[(&str, f32, u16, bool, f32)],
+    ) -> SceneElem {
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        for &(part, size, weight, italic, shift) in parts {
+            spans.push(ElemSpan {
+                at: text.len() as u32,
+                len: part.len() as u32,
+                color: (210, 212, 218),
+                size,
+                weight,
+                italic,
+                shift,
+            });
+            text.push_str(part);
+        }
+        let head = spans[0];
         SceneElem {
             kind: ElemKind::Text,
-            text: text.to_string(),
-            color: (210, 212, 218),
-            font_size: 15.0,
-            weight: 400,
-            italic: false,
+            text,
+            color: head.color,
+            font_size: head.size,
+            weight: head.weight,
+            italic: head.italic,
             top_gap: 0.0,
             wrap_w: 176.0,
             align,
@@ -414,6 +481,7 @@ mod tests {
             rect: SceneRect { x: pen.0, y: pen.1, w: 100.0, h: 20.0 },
             lines: 1,
             advance: 20.0,
+            spans,
         }
     }
 
@@ -497,13 +565,18 @@ mod tests {
     /// did not measure it in would be
     /// wrapped one way and drawn
     /// another, and CSS emphasis would
-    /// reach the panel not at all.
+    /// reach the panel not at all. The
+    /// weight is the *span's*, not the
+    /// element's: that is what lets one
+    /// element hold two of them.
     #[test]
     fn a_run_is_drawn_in_the_weight_and_style_the_scene_measured_it_in() {
         let theme = Theme { collapsed_weight: 200, collapsed_italic: true, ..Theme::dark() };
-        let mut elem = text_elem("gloss", (12.0, 12.0), Align::Leading);
-        elem.weight = 700;
-        elem.italic = true;
+        let elem = styled_elem(
+            (12.0, 12.0),
+            Align::Leading,
+            &[("gloss", 15.0, 700, true, 0.0)],
+        );
         let mut scene = plain_scene();
         scene.elems = vec![elem];
         scene.side = Some(SidePanel {
@@ -527,13 +600,67 @@ mod tests {
         panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
 
         let gloss = text.runs.first().expect("the gloss must be drawn");
-        assert_eq!(700, gloss.weight);
-        assert!(gloss.italic);
+        assert_eq!(700, gloss.one().weight);
+        assert!(gloss.one().italic);
         // The side column is one
         // format, the collapsed role's.
         let side = text.runs.last().expect("a side row must be drawn");
-        assert_eq!(theme.collapsed_weight, side.weight);
-        assert!(side.italic);
+        assert_eq!(theme.collapsed_weight, side.one().weight);
+        assert!(side.one().italic);
+    }
+
+    /// The whole span list reaches the engine, as one run.
+    ///
+    /// A bin that handed over only the first span would still draw
+    /// something, and the something would be a paragraph with its
+    /// emphasis, its colours and its raised marks silently missing.
+    #[test]
+    fn every_span_of_an_element_reaches_the_engine_in_one_run() {
+        let theme = Theme::dark();
+        let mut scene = plain_scene();
+        scene.elems = vec![styled_elem(
+            (12.0, 12.0),
+            Align::Leading,
+            &[
+                ("plain ", 15.0, 400, false, 0.0),
+                ("bold", 15.0, 700, false, 0.0),
+                ("1", 12.5, 400, false, 5.0),
+            ],
+        )];
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+
+        assert_eq!(1, text.runs.len(), "one run, not one per span");
+        let run = &text.runs[0];
+        assert_eq!("plain bold1", run.text());
+        assert_eq!(
+            vec![(400, 15.0, 0.0), (700, 15.0, 0.0), (400, 12.5, 5.0)],
+            run.spans.iter().map(|s| (s.weight, s.size, s.shift)).collect::<Vec<_>>()
+        );
+        assert_eq!(176.0, run.max_w, "and one wrap width for the paragraph");
+    }
+
+    /// Colour is per span, not per element.
+    #[test]
+    fn each_span_paints_in_its_own_colour() {
+        let theme = Theme::dark();
+        let mut elem = styled_elem(
+            (12.0, 12.0),
+            Align::Leading,
+            &[("black", 15.0, 400, false, 0.0), ("red", 15.0, 400, false, 0.0)],
+        );
+        elem.spans[1].color = (255, 0, 0);
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+
+        let colors: Vec<Rgb> = text.runs[0].spans.iter().map(|s| s.color).collect();
+        assert_eq!(vec![(210, 212, 218), (255, 0, 0)], colors);
     }
 
     #[test]
@@ -577,7 +704,7 @@ mod tests {
         panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
 
         let label = text.runs.last().expect("the label must be drawn");
-        assert_eq!("Add to Anki", label.text);
+        assert_eq!("Add to Anki", label.text());
         // 11 chars at 13px measures 71.5 wide in the fake.
         assert_eq!(64.25, label.origin.0);
         assert_eq!(100.0, label.origin.1);
@@ -644,7 +771,7 @@ mod tests {
         assert_eq!(sep, pix.pixel(140, 80).unwrap().red(), "the rule runs the panel's height");
         assert_ne!(sep, pix.pixel(140, 112).unwrap().red(), "but never into the Anki strip");
         assert!(
-            text.runs.iter().any(|r| r.origin == (152.0, 12.0) && r.text == "See also"),
+            text.runs.iter().any(|r| r.origin == (152.0, 12.0) && r.text() == "See also"),
             "the column's rows are drawn at the column"
         );
     }
