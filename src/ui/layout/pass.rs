@@ -20,6 +20,7 @@ use super::flow::Flow;
 use super::image::{measure_images, place_images};
 use super::marker::{measure_markers, place_markers};
 use super::measure::{LineBox, MeasureError, MeasureRun, Measured, StyledSpan, TextMeasure};
+use super::pill::{measure_pills, place_pills};
 use super::ruby::{measure_readings, place_ruby};
 use super::scene::{
     box_elem, ElemBox, ElemKind, ElemSpan, GlossOrigin, HitTarget, SceneElem, SceneRect,
@@ -159,6 +160,19 @@ impl<'a> Pass<'a> {
         // either is a span the
         // measurer is charged for.
         measure_images(m, font, flow, wrap_w, &mut self.run)?;
+        // Then the inline boxes, for the
+        // third time on the same rule: an
+        // inline box's own margin, border
+        // and padding occupy inline space,
+        // and the only thing that can is
+        // a span the measurer is charged
+        // for. Its spacers touch no
+        // reading's and no image's, so
+        // the three passes are
+        // independent - each writes only
+        // the sizes of spans it put in
+        // the paragraph itself.
+        measure_pills(m, flow, wrap_w, &mut self.run)?;
         m.measure(MeasureRun { spans: &self.run, max_w: wrap_w }, &mut self.measured)?;
         // The markers last, and after
         // the paragraph rather than
@@ -248,53 +262,13 @@ impl<'a> Pass<'a> {
         }
 
         // A pill per line its run
-        // touches, drawn around the
-        // text rather than pushing it
-        // aside: the measurement seam
-        // takes styled spans and no
-        // boxes (ADR-0013), so an
-        // inline box's padding cannot
-        // reserve room on its line.
-        // Every census pill is a short
-        // label its dictionary already
-        // spaces with `marginRight`, so
-        // what this costs is the pill's
-        // border overlapping the gap
-        // beside it, never a glyph.
-        let mut inline_boxes = Vec::new();
-        for pill in &flow.inline {
-            span_cover(&self.measured, &mut self.cover, |b| b >= pill.from && b < pill.to);
-            let (p, b) = (pill.style.padding, pill.style.border_used());
-            for &(line, left, right, span_h) in &self.cover {
-                let line = self.measured.lines[line as usize];
-                let shift = flow
-                    .spans
-                    .get(pill.from as usize)
-                    .map_or(0.0, |s| shift_on(s.style, line, span_h));
-                // The run's own text box
-                // on this line, from the
-                // two facts the seam
-                // reports about a line:
-                // how tall it is and how
-                // far down it the
-                // baseline sits.
-                let ascent = if line.h > 0.0 {
-                    span_h * line.baseline / line.h
-                } else {
-                    span_h
-                };
-                let top = line.y + line.baseline - shift - ascent;
-                inline_boxes.push(ElemBox {
-                    rect: SceneRect {
-                        x: line_at(line) + left - p.left - b.left,
-                        y: pen.1 + top - p.top - b.top,
-                        w: (right - left) + p.horizontal() + b.horizontal(),
-                        h: span_h + p.vertical() + b.vertical(),
-                    },
-                    style: pill.style,
-                });
-            }
-        }
+        // touches, in the room its own
+        // spacer spans already bought
+        // ([`place_pills`]).
+        //
+        // [`place_pills`]: super::pill::place_pills
+        let inline_boxes =
+            place_pills(flow, &self.measured, &mut self.cover, pen, line_at);
 
         let base = flow.base(theme);
         // A reading wider than its

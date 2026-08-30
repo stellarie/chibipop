@@ -9,7 +9,7 @@ use super::*;
 // module's face: each asserts what one pass measured against fixed
 // metrics, so they name the private vocabulary the submodules share
 // exactly as they did when all of it was one file.
-use super::{chrome::*, flow::*, gloss::*, image::*, marker::*, pass::*, ruby::*, style::*};
+use super::{chrome::*, flow::*, gloss::*, image::*, marker::*, pass::*, pill::*, ruby::*, style::*};
 use crate::dict::gloss::{render_html, RoleFilter, Selection, Tag};
 use crate::dict::media::{Intrinsic, MediaFormat, MediaKey};
 use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
@@ -82,53 +82,137 @@ fn zero_advance(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| matches!(c, '\u{2060}' | '\u{200b}'))
 }
 
+/// Characters a real shaper refuses to
+/// break beside: UAX #14's class GL,
+/// of which one is written here.
+///
+/// U+00A0 NO-BREAK SPACE is what an
+/// inline box buys its horizontal room
+/// with ([`PILL_SPACER`]) and what an
+/// image buys its width with
+/// ([`IMAGE_SPACER`]), and *both* rest
+/// on the break being forbidden: a wrap
+/// that split a pill from its own
+/// padding, or left a `margin-right`'s
+/// gap on one line and the word it
+/// separates on the next, would draw
+/// the box in one place and the room in
+/// another. A fake that broke there
+/// would mismeasure precisely the thing
+/// it exists to model, exactly as one
+/// charging [`zero_advance`] a full
+/// unit would.
+fn glue(c: char) -> bool {
+    c == '\u{a0}'
+}
+
+/// One unit of the fake's wrap: one
+/// UTF-16 unit of one span.
+struct Unit {
+    span: usize,
+    advance: f32,
+    h: f32,
+    /// May a line break happen
+    /// immediately before it?
+    breakable: bool,
+}
+
 /// The fake's greedy wrap.
 ///
 /// Lays one rectangle per UTF-16 unit
 /// end to end and breaks when the next
 /// would not fit, so every expectation
 /// below stays arithmetic a reader can
-/// redo by hand. A one-span run
-/// reduces to `floor(max_w / advance)`
-/// units per line, which is what this
-/// fake always did.
+/// redo by hand. A one-span run of text
+/// carrying no [`glue`] reduces to
+/// `floor(max_w / advance)` units per
+/// line, which is what this fake always
+/// did.
+///
+/// The unit it breaks *at* is UAX #14's
+/// answer and not "anywhere", because
+/// two of this renderer's reservations
+/// depend on the difference ([`glue`]).
+/// Two of the algorithm's rules are
+/// enough for that: no break after glue
+/// (LB12) and none before it either
+/// unless a space comes first (LB12a).
+/// Everything else is still a break
+/// opportunity, which is what keeps a
+/// plain run wrapping per unit.
 fn wrap(run: MeasureRun<'_>) -> (Vec<Frag>, Measured) {
     let max_w = run.max_w.max(1.0);
-    let mut frags = Vec::new();
-    let (mut line, mut x, mut from) = (0usize, 0.0f32, 0usize);
+    let mut units: Vec<Unit> = Vec::new();
+    let mut prev: Option<char> = None;
     for (span, s) in run.spans.iter().enumerate() {
         let advance = if zero_advance(s.text) { 0.0 } else { s.size * ADVANCE };
         let h = s.size * LINE_H;
-        let mut left = s.text.encode_utf16().count();
-        loop {
-            // A span that advances
-            // nothing always fits, and
-            // never zero at the head of
-            // a line: a measurer that
-            // cannot wrap narrower than
-            // one glyph overflows rather
-            // than loops.
-            let mut room = if advance <= 0.0 {
-                left
-            } else {
-                ((max_w - x) / advance).floor().max(0.0) as usize
-            };
-            if room == 0 && x == 0.0 {
-                room = 1;
+        for c in s.text.chars() {
+            // LB12 and LB12a, over the
+            // run's whole text: a span
+            // boundary is not a line
+            // boundary (ADR-0013), so the
+            // character before this one
+            // may belong to the span
+            // before it.
+            let after_glue = prev.is_some_and(glue);
+            let before_glue = glue(c) && !prev.is_some_and(|p| p == ' ' || p == '\t');
+            let breakable = !after_glue && !before_glue;
+            for i in 0..c.len_utf16() {
+                // A surrogate pair is two
+                // units of one character,
+                // and no break goes
+                // between them.
+                units.push(Unit { span, advance, h, breakable: breakable && i == 0 });
             }
-            let take = left.min(room);
-            if take > 0 {
-                frags.push(Frag { span, line, x, from, units: take, advance, h });
-                x += take as f32 * advance;
-                from += take;
-                left -= take;
-            }
-            if left == 0 {
-                break;
-            }
+            prev = Some(c);
+        }
+    }
+
+    let mut frags: Vec<Frag> = Vec::new();
+    let (mut line, mut x, mut from) = (0usize, 0.0f32, 0usize);
+    let mut at = 0usize;
+    while at < units.len() {
+        // One chunk: this break
+        // opportunity to the next. Plain
+        // text gives one unit per chunk,
+        // so it still wraps per unit; a
+        // run of glue gives one chunk
+        // holding the whole reservation
+        // and the units it is fused to.
+        let mut end = at + 1;
+        while end < units.len() && !units[end].breakable {
+            end += 1;
+        }
+        let chunk = &units[at..end];
+        let w: f32 = chunk.iter().map(|u| u.advance).sum();
+        // Never at the head of a line: a
+        // measurer that cannot wrap
+        // narrower than one chunk
+        // overflows rather than loops. A
+        // chunk that advances nothing
+        // always fits.
+        if x > 0.0 && w > 0.0 && x + w > max_w {
             line += 1;
             x = 0.0;
         }
+        for u in chunk {
+            match frags.last_mut() {
+                Some(f) if f.span == u.span && f.line == line => f.units += 1,
+                _ => frags.push(Frag {
+                    span: u.span,
+                    line,
+                    x,
+                    from,
+                    units: 1,
+                    advance: u.advance,
+                    h: u.h,
+                }),
+            }
+            x += u.advance;
+            from += 1;
+        }
+        at = end;
     }
 
     let mut out = Measured::default();
@@ -2126,14 +2210,17 @@ fn a_bordered_pill_puts_its_border_and_radius_in_the_scene() {
     assert_eq!(6.0, pill.style.radius);
     assert_eq!(Some((0, 128, 0)), pill.style.background);
 
-    // "noun" is four units at 7.5, outset by 3 of padding and 3 of border
-    // on every side. It hugs its own run, not the whole paragraph.
-    assert_eq!(gloss.pen.0 - 6.0, pill.rect.x);
-    assert_eq!(gloss.pen.1 - 6.0, pill.rect.y);
+    // "noun" is four units at 7.5, with 3 of border and 3 of padding a
+    // side bought as advance in the run itself, so the box is the run:
+    // it starts at the pen and ends where the text after it starts.
+    // Ticket 08 drew the same 42 wide outset 6 to the left of the pen,
+    // over a neighbour's glyphs at both ends.
+    assert_eq!(gloss.pen.0, pill.rect.x);
+    assert_eq!(gloss.pen.1 - 6.0, pill.rect.y, "vertically it is still an outset");
     assert_eq!(4.0 * BOX_EM * ADVANCE + 12.0, pill.rect.w);
     assert_eq!(BODY_LINE + 12.0, pill.rect.h);
     assert_eq!(
-        "noun a word", gloss.text,
+        "\u{a0}\u{a0}noun\u{a0}\u{a0} a word", gloss.text,
         "and it kept its place on the line rather than breaking one"
     );
 }
@@ -2182,16 +2269,345 @@ fn a_pill_carrying_a_content_marker_draws_one_box_and_not_two() {
 
     assert_eq!(2, gloss.len(), "the marker still opens a line of its own");
     assert_eq!("before", gloss[0].text);
-    assert_eq!("noun a word", gloss[1].text, "and the text after it joins that line");
+    // The pill's 3 of padding a side is now a no-break space at each end
+    // of its run, which is what makes the room it paints over room the
+    // text after it cleared (`pill::PILL_SPACER`).
+    assert_eq!(
+        "\u{a0}noun\u{a0} a word", gloss[1].text,
+        "and the text after it joins that line"
+    );
 
     let pill = gloss[1];
     assert_eq!(1, pill.boxes().count(), "one pill, one box - a bin paints `boxes()`");
     assert_eq!(None, pill.block_box, "an inline tag's box is its own, marker or not");
     assert_eq!(Some((0x56, 0x56, 0x56)), pill.inline_boxes[0].style.background);
-    // And it hugs its own run rather than the paragraph it opened:
-    // "noun" is four units at 7.5, outset by 3 of padding per side.
+    // And it hugs its own run rather than the paragraph it opened: "noun"
+    // is four units at 7.5, plus the 3 of padding its own two spacers
+    // bought.
     assert_eq!(4.0 * BOX_EM * ADVANCE + 6.0, pill.inline_boxes[0].rect.w);
     assert_eq!(BODY_LINE + 6.0, pill.inline_boxes[0].rect.h);
+}
+
+/// Where each of `elem`'s spans landed, as a bin's own re-measure answers
+/// it.
+///
+/// Both bins re-measure an element's own spans to paint it
+/// (`popup::paint::run_of`, `ui::render::draw_elem`), so this - and not
+/// the walk's own `Measured` - is the geometry a background can be
+/// compared against. Room a core pass added *after* the wrap would be
+/// absent here, which is exactly the failure the whole reservation is
+/// built to avoid.
+fn painted_spans(elem: &SceneElem) -> Measured {
+    let spans: Vec<StyledSpan<'_>> = elem
+        .spans
+        .iter()
+        .map(|s| StyledSpan {
+            text: &elem.text[s.at as usize..(s.at + s.len) as usize],
+            font: "",
+            size: s.size,
+            weight: s.weight,
+            italic: s.italic,
+            color: s.color,
+        })
+        .collect();
+    let mut out = Measured::default();
+    FakeMeasure::default()
+        .measure(MeasureRun { spans: &spans, max_w: elem.wrap_w }, &mut out)
+        .expect("FakeMeasure never refuses a run");
+    out
+}
+
+/// One span's box on the first line it touched, by index.
+fn painted(boxes: &Measured, span: u32) -> SpanBox {
+    *boxes
+        .spans
+        .iter()
+        .find(|b| b.span == span)
+        .unwrap_or_else(|| panic!("span {span} landed nowhere in {boxes:?}"))
+}
+
+/// The defect ticket 08 recorded as impossible, and the numbers that close
+/// it: an inline box's horizontal margin, border and padding each reserve
+/// real advance in the line.
+///
+/// Observed on a real Wayland surface against Jitendex, whose
+/// `span[data-sc-class="tag"]` declares `padding: 0.2em 0.3em` and
+/// `margin-right: 0.5em`: the panel drew `go (game)〔眼 only〕` where
+/// Yomitan draws `go (game) 〔眼 only〕`. The margin reserved nothing at
+/// all, and the box was outset over the padding it had not reserved
+/// either - so the background painted 3.6 physical pixels *under* the
+/// following word.
+///
+/// Every number below is arithmetic over `FakeMeasure`: one no-break space
+/// advances half its size, so `n` of them at size `s` reserve
+/// `n * s / 2`. A left margin and a border join Jitendex's own
+/// declarations so that all three properties are priced in one pass.
+#[test]
+fn an_inline_boxs_horizontal_edges_each_reserve_their_own_advance() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":[{"tag":"span","style":{"##,
+        r##""backgroundColor":"#565656","borderRadius":0.3,"##,
+        r##""padding":"0.2em 0.3em","marginLeft":"0.1em","marginRight":"0.5em","##,
+        r##""borderWidth":"0.2em","borderStyle":"solid"},"##,
+        r##""content":"noun"},"Chinese character"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    // 0.1em of margin, then 0.2em of border plus 0.3em of padding, then
+    // the word, then the same again, then 0.5em of margin - one span per
+    // edge with room to buy, in the order a line reads them.
+    assert_eq!(
+        "\u{a0}\u{a0}\u{a0}noun\u{a0}\u{a0}\u{a0}\u{a0}Chinese character", gloss.text,
+        "the room is text, because text is what both bins re-measure"
+    );
+    assert_eq!(
+        vec![3.0, 7.5, BOX_EM, 7.5, 7.5, BOX_EM],
+        gloss.spans.iter().map(|s| s.size).collect::<Vec<_>>(),
+        "each spacer solved to the size that reserves its own edge"
+    );
+
+    // And the advance those sizes actually buy, through the seam, at the
+    // same width the walk measured at.
+    let boxes = painted_spans(gloss);
+    assert_eq!(1, boxes.metrics.lines, "one line, so one fragment per span");
+    let widths: Vec<f32> = (0..6).map(|i| painted(&boxes, i).w).collect();
+    assert_eq!(
+        vec![1.5, 7.5, 4.0 * BOX_EM * ADVANCE, 7.5, 7.5, 17.0 * BOX_EM * ADVANCE],
+        widths,
+        "margin-left 1.5, border+padding 7.5, the word, 7.5, margin-right 7.5"
+    );
+
+    // The box is the border box: the margins are outside it, both
+    // paddings are inside, and its own two ends are the two spacers.
+    let pill = gloss.inline_boxes[0];
+    assert_eq!(gloss.pen.0 + 1.5, pill.rect.x, "the left margin is outside the box");
+    assert_eq!(7.5 + 4.0 * BOX_EM * ADVANCE + 7.5, pill.rect.w);
+
+    // The whole point, in one number: the word after the pill starts a
+    // full margin-right clear of the background, where before this it
+    // started flush against the pill's own glyphs. 1.5 + 7.5 + 30 + 7.5
+    // + 7.5, every term of it reserved.
+    let word = painted(&boxes, 5);
+    assert_eq!(54.0, word.x);
+    assert_eq!(
+        7.5,
+        (gloss.pen.0 + word.x) - (pill.rect.x + pill.rect.w),
+        "margin-right, and no background under the word"
+    );
+}
+
+/// The invariant a bin's re-measure enforces: the rect drawn and the
+/// advance reserved are one measurement, so the background cannot reach
+/// past the room the text cleared for it.
+///
+/// Asserted as an *identity*, `rect == cover of the box's own spans`,
+/// rather than as `rect == what the style declared`. The two agree on any
+/// face whose no-break space is at least a quarter of an em, which is
+/// every real one and this fake; on a narrower face the solve comes out
+/// short ([`PILL_SPACERS_PER_EM`]) and only the identity still holds -
+/// which is why [`place_pills`] reads the box back off the run instead of
+/// outsetting the text by what the style declared.
+#[test]
+fn a_pills_background_never_reaches_past_the_room_it_bought() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":[{"tag":"span","style":{"##,
+        r##""backgroundColor":"#565656","padding":"0.3em","marginRight":"0.5em"},"##,
+        r##""content":"noun"},"Chinese character"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+    let boxes = painted_spans(gloss);
+    let pill = gloss.inline_boxes[0];
+
+    // The cover of the box's own two spacers plus its word, exactly.
+    let (lead, word, trail) = (painted(&boxes, 0), painted(&boxes, 1), painted(&boxes, 2));
+    assert_eq!(gloss.pen.0 + lead.x, pill.rect.x, "the box starts where its padding does");
+    assert_eq!(trail.x + trail.w - lead.x, pill.rect.w, "and ends where it ends");
+    assert_eq!(4.5, lead.w, "0.3em of padding, reserved");
+    assert_eq!(4.5, trail.w);
+    assert_eq!(lead.x + lead.w, word.x, "the word starts after the padding");
+
+    // So no glyph of the following word is under the fill.
+    let after = painted(&boxes, 4);
+    assert!(
+        pill.rect.x + pill.rect.w <= gloss.pen.0 + after.x,
+        "{pill:?} reaches past the word at {after:?}"
+    );
+}
+
+/// The reservation must not become a wrap opportunity. A pill whose
+/// `margin-right` ended one line while the word it separates began the
+/// next would put the gap in one place and the reason for it in another.
+///
+/// U+00A0 is UAX #14 class GL, so a break is forbidden after it (LB12) and
+/// before it too unless a space came first (LB12a) - and `FakeMeasure`
+/// models exactly those two rules, because two of this renderer's
+/// reservations rest on them ([`glue`]).
+#[test]
+fn a_pills_margin_never_breaks_away_from_the_word_it_separates() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":[{"tag":"span","style":{"##,
+        r##""backgroundColor":"#565656","marginRight":"0.5em"},"##,
+        r##""content":"noun"},"Chinese character"]}"##
+    )));
+    // Every width the run can wrap at, rather than one: the break that
+    // matters is the one that lands exactly on the gap, and pinning a
+    // single width would go vacuous the moment the arithmetic around it
+    // moved. `wrap_w` is `max_w - 24` here, so this sweeps 16 to 175 and
+    // the naive break falls on the gap at 46.
+    let mut wrapped = 0;
+    for step in 0..160 {
+        let s = laid_out(&p, 40.0 + step as f32, 4000.0, false, false);
+        let gloss = one_body(&s);
+        let boxes = painted_spans(gloss);
+        wrapped += usize::from(boxes.metrics.lines > 1);
+
+        // The gap is one fragment, never split down the middle.
+        let margin: Vec<SpanBox> =
+            boxes.spans.iter().copied().filter(|b| b.span == 1).collect();
+        assert_eq!(1, margin.len(), "the gap wrapped inside itself: {boxes:?}");
+        // And it shares its line with the end of the pill before it and
+        // the start of the word after it, so the gap and the reason for
+        // it are never a line apart. The pill's *last* fragment, because
+        // at 16 pixels of wrap the word inside it wraps too.
+        let pill = boxes.spans.iter().rfind(|b| b.span == 0).expect("the pill");
+        assert_eq!(
+            pill.line, margin[0].line,
+            "the pill left its own margin behind: {boxes:?}"
+        );
+        assert_eq!(
+            margin[0].line, painted(&boxes, 2).line,
+            "the gap and the word it separates split across lines: {boxes:?}"
+        );
+    }
+    assert!(wrapped > 100, "only {wrapped} of 160 widths wrapped at all");
+}
+
+/// The vertical half, which CSS answers differently and this renderer
+/// already agreed with: an inline box's vertical padding and border paint
+/// but do not affect line height.
+///
+/// So the rect grows over its neighbours' lines while the paragraph stacks
+/// as though the box were not there - and the horizontal spacers do not
+/// grow it either, which is what capping their solved size at the box's
+/// own em is for ([`measure_pills`]).
+#[test]
+fn an_inline_boxs_vertical_padding_paints_without_growing_its_line() {
+    let bare = laid_out(&rich(&sc(r#"{"tag":"div","content":"noun"}"#)), 424.0, 4000.0, false, false);
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":[{"tag":"span","style":{"##,
+        r##""backgroundColor":"#565656","padding":"0.5em"},"content":"noun"}]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let (bare, gloss) = (one_body(&bare), one_body(&s));
+
+    assert_eq!(BODY_LINE, bare.rect.h, "one line of body text");
+    assert_eq!(bare.rect.h, gloss.rect.h, "and the box adds nothing to it");
+    assert_eq!(bare.advance, gloss.advance, "so the paragraph below does not move");
+
+    // The rect, though, is outset by 0.5em on both edges and hangs over
+    // whatever is stacked above and below.
+    let pill = gloss.inline_boxes[0];
+    assert_eq!(gloss.pen.1 - 7.5, pill.rect.y);
+    assert_eq!(BODY_LINE + 15.0, pill.rect.h);
+}
+
+/// A box that paints nothing and only spaces its content out. Ticket 08
+/// resolved these to nothing, because nothing could spend them; now the
+/// room is bought and no box is drawn, which is what a browser does with
+/// `<span style="margin-right:.5em">`.
+#[test]
+fn a_margin_with_nothing_to_draw_still_reserves_its_room() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":[{"tag":"span","style":{"marginRight":"0.5em"},"##,
+        r##""content":"a"},"b"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    assert_eq!("a\u{a0}\u{a0}b", gloss.text, "the room is there");
+    assert!(gloss.inline_boxes.is_empty(), "and nothing is drawn in it");
+    assert_eq!(None, gloss.block_box, "an inline margin is no block's box");
+
+    let boxes = painted_spans(gloss);
+    assert_eq!(7.5, painted(&boxes, 1).w, "half an em of margin, as advance");
+    assert_eq!(
+        BOX_EM * ADVANCE + 7.5,
+        painted(&boxes, 2).x,
+        "so the run after it starts a margin clear of the run before"
+    );
+}
+
+/// A pill whose paragraph lost a span to the edge trim. `InlineBox` names
+/// its run by span index and its own spacers are found from the same two
+/// indices, so the trim renumbers them ([`trim`]) - a stale pair would
+/// size a *word* as though it were a spacer.
+#[test]
+fn a_pill_keeps_its_own_run_when_the_trim_drops_a_span_ahead_of_it() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":[" ",{"tag":"span","style":{"##,
+        r##""backgroundColor":"#565656","padding":"0.2em"},"content":"noun"}," tail"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    assert_eq!("\u{a0}noun\u{a0} tail", gloss.text, "the leading space is gone");
+    assert_eq!(
+        vec![6.0, BOX_EM, 6.0, BOX_EM],
+        gloss.spans.iter().map(|s| s.size).collect::<Vec<_>>(),
+        "the two spacers were sized, and the two words were not"
+    );
+    let pill = gloss.inline_boxes[0];
+    assert_eq!(gloss.pen.0, pill.rect.x, "the box starts at its own padding");
+    assert_eq!(3.0 + 4.0 * BOX_EM * ADVANCE + 3.0, pill.rect.w, "and covers only its run");
+}
+
+/// An inline box whose content turns out to hold a block. The block opens
+/// a paragraph, which sends the one the box was being measured against out
+/// from under it, so every span index the box took names a paragraph that
+/// has left.
+///
+/// No box, stated rather than accidental. Before the room was priced in,
+/// whether one was drawn depended on how many spans the *previous*
+/// paragraph happened to hold - and now a stale index would also resize
+/// the replacement paragraph's own first word.
+#[test]
+fn a_pill_that_turns_out_to_hold_a_block_draws_no_box() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"span","style":{"backgroundColor":"#565656","padding":"0.2em"},"##,
+        r##""content":[{"tag":"div","content":"x"}]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    assert!(texts(&s).contains(&"x"), "the block still renders: {:?}", texts(&s));
+    assert!(
+        s.elems.iter().all(|e| e.inline_boxes.is_empty() && e.block_box.is_none()),
+        "no box over another paragraph's spans"
+    );
+    let gloss = one_body(&s);
+    assert_eq!(
+        vec![BOX_EM],
+        gloss.spans.iter().map(|s| s.size).collect::<Vec<_>>(),
+        "and the block's own word kept its size"
+    );
+}
+
+/// A box over no span is no box - and the room its edges would have bought
+/// goes back out of the paragraph, because a gap with nothing in it is a
+/// gap a reader can see.
+#[test]
+fn a_pill_around_nothing_reserves_nothing() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":["before",{"tag":"span","style":{"##,
+        r##""backgroundColor":"#565656","padding":"0.2em","marginRight":"0.5em"},"##,
+        r##""content":""},"after"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    assert_eq!("beforeafter", gloss.text, "no spacer left behind");
+    assert!(gloss.inline_boxes.is_empty());
 }
 
 /// The other defect ticket 17's author found: `css_len` read `em`, `%`
@@ -4796,16 +5212,36 @@ fn without(edit: fn(&mut RenderSettings)) -> RenderSettings {
     render
 }
 
-/// The gloss element carrying exactly `text`.
+/// The gloss element whose glyphs are exactly `text`.
 ///
 /// Not [`bodies`], which selects on the body font size - and a
 /// `fontSize` declaration is precisely what a styling test has to be
 /// able to change.
+///
+/// The [`PILL_SPACER`]s come out first. An inline box buys its own
+/// horizontal room with runs of them *in the paragraph's text*
+/// (`pill::measure_pills`), so a styled gloss and the same gloss with
+/// styling off are two different strings - and which element rendered
+/// which gloss is the only thing this selector is asking.
 fn gloss_of<'a>(s: &'a PopupScene, text: &str) -> &'a SceneElem {
+    let glyphs = |e: &SceneElem| e.text.replace(PILL_SPACER, "");
     s.elems
         .iter()
-        .find(|e| e.kind == ElemKind::Text && e.text == text)
+        .find(|e| e.kind == ElemKind::Text && glyphs(e) == text)
         .unwrap_or_else(|| panic!("no gloss element says {text:?} in {:?}", texts(s)))
+}
+
+/// The span of `elem` whose glyphs are exactly `text`.
+///
+/// A pill's own run is not one span. A no-break space at each end bought
+/// the box its padding room and a third one its margin
+/// (`pill::measure_pills`), and those carry the box's style at a solved
+/// size - so `spans[0]` is the room and not the word.
+fn span_of<'a>(elem: &'a SceneElem, text: &str) -> &'a ElemSpan {
+    elem.spans
+        .iter()
+        .find(|s| elem.text[s.at as usize..(s.at + s.len) as usize] == *text)
+        .unwrap_or_else(|| panic!("no span says {text:?} in {:?}", elem.text))
 }
 
 /// A gloss carrying two example sentences and an attribution, each under a
@@ -5093,8 +5529,9 @@ fn styling_off_renders_in_the_themes_own_colours_and_draws_no_box() {
 
     let styled_scene = shown(&p, RenderSettings::default());
     let styled = gloss_of(&styled_scene, "chatting");
-    assert_eq!((255, 0, 0), styled.spans[0].color, "the dictionary's colour, honoured");
-    assert_eq!(2.0 * theme.body_size, styled.spans[0].size, "its size too");
+    let ink = span_of(styled, "chatting");
+    assert_eq!((255, 0, 0), ink.color, "the dictionary's colour, honoured");
+    assert_eq!(2.0 * theme.body_size, ink.size, "its size too");
     assert!(!styled.inline_boxes.is_empty(), "and its pill, drawn");
 
     let plain_scene = shown(&p, without(|r| r.styling = false));

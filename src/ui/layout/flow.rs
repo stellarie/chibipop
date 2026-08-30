@@ -131,12 +131,12 @@ pub(super) struct FlowSpan {
 /// paragraph's spans.
 ///
 /// A pill: a `span` carrying padding,
-/// a background or a border, which
-/// keeps its place on its line rather
-/// than breaking one - Jitendex draws
-/// its part-of-speech labels this
-/// way, and 11 to 14 census
-/// dictionaries draw theirs.
+/// a background, a border or a margin,
+/// which keeps its place on its line
+/// rather than breaking one -
+/// Jitendex draws its part-of-speech
+/// labels this way, and 11 to 14
+/// census dictionaries draw theirs.
 ///
 /// A span range rather than a rect,
 /// because where the run lands is the
@@ -145,11 +145,28 @@ pub(super) struct FlowSpan {
 /// these becomes one [`ElemBox`] per
 /// line the run touches.
 ///
+/// **The range is the border box.**
+/// `from` is the box's own left border
+/// and padding and `to - 1` its right
+/// ones, each a spacer span that bought
+/// that edge its advance
+/// ([`measure_pills`]); the two margins
+/// sit immediately outside the range,
+/// because a margin is outside the box
+/// a cover of this run draws. So the
+/// rect and the room agree by
+/// construction and neither can be
+/// derived without the other
+/// ([`place_pills`]).
+///
 /// [`ElemBox`]: super::scene::ElemBox
+/// [`measure_pills`]: super::pill::measure_pills
+/// [`place_pills`]: super::pill::place_pills
 pub(super) struct InlineBox {
-    /// First span it covers.
+    /// Its left border edge: the first
+    /// span the box draws around.
     pub(super) from: u32,
-    /// One past the last.
+    /// One past its right border edge.
     pub(super) to: u32,
     pub(super) style: BoxStyle,
 }
@@ -302,6 +319,18 @@ impl Flow {
 /// keeps a separator node between two
 /// blocks from measuring as a span of
 /// one space.
+///
+/// A dropped span moves every index
+/// after it, and an [`InlineBox`] names
+/// its run by index - so the boxes are
+/// renumbered here rather than left to
+/// rot. Before the room an inline box
+/// buys was found from those two
+/// indices this only mis-drew a pill
+/// that had leading whitespace ahead of
+/// it in its paragraph; now a stale
+/// pair would also size someone else's
+/// span as a spacer.
 pub(super) fn trim(flow: &mut Flow) {
     // `white-space: pre-line`
     // preserves a segment break and
@@ -319,6 +348,27 @@ pub(super) fn trim(flow: &mut Flow) {
     }
     let (start, end) = (start as u32, end as u32);
     flow.text = flow.text[start as usize..end as usize].to_string();
+    // One new index per old span
+    // boundary - the number of spans
+    // before it that survive - so the
+    // half-open ranges above stay
+    // half-open. `to` may name one past
+    // the last span, which is why there
+    // is a boundary per span *and* one
+    // at the end.
+    let mut moved = Vec::with_capacity(flow.spans.len() + 1);
+    let mut kept = 0u32;
+    for span in &flow.spans {
+        moved.push(kept);
+        let at = span.at.max(start);
+        let to = (span.at + span.len).min(end);
+        kept += u32::from(to > at);
+    }
+    moved.push(kept);
+    for pill in &mut flow.inline {
+        pill.from = moved[pill.from as usize];
+        pill.to = moved[pill.to as usize];
+    }
     flow.spans.retain_mut(|span| {
         let at = span.at.max(start);
         let to = (span.at + span.len).min(end);

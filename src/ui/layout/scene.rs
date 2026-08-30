@@ -627,9 +627,20 @@ pub struct SceneElem {
     /// A pill is an inline box, because
     /// that is what a pill is: it keeps
     /// its place on its line instead of
-    /// breaking one. Pure decoration -
-    /// no geometry the walk stacked
-    /// depends on these.
+    /// breaking one.
+    ///
+    /// Pure decoration - no geometry the
+    /// walk stacked depends on these -
+    /// and one of them is not the whole
+    /// of its box. The horizontal room
+    /// its margin, border and padding
+    /// reserve is *advance in the run*,
+    /// bought before the wrap and
+    /// therefore already in `spans`,
+    /// `rect` and `advance`; a rect here
+    /// is what draws inside that room.
+    /// So a box with no ink has no entry
+    /// and still spaces its content out.
     pub inline_boxes: Vec<ElemBox>,
     /// Where in its dictionary this
     /// came from, or `None` for the

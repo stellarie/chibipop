@@ -936,8 +936,12 @@ fn styled_spans() -> Fixture {
 ///   carries a `data.content` marker *and* a box that only spaces
 ///   (padding and a right margin, no fill and no border), so it opens a
 ///   line - that is ticket 01's sense separator - and then resolves to
-///   **no box at all**, where before ticket 15's fix a marker-carrying
+///   **no box drawn**, where before ticket 15's fix a marker-carrying
 ///   node became a block box and indented its own line by its padding.
+///   It does still *reserve* that padding and margin, as an inline box
+///   in a browser does: the room is spacer spans in the run itself
+///   (`ui::layout`'s `pill` pass), so what a box with no ink costs the
+///   line is advance and not pixels.
 ///   The second `div` is the same block with the marker span *first*:
 ///   the shape that used to lose its box entirely, because the
 ///   paragraph the block opened was flushed empty before it could carry

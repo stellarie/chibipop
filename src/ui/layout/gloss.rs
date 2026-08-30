@@ -29,6 +29,7 @@ use super::image::{FlowImage, NO_IMAGE};
 use super::link::link_action;
 use super::marker::FlowMarker;
 use super::pass::{Boxed, Piece};
+use super::pill::{reserves, rooms, spacers, PILL_SPACER};
 use super::ruby::{FlowRuby, NO_RUBY};
 use super::scene::Rgb;
 use super::style::{Block, BoxStyle, Inline};
@@ -190,6 +191,22 @@ pub(super) struct Paragraphs<'a> {
     /// box would be drawn around its
     /// neighbours too.
     pub(super) barrier: bool,
+    /// How many paragraphs have been
+    /// closed.
+    ///
+    /// Read by [`Paragraphs::pill`] and
+    /// nothing else, to answer one
+    /// question no index can: did the
+    /// node whose children were just
+    /// walked hold a block, and so send
+    /// the paragraph the box was being
+    /// measured against out from under
+    /// it? Every span index the box
+    /// recorded then names a paragraph
+    /// that has left, and a box drawn
+    /// over them would be drawn around
+    /// whatever replaced them.
+    pub(super) flushes: u32,
     /// List markers owed to the next
     /// run of text worth marking,
     /// outermost list first.
@@ -355,6 +372,7 @@ pub(super) fn paragraphs(
         rubies: Vec::new(),
         open_ruby: NO_RUBY,
         barrier: false,
+        flushes: 0,
         pending_marker: Vec::new(),
         stack_items,
         render,
@@ -586,20 +604,26 @@ impl Paragraphs<'_> {
             link: self.link_of(id, ctx.link),
             path: ctx.path,
         };
-        // An inline node carrying ink is
-        // a pill, and a pill is drawn as
-        // an inline box: it keeps its
-        // place on its line instead of
-        // breaking one. Ink is the whole
-        // of the gate, because the seam
-        // takes styled spans and no
-        // boxes (ADR-0013): an inline
-        // box cannot push its neighbours
-        // aside, so a margin or a
-        // padding with nothing to draw
-        // resolves to nothing - whatever
-        // its node marks.
-        if !node.tag.is_block() && block.style.paints() {
+        // An inline node carrying ink or
+        // horizontal room is a pill, and
+        // a pill is drawn as an inline
+        // box: it keeps its place on its
+        // line instead of breaking one.
+        //
+        // Ink used to be the whole of the
+        // gate, because an inline box
+        // could not push its neighbours
+        // aside and a margin with nothing
+        // to draw therefore resolved to
+        // nothing. It can now
+        // ([`measure_pills`]), so a
+        // dictionary spacing two inline
+        // labels apart with margins alone
+        // gets the gaps it asked for and
+        // no box is drawn around them.
+        //
+        // [`measure_pills`]: super::pill::measure_pills
+        if !node.tag.is_block() && (block.style.paints() || reserves(block.style)) {
             return self.pill(id, next, block.style);
         }
         // A list marks and indents its
@@ -764,28 +788,117 @@ impl Paragraphs<'_> {
     }
 
     /// One inline box's own run, kept
-    /// out of its neighbours' spans.
+    /// out of its neighbours' spans and
+    /// given the room its edges declared.
     ///
     /// The box is drawn around exactly
     /// the spans this node produced, so
     /// a barrier goes in at each end:
     /// coalescing is what would
     /// otherwise hand the box a
-    /// neighbour's text as well.
+    /// neighbour's text as well - and
+    /// would fold a spacer span into the
+    /// text beside it, which would leave
+    /// the two sharing one size when the
+    /// whole point is that they do not.
+    ///
+    /// Four spacers, in CSS's own order
+    /// across the line: the left margin,
+    /// then the left border and padding,
+    /// then the run, then the right
+    /// padding and border, then the right
+    /// margin. The two margins are
+    /// outside `from..to` because a
+    /// margin is outside the box drawn
+    /// around that range
+    /// ([`InlineBox`]), and each is
+    /// written only where there is room
+    /// to buy - so a box declaring
+    /// nothing horizontal measures
+    /// byte-for-byte as it did before
+    /// this pass existed.
     pub(super) fn pill(&mut self, id: NodeId, ctx: Ctx, style: BoxStyle) {
+        let room = rooms(style);
+        // Where to roll back to if the
+        // node turns out to hold no
+        // inline content: room nothing
+        // occupies is a gap a reader can
+        // see and no box is drawn in.
+        let mark = (self.cur.text.len(), self.cur.spans.len());
+        let flushes = self.flushes;
         self.barrier = true;
+        self.room(room[0], ctx);
         let from = self.cur.spans.len() as u32;
+        self.room(room[1], ctx);
+        let opened = self.cur.spans.len() as u32;
         self.children(id, ctx);
-        let to = self.cur.spans.len() as u32;
         self.barrier = true;
-        // `to < from` when the node held
-        // a block after all and flushed
-        // the paragraph out from under
-        // itself; a box over no span is
-        // no box either way.
-        if to > from {
-            self.cur.inline.push(InlineBox { from, to, style });
+        // The node held a block after all
+        // and flushed the paragraph out
+        // from under itself. Every index
+        // above names a paragraph that has
+        // already left, so there is
+        // nothing here to draw a box
+        // around and nothing to roll back.
+        if self.flushes != flushes {
+            return;
         }
+        // A box over no span is no box.
+        if self.cur.spans.len() as u32 == opened {
+            self.cur.spans.truncate(mark.1);
+            self.cur.text.truncate(mark.0);
+            return;
+        }
+        self.room(room[2], ctx);
+        let to = self.cur.spans.len() as u32;
+        self.room(room[3], ctx);
+        self.cur.inline.push(InlineBox { from, to, style });
+    }
+
+    /// Buys one of an inline box's edges
+    /// the advance it declared.
+    ///
+    /// A run of [`PILL_SPACER`]s, its own
+    /// span, in the style the box
+    /// resolved - so [`measure_pills`]
+    /// can size it against the em it sits
+    /// in without touching the text
+    /// beside it. Pushed rather than
+    /// coalesced for exactly that reason,
+    /// which is also why it does not go
+    /// through [`Paragraphs::raw`]: the
+    /// count is written straight into the
+    /// paragraph's own string instead of
+    /// through a temporary.
+    ///
+    /// It takes the box's link, so a
+    /// clickable pill is clickable over
+    /// its own padding rather than only
+    /// over its glyphs. It claims no ruby
+    /// slot: a reading centred over a
+    /// margin would be centred over
+    /// nothing.
+    ///
+    /// [`PILL_SPACER`]: super::pill::PILL_SPACER
+    /// [`measure_pills`]: super::pill::measure_pills
+    fn room(&mut self, room: f32, ctx: Ctx) {
+        let n = spacers(room, ctx.inline.size);
+        if n == 0 {
+            return;
+        }
+        let at = self.cur.text.len() as u32;
+        for _ in 0..n {
+            self.cur.text.push_str(PILL_SPACER);
+        }
+        self.cur.spans.push(FlowSpan {
+            at,
+            len: self.cur.text.len() as u32 - at,
+            style: ctx.inline,
+            link: ctx.link,
+            ruby: NO_RUBY,
+            filler: false,
+            image: NO_IMAGE,
+        });
     }
 
     /// Ends the paragraph being built
@@ -955,6 +1068,13 @@ impl Paragraphs<'_> {
     /// dictionary happened to leave
     /// between two nodes.
     pub(super) fn flush(&mut self) {
+        // Both arms below invalidate every
+        // span index taken over the
+        // paragraph that was open, so the
+        // count moves before either of
+        // them and not only when one
+        // reaches the stream.
+        self.flushes += 1;
         if self.cur.text.trim().is_empty() {
             self.cur.text.clear();
             self.cur.spans.clear();

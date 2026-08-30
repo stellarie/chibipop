@@ -30,6 +30,7 @@
 //! | `ruby` | how a reading buys its slot, and where it sits in it |
 //! | `marker` | what a list draws beside its items, and where |
 //! | `image` | how an inline asset is sized and given room |
+//! | `pill` | what an inline box's own edges do to its line |
 //! | `pass` | how blocks stack, and how a box closes around them |
 //! | `table` | HTML's and CSS's table rules |
 //! | `chrome` | what the popup shows of an entry |
@@ -49,6 +50,7 @@ mod link;
 mod marker;
 mod measure;
 mod pass;
+mod pill;
 mod ruby;
 mod scene;
 mod style;
