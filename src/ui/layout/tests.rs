@@ -3,6 +3,10 @@
 //! `FakeMeasure` wraps at a whole number of pixels per UTF-16 unit, so
 //! every expectation below is arithmetic a reader can redo by hand. No
 //! font, no platform: these run in both CI jobs, forever.
+//!
+//! The corpus sweep is a child of this module ([`sweep`]) because it renders
+//! against the same `FakeMeasure` and reuses these fixtures' own builders;
+//! it reads a corpus directory from the environment and never runs in CI.
 
 use super::*;
 // Every submodule these tests reach into. They are not a test of the
@@ -13,6 +17,8 @@ use super::{chrome::*, flow::*, gloss::*, image::*, marker::*, pass::*, pill::*,
 use crate::dict::gloss::{render_html, RoleFilter, Selection, Tag};
 use crate::dict::media::{Intrinsic, MediaFormat, MediaKey};
 use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
+
+mod sweep;
 
 /// Advance per UTF-16 unit, as a
 /// fraction of the font size.
