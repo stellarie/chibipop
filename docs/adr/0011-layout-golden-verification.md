@@ -24,6 +24,11 @@ One JSON file per fixture: per-element text, font size, and x/y/w/h; hit rects w
 `HitAction`s; content height; `max_scroll`; side-panel geometry. Floats serialized at
 fixed precision.
 
+**Widened by ADR-0013**, which the fixture set below reflects: an element also carries
+its styled spans, the line and span geometry the measurer reported for them with the
+baseline, its box record, its readings, its list markers, its dictionary address, and
+its image's media key. Same fixed precision, same exact equality.
+
 Capturable from the **unmodified pre-refactor build**: `layout_pass` already computes
 every one of these (its `target` is `Option` — the measure-only walk needs no window, so
 capture is a plain `cargo test` on the runner). Post-refactor, the `PopupScene` projects
@@ -71,8 +76,9 @@ goldens still fail inside tier0's own `cargo test` on drift — the problem rein
 
 ## Fixture set
 
-Seven hand-built `Presentation`s in the existing `one_card`/`with_collapsed` style, each
-one committed golden:
+**Thirteen** hand-built `Presentation`s, each one committed golden. The first seven
+are the original set, in the `one_card`/`with_collapsed` style, and their intent is
+unchanged:
 
 1. **Wrapping-heavy long gloss** — the wrap loop, `LINE_GAP`/`SECTION_GAP` stacking.
 2. **Side panel, both modes** — the same collapsed-row content with `side_panel`
@@ -85,3 +91,48 @@ one committed golden:
 6. **Minimal/edge cards** — no reading, no PoS, unranked, empty gloss; degenerate gap
    paths.
 7. **Kitchen sink** — everything at once, the cheap catch-all.
+
+All seven still build their blocks from plain glossary strings, which is what 20 of
+the census's 72 dictionaries emit, so none of them changed shape when `GlossBlock`
+became one dictionary's contribution with `entries: Vec<GlossEntry>`:
+`GlossBlock::parse` produces exactly the one-row block they always described.
+
+The last six are ADR-0013's, and they are **authored rather than captured**, because
+the pre-refactor build had no styled spans to capture from. Every tree in them is a
+real corpus shape out of `docs/research/dict-shapes.md`, so a golden that moves says
+something about a dictionary somebody owns:
+
+8. **Mixed styled spans** — bold, a larger and a smaller size, italic, colour, and a
+   `sup`/`sub` pair, all in one wrapped paragraph. The one fact ADR-0013 exists to
+   change, and the only fixture that can produce a non-zero `shift` or a span shorter
+   than its line.
+9. **Bordered pill** — the box record, both mechanisms. A `css` variant with
+   Jitendex's own `span[data-sc-class="tag"]` pill, and an `inline` variant carrying
+   a bordered block, a marker-carrying spacing-only inline box that resolves to no
+   box, and the block whose own box reaches nothing because its first child opens a
+   line (see the finding below).
+10. **Nested list** — hanging markers, two levels. A `jitendex` variant with the real
+    `ul[sense-groups]`/`ol`/`ul[glossary]` tree, its two CSS list rules, its example
+    pair and its attribution line; a `plain` variant with the default bullet and
+    number ladder. The example and attribution lines are the only place a golden sees
+    the popup's role default, which now keeps them.
+11. **Table with both spans** — a conjugation grid with `colSpan` and `rowSpan`, where
+    `Table`, `Cell` and the cells' own paragraphs meet.
+12. **Ruby run** — readings positioned over their bases, including a reading that
+    overhangs a one-character base and a styled `rt`. Also the only fixture with two
+    term-bank rows under one dictionary label.
+13. **Image-bearing entry** — the census's three representative `img` nodes: a
+    recorded `1em` GIF gaiji, a monochrome SVG declaring both axes, and an unrecorded
+    asset that falls to its `alt` text. Where a media key reaches a golden.
+
+`fixtures()` and this list grow together, and
+`the_fixture_set_is_the_thirteen_from_adr_0011` pins the names against it.
+
+### One finding this set records rather than fixes
+
+In the `bordered_pill` `inline` variant, a block whose **first** child carries a
+`data.content` marker loses its own box: the marker opens a paragraph, the block box
+attaches to the first paragraph the block emits, and there is none. The same block
+with one text node before the marker keeps its box. The goldens pin the current
+answer for both shapes so that a later fix moves a named coordinate instead of
+arriving unnoticed.

@@ -65,18 +65,29 @@ fn flatten(v: &Value, path: &str, out: &mut BTreeMap<String, String>) {
 /// "…elements.3.text", so a moved
 /// coordinate is named by what it
 /// belongs to, not just an index.
+///
+/// Walks *up* until it finds one,
+/// because ADR-0013's fields nest:
+/// `elements.3.measured.line_boxes.1.baseline`
+/// has no text of its own and the
+/// element three levels above it is
+/// still what moved.
 fn owner_text(path: &str, golden: &BTreeMap<String, String>) -> Option<String> {
-    let (parent, field) = path.rsplit_once('.')?;
+    let (mut parent, field) = path.rsplit_once('.')?;
     if field == "text" || field == "kind" {
         return None;
     }
-    let text = golden.get(&format!("{parent}.text"))?;
-    let kind = golden
-        .get(&format!("{parent}.kind"))
-        .cloned()
-        .or_else(|| golden.get(&format!("{parent}.action")).cloned())
-        .unwrap_or_default();
-    Some(format!("{kind} {text}"))
+    loop {
+        if let Some(text) = golden.get(&format!("{parent}.text")) {
+            let kind = golden
+                .get(&format!("{parent}.kind"))
+                .cloned()
+                .or_else(|| golden.get(&format!("{parent}.action")).cloned())
+                .unwrap_or_default();
+            return Some(format!("{kind} {text}"));
+        }
+        parent = parent.rsplit_once('.')?.0;
+    }
 }
 
 fn check(name: &str) {
@@ -198,11 +209,46 @@ fn geometry_golden_kitchen_sink() {
     check("kitchen_sink");
 }
 
-/// The ADR-0011 fixture set, pinned:
-/// exactly these seven, one golden
-/// file each.
 #[test]
-fn the_fixture_set_is_the_seven_from_adr_0011() {
+fn geometry_golden_styled_spans() {
+    check("styled_spans");
+}
+
+#[test]
+fn geometry_golden_bordered_pill() {
+    check("bordered_pill");
+}
+
+#[test]
+fn geometry_golden_nested_list() {
+    check("nested_list");
+}
+
+#[test]
+fn geometry_golden_table_spans() {
+    check("table_spans");
+}
+
+#[test]
+fn geometry_golden_ruby_run() {
+    check("ruby_run");
+}
+
+#[test]
+fn geometry_golden_inline_image() {
+    check("inline_image");
+}
+
+/// The ADR-0011 fixture set, pinned:
+/// exactly these thirteen, one golden
+/// file each. The first seven are the
+/// original set with its intent
+/// unchanged; the last six are the
+/// ones ADR-0013 requires, because the
+/// widened schema has fields no
+/// plain-string fixture can fill.
+#[test]
+fn the_fixture_set_is_the_thirteen_from_adr_0011() {
     let names: Vec<&str> = fixtures().iter().map(|f| f.name).collect();
     assert_eq!(
         vec![
@@ -213,10 +259,112 @@ fn the_fixture_set_is_the_seven_from_adr_0011() {
             "full_chrome",
             "minimal_edge",
             "kitchen_sink",
+            "styled_spans",
+            "bordered_pill",
+            "nested_list",
+            "table_spans",
+            "ruby_run",
+            "inline_image",
         ],
         names
     );
     for f in fixtures() {
         assert!(!f.variants.is_empty(), "fixture '{}' has no variants", f.name);
     }
+}
+
+/// One fixture's own claim about its
+/// captured snapshot.
+type Claim = (&'static str, fn(&Value) -> bool);
+
+/// Each fixture actually exercises the
+/// feature it is named for.
+///
+/// A "ruby run" fixture whose scene
+/// carries no [`RubyRun`] is not a
+/// fixture, and the way to notice is
+/// not to read the golden by eye - a
+/// tree that stopped parsing the way
+/// its author meant would simply
+/// bless quieter geometry. So each of
+/// the six names a predicate over the
+/// captured scene, and the capture is
+/// the same one the golden holds.
+#[test]
+fn every_new_fixture_carries_the_feature_it_is_named_for() {
+    let want: &[Claim] = &[
+        // Two spans on one line, in
+        // two different sizes: the one
+        // thing the old seam could not
+        // express.
+        ("styled_spans", |v| {
+            elems(v).any(|e| {
+                let spans = arr(e, "spans");
+                spans.len() > 1
+                    && spans.iter().any(|s| s["shift"].as_str() != Some("0.00"))
+                    && spans.windows(2).any(|w| w[0]["size"] != w[1]["size"])
+            })
+        }),
+        // A box that paints: a fill or
+        // a border, not merely spacing.
+        ("bordered_pill", |v| {
+            elems(v).any(|e| {
+                boxes(e).any(|b| {
+                    b["style"]["background"] != Value::Null
+                        || b["style"]["border_style"]
+                            .as_array()
+                            .is_some_and(|s| s.iter().any(|e| e != "none"))
+                })
+            })
+        }),
+        // Two markers on one element:
+        // two levels sharing the line
+        // between them.
+        ("nested_list", |v| elems(v).any(|e| arr(e, "marker").len() > 1)),
+        ("table_spans", |v| {
+            elems(v).any(|e| e["kind"] == "Table")
+                && elems(v).filter(|e| e["kind"] == "Cell").count() > 1
+        }),
+        ("ruby_run", |v| elems(v).any(|e| !arr(e, "ruby").is_empty())),
+        // An asset with a media key,
+        // which is what says the store
+        // was consulted rather than the
+        // node believed.
+        ("inline_image", |v| {
+            elems(v).any(|e| e["kind"] == "Image" && e["image"]["key"] != Value::Null)
+        }),
+    ];
+
+    for (name, holds) in want {
+        let fixture = fixtures()
+            .into_iter()
+            .find(|f| f.name == *name)
+            .unwrap_or_else(|| panic!("fixture '{name}' is not in geometry::fixtures()"));
+        let snap =
+            snapshot(&fixture).unwrap_or_else(|e| panic!("capturing '{name}' failed: {e:#}"));
+        assert!(holds(&snap), "fixture '{name}' does not exercise what it is named for");
+    }
+}
+
+/// Every element of every variant, in
+/// draw order.
+fn elems(snap: &Value) -> impl Iterator<Item = &Value> {
+    snap["variants"]
+        .as_object()
+        .into_iter()
+        .flat_map(|vs| vs.values())
+        .filter_map(|v| v["elements"].as_array())
+        .flatten()
+}
+
+/// One element's array field, or empty.
+fn arr<'a>(elem: &'a Value, field: &str) -> &'a [Value] {
+    elem[field].as_array().map_or(&[], Vec::as_slice)
+}
+
+/// Every box on one element, block
+/// first, exactly as a bin paints them.
+fn boxes(elem: &Value) -> impl Iterator<Item = &Value> {
+    let block = (elem["block_box"] != Value::Null).then(|| &elem["block_box"]);
+    block.into_iter().chain(arr(elem, "inline_boxes"))
 }
