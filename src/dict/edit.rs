@@ -937,18 +937,18 @@ mod tests {
         // Two dictionaries from one archive: every blob is shared.
         let first = add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
         let second = add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
-        assert_eq!(14, count(&conn, "SELECT COUNT(*) FROM media"), "seven paths, twice");
-        assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM media_blob"), "and one set of blobs");
+        assert_eq!(16, count(&conn, "SELECT COUNT(*) FROM media"), "eight paths, twice");
+        assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media_blob"), "and one set of blobs");
 
         let gone = remove_dictionary(&mut conn, first.dict_id, &media_zip()).unwrap();
-        assert_eq!(7, gone.media);
+        assert_eq!(8, gone.media);
         assert_eq!(0, gone.blobs, "the surviving dictionary still ships every asset");
-        assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media"));
-        assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM media_blob"));
+        assert_eq!(8, count(&conn, "SELECT COUNT(*) FROM media"));
+        assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media_blob"));
 
         let gone = remove_dictionary(&mut conn, second.dict_id, &media_zip()).unwrap();
-        assert_eq!(7, gone.media);
-        assert_eq!(6, gone.blobs, "the last reference going takes the bytes with it");
+        assert_eq!(8, gone.media);
+        assert_eq!(7, gone.blobs, "the last reference going takes the bytes with it");
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM media_blob"));
     }
 
@@ -965,6 +965,6 @@ mod tests {
         let after = ids(&conn, "SELECT blob_id FROM media WHERE path = 'gaiji/one.png'");
         assert_eq!(2, after.len(), "two dictionaries, two rows");
         assert_eq!(vec![blobs[0], blobs[0]], after, "and one blob behind both");
-        assert_eq!(6, count(&conn, "SELECT COUNT(*) FROM media_blob"));
+        assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media_blob"));
     }
 }

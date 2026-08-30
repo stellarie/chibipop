@@ -211,13 +211,25 @@ fn no_prefix_and_no_single_byte_corruption_of_any_fixture_panics() {
     }
 }
 
+/// One pixel, as four premultiplied bytes.
+fn px(s: &Surface, x: u32, y: u32) -> [u8; 4] {
+    let at = ((y * s.w + x) * 4) as usize;
+    s.rgba[at..at + 4].try_into().expect("a surface is w * h * 4 bytes")
+}
+
+/// Within `tol` on every channel, which is what a lossy format allows.
+fn near(got: [u8; 4], want: [u8; 4], tol: i32, what: &str) {
+    let off = got.iter().zip(want).map(|(&g, w)| (i32::from(g) - i32::from(w)).abs()).max();
+    assert!(off <= Some(tol), "{what}: {got:?} is not within {tol} of {want:?}");
+}
+
 #[test]
 fn decoding_premultiplies_alpha_into_the_surface() {
     // The fixture is 12x7 of pure blue at half alpha. Premultiplied, a
     // pixel is (0, 0, 128, 128) - painting the straight value would make
     // every gaiji too bright over a dark panel.
     let png = fixture("one.png");
-    let s = decode(MediaFormat::Png, &png).expect("a true-colour PNG decodes");
+    let s = decode(MediaFormat::Png, &png, None).expect("a true-colour PNG decodes");
     assert_eq!((12, 7), (s.w, s.h));
     assert_eq!(12 * 7 * 4, s.rgba.len());
     for px in s.rgba.as_chunks::<4>().0 {
@@ -228,26 +240,104 @@ fn decoding_premultiplies_alpha_into_the_surface() {
 #[test]
 fn grey_and_palette_pngs_widen_to_four_lanes() {
     for (name, w, h) in [("grey.png", 5u32, 4u32), ("unused.png", 3, 3)] {
-        let s = decode(MediaFormat::Png, &fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let s = decode(MediaFormat::Png, &fixture(name), None)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!((w, h), (s.w, s.h), "{name}");
         assert_eq!((w * h * 4) as usize, s.rgba.len(), "{name}");
     }
 }
 
+/// Every format the census found now reaches pixels, which is the whole
+/// point of the ticket: before this, `decode` refused four of five and a
+/// real gaiji painted as an outlined box.
+///
+/// One sampled pixel per format, at its own generator colour, so reading
+/// the right bytes off the wrong format cannot pass. The tolerances are
+/// the formats' own: JPEG at quality 80 and AVIF at `-q 40` are lossy, and
+/// the AVIF fixture is `magick gradient:red-blue`, which runs top to
+/// bottom - so the ends are two rows in from each edge.
 #[test]
-fn a_format_this_build_cannot_rasterize_answers_no_decoder_rather_than_failing() {
-    // A definite answer is what the `alt`-text ladder needs. The media row
-    // still carries the right intrinsic size, so the line the image sits on
-    // is laid out identically either way.
+fn every_census_format_decodes_to_a_surface() {
+    let jpeg = decode(MediaFormat::Jpeg, &fixture("three.jpg"), None).expect("jpeg");
+    assert_eq!((23, 11), (jpeg.w, jpeg.h));
+    near(px(&jpeg, 11, 5), [0xa0, 0x50, 0x30, 255], 6, "a flat #a05030 jpeg");
+
+    let gif = decode(MediaFormat::Gif, &fixture("four.gif"), None).expect("gif");
+    assert_eq!((9, 5), (gif.w, gif.h));
+    assert_eq!([255, 0, 0, 255], px(&gif, 1, 1), "the first frame is red");
+
+    // 64x32 declared over a 0 0 128 64 viewBox, so the rect at viewBox
+    // (8,8)-(120,56) lands at pixel (4,4)-(60,28).
+    let svg = decode(MediaFormat::Svg, &fixture("two.svg"), None).expect("svg");
+    assert_eq!((64, 32), (svg.w, svg.h));
+    assert_eq!([0x30, 0x50, 0xa0, 255], px(&svg, 32, 16), "inside the rect");
+    assert_eq!([0, 0, 0, 0], px(&svg, 1, 1), "outside it, and transparent");
+
+    let avif = decode(MediaFormat::Avif, &fixture("five.avif"), None).expect("avif");
+    assert_eq!((480, 120), (avif.w, avif.h));
+    near(px(&avif, 240, 2), [255, 0, 0, 255], 24, "the red end of the gradient");
+    near(px(&avif, 240, 117), [0, 0, 255, 255], 24, "the blue end");
+}
+
+/// The spec asks for the first frame, and the media row records the
+/// logical screen - so the frame has to composite into that canvas rather
+/// than be stretched to it.
+#[test]
+fn an_animated_gif_decodes_its_first_frame_into_the_logical_screen() {
+    // Two 4x3 frames, red then blue, inside a 9x5 canvas.
+    let gif = decode(MediaFormat::Gif, &fixture("four.gif"), None).expect("gif");
+    assert_eq!((9, 5), (gif.w, gif.h), "the canvas, not the frame");
+    for px in gif.rgba.as_chunks::<4>().0 {
+        assert_ne!(&[0, 0, 255, 255], px, "the second frame must not be painted");
+    }
+    // Outside the frame rectangle the canvas stays transparent, which is
+    // what a later frame would composite onto.
+    assert_eq!([0, 0, 0, 0], px(&gif, 8, 4));
+    assert_eq!([255, 0, 0, 255], px(&gif, 3, 2), "the last pixel of the frame");
+}
+
+/// `Tint::Raster` exists because a vector has no pixels until something
+/// picks a size, and this is the end of that wire: the pair core quantised
+/// out of the resolved box is the pixmap the bin gets.
+#[test]
+fn an_svg_rasterizes_at_the_size_the_scene_asked_for() {
+    let bytes = fixture("two.svg");
+    let asked = decode(MediaFormat::Svg, &bytes, Some((16, 8))).expect("svg at a size");
+    assert_eq!((16, 8), (asked.w, asked.h));
+    assert_eq!(16 * 8 * 4, asked.rgba.len());
+    // The rect scales with the box rather than being cropped out of it.
+    assert_eq!([0x30, 0x50, 0xa0, 255], px(&asked, 8, 4));
+
+    let intrinsic = decode(MediaFormat::Svg, &bytes, None).expect("svg at its own size");
+    assert_eq!((64, 32), (intrinsic.w, intrinsic.h));
+
+    // A raster asset has its own pixels, so the same request changes
+    // nothing about it - `at` is a vector's alone.
+    let png = decode(MediaFormat::Png, &fixture("one.png"), Some((99, 99))).expect("png");
+    assert_eq!((12, 7), (png.w, png.h));
+}
+
+/// A vector with no declared size still rasterizes: its `viewBox` is the
+/// intrinsic size the media row recorded, which is the shape a gaiji drawn
+/// from a font glyph arrives in - all 35 of this library's SVG assets.
+#[test]
+fn an_svg_sized_only_by_its_view_box_still_reaches_pixels() {
+    let s = decode(MediaFormat::Svg, &fixture("ratio.svg"), None).expect("svg");
+    assert_eq!((100, 40), (s.w, s.h));
+    assert_eq!([0xa0, 0x50, 0x30, 255], px(&s, 50, 20));
+}
+
+/// Premultiplied is the contract `Surface` states, and `rgb <= a` is the
+/// invariant tiny-skia's own pixel type enforces - a surface that broke it
+/// would blend brighter than the asset every frame.
+#[test]
+fn every_decoded_surface_is_premultiplied() {
     for (name, format, ..) in SIZES {
-        if format == MediaFormat::Png {
-            continue;
+        let s = decode(format, &fixture(name), None).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((s.w * s.h * 4) as usize, s.rgba.len(), "{name}");
+        for p in s.rgba.as_chunks::<4>().0 {
+            assert!(p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3], "{name}: {p:?}");
         }
-        assert_eq!(
-            Err(Undecodable::NoDecoder(format)),
-            decode(format, &fixture(name)),
-            "{name}"
-        );
     }
 }
 
@@ -255,8 +345,77 @@ fn a_format_this_build_cannot_rasterize_answers_no_decoder_rather_than_failing()
 fn a_ruined_png_answers_broken_rather_than_producing_pixels() {
     assert_eq!(
         Err(Undecodable::Broken(MediaFormat::Png)),
-        decode(MediaFormat::Png, &fixture("broken.png"))
+        decode(MediaFormat::Png, &fixture("broken.png"), None)
     );
+}
+
+/// Half of every fixture, one format at a time. A definite `Err` is what
+/// the `alt`-text ladder acts on, and the media row still carries the
+/// right intrinsic size, so the line the image sits on is laid out
+/// identically either way.
+#[test]
+fn a_truncated_asset_of_any_format_answers_undecodable_rather_than_pixels() {
+    for (name, format, ..) in SIZES {
+        let bytes = fixture(name);
+        let half = &bytes[..bytes.len() / 2];
+        assert!(decode(format, half, None).is_err(), "half of {name} decoded");
+    }
+}
+
+/// A declared area over the cap is refused before anything allocates it.
+///
+/// Both halves matter. The GIF is the real fixture with its logical screen
+/// descriptor overwritten - the same four bytes the generator patches, and
+/// the same shape the store's own 16 MiB byte cap cannot see: a 65 535
+/// square canvas is 17 GB of RGBA8 out of 93 bytes of file. The SVG is the
+/// other direction, where the asset is fine and the *scene* asked for an
+/// impossible box, which is the one size in this module that is a choice.
+#[test]
+fn a_surface_over_the_area_cap_is_refused_and_named_as_a_size() {
+    let mut bomb = fixture("four.gif");
+    bomb[6..10].fill(0xff);
+    assert_eq!(
+        Err(Undecodable::TooLarge(MediaFormat::Gif)),
+        decode(MediaFormat::Gif, &bomb, None)
+    );
+    assert_eq!(
+        Err(Undecodable::TooLarge(MediaFormat::Svg)),
+        decode(MediaFormat::Svg, &fixture("two.svg"), Some((60_000, 60_000)))
+    );
+    // And the bound is a bound, not a refusal of everything large.
+    assert!(decode(MediaFormat::Svg, &fixture("two.svg"), Some((4000, 4000))).is_ok());
+}
+
+/// A decoder is new attack surface over untrusted dictionary bytes, and it
+/// runs at paint time: a panic here takes the daemon down mid-hover rather
+/// than costing one diagnostic line at build time.
+///
+/// Every prefix of the header region, where a length or a dimension lives,
+/// plus a stride over the payload. Bounded on purpose - a decoder that
+/// survives thousands of mutations of five real containers is not going to
+/// be talked into a panic by one more, and this runs three times per CI
+/// job.
+#[test]
+fn no_prefix_and_no_corruption_of_any_fixture_panics_in_a_decoder() {
+    for (name, format, ..) in SIZES {
+        let bytes = fixture(name);
+        let mut cuts: Vec<usize> = (0..bytes.len().min(200)).collect();
+        let mut next = 200;
+        while next < bytes.len() {
+            cuts.push(next);
+            next = next * 6 / 5 + 1;
+        }
+        for cut in cuts {
+            let _ = decode(format, &bytes[..cut], None);
+        }
+        for at in (0..bytes.len()).step_by(11) {
+            let mut damaged = bytes.clone();
+            damaged[at] = 0xff;
+            let _ = decode(format, &damaged, None);
+            damaged[at] = 0x00;
+            let _ = decode(format, &damaged, None);
+        }
+    }
 }
 
 #[test]

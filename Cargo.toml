@@ -129,6 +129,59 @@ zbus = "5.19.0"
 # this exact version, so the lockfile gains no package.
 libloading = "0.9.0"
 
+# --- ticket 12's paint-time decoders (`dict::media::decode`) ---
+# One rasterizer per census format, reachable from nothing else. They run
+# in the bin behind its own surface cache and never on the measurement
+# path: ticket 03 records intrinsic sizes in the media row at build time
+# precisely so that a decoder is not an input to layout, and `decode`
+# takes the format the row already recorded rather than sniffing again.
+#
+# resvg is the one that carries the gaiji. 35 of this library's 236 assets
+# are HanaMin glyph outlines at `height: 1em, appearance: monochrome`, so
+# it is also the only decoder story 17's `Tint::Raster` can rasterize a
+# mask with - a vector has no pixels until something picks a size, which
+# is the whole reason that variant carries one. It resolves tiny-skia
+# 0.12.0, the exact pin the popup panel above already paints with, so the
+# one-pin rule costs no second copy of the rasterizer; and a `Pixmap` is
+# premultiplied RGBA8, which is `dict::media::Surface`'s own layout, so
+# the handoff copies nothing. `default-features = false` drops four
+# things this build must not have: `text` and `system-fonts` link fontdb
+# and libfontconfig - the same build-time system package the SCTK pin
+# above refuses - and no census SVG carries a `<text>` element; `svgz` is
+# unreachable because `sniff` claims only plaintext `<svg`; and
+# `raster-images` would bury a second JPEG and GIF decoder inside resvg
+# for `<image>` elements no census SVG uses.
+resvg = { version = "0.48.1", default-features = false }
+# JPEG and GIF: the census found both, this library ships neither, so
+# they are cheap completeness rather than load-bearing. `zune-jpeg` over
+# `jpeg-decoder` because the latter's default `rayon` feature would put a
+# thread pool in the daemon, which ADR-0001 forbids, and its no-rayon
+# path is the slower of the two. It re-exports its own `zune-core`, so
+# naming the colourspace costs no second pin. An animated GIF renders its
+# first frame composited into the logical screen the media row recorded,
+# which is what `probe` already documents that column as meaning.
+zune-jpeg = "0.5"
+gif = "0.14.2"
+# AVIF: 201 of this library's 236 assets and the format ticket 03 flagged,
+# because sizing one needs no decoder and painting one needs a whole AV1
+# implementation. Every C route was refused on the build it would cost:
+# `libavif-sys` and `libdav1d-sys` build their codec with meson, ninja and
+# nasm, and `dav1d-rs` links a system libdav1d through pkg-config - none
+# of which either CI runner installs, and the Windows gate has no
+# libdav1d at all. That leaves two pure-Rust decoders, and the choice
+# between them is a safety argument, not a correctness one. `rav1d`, the
+# dav1d port, decodes all 201 assets bit-exactly - and publishes only its
+# `extern "C"` dav1d API, so its own `Option::unwrap` on a malformed
+# frame (rav1d 1.1.0 decode.rs:4997, reachable by flipping one byte of a
+# real Jitendex asset) crosses an ABI that cannot unwind and *aborts the
+# process*. A dictionary archive is third-party bytes and the ladder's
+# promise is `alt` text, so that is disqualifying. `avif-rust` is safe
+# Rust throughout, survives 11 574 truncations and single-byte
+# corruptions of real assets without one panic, and matches libavif to
+# within one level on 198 of 201. The residue is named in ticket 12's
+# comments and lands on the `alt` ladder, not on a crash.
+avif-rust = "0.0.6"
+
 [package]
 name = "chibipop"
 version.workspace = true
@@ -145,10 +198,21 @@ path = "src/lib.rs"
 anyhow.workspace = true
 # The Anki picture payload: AnkiConnect takes attachments as base64.
 base64.workspace = true
-# The one PNG encoder (spec D3, src/image.rs). Pure Rust, so it costs the
+# The one PNG encoder (spec D3, src/image.rs) and the first of
+# `dict::media::decode`'s five rasterizers. Pure Rust, so it costs the
 # Windows bin nothing and it is the same version the Linux bin already
 # decodes its tray icons with.
 png.workspace = true
+# The other four (`dict::media::decode`, ticket 12). Every one is pure
+# Rust, so both bins keep the C-free build they have today - the only
+# native code in this tree stays rusqlite's bundled SQLite. resvg brings
+# tiny-skia into this crate, and therefore into the Windows bin, which is
+# what makes an SVG gaiji paint on both platforms from one rasterizer
+# instead of two.
+resvg.workspace = true
+zune-jpeg.workspace = true
+gif.workspace = true
+avif-rust.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

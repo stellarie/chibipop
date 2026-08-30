@@ -20,6 +20,7 @@ import shutil
 import struct
 import subprocess
 import zipfile
+import zlib
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -95,6 +96,7 @@ TERM_BANK = [
     ["さかな", "さかな", "", "", 0, [{"type": "structured-content", "content": [
         {"tag": "img", "path": "gaiji/missing.png", "data": {"alt": "[fish]"}},
         {"tag": "img", "path": "gaiji/broken.png"},
+        {"tag": "img", "path": "gaiji/torn.png", "data": {"alt": "[torn]"}},
         {"tag": "span", "content": "fish"},
     ]}]],
     ["かめ", "かめ", "", "", 0, [{"type": "image", "path": "gaiji/dropped.png"}]],
@@ -103,7 +105,10 @@ TERM_BANK = [
 # `copy.png` is `one.png`'s bytes at a second path: two media rows, one
 # blob. `broken.png` is a PNG signature with no IHDR behind it - present,
 # sniffed, and unsizeable, which is the skip-with-a-diagnostic case.
-# `gaiji/missing.png` is referenced and absent on purpose.
+# `torn.png` is the opposite and the only asset that reaches ticket 12's
+# last rung: a valid IHDR over an IDAT that is not a zlib stream, so the
+# build records a real 12x7 row and the *painter* is the one that cannot
+# decode it. `gaiji/missing.png` is referenced and absent on purpose.
 ARCHIVE_MEDIA = {
     "gaiji/one.png": "one.png",
     "gaiji/copy.png": "one.png",
@@ -113,9 +118,15 @@ ARCHIVE_MEDIA = {
     "gaiji/two.svg": "two.svg",
     "gaiji/ratio.svg": "ratio.svg",
     "gaiji/broken.png": "broken.png",
+    "gaiji/torn.png": "torn.png",
     "gaiji/unused.png": "unused.png",
     "gaiji/dropped.png": "dropped.png",
 }
+
+
+def png_chunk(kind, body):
+    raw = kind + body
+    return struct.pack(">I", len(body)) + raw + struct.pack(">I", zlib.crc32(raw))
 
 
 def run(args):
@@ -146,6 +157,16 @@ def rasters():
     # A PNG signature and four bytes of nothing: sniffs as a PNG, holds no
     # IHDR.
     (HERE / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00")
+    # A 12x7 RGBA8 IHDR with correct CRCs over an IDAT that is not a zlib
+    # stream. The build sizes it from the header and stores a real row; the
+    # *painter* is the one that cannot decode it, which is the only way to
+    # reach the last rung of ticket 12's fallback ladder.
+    (HERE / "torn.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 12, 7, 8, 6, 0, 0, 0))
+        + png_chunk(b"IDAT", b"not a zlib stream")
+        + png_chunk(b"IEND", b"")
+    )
 
 
 def archive():

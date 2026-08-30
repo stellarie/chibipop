@@ -18,14 +18,17 @@
 //!   is, so `layout` never touches a decoder.
 //! - [`decode`] runs at paint time in the bin, behind that bin's own
 //!   surface cache, and is the only place in this tree that turns encoded
-//!   asset bytes into pixels.
+//!   asset bytes into pixels. One rasterizer per census format, and the
+//!   size still only ever flows *into* it: a raster asset's pixels are a
+//!   property of its bytes, and the one size that is a choice - an SVG's,
+//!   because a vector has no pixels until something picks one - is handed
+//!   down from the resolved box, never read back.
 //!
-//! Reading the header rather than decoding is also what lets the build
-//! support AVIF without an AVIF decoder: `ispe` is a container property, so
-//! sizing an AVIF is box-walking, not entropy decoding. [`decode`] is
-//! honest about the consequence and answers [`Undecodable::NoDecoder`] for
-//! the formats this build cannot rasterize, which is a definite answer the
-//! `alt`-text fallback can act on.
+//! Reading the header rather than decoding is what let the build support
+//! AVIF before an AVIF decoder existed: `ispe` is a container property, so
+//! sizing an AVIF is box-walking, not entropy decoding. The same walk now
+//! bounds the decode, refusing a hostile declaration before an AV1 frame is
+//! allocated for it.
 
 use std::fmt;
 
@@ -607,22 +610,26 @@ pub struct Surface {
 }
 
 /// Why a decode produced no pixels.
+///
+/// Both arms are fallback cues rather than errors, and both are reachable:
+/// this build carries a rasterizer for every census format, so "no decoder
+/// for that format" is no longer a state anything can be in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Undecodable {
-    /// This build carries no decoder for the format. A definite answer, not
-    /// a failure: ticket 12's `alt`-text ladder acts on it, and the media
-    /// row is still there with the right intrinsic size, so the line the
-    /// image sits on is laid out the same either way.
-    NoDecoder(MediaFormat),
     /// A decoder ran and refused the bytes.
     Broken(MediaFormat),
+    /// Readable, and refused for its size: the surface would be over
+    /// [`MAX_PIXELS`]. Its own arm because it is not corruption - the media
+    /// row is right, the asset is real, and it is simply larger than a
+    /// popup will ever composite. A diagnostic should say so.
+    TooLarge(MediaFormat),
 }
 
 impl fmt::Display for Undecodable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Undecodable::NoDecoder(fmt) => write!(f, "this build decodes no {fmt}"),
             Undecodable::Broken(fmt) => write!(f, "undecodable {fmt}"),
+            Undecodable::TooLarge(fmt) => write!(f, "a {fmt} too large to rasterize"),
         }
     }
 }
@@ -655,48 +662,81 @@ impl fmt::Display for Missing {
     }
 }
 
+/// The largest surface a decode will hand back, in pixels.
+///
+/// 16 Mpx is 64 MiB of RGBA8, and the largest asset in the census's
+/// heaviest image dictionary is 1024x768 - three orders of magnitude
+/// under it. The bound exists because a container header is a few bytes
+/// of third-party integer: [`MAX_DIM`] already refuses an axis over
+/// 65 536, but 65 536 x 65 536 is still 17 GB of pixels, and the store's
+/// 16 MiB byte cap does not bound *decoded* area for any format that
+/// compresses. Every arm below refuses before it allocates.
+pub const MAX_PIXELS: u32 = 16 << 20;
+
 /// Asset bytes to pixels, with the format the media row already recorded
 /// rather than a second sniff.
 ///
-/// PNG only, and deliberately: PNG is the one image codec already resident
-/// in this tree (`src/image.rs` encodes with it, the Linux tray decodes
-/// with it), so it costs no dependency. JPEG, GIF, SVG and AVIF each need
-/// a decoder the workspace does not carry, and pulling four of them in
-/// ahead of the ticket that paints images would be four pins chosen
-/// blind. They answer [`Undecodable::NoDecoder`] until ticket 12 chooses
-/// them against a real paint path.
-pub fn decode(format: MediaFormat, bytes: &[u8]) -> Result<Surface, Undecodable> {
-    if format != MediaFormat::Png {
-        return Err(Undecodable::NoDecoder(format));
-    }
-    decode_png(bytes).ok_or(Undecodable::Broken(MediaFormat::Png))
+/// `at` is the pixel size to rasterize a **vector** at, and it is the one
+/// place a size enters this half of the module. It flows one way, from
+/// layout to the decoder: the resolved box comes from the intrinsic size
+/// ticket 03 recorded, [`crate::ui::layout::SceneImage::tint`] quantises
+/// it into `Tint::Raster`, and the bin hands that number here. Nothing
+/// reads a decoded size back out, which is what keeps a decoder off the
+/// measurement path. `None` rasterizes an SVG at its own intrinsic size,
+/// which is what an untinted vector wants - the painter scales the box.
+/// A raster format has its own pixels and ignores `at` entirely.
+///
+/// Total over arbitrary bytes, like [`probe`]: a dictionary archive is
+/// third-party data, so every arm answers [`Undecodable`] rather than
+/// panicking, and the `alt`-text ladder acts on the answer.
+pub fn decode(
+    format: MediaFormat,
+    bytes: &[u8],
+    at: Option<(u32, u32)>,
+) -> Result<Surface, Undecodable> {
+    let decoded = match format {
+        MediaFormat::Png => decode_png(bytes),
+        MediaFormat::Jpeg => decode_jpeg(bytes),
+        MediaFormat::Gif => decode_gif(bytes),
+        MediaFormat::Svg => decode_svg(bytes, at),
+        MediaFormat::Avif => decode_avif(bytes),
+    };
+    decoded.map_err(|too_big| {
+        if too_big { Undecodable::TooLarge(format) } else { Undecodable::Broken(format) }
+    })
 }
 
-/// Palette, grey and 16-bit PNGs all normalise to eight bits with an alpha
-/// channel, so this only has to widen grey to RGB and premultiply.
-fn decode_png(bytes: &[u8]) -> Option<Surface> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(
-        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
-    );
-    let mut reader = decoder.read_info().ok()?;
-    let mut raw = vec![0u8; reader.output_buffer_size()?];
-    let info = reader.next_frame(&mut raw).ok()?;
-    let (w, h) = (info.width, info.height);
-    let pixels = usize::try_from(w).ok()?.checked_mul(usize::try_from(h).ok()?)?;
-    let lanes = match info.color_type {
-        png::ColorType::Rgba => 4,
-        png::ColorType::Rgb => 3,
-        png::ColorType::GrayscaleAlpha => 2,
-        png::ColorType::Grayscale => 1,
-        // `EXPAND` turns a palette into colour, so this cannot arrive.
-        png::ColorType::Indexed => return None,
-    };
-    raw.truncate(info.buffer_size());
-    if raw.len() != pixels.checked_mul(lanes)? {
-        return None;
-    }
+/// A decode's own answer: the surface, or `true` when it was refused for
+/// its size rather than for its bytes.
+///
+/// `bool` and not a second enum because [`decode`] is the only reader and
+/// it turns the flag into the format-carrying [`Undecodable`] arm; every
+/// decoder below then reads as one `?`-chain with no error type to thread.
+type Decoded = Result<Surface, bool>;
 
+/// Refuses a surface over [`MAX_PIXELS`] before anything allocates it, and
+/// answers the pixel count on the way through.
+fn area(w: u32, h: u32) -> Result<usize, bool> {
+    if w == 0 || h == 0 {
+        return Err(false);
+    }
+    match w.checked_mul(h) {
+        Some(pixels) if pixels <= MAX_PIXELS => Ok(pixels as usize),
+        _ => Err(true),
+    }
+}
+
+/// Straight samples to premultiplied RGBA8, `lanes` per input pixel.
+///
+/// One helper for four decoders, because premultiplying is the whole
+/// contract [`Surface`] states and the four differ only in how many lanes
+/// they hand over: `4` is RGBA, `3` is opaque colour, `2` is grey plus
+/// alpha, `1` is grey. `channel * a / 255` rounded is also what keeps
+/// `rgb <= a`, the invariant tiny-skia's own pixel type enforces.
+fn premultiply(raw: &[u8], lanes: usize, pixels: usize) -> Result<Vec<u8>, bool> {
+    if raw.len() != pixels.checked_mul(lanes).ok_or(true)? {
+        return Err(false);
+    }
     let mut rgba = Vec::with_capacity(pixels * 4);
     for px in raw.chunks_exact(lanes) {
         let (r, g, b, a) = match lanes {
@@ -705,10 +745,161 @@ fn decode_png(bytes: &[u8]) -> Option<Surface> {
             2 => (px[0], px[0], px[0], px[1]),
             _ => (px[0], px[0], px[0], 255),
         };
-        let mul = |c: u8| (u32::from(c) * u32::from(a) / 255) as u8;
+        let mul = |c: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
         rgba.extend_from_slice(&[mul(r), mul(g), mul(b), a]);
     }
-    Some(Surface { w, h, rgba })
+    Ok(rgba)
+}
+
+/// Palette, grey and 16-bit PNGs all normalise to eight bits with an alpha
+/// channel, so this only has to widen grey to RGB and premultiply.
+fn decode_png(bytes: &[u8]) -> Decoded {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(
+        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+    );
+    // The `png` pin bounds its own allocations, so the area cap is stated
+    // to the decoder rather than checked after it has already allocated.
+    decoder.set_limits(png::Limits { bytes: MAX_PIXELS as usize * 4 });
+    let mut reader = decoder.read_info().map_err(|_| false)?;
+    let pixels = area(reader.info().width, reader.info().height)?;
+    let mut raw = vec![0u8; reader.output_buffer_size().ok_or(true)?];
+    let info = reader.next_frame(&mut raw).map_err(|_| false)?;
+    let (w, h) = (info.width, info.height);
+    let lanes = match info.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Grayscale => 1,
+        // `EXPAND` turns a palette into colour, so this cannot arrive.
+        png::ColorType::Indexed => return Err(false),
+    };
+    raw.truncate(info.buffer_size());
+    Ok(Surface { w, h, rgba: premultiply(&raw, lanes, pixels)? })
+}
+
+/// JPEG carries no alpha, so the only work is asking for four lanes and
+/// letting [`premultiply`] pass an opaque asset through unchanged.
+///
+/// Two passes on purpose: `decode_headers` gives the dimensions out of the
+/// `SOFn` segment, which is what the area cap has to see *before* a
+/// progressive JPEG allocates its coefficient buffers.
+fn decode_jpeg(bytes: &[u8]) -> Decoded {
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
+    decoder.set_options(DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA));
+    decoder.decode_headers().map_err(|_| false)?;
+    let (w, h) = decoder.dimensions().ok_or(false)?;
+    let (w, h) = (u32::try_from(w).map_err(|_| true)?, u32::try_from(h).map_err(|_| true)?);
+    let pixels = area(w, h)?;
+    let raw = decoder.decode().map_err(|_| false)?;
+    Ok(Surface { w, h, rgba: premultiply(&raw, 4, pixels)? })
+}
+
+/// A GIF's first frame, composited into the logical screen.
+///
+/// The composite is the point, and it is why this is not four lines: an
+/// animation's first frame is often smaller than the canvas and offset
+/// inside it, and the logical screen is the size the media row recorded
+/// (see [`gif_size`]) because that is the box a browser lays out. Painting
+/// the frame's own rectangle at the canvas's size would stretch it. The
+/// rest of the canvas stays transparent, which is what an animation's
+/// first frame composites onto.
+///
+/// Later frames are read by nothing: the spec asks for the first frame,
+/// and a popup that animated a definition would be worse than one that
+/// does not.
+fn decode_gif(bytes: &[u8]) -> Decoded {
+    /// [`MAX_PIXELS`] in bytes of RGBA8, for `gif`'s own frame limiter.
+    /// A `const` match, so the constant is proved non-zero at compile time
+    /// and no unwrap reaches a paint path.
+    const FRAME_CAP: std::num::NonZeroU64 =
+        match std::num::NonZeroU64::new(MAX_PIXELS as u64 * 4) {
+            Some(cap) => cap,
+            None => panic!("MAX_PIXELS is not zero"),
+        };
+
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    options.set_memory_limit(gif::MemoryLimit::Bytes(FRAME_CAP));
+    let mut reader = options.read_info(std::io::Cursor::new(bytes)).map_err(|_| false)?;
+    let (w, h) = (u32::from(reader.width()), u32::from(reader.height()));
+    let pixels = area(w, h)?;
+    let frame = reader.read_next_frame().map_err(|_| false)?.ok_or(false)?;
+
+    let mut rgba = vec![0u8; pixels * 4];
+    let stride = w as usize * 4;
+    let (left, top) = (usize::from(frame.left), usize::from(frame.top));
+    let (fw, fh) = (usize::from(frame.width), usize::from(frame.height));
+    // Clipped rather than refused: a frame rectangle reaching past the
+    // logical screen is a real thing in old encoders, and the canvas is
+    // what the line was laid out for either way.
+    let span = fw.min((w as usize).saturating_sub(left));
+    for row in 0..fh.min((h as usize).saturating_sub(top)) {
+        let src = frame.buffer.get(row * fw * 4..).ok_or(false)?;
+        let dst = (top + row) * stride + left * 4;
+        let premultiplied = premultiply(&src[..span * 4], 4, span)?;
+        rgba[dst..dst + span * 4].copy_from_slice(&premultiplied);
+    }
+    Ok(Surface { w, h, rgba })
+}
+
+/// An SVG rasterized at `at`, or at its own intrinsic size.
+///
+/// This is the decoder story 17 needs and the only one whose output size
+/// is a choice rather than a property of the bytes: a vector has no pixels
+/// until something picks a size. `at` is `Tint::Raster`'s pair, already
+/// quantised and clamped by [`crate::ui::layout::SceneImage::tint`], so a
+/// theme change re-rasterizes a gaiji-sized mask and never a 300x150
+/// default-object illustration.
+///
+/// The scale is per axis and not uniform, because the resolved box came
+/// from the recorded aspect and honouring only one axis would letterbox
+/// inside a box the line was already laid out for. tiny-skia's pixmap is
+/// premultiplied RGBA8 - [`Surface`]'s own layout - so nothing converts.
+fn decode_svg(bytes: &[u8], at: Option<(u32, u32)>) -> Decoded {
+    let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default())
+        .map_err(|_| false)?;
+    let size = tree.size();
+    let (w, h) = match at {
+        Some(wh) => wh,
+        // `ceil`, so a fractional intrinsic size never rasterizes a
+        // column of the drawing away.
+        None => (size.width().ceil() as u32, size.height().ceil() as u32),
+    };
+    area(w, h)?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or(true)?;
+    let scale = resvg::tiny_skia::Transform::from_scale(
+        w as f32 / size.width(),
+        h as f32 / size.height(),
+    );
+    resvg::render(&tree, scale, &mut pixmap.as_mut());
+    Ok(Surface { w, h, rgba: pixmap.take() })
+}
+
+/// AVIF through `avif-rust`: the container walk, the AV1 decode, the alpha
+/// auxiliary item and the container's rotate/mirror/crop, in one call.
+///
+/// The area cap is stated from this module's own `ispe` walk rather than
+/// from the decoder, for the reason the cap exists: `ispe` is a container
+/// property read in the first few hundred bytes, so a 65 536-square
+/// declaration is refused before an AV1 decoder allocates a frame for it.
+/// That is the same walk the build already sized the asset with, so the
+/// number checked here is the number the media row carries.
+///
+/// `avif-rust` hands back straight RGBA8; the premultiply is ours.
+fn decode_avif(bytes: &[u8]) -> Decoded {
+    let declared = avif_size(bytes).map_err(|_| false)?;
+    area(declared.width as u32, declared.height as u32)?;
+    let image = avif_rust::image_from_bytes(bytes).map_err(|_| false)?;
+    let (w, h) = (
+        u32::try_from(image.width).map_err(|_| true)?,
+        u32::try_from(image.height).map_err(|_| true)?,
+    );
+    let pixels = area(w, h)?;
+    Ok(Surface { w, h, rgba: premultiply(&image.rgba, 4, pixels)? })
 }
 
 #[cfg(test)]

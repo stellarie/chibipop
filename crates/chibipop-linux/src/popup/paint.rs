@@ -1447,10 +1447,11 @@ mod tests {
         assert!(inside.red() <= outside.red(), "and not as red: {inside:?}");
     }
 
-    /// The second rung, and the one real data takes on this machine: the
-    /// asset is stored and sized, this build carries no decoder for its
-    /// format, so the element's own `alt` run is drawn instead. Jitendex
-    /// ships 201 AVIF and 35 SVG assets and no PNG.
+    /// The rung a corrupt asset takes, and the one this build can still
+    /// reach now that every census format decodes: `gaiji/torn.png` is a
+    /// valid 12x7 IHDR over an IDAT that is not a zlib stream, so the media
+    /// row is real, the line is laid out from it, and the *painter* is the
+    /// one that comes up empty. It draws the element's own `alt` run.
     #[test]
     fn an_undecodable_asset_falls_back_to_its_alt_run() {
         let theme = Theme::dark();
@@ -1461,7 +1462,7 @@ mod tests {
             20.0,
             20.0,
             "\u{5bfe}",
-            scene_image(Some("gaiji/five.avif"), Some(MediaFormat::Avif)),
+            scene_image(Some("gaiji/torn.png"), Some(MediaFormat::Png)),
         ));
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();

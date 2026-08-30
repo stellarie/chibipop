@@ -38,13 +38,19 @@ use tiny_skia::{IntSize, Pixmap};
 /// and not a count because one illustration can be worth a thousand gaiji.
 const BUDGET: usize = 8 << 20;
 
-/// One cache slot: the asset, and the colour it was tinted with.
+/// One cache slot: the asset, the colour it was tinted with, and the pixel
+/// size a vector was rasterized at.
 ///
 /// The colour is part of the key because a monochrome asset is a *mask*:
 /// two nodes can share one blob and want two different pixmaps, and a theme
 /// change wants a third. `None` is the untinted asset, which is what all but
 /// 15 of the census's 72 dictionaries ask for.
-type Slot = (MediaKey, Option<Rgb>);
+///
+/// The raster size is part of it for the same reason one axis further out:
+/// `Tint::Raster` exists because a vector has no pixels until something
+/// picks a size, so one SVG at two font sizes is two masks. `None` is a
+/// raster asset, or a vector at its own intrinsic size.
+type Slot = (MediaKey, Option<Rgb>, Option<(u32, u32)>);
 
 /// Decoded assets, keyed by media key.
 ///
@@ -90,16 +96,23 @@ impl MediaSurfaces {
     ///
     /// The tint is applied once, on the way into the cache, rather than per
     /// frame: a scroll re-paints the same asset at the refresh rate and a
-    /// mask's whole surface would be rewritten each time.
+    /// mask's whole surface would be rewritten each time. `Tint::Raster`
+    /// also *is* the rasterization size - core quantised the resolved box
+    /// so both bins ask their decoder for the same pixels - so it is read
+    /// out here and handed to the store rather than dropped.
     pub fn surface(
         &mut self,
         key: &MediaKey,
         tint: Tint,
         color: Rgb,
     ) -> Result<&Pixmap, Missing> {
-        let slot: Slot = (key.clone(), (tint != Tint::None).then_some(color));
+        let at = match tint {
+            Tint::Raster(w, h) => Some((w, h)),
+            Tint::None | Tint::Alpha => None,
+        };
+        let slot: Slot = (key.clone(), (tint != Tint::None).then_some(color), at);
         if !self.slots.contains_key(&slot) {
-            let mut pixels = self.load(key);
+            let mut pixels = self.load(key, at);
             if let (Ok(pixmap), true) = (&mut pixels, tint != Tint::None) {
                 tint_alpha(pixmap.data_mut(), color);
             }
@@ -127,8 +140,8 @@ impl MediaSurfaces {
         self.bytes
     }
 
-    fn load(&self, key: &MediaKey) -> Result<Pixmap, Missing> {
-        let surface = self.store.surface(key)?;
+    fn load(&self, key: &MediaKey, at: Option<(u32, u32)>) -> Result<Pixmap, Missing> {
+        let surface = self.store.surface(key, at)?;
         let (w, h) = (surface.w, surface.h);
         IntSize::from_wh(w, h)
             .and_then(|size| Pixmap::from_vec(surface.rgba, size))
@@ -193,7 +206,6 @@ fn weight(slot: &Result<Pixmap, Missing>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chibipop::dict::media::{MediaFormat, Undecodable};
     use std::path::PathBuf;
 
     /// Removes the file on drop, as every other database test here does.
@@ -245,20 +257,26 @@ mod tests {
         assert_eq!(held, cache.footprint(), "a hit admits nothing");
     }
 
+    /// Every format the census found now reaches pixels, so the cache's
+    /// subject is a decoded surface rather than a refusal. AVIF and SVG are
+    /// the two that matter: 201 and 35 of this library's 236 assets.
     #[test]
-    fn a_format_this_build_cannot_rasterize_is_a_cached_refusal_and_holds_no_pixels() {
-        let (db, _guard) = built("no_decoder");
+    fn every_stored_census_format_decodes_into_the_cache() {
+        let (db, _guard) = built("formats");
         let mut cache = MediaSurfaces::open(&db).expect("the store opens");
-
-        let avif = MediaKey::new(1, "gaiji/five.avif");
-        assert_eq!(
-            Err(Missing::Undecodable(Undecodable::NoDecoder(MediaFormat::Avif))),
-            cache.surface(&avif, AS_DRAWN.0, AS_DRAWN.1).map(|_| ()),
-            "the ladder needs to know it is the format and not the asset",
-        );
-        assert_eq!(0, cache.footprint(), "a refusal costs no pixels");
-        // Cached: the second ask must not go back to SQLite.
-        assert!(cache.surface(&avif, AS_DRAWN.0, AS_DRAWN.1).is_err());
+        for (path, w, h) in [
+            ("gaiji/one.png", 12u32, 7u32),
+            ("gaiji/three.jpg", 23, 11),
+            ("gaiji/four.gif", 9, 5),
+            ("gaiji/two.svg", 64, 32),
+            ("gaiji/five.avif", 480, 120),
+        ] {
+            let key = MediaKey::new(1, path);
+            let pixmap = cache
+                .surface(&key, AS_DRAWN.0, AS_DRAWN.1)
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert_eq!((w, h), (pixmap.width(), pixmap.height()), "{path}");
+        }
     }
 
     #[test]
@@ -272,7 +290,11 @@ mod tests {
                 cache.surface(&key, AS_DRAWN.0, AS_DRAWN.1).map(|_| ()),
                 "{path}",
             );
+            // Cached: a permanent answer must not go back to SQLite once
+            // per frame, and it costs no pixels.
+            assert!(cache.surface(&key, AS_DRAWN.0, AS_DRAWN.1).is_err(), "{path}");
         }
+        assert_eq!(0, cache.footprint(), "a refusal costs no pixels");
     }
 
     #[test]
@@ -301,8 +323,8 @@ mod tests {
         assert!(cache.surface(&one, AS_DRAWN.0, AS_DRAWN.1).is_ok());
         assert!(cache.surface(&copy, AS_DRAWN.0, AS_DRAWN.1).is_ok());
         assert_eq!(12 * 7 * 4, cache.footprint(), "the budget is honoured");
-        assert!(!cache.slots.contains_key(&(one.clone(), None)), "the oldest went");
-        assert!(cache.slots.contains_key(&(copy, None)), "the newest stayed");
+        assert!(!cache.slots.contains_key(&(one.clone(), None, None)), "the oldest went");
+        assert!(cache.slots.contains_key(&(copy, None, None)), "the newest stayed");
 
         let mut tight = MediaSurfaces::with_budget(&db, 1).expect("the store opens");
         assert!(
@@ -350,20 +372,48 @@ mod tests {
         assert_eq!(3 * 12 * 7 * 4, cache.footprint());
     }
 
-    /// A vector too large for the rasterise-and-tint bound composites
-    /// untinted, and `Tint::Raster` means the same thing to this cache as
-    /// `Tint::Alpha` until an SVG rasterizer exists: `dict::media::decode`
-    /// answers `NoDecoder` for every vector, so the `alt` ladder takes over.
+    /// Story 17 on the assets story 17 is about: a monochrome SVG is a mask
+    /// with no pixels until something picks a size, `SceneImage::tint`
+    /// picks it out of the resolved box, and this is where that number
+    /// becomes a pixmap. All 35 of this library's gaiji are exactly this
+    /// shape - `appearance: "monochrome"`, `height: 1em`, an SVG glyph
+    /// outline - and the theme's body text colour is what makes them
+    /// legible on a dark panel and on a light one.
     #[test]
-    fn a_vector_has_no_pixels_to_tint_in_this_build() {
+    fn a_monochrome_vector_rasterizes_at_the_size_the_tint_asked_for() {
         let (db, _guard) = built("vector");
         let mut cache = MediaSurfaces::open(&db).expect("the store opens");
         let svg = MediaKey::new(1, "gaiji/two.svg");
 
-        assert_eq!(
-            Err(Missing::Undecodable(Undecodable::NoDecoder(MediaFormat::Svg))),
-            cache.surface(&svg, Tint::Raster(30, 30), (230, 230, 230)).map(|_| ()),
-        );
-        assert_eq!(0, cache.footprint());
+        // The dark theme's body text, and the light theme's. A mask
+        // composited as drawn would be one of them and invisible on the
+        // other; the tint is what makes it both.
+        for ink in [(210u8, 212u8, 218u8), (40, 42, 48)] {
+            let mask = cache.surface(&svg, Tint::Raster(30, 30), ink).expect("it paints").clone();
+            assert_eq!((30, 30), (mask.width(), mask.height()), "the tint's own size");
+            let mut inked = 0;
+            for px in mask.data().as_chunks::<4>().0 {
+                let a = u32::from(px[3]);
+                for (i, channel) in [ink.0, ink.1, ink.2].into_iter().enumerate() {
+                    assert_eq!(((u32::from(channel) * a + 127) / 255) as u8, px[i], "{ink:?}");
+                    assert!(px[i] <= px[3], "premultiplied");
+                }
+                inked += usize::from(px[3] > 0);
+            }
+            assert!(inked > 0, "a mask with no coverage would tint nothing");
+        }
+        // Two colours, two pixmaps: a theme change must not silently keep
+        // the old ink.
+        assert_eq!(2 * 30 * 30 * 4, cache.footprint(), "one mask per theme");
+
+        // A second size is a second mask too, because a vector's pixels are
+        // the size somebody asked for - not a property of its bytes.
+        cache.surface(&svg, Tint::Raster(12, 12), (40, 42, 48)).expect("it paints");
+        assert_eq!(2 * 30 * 30 * 4 + 12 * 12 * 4, cache.footprint(), "two sizes, two pixmaps");
+
+        // And an untinted vector still rasterizes, at its own intrinsic
+        // size, which is the size the media row recorded.
+        let plain = cache.surface(&svg, Tint::None, (0, 0, 0)).expect("it paints");
+        assert_eq!((64, 32), (plain.width(), plain.height()));
     }
 }

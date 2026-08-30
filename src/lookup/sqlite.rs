@@ -204,16 +204,21 @@ impl MediaStore {
 
     /// One asset's pixels, decoded.
     ///
+    /// `at` is the pixel size a **vector** rasterizes at, straight through
+    /// to [`media::decode`] - `Tint::Raster`'s pair when the scene asked
+    /// for a tinted mask, and `None` otherwise, which takes the asset's
+    /// own intrinsic size.
+    ///
     /// Total: every way this can fail is a [`Missing`] arm, because a
     /// dictionary's broken asset must cost the popup its `alt` text and
     /// never a frame. The bin caches the answer either way - a key that
     /// cannot paint must not be re-read and re-decoded once per frame.
-    pub fn surface(&self, key: &MediaKey) -> Result<Surface, Missing> {
+    pub fn surface(&self, key: &MediaKey, at: Option<(u32, u32)>) -> Result<Surface, Missing> {
         match self.blob(key) {
             Err(e) => Err(Missing::Unavailable(format!("{e:#}"))),
             Ok(None) => Err(Missing::NotStored),
             Ok(Some((format, bytes))) => {
-                media::decode(format, &bytes).map_err(Missing::Undecodable)
+                media::decode(format, &bytes, at).map_err(Missing::Undecodable)
             }
         }
     }
@@ -589,25 +594,32 @@ mod tests {
 
     /// Every way a paint-time lookup can come up empty is a `Missing` arm,
     /// because a broken asset must cost the popup its `alt` text and never
-    /// a frame.
+    /// a frame - and every census format now reaches pixels, so a stored
+    /// JPEG is a surface rather than a refusal.
     #[test]
     fn a_paint_time_surface_lookup_is_total() {
         let (path, _guard) = built_media_db("media_surface");
         let store = MediaStore::open(&path).unwrap();
 
-        let png = store.surface(&MediaKey::new(1, "gaiji/one.png")).expect("a PNG decodes");
+        let png =
+            store.surface(&MediaKey::new(1, "gaiji/one.png"), None).expect("a PNG decodes");
         assert_eq!((12, 7), (png.w, png.h));
         assert_eq!(12 * 7 * 4, png.rgba.len());
 
-        assert_eq!(
-            Err(Missing::Undecodable(crate::dict::media::Undecodable::NoDecoder(
-                MediaFormat::Jpeg
-            ))),
-            store.surface(&MediaKey::new(1, "gaiji/three.jpg")).map(|_| ()),
-        );
+        let jpeg =
+            store.surface(&MediaKey::new(1, "gaiji/three.jpg"), None).expect("a JPEG decodes");
+        assert_eq!((23, 11), (jpeg.w, jpeg.h));
+
+        // The vector is the one asset whose pixels are a size the caller
+        // picks, and `MediaStore` is the wire that carries it.
+        let svg = store
+            .surface(&MediaKey::new(1, "gaiji/ratio.svg"), Some((24, 10)))
+            .expect("an SVG rasterizes");
+        assert_eq!((24, 10), (svg.w, svg.h));
+
         assert_eq!(
             Err(Missing::NotStored),
-            store.surface(&MediaKey::new(1, "gaiji/nope.png")).map(|_| ()),
+            store.surface(&MediaKey::new(1, "gaiji/nope.png"), None).map(|_| ()),
         );
     }
 

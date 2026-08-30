@@ -1440,13 +1440,16 @@ mod tests {
                 "gaiji/one.png",
                 "gaiji/ratio.svg",
                 "gaiji/three.jpg",
+                // Sized from its header and undecodable behind it, which
+                // is a real row and ticket 12's paint-time rung.
+                "gaiji/torn.png",
                 "gaiji/two.svg",
             ],
             media_paths(&conn),
         );
         // `unused.png` is in the archive and named by nothing.
-        assert_eq!(7, counts.media.stored);
-        assert_eq!(9, counts.media.referenced, "seven stored, one absent, one corrupt");
+        assert_eq!(8, counts.media.stored);
+        assert_eq!(10, counts.media.referenced, "eight stored, one absent, one unsizeable");
     }
 
     /// A term row whose glossary renders no text is not an entry, so no
@@ -1477,8 +1480,8 @@ mod tests {
         );
         let blobs: i64 =
             conn.query_row("SELECT COUNT(*) FROM media_blob", [], |r| r.get(0)).unwrap();
-        assert_eq!(6, blobs, "seven media rows over six distinct assets");
-        assert_eq!(6, counts.media.blobs);
+        assert_eq!(7, blobs, "eight media rows over seven distinct assets");
+        assert_eq!(7, counts.media.blobs);
     }
 
     /// The load-bearing column set. 99 807 census image nodes declare
@@ -1551,7 +1554,7 @@ mod tests {
         let per_dict = lines.iter().find(|l| l.contains("FixtureMedia"));
         let per_dict = per_dict.unwrap_or_else(|| panic!("no per-dictionary line: {lines:?}"));
         assert!(
-            per_dict.contains("7 of 9 assets in 6 blobs"),
+            per_dict.contains("8 of 10 assets in 7 blobs"),
             "the line has to carry the numbers: {per_dict}",
         );
         assert!(
