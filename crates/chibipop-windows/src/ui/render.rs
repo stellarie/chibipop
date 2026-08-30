@@ -716,7 +716,14 @@ impl Renderer {
                         color: painted.row.color,
                     };
                     let at = Vector2 { X: side.col_x, Y: painted.y };
-                    self.draw_spans(target, &[span], &[0.0], side.col_w, at, false)?;
+                    self.draw_spans(
+                        target,
+                        &[span],
+                        &[0.0],
+                        side.col_w,
+                        at,
+                        Align::Leading,
+                    )?;
                 }
             }
 
@@ -766,6 +773,18 @@ impl Renderer {
             return Ok(());
         }
 
+        // Boxes first, under the text: a
+        // pill's fill is behind the label
+        // it tints, and a block's border
+        // frames the paragraph inside it.
+        // The scene resolved every rect,
+        // so this walk decides nothing -
+        // it only draws.
+        let dy = pen.1 - elem.pen.1;
+        for b in elem.boxes() {
+            self.draw_box(target, b, dy)?;
+        }
+
         // One layout for the whole
         // element, however many styles
         // it holds: its spans wrap as
@@ -783,8 +802,100 @@ impl Renderer {
             &shifts,
             elem.wrap_w,
             at,
-            elem.align == Align::Trailing,
-        )
+            elem.align,
+        )?;
+
+        // The readings, over the bases
+        // they were placed against. Not
+        // spans of the layout above: a
+        // reading takes no horizontal
+        // room from the line it sits on,
+        // so it is drawn where the scene
+        // put it and at the width the
+        // scene measured it at, which is
+        // the element's own.
+        for run in &elem.ruby {
+            let at = Vector2 { X: pen.0 + run.x, Y: pen.1 + run.y };
+            let span = [run.styled_span(&theme.font_name)];
+            self.draw_spans(target, &span, &[0.0], elem.wrap_w, at, Align::Leading)?;
+        }
+        Ok(())
+    }
+
+    /// One scene box: its fill, then
+    /// its border.
+    ///
+    /// `dy` is the scroll the element
+    /// was drawn at, since a box's rect
+    /// is in unscrolled panel space like
+    /// every other rect the scene
+    /// reports.
+    ///
+    /// `DrawRoundedRectangle` strokes
+    /// centred on the path, so the rect
+    /// is inset by half the width and
+    /// the border sits inside the box -
+    /// which is what CSS's border box
+    /// means. Whether one stroke will
+    /// do is `BoxStyle::even_border`'s
+    /// answer, not this painter's: a
+    /// rounded corner between two
+    /// different widths has no single
+    /// path, and the only asymmetric
+    /// border in the census corpus is a
+    /// one-sided rule that a rect draws
+    /// exactly.
+    ///
+    /// Every drawn style strokes solid.
+    /// The scene carries `dashed`,
+    /// `dotted` and `double` faithfully
+    /// for a later painter; the corpus's
+    /// only observed values are `solid`
+    /// and `none`.
+    fn draw_box(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        b: &layout::ElemBox,
+        dy: f32,
+    ) -> windows::core::Result<()> {
+        let (x, y, w, h) = (b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
+        if w <= 0.0 || h <= 0.0 {
+            return Ok(());
+        }
+        let radius = b.style.radius;
+        let round = |x: f32, y: f32, w: f32, h: f32, r: f32| D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h },
+            radiusX: r.max(0.0),
+            radiusY: r.max(0.0),
+        };
+        if let Some(bg) = b.style.background {
+            let brush = unsafe { target.CreateSolidColorBrush(&color_f(bg), None) }?;
+            unsafe { target.FillRoundedRectangle(&round(x, y, w, h, radius), &brush) };
+        }
+
+        let e = b.style.border_used();
+        if e == layout::Edges::default() {
+            return Ok(());
+        }
+        let brush = unsafe { target.CreateSolidColorBrush(&color_f(b.style.border_color), None) }?;
+        if let Some(width) = b.style.even_border() {
+            let inset = width / 2.0;
+            let edge = round(x + inset, y + inset, w - width, h - width, radius - inset);
+            unsafe { target.DrawRoundedRectangle(&edge, &brush, width, None) };
+            return Ok(());
+        }
+        let side = |x: f32, y: f32, w: f32, h: f32| {
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            let rect = D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h };
+            unsafe { target.FillRectangle(&rect, &brush) };
+        };
+        side(x, y, w, e.top);
+        side(x, y + h - e.bottom, w, e.bottom);
+        side(x, y, e.left, h);
+        side(x + w - e.right, y, e.right, h);
+        Ok(())
     }
 
     /// Draws one run's spans, each in
@@ -824,14 +935,25 @@ impl Renderer {
         shifts: &[f32],
         max_w: f32,
         at: Vector2,
-        trailing: bool,
+        align: Align,
     ) -> windows::core::Result<()> {
         if spans.is_empty() {
             return Ok(());
         }
         let layout = self.text.layout(MeasureRun { spans, max_w })?;
-        if trailing {
-            unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
+        // DirectWrite aligns the whole
+        // wrap box, which is what the
+        // scene measured at: a centred
+        // paragraph that wrapped centres
+        // each of its lines, exactly as
+        // the scene's own per-line offset
+        // says it should.
+        match align {
+            Align::Leading => {}
+            Align::Center => unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER) }?,
+            Align::Trailing => {
+                unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?
+            }
         }
         for i in 0..spans.len() {
             let shift = shift_at(shifts, i);

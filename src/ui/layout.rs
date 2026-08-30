@@ -12,7 +12,7 @@
 //! derived).
 
 use crate::controller::HitAction;
-use crate::dict::gloss::{GlossDoc, ItemType, Kind, NodeId, Scalar, StyleKey, Tag};
+use crate::dict::gloss::{GlossDoc, ItemType, Kind, NodeId, NodePath, Scalar, StyleKey, Tag};
 use crate::present::{AnkiPopupState, Presentation};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
 use std::fmt;
@@ -275,11 +275,39 @@ pub struct SceneRect {
 }
 
 /// Where a run sits in its wrap box.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The panel's own chrome builds
+/// `Leading` for everything but the
+/// frequency corner; a gloss earns
+/// the other two from `textAlign`,
+/// which 7 of the census's 72
+/// dictionaries declare over 249 242
+/// nodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Align {
+    #[default]
     Leading,
-    /// The frequency corner only.
+    Center,
+    /// The frequency corner, and
+    /// `textAlign: right`/`end`.
     Trailing,
+}
+
+impl Align {
+    /// The fraction of a line's slack
+    /// that sits before it.
+    ///
+    /// One number, so a line's own
+    /// offset and the whole ink box's
+    /// are the same arithmetic over
+    /// two different widths.
+    pub fn slack_before(self) -> f32 {
+        match self {
+            Align::Leading => 0.0,
+            Align::Center => 0.5,
+            Align::Trailing => 1.0,
+        }
+    }
 }
 
 /// What an element came from.
@@ -350,6 +378,369 @@ pub struct ElemSpan {
     pub shift: f32,
 }
 
+/// One reading, over its base.
+///
+/// Out of the element's flow and out
+/// of its text: a reading takes no
+/// horizontal room from the line it
+/// sits on, so it is not a span of the
+/// run a bin re-measures. It is
+/// placed once, here, and drawn where
+/// it is told.
+///
+/// `x` and `y` are run-relative, like
+/// the [`LineBox`] the reading was
+/// placed against, so a bin adds
+/// [`SceneElem::pen`] and draws. No
+/// bidi and no complex-script
+/// positioning: a reading sits
+/// centred over the horizontal extent
+/// its base measured to, and nothing
+/// else.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RubyRun {
+    /// The reading itself.
+    pub text: String,
+    /// Leading edge, run-relative.
+    pub x: f32,
+    /// Top edge, likewise.
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub size: f32,
+    pub color: Rgb,
+    /// DirectWrite weight, 100-900.
+    pub weight: u16,
+    pub italic: bool,
+}
+
+impl RubyRun {
+    /// The run a bin draws it from.
+    ///
+    /// One span and one line, at
+    /// [`SceneElem::wrap_w`] - the
+    /// width layout measured it at -
+    /// so a reading too long for the
+    /// panel wraps the same way in
+    /// both places and its slot is as
+    /// tall as what it wrapped to.
+    pub fn styled_span<'a>(&'a self, font: &'a str) -> StyledSpan<'a> {
+        StyledSpan {
+            text: &self.text,
+            font,
+            size: self.size,
+            weight: self.weight,
+            italic: self.italic,
+            color: self.color,
+        }
+    }
+}
+
+/// One value per edge of a box, in
+/// CSS's own order.
+///
+/// Generic because the box model
+/// needs two of them - lengths for
+/// margin, padding and border width,
+/// and a [`BorderStyle`] per edge -
+/// and because one shorthand parser
+/// then serves both: `padding:
+/// 0.2em 0.3em` and `border-style:
+/// none none none solid` are the same
+/// one-to-four-value grammar, and
+/// both are written by real
+/// dictionaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Edges<T> {
+    pub top: T,
+    pub right: T,
+    pub bottom: T,
+    pub left: T,
+}
+
+impl<T: Copy> Edges<T> {
+    /// All four edges alike, which is
+    /// what a one-value shorthand
+    /// means.
+    pub fn all(v: T) -> Edges<T> {
+        Edges { top: v, right: v, bottom: v, left: v }
+    }
+}
+
+impl Edges<f32> {
+    /// Top plus bottom: what a box
+    /// adds to its content's height.
+    pub fn vertical(self) -> f32 {
+        self.top + self.bottom
+    }
+
+    /// Left plus right: what a box
+    /// takes from its content's width.
+    pub fn horizontal(self) -> f32 {
+        self.left + self.right
+    }
+
+    /// Negative edges dropped, which
+    /// is what CSS does to a padding
+    /// or a border width and what it
+    /// deliberately does not do to a
+    /// margin.
+    pub fn non_negative(self) -> Edges<f32> {
+        Edges {
+            top: self.top.max(0.0),
+            right: self.right.max(0.0),
+            bottom: self.bottom.max(0.0),
+            left: self.left.max(0.0),
+        }
+    }
+}
+
+/// How one border edge draws.
+///
+/// CSS's `none` is the initial value
+/// and forces that edge's used width
+/// to zero however wide it was
+/// declared, which is why it is the
+/// default here too: a dictionary
+/// asking for a width and no style
+/// gets what a browser gives it,
+/// nothing.
+///
+/// `groove`, `ridge`, `inset` and
+/// `outset` resolve to [`Solid`], as
+/// a browser draws them at the
+/// hairline widths dictionaries use;
+/// `hidden` resolves to [`None`].
+///
+/// [`Solid`]: BorderStyle::Solid
+/// [`None`]: BorderStyle::None
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BorderStyle {
+    #[default]
+    None,
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+}
+
+impl BorderStyle {
+    /// Stable name for snapshots.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BorderStyle::None => "none",
+            BorderStyle::Solid => "solid",
+            BorderStyle::Dashed => "dashed",
+            BorderStyle::Dotted => "dotted",
+            BorderStyle::Double => "double",
+        }
+    }
+}
+
+/// One box's margin, padding, border
+/// and fill - the box record the
+/// scene had no concept of.
+///
+/// The census's unsupported block is
+/// dominated by these
+/// (`docs/research/dict-shapes.md`):
+/// margin, padding, border style,
+/// border width and border radius,
+/// each in 11 to 14 of 72
+/// dictionaries, and that is how
+/// **those** dictionaries draw
+/// part-of-speech and label pills.
+///
+/// Not inherited, and deliberately:
+/// CSS inherits none of these, and a
+/// nested block that inherited its
+/// parent's margin would pay it
+/// twice.
+///
+/// Fed today by a node's inline
+/// `style` only. Ticket 17 folds a
+/// dictionary's own `styles.css` in
+/// underneath that, in `GlossDoc`'s
+/// resolved style record, so nothing
+/// here learns that CSS exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BoxStyle {
+    pub margin: Edges<f32>,
+    pub padding: Edges<f32>,
+    /// Declared border width, per
+    /// edge. See
+    /// [`border_used`](Self::border_used)
+    /// for the width that draws.
+    pub border: Edges<f32>,
+    pub border_style: Edges<BorderStyle>,
+    /// One colour for all four edges.
+    ///
+    /// CSS's initial value is
+    /// `currentColor`, so this is
+    /// seeded from the text colour the
+    /// node resolved to and a border
+    /// declaring only a width and a
+    /// style still draws.
+    pub border_color: Rgb,
+    /// One radius for all four
+    /// corners.
+    pub radius: f32,
+    /// `None` is transparent, which is
+    /// CSS's initial value and not the
+    /// same as black.
+    pub background: Option<Rgb>,
+}
+
+impl BoxStyle {
+    /// The border widths that actually
+    /// draw.
+    ///
+    /// `border-style: none` forces an
+    /// edge's used width to zero
+    /// however wide it was declared,
+    /// which is what makes
+    /// `border-style: none none none
+    /// solid` a left rule rather than
+    /// a full frame.
+    pub fn border_used(self) -> Edges<f32> {
+        let used = |style: BorderStyle, w: f32| match style {
+            BorderStyle::None => 0.0,
+            _ => w.max(0.0),
+        };
+        Edges {
+            top: used(self.border_style.top, self.border.top),
+            right: used(self.border_style.right, self.border.right),
+            bottom: used(self.border_style.bottom, self.border.bottom),
+            left: used(self.border_style.left, self.border.left),
+        }
+    }
+
+    /// Is there any ink in this box?
+    ///
+    /// What a painter asks before
+    /// building a path: a box that only
+    /// spaces its content out is
+    /// geometry, not paint.
+    pub fn paints(self) -> bool {
+        self.background.is_some() || self.border_used() != Edges::default()
+    }
+
+    /// Does this box occupy space its
+    /// content does not?
+    ///
+    /// True exactly when the walk's
+    /// advance, the pen or the wrap
+    /// width differ from what the same
+    /// content would produce with no
+    /// box at all - which is why a
+    /// gloss carrying no box style
+    /// still measures and stacks
+    /// byte-for-byte as it did before
+    /// this pass existed.
+    pub fn spaces(self) -> bool {
+        let b = self.border_used();
+        self.margin != Edges::default()
+            || self.padding != Edges::default()
+            || b != Edges::default()
+    }
+
+    /// Is this box anything at all?
+    ///
+    /// Every gloss paragraph resolves
+    /// one, because a border colour
+    /// defaults to the text colour and
+    /// a radius alone paints nothing;
+    /// only a box that takes space or
+    /// carries ink reaches the scene.
+    pub fn exists(self) -> bool {
+        self.spaces() || self.paints()
+    }
+
+    /// One stroke around the whole
+    /// box, or a fill per edge?
+    ///
+    /// `Some(width)` when all four
+    /// used widths are equal and
+    /// non-zero, which is the only
+    /// case a single rounded path can
+    /// draw: a corner between two
+    /// different widths has no one
+    /// path, and an edge whose style
+    /// is `none` has no width at all.
+    /// `None` means "fill each edge as
+    /// a plain rect", which is exactly
+    /// right for the one asymmetric
+    /// border the census corpus draws
+    /// - a one-sided rule.
+    ///
+    /// Asked here rather than in each
+    /// painter so that two bins with
+    /// two different drawing APIs
+    /// cannot answer it two different
+    /// ways. Neither bin has a test
+    /// that can see Direct2D; this
+    /// does.
+    pub fn even_border(self) -> Option<f32> {
+        let e = self.border_used();
+        let even = e.top == e.right && e.right == e.bottom && e.bottom == e.left;
+        (even && e.top > 0.0).then_some(e.top)
+    }
+}
+
+/// One box to fill and stroke.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ElemBox {
+    /// The border box, in panel space:
+    /// what a fill covers, and what a
+    /// stroke of the used width runs
+    /// down the inside of.
+    pub rect: SceneRect,
+    pub style: BoxStyle,
+}
+
+/// Where in its dictionary a scene
+/// element came from.
+///
+/// The stable identity stories 45 and
+/// 46 ask for: a hit on a sense means
+/// "sense 3 of 大辞林" and not a
+/// character range. `dict_id` and
+/// `entry_id` name the term-bank row,
+/// and `path` names the subtree
+/// inside that row's parsed tree -
+/// which is exactly what
+/// [`Selection::Nodes`] consumes, so
+/// a picker built on this hands Anki
+/// formatted markup for the senses
+/// chosen rather than flattened text.
+///
+/// Cheap because the block pass is
+/// already descending the tree: the
+/// path is extended one step per
+/// level on the way down
+/// ([`NodePath::child`]), never
+/// searched for afterwards.
+///
+/// [`Selection::Nodes`]: crate::dict::gloss::Selection::Nodes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlossOrigin {
+    pub dict_id: i64,
+    pub entry_id: i64,
+    /// The node this element renders,
+    /// or `None` when it has no
+    /// address.
+    ///
+    /// A [`NodePath`] reaches 16
+    /// levels and 65 536 siblings, and
+    /// past either it returns nothing
+    /// rather than a path that would
+    /// address an ancestor instead.
+    /// Unaddressable is a correct
+    /// answer for a selection;
+    /// silently aliased is not.
+    pub path: Option<NodePath>,
+}
+
 /// One measured, positioned element.
 ///
 /// Plain data: everything a bin needs
@@ -392,6 +783,44 @@ pub struct SceneElem {
     /// gloss. Empty for `Separator`,
     /// which has no text.
     pub spans: Vec<ElemSpan>,
+    /// This element's readings, each
+    /// already positioned over its
+    /// base.
+    ///
+    /// Empty for all but a gloss
+    /// paragraph holding `ruby`, which
+    /// is 14 of the census's 72
+    /// dictionaries. A reading is not
+    /// in `text` and not in `spans`,
+    /// because it does not flow - see
+    /// [`RubyRun`].
+    pub ruby: Vec<RubyRun>,
+    /// The box this element *is*, or
+    /// `None` when it draws none.
+    ///
+    /// Its rect is the border box, and
+    /// the element's own `pen`,
+    /// `wrap_w` and `advance` already
+    /// account for the margin, border
+    /// and padding around it: a bin
+    /// paints this and nothing else
+    /// changes.
+    pub block_box: Option<ElemBox>,
+    /// Boxes drawn around runs *inside*
+    /// this element - one per line each
+    /// run touches.
+    ///
+    /// A pill is an inline box, because
+    /// that is what a pill is: it keeps
+    /// its place on its line instead of
+    /// breaking one. Pure decoration -
+    /// no geometry the walk stacked
+    /// depends on these.
+    pub inline_boxes: Vec<ElemBox>,
+    /// Where in its dictionary this
+    /// came from, or `None` for the
+    /// panel's own chrome.
+    pub origin: Option<GlossOrigin>,
 }
 
 impl SceneElem {
@@ -418,6 +847,20 @@ impl SceneElem {
             italic: s.italic,
             color: s.color,
         })
+    }
+
+    /// Every box to paint, outermost
+    /// first.
+    ///
+    /// The element's own box before the
+    /// runs inside it, so a pill draws
+    /// over the block that holds it and
+    /// both draw under the text. One
+    /// iterator, so a bin has one loop
+    /// and cannot paint them in two
+    /// different orders.
+    pub fn boxes(&self) -> impl Iterator<Item = &ElemBox> {
+        self.block_box.iter().chain(self.inline_boxes.iter())
     }
 }
 
@@ -638,13 +1081,15 @@ pub fn scene(
     // The gloss walk's two scratch
     // buffers: one paragraph's spans
     // as the seam takes them, and the
-    // per-line boxes one link covers.
-    // Both are refilled per element,
-    // so a rich entry costs no
-    // allocation per element per
+    // per-line boxes one run of spans
+    // covers - a link's, for its hit
+    // targets, and a pill's, for its
+    // box. Both are refilled per
+    // element, so a rich entry costs
+    // no allocation per element per
     // frame.
     let mut run: Vec<StyledSpan<'_>> = Vec::new();
-    let mut cover: Vec<(u32, f32, f32)> = Vec::new();
+    let mut cover: Vec<Cover> = Vec::new();
 
     for elem in &elems {
         let advance = match elem {
@@ -666,6 +1111,10 @@ pub fn scene(
                     lines: 0,
                     advance: h,
                     spans: Vec::new(),
+                    ruby: Vec::new(),
+                    block_box: None,
+                    inline_boxes: Vec::new(),
+                    origin: None,
                 });
                 h
             }
@@ -696,6 +1145,10 @@ pub fn scene(
                     lines: met.lines,
                     advance: 0.0,
                     spans: one_span(line),
+                    ruby: Vec::new(),
+                    block_box: None,
+                    inline_boxes: Vec::new(),
+                    origin: None,
                 });
                 reserved_w = met.w + CORNER_GAP;
                 0.0
@@ -766,6 +1219,26 @@ pub fn scene(
             Elem::Gloss(flow) => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
+                // The box first: its margin,
+                // border and padding decide
+                // the width the paragraph is
+                // measured at, so they cannot
+                // be applied afterwards. A
+                // paragraph carrying no box
+                // gets `avail_w` and the pen
+                // it always got, which is why
+                // no geometry golden moves.
+                let bx = flow.block.style;
+                let (margin, border, padding) =
+                    (bx.margin, bx.border_used(), bx.padding);
+                let lead = Edges {
+                    top: margin.top + border.top + padding.top,
+                    right: margin.right + border.right + padding.right,
+                    bottom: margin.bottom + border.bottom + padding.bottom,
+                    left: margin.left + border.left + padding.left,
+                };
+                let wrap_w = (avail_w - lead.horizontal()).max(1.0);
+
                 // The whole paragraph in one
                 // request: its spans wrap
                 // together, so a bold word and
@@ -775,16 +1248,46 @@ pub fn scene(
                 // (ADR-0013).
                 run.clear();
                 run.extend(flow.styled_spans(font));
-                m.measure(MeasureRun { spans: &run, max_w: avail_w }, &mut measured)?;
+                // The readings first, because
+                // what they measure to is what
+                // sizes the filler span that
+                // buys each one its slot - so
+                // the paragraph below is
+                // measured with the taller
+                // lines already asked for, and
+                // `met.h` counts the readings
+                // without anything after the
+                // fact touching it. A bin
+                // re-measuring these same
+                // spans gets the same lines.
+                let read = measure_readings(m, font, flow, wrap_w, &mut run)?;
+                m.measure(MeasureRun { spans: &run, max_w: wrap_w }, &mut measured)?;
                 let met = measured.metrics;
-                let h = met.h;
                 y += flow.top_gap;
+                // Margins are in the advance,
+                // and are *not* collapsed
+                // against a sibling's: see
+                // [`Flow::block`].
+                let h = lead.top + met.h + padding.bottom + border.bottom + margin.bottom;
+                let pen = (origin + lead.left, origin + y + lead.top);
+                // One offset per line, so a
+                // centred paragraph that
+                // wrapped centres each of its
+                // lines and not just its ink
+                // box.
+                let slack = flow.block.align.slack_before();
+                let line_at = |line: LineBox| pen.0 + (wrap_w - line.w).max(0.0) * slack;
+                // Each reading over the base
+                // it belongs to, in the slot
+                // the lines already carry.
+                let ruby = place_ruby(flow, &read, &measured, wrap_w, slack);
 
                 let spans = flow
                     .spans
                     .iter()
+                    .zip(run.iter())
                     .enumerate()
-                    .map(|(i, s)| {
+                    .map(|(i, (s, asked))| {
                         // A span that wrapped is
                         // placed against the
                         // first line it touches;
@@ -797,7 +1300,12 @@ pub fn scene(
                             at: s.at,
                             len: s.len,
                             color: s.style.color,
-                            size: s.style.size,
+                            // The size the seam was
+                            // handed, which for a
+                            // ruby filler is not
+                            // the size the walk
+                            // resolved.
+                            size: asked.size,
                             weight: s.style.weight,
                             italic: s.style.italic,
                             shift: shift_on(s.style, line, span_h),
@@ -810,28 +1318,14 @@ pub fn scene(
                 // that wrapped is clickable on
                 // both halves of itself.
                 for (i, action) in flow.links.iter().enumerate() {
-                    cover.clear();
-                    for b in &measured.spans {
-                        let inside = flow
-                            .spans
-                            .get(b.span as usize)
-                            .is_some_and(|s| s.link == i as u32);
-                        if !inside {
-                            continue;
-                        }
-                        match cover.iter_mut().find(|(line, _, _)| *line == b.line) {
-                            Some(seen) => {
-                                seen.1 = seen.1.min(b.x);
-                                seen.2 = seen.2.max(b.x + b.w);
-                            }
-                            None => cover.push((b.line, b.x, b.x + b.w)),
-                        }
-                    }
-                    for &(line, left, right) in &cover {
+                    span_cover(&measured, &mut cover, |b| {
+                        flow.spans.get(b as usize).is_some_and(|s| s.link == i as u32)
+                    });
+                    for &(line, left, right, _) in &cover {
                         let line = measured.lines[line as usize];
                         hits.push(HitTarget {
-                            x: Some(origin + left),
-                            y: origin + y + line.y,
+                            x: Some(line_at(line) + left),
+                            y: pen.1 + line.y,
                             w: Some(right - left),
                             h: line.h,
                             action: action.clone(),
@@ -839,7 +1333,68 @@ pub fn scene(
                     }
                 }
 
+                // A pill per line its run
+                // touches, drawn around the
+                // text rather than pushing it
+                // aside: the measurement seam
+                // takes styled spans and no
+                // boxes (ADR-0013), so an
+                // inline box's padding cannot
+                // reserve room on its line.
+                // Every census pill is a short
+                // label its dictionary already
+                // spaces with `marginRight`, so
+                // what this costs is the pill's
+                // border overlapping the gap
+                // beside it, never a glyph.
+                let mut inline_boxes = Vec::new();
+                for run in &flow.inline {
+                    span_cover(&measured, &mut cover, |b| {
+                        b >= run.from && b < run.to
+                    });
+                    let (p, b) = (run.style.padding, run.style.border_used());
+                    for &(line, left, right, span_h) in &cover {
+                        let line = measured.lines[line as usize];
+                        let shift = flow
+                            .spans
+                            .get(run.from as usize)
+                            .map_or(0.0, |s| shift_on(s.style, line, span_h));
+                        // The run's own text box
+                        // on this line, from the
+                        // two facts the seam
+                        // reports about a line:
+                        // how tall it is and how
+                        // far down it the
+                        // baseline sits.
+                        let ascent = if line.h > 0.0 {
+                            span_h * line.baseline / line.h
+                        } else {
+                            span_h
+                        };
+                        let top = line.y + line.baseline - shift - ascent;
+                        inline_boxes.push(ElemBox {
+                            rect: SceneRect {
+                                x: line_at(line) + left - p.left - b.left,
+                                y: pen.1 + top - p.top - b.top,
+                                w: (right - left) + p.horizontal() + b.horizontal(),
+                                h: span_h + p.vertical() + b.vertical(),
+                            },
+                            style: run.style,
+                        });
+                    }
+                }
+
                 let base = flow.base(theme);
+                // A reading wider than its
+                // base overhangs it, and the
+                // ink box is the ink: without
+                // this an element would report
+                // a width its own furigana
+                // exceeds. It can only ever
+                // overhang to the right -
+                // [`place_ruby`] clamps the
+                // left edge into the box.
+                let ink_w = ruby.iter().fold(met.w, |a, r| a.max(r.x + r.w));
                 out.push(SceneElem {
                     kind: ElemKind::Text,
                     text: flow.text.clone(),
@@ -848,13 +1403,34 @@ pub fn scene(
                     weight: base.weight,
                     italic: base.italic,
                     top_gap: flow.top_gap,
-                    wrap_w: avail_w,
-                    align: Align::Leading,
-                    pen: (origin, origin + y),
-                    rect: SceneRect { x: origin, y: origin + y, w: met.w, h: met.h },
+                    wrap_w,
+                    align: flow.block.align,
+                    pen,
+                    rect: SceneRect {
+                        x: pen.0 + (wrap_w - met.w).max(0.0) * slack,
+                        y: pen.1,
+                        w: ink_w,
+                        h: met.h,
+                    },
                     lines: met.lines,
-                    advance: met.h,
+                    advance: h,
                     spans,
+                    ruby,
+                    block_box: bx.exists().then(|| ElemBox {
+                        rect: SceneRect {
+                            x: origin + margin.left,
+                            y: origin + y + margin.top,
+                            w: (avail_w - margin.horizontal()).max(0.0),
+                            h: border.vertical() + padding.vertical() + met.h,
+                        },
+                        style: bx,
+                    }),
+                    inline_boxes,
+                    origin: Some(GlossOrigin {
+                        dict_id: flow.dict_id,
+                        entry_id: flow.entry_id,
+                        path: flow.path,
+                    }),
                 });
                 h
             }
@@ -960,6 +1536,17 @@ fn text_elem(
         lines: met.lines,
         advance: met.h,
         spans: one_span(line),
+        ruby: Vec::new(),
+        block_box: None,
+        inline_boxes: Vec::new(),
+        // The panel's own chrome: a
+        // headword, a reading, a
+        // dictionary label and a
+        // collapsed row are built from
+        // a `Presentation` and not from
+        // a parsed tree, so none of
+        // them addresses a node.
+        origin: None,
     }
 }
 
@@ -1000,6 +1587,257 @@ fn first_box(measured: &Measured, span: u32) -> (LineBox, f32) {
             b.h,
         ),
         None => (LineBox::default(), 0.0),
+    }
+}
+
+/// One run of spans, on one line.
+///
+/// `(line, left, right, height)`, all
+/// run-relative: the line index, the
+/// run's horizontal extent on it, and
+/// the tallest span box in it - which
+/// is what a hit target's rect and an
+/// inline box's rect are each built
+/// from.
+type Cover = (u32, f32, f32, f32);
+
+/// Where a run of spans landed, one
+/// entry per line it touches.
+///
+/// A span that wrapped has one box
+/// per line, and a run of them has
+/// several per line, so this unions
+/// them: a cross-reference broken
+/// across two lines is clickable on
+/// both halves and a pill that
+/// wrapped is drawn on both. `out` is
+/// refilled rather than returned,
+/// because the walk does this twice
+/// per paragraph.
+fn span_cover(measured: &Measured, out: &mut Vec<Cover>, wanted: impl Fn(u32) -> bool) {
+    out.clear();
+    for b in &measured.spans {
+        if !wanted(b.span) {
+            continue;
+        }
+        match out.iter_mut().find(|(line, ..)| *line == b.line) {
+            Some(seen) => {
+                seen.1 = seen.1.min(b.x);
+                seen.2 = seen.2.max(b.x + b.w);
+                seen.3 = seen.3.max(b.h);
+            }
+            None => out.push((b.line, b.x, b.x + b.w, b.h)),
+        }
+    }
+}
+
+/// One reading, measured.
+///
+/// What [`measure_readings`] learns
+/// and [`place_ruby`] spends.
+#[derive(Clone, Copy, Default)]
+struct ReadBox {
+    w: f32,
+    h: f32,
+    /// The fraction of a line that
+    /// sits above its baseline.
+    ///
+    /// A face metric, and the seam
+    /// reports it rather than the
+    /// face's tables: `baseline / h`
+    /// on any line of any run in this
+    /// font. Noto Sans CJK answers
+    /// 0.81; the layout tests' fake
+    /// answers 0.5. Nothing here may
+    /// assume either.
+    ascent: f32,
+}
+
+/// Every reading of a paragraph,
+/// measured, and its filler span
+/// sized.
+///
+/// Called *before* the paragraph is
+/// measured, and it is what buys the
+/// reading its slot. A reading is not
+/// in the paragraph's text, so the
+/// measurer would give its line the
+/// height the base alone needs - and
+/// growing the line boxes afterwards
+/// would fool nobody, because a bin
+/// re-measures the same spans to
+/// paint them and would get the
+/// ungrown lines back.
+///
+/// So the run itself asks for the
+/// taller line, through the one rule
+/// both engines already answer to and
+/// ADR-0013 already documents: a line
+/// is as tall as its tallest span. A
+/// [`RUBY_FILLER`] beside each base
+/// carries no ink and no advance and
+/// exists only to be that span. Both
+/// the scene and the bin's re-measure
+/// therefore see one set of line
+/// boxes, and `metrics.h` counts the
+/// readings without anything after
+/// the fact touching it.
+///
+/// Its size is decided here rather
+/// than while the paragraph is built,
+/// because the growth a line hands to
+/// the space *above* its baseline is
+/// the face's ascent share
+/// ([`ReadBox::ascent`]) and only a
+/// measurer knows it.
+fn measure_readings(
+    m: &mut dyn TextMeasure,
+    font: &str,
+    flow: &Flow,
+    max_w: f32,
+    run: &mut [StyledSpan<'_>],
+) -> Result<Vec<ReadBox>, MeasureError> {
+    if flow.ruby.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Only a paragraph that holds ruby
+    // pays for this buffer, which is
+    // why it is not one of the walk's.
+    let mut scratch = Measured::default();
+    let mut out = vec![ReadBox::default(); flow.ruby.len()];
+    for (slot, ruby) in flow.ruby.iter().enumerate() {
+        if ruby.text.is_empty() {
+            continue;
+        }
+        m.measure(
+            MeasureRun { spans: &[ruby_span(font, ruby)], max_w },
+            &mut scratch,
+        )?;
+        let first = scratch.lines.first().copied().unwrap_or_default();
+        out[slot] = ReadBox {
+            w: scratch.metrics.w,
+            h: scratch.metrics.h,
+            ascent: if first.h > 0.0 { first.baseline / first.h } else { 0.0 },
+        };
+    }
+    // A line of height `h` gives
+    // `ascent * h` to the space above
+    // its baseline, and a base of its
+    // own size already claims its own
+    // ascent of that. So a line has to
+    // grow by `reading / ascent` for
+    // the reading to fit above the
+    // base - and a line's height is
+    // proportional to its tallest
+    // span's size in both engines,
+    // which turns the growth into a
+    // size.
+    for (span, asked) in flow.spans.iter().zip(run.iter_mut()) {
+        let Some(read) = flow.ruby.get(span.ruby as usize).filter(|_| span.filler) else {
+            continue;
+        };
+        let box_ = out[span.ruby as usize];
+        let grown = if box_.ascent > 0.0 {
+            read.style.size / box_.ascent
+        } else {
+            read.style.size
+        };
+        asked.size = span.style.size + grown;
+    }
+    Ok(out)
+}
+
+/// The paragraph's readings, placed.
+///
+/// Pure: the lines already carry the
+/// slot [`measure_readings`] bought,
+/// so this only decides where in it
+/// each reading sits.
+fn place_ruby(
+    flow: &Flow,
+    read: &[ReadBox],
+    measured: &Measured,
+    wrap_w: f32,
+    slack: f32,
+) -> Vec<RubyRun> {
+    let mut out = Vec::new();
+    for (slot, ruby) in flow.ruby.iter().enumerate() {
+        let box_ = read[slot];
+        if ruby.text.is_empty() || box_.h <= 0.0 {
+            continue;
+        }
+        let base = |b: &&SpanBox| {
+            flow.spans
+                .get(b.span as usize)
+                .is_some_and(|s| s.ruby == slot as u32 && !s.filler)
+        };
+        // The first line the base
+        // landed on, and its extent
+        // there: a base that wrapped
+        // keeps its reading over its
+        // head rather than over its
+        // tail. A base is a character
+        // or two, so it practically
+        // never wraps.
+        let Some(line) = measured.spans.iter().filter(base).map(|b| b.line).min() else {
+            continue;
+        };
+        let Some(geom) = measured.lines.get(line as usize) else {
+            continue;
+        };
+        let (left, right, tallest) = measured
+            .spans
+            .iter()
+            .filter(base)
+            .filter(|b| b.line == line)
+            .fold((f32::MAX, 0.0f32, 0.0f32), |(l, r, h), b| {
+                (l.min(b.x), r.max(b.x + b.w), h.max(b.h))
+            });
+        // Its bottom against the base's
+        // own ink top, which is the
+        // base's ascent up from the
+        // line's baseline. Clamped into
+        // the line, so a measurer that
+        // gave the line no extra room
+        // draws the reading small and
+        // high rather than off the
+        // paragraph.
+        let floor = geom.baseline - box_.ascent * tallest;
+        let y = geom.y + (floor - box_.h).max(0.0);
+        // Centred over the base, and
+        // never off the panel's left
+        // edge: a reading wider than its
+        // base overhangs it, which is
+        // what a browser does too. The
+        // line's own alignment slack
+        // comes first, because the base
+        // it sits over moved by it.
+        let indent = (wrap_w - geom.w).max(0.0) * slack;
+        let x = (indent + left + (right - left - box_.w) / 2.0).max(0.0);
+        out.push(RubyRun {
+            text: ruby.text.clone(),
+            x,
+            y,
+            w: box_.w,
+            h: box_.h,
+            size: ruby.style.size,
+            color: ruby.style.color,
+            weight: ruby.style.weight,
+            italic: ruby.style.italic,
+        });
+    }
+    out
+}
+
+/// One reading, as the seam takes it.
+fn ruby_span<'a>(font: &'a str, ruby: &'a FlowRuby) -> StyledSpan<'a> {
+    StyledSpan {
+        text: &ruby.text,
+        font,
+        size: ruby.style.size,
+        weight: ruby.style.weight,
+        italic: ruby.style.italic,
+        color: ruby.style.color,
     }
 }
 
@@ -1265,6 +2103,32 @@ const SUPER_RISE: f32 = 1.0 / 3.0;
 /// `vertical-align: sub`, likewise.
 const SUB_DROP: f32 = 1.0 / 5.0;
 
+/// A reading's size, as a fraction of
+/// the base it sits over.
+///
+/// Yomitan's own
+/// `ext/css/structured-content.css` -
+/// the spec's stated source of
+/// defaults - declares no `ruby`,
+/// `rt` or `rp` rule at all, so what
+/// a reader sees in Yomitan is the
+/// browser's own default, and both
+/// engines Yomitan runs in give `rt`
+/// `font-size: 50%`. This is
+/// therefore Yomitan's drawn default
+/// by exactly the route
+/// [`tag_style`] already takes for
+/// `b` and `sup`: HTML's own
+/// stylesheet, and not a number
+/// invented here.
+///
+/// Not [`FONT_STEP`]: `smaller` is a
+/// 1.2 step and a reading is a half,
+/// which is the point - furigana is
+/// meant to read as an annotation
+/// rather than as small text.
+const RUBY_RATIO: f32 = 0.5;
+
 /// What separates two top-level
 /// glossary items.
 ///
@@ -1282,6 +2146,44 @@ const ITEM_SEPARATOR: &str = "; ";
 /// A link's index in [`Flow::links`],
 /// or no link at all.
 const NO_LINK: u32 = u32::MAX;
+
+/// A base's index in [`Flow::ruby`],
+/// or no reading at all.
+const NO_RUBY: u32 = u32::MAX;
+
+/// What a ruby base's slot is bought
+/// with: U+2060 WORD JOINER.
+///
+/// A reading has to have room above
+/// its base that the line above must
+/// not overlap, and the only thing
+/// that grows a line is a taller span
+/// on it (ADR-0013). This character
+/// is that span. Two properties earn
+/// it the job, and both were probed
+/// against the real shaper rather
+/// than assumed: it shapes to a glyph
+/// of zero advance, so it costs the
+/// line no width, and it is a *word
+/// joiner*, so no wrap can separate
+/// it from the base whose line it
+/// grows.
+///
+/// Not U+200B ZERO WIDTH SPACE, which
+/// measures the same and is a break
+/// *opportunity*: it would let a line
+/// break between a base and its own
+/// filler.
+///
+/// It does mean an element's `text`
+/// holds one invisible character per
+/// reading. That is the honest
+/// record: the text is what the bin
+/// re-measures and shapes, and the
+/// alternative - line boxes grown
+/// after the wrap - is geometry the
+/// paint would not reproduce.
+const RUBY_FILLER: &str = "\u{2060}";
 
 /// What a span's `verticalAlign`
 /// still needs from its line.
@@ -1345,6 +2247,79 @@ impl Inline {
     }
 }
 
+/// One node's resolved block-level
+/// style, while a paragraph is being
+/// built.
+///
+/// What [`Inline`] is to a span. Its
+/// two halves behave differently
+/// because CSS says so: `style` is
+/// not inherited, so every node
+/// starts with an empty box and a
+/// nested block never pays its
+/// parent's margin twice, while
+/// `align` and `pre_line` are, so a
+/// centred block centres the blocks
+/// inside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Block {
+    /// This node's own box.
+    style: BoxStyle,
+    align: Align,
+    /// `whiteSpace: pre-line`.
+    pre_line: bool,
+}
+
+impl Block {
+    /// What a child inherits: the
+    /// inherited half, and an empty
+    /// box.
+    fn inherited(self) -> Block {
+        Block { style: BoxStyle::default(), ..self }
+    }
+}
+
+/// What a node inherits from the one
+/// above it.
+///
+/// Bundled because the descent
+/// carries four of them and a
+/// five-argument recursion is where
+/// an argument gets passed in the
+/// wrong slot. `Copy`, so a child's
+/// context is the parent's with one
+/// field replaced.
+#[derive(Debug, Clone, Copy)]
+struct Ctx {
+    inline: Inline,
+    block: Block,
+    /// The `<a>` it sits inside, or
+    /// [`NO_LINK`].
+    link: u32,
+    /// This node's own address, or
+    /// `None` once a step no longer
+    /// fits - past 16 levels or the
+    /// 65 536th sibling, where a
+    /// [`NodePath`] addresses nothing
+    /// rather than aliasing an
+    /// ancestor.
+    path: Option<NodePath>,
+}
+
+impl Ctx {
+    /// This context at the `i`th child
+    /// of the node it addresses.
+    ///
+    /// The path is extended one step
+    /// per level on the way down, which
+    /// is why every scene element can
+    /// carry one for the price of a
+    /// `u16` write.
+    fn at(self, i: usize) -> Ctx {
+        Ctx { path: self.path.and_then(|p| p.child(i)), ..self }
+    }
+}
+
 /// One span of a [`Flow`].
 struct FlowSpan {
     at: u32,
@@ -1352,6 +2327,69 @@ struct FlowSpan {
     style: Inline,
     /// The `<a>` it sits inside.
     link: u32,
+    /// The reading it wears, if it is
+    /// a ruby base.
+    ///
+    /// Also what keeps a base from
+    /// coalescing into the text beside
+    /// it: the `漢` of `常用漢字` must
+    /// stay addressable on its own for
+    /// its reading to centre over it,
+    /// and [`Paragraphs::push`] joins
+    /// two runs only when everything
+    /// about them matches.
+    ruby: u32,
+    /// Is this the slot's line-height
+    /// filler rather than its base?
+    ///
+    /// A [`RUBY_FILLER`] span, whose
+    /// only job is to be the tallest
+    /// span on its line so that the
+    /// measurer reserves the reading's
+    /// slot - see
+    /// [`measure_readings`]. It draws
+    /// nothing, advances nothing, and
+    /// is never a base.
+    filler: bool,
+}
+
+/// One reading, before it is placed.
+///
+/// Held beside the paragraph rather
+/// than in it: a reading takes no
+/// horizontal room from the line it
+/// sits on, so putting it in the run
+/// would advance the pen past it and
+/// let the wrap break it away from
+/// the base it belongs to.
+#[derive(Clone)]
+struct FlowRuby {
+    text: String,
+    style: Inline,
+}
+
+/// One inline box's run of spans.
+///
+/// A pill: a `span` carrying padding,
+/// a background or a border, which
+/// keeps its place on its line rather
+/// than breaking one - Jitendex draws
+/// its part-of-speech labels this
+/// way, and 11 to 14 census
+/// dictionaries draw theirs.
+///
+/// A span range rather than a rect,
+/// because where the run lands is the
+/// measurer's answer: the seam reports
+/// a box per span per line, so one of
+/// these becomes one [`ElemBox`] per
+/// line the run touches.
+struct InlineRun {
+    /// First span it covers.
+    from: u32,
+    /// One past the last.
+    to: u32,
+    style: BoxStyle,
 }
 
 /// One paragraph of inline content.
@@ -1374,6 +2412,37 @@ struct Flow {
     /// target, indexed by
     /// [`FlowSpan::link`].
     links: Vec<HitAction>,
+    /// One per ruby base, indexed by
+    /// [`FlowSpan::ruby`].
+    ruby: Vec<FlowRuby>,
+    /// The block this paragraph is:
+    /// its box, its alignment, and
+    /// whether it preserves newlines.
+    block: Block,
+    /// The node the paragraph renders,
+    /// or `None` when it has no
+    /// address.
+    ///
+    /// The block that opened it, so
+    /// that a hit resolves to a
+    /// subtree and
+    /// `render_html(Selection::Nodes)`
+    /// reproduces exactly that sense.
+    path: Option<NodePath>,
+    /// Boxes to draw around runs
+    /// inside it.
+    inline: Vec<InlineRun>,
+    /// The term-bank row this
+    /// paragraph renders.
+    ///
+    /// Stamped by [`build_elements`],
+    /// which is where the ids are in
+    /// hand: the tree itself does not
+    /// know which row stored it.
+    /// Together with `path` this is the
+    /// whole of [`GlossOrigin`].
+    dict_id: i64,
+    entry_id: i64,
 }
 
 impl Flow {
@@ -1418,13 +2487,24 @@ impl Flow {
             span.at += shift;
         }
         match self.spans.first_mut() {
-            Some(first) if first.style == style && first.link == NO_LINK => {
+            Some(first)
+                if first.style == style
+                    && first.link == NO_LINK
+                    && first.ruby == NO_RUBY =>
+            {
                 first.at = 0;
                 first.len += shift;
             }
             _ => self.spans.insert(
                 0,
-                FlowSpan { at: 0, len: shift, style, link: NO_LINK },
+                FlowSpan {
+                    at: 0,
+                    len: shift,
+                    style,
+                    link: NO_LINK,
+                    ruby: NO_RUBY,
+                    filler: false,
+                },
             ),
         }
     }
@@ -1458,6 +2538,25 @@ struct Paragraphs<'a> {
     /// A separator owed to the next
     /// text this paragraph takes.
     pending_sep: bool,
+    /// Every reading seen so far;
+    /// [`Flow`] gets the ones its own
+    /// bases wear, renumbered.
+    rubies: Vec<FlowRuby>,
+    /// The slot the text being read
+    /// right now belongs to, or
+    /// [`NO_RUBY`] outside a `ruby`.
+    open_ruby: u32,
+    /// A span break owed before the
+    /// next run.
+    ///
+    /// What keeps an inline box's spans
+    /// its own: its first run must not
+    /// coalesce into the text before it
+    /// and the run after it must not
+    /// coalesce into its last, or the
+    /// box would be drawn around its
+    /// neighbours too.
+    barrier: bool,
 }
 
 /// One row's gloss tree, laid out as
@@ -1469,9 +2568,18 @@ fn paragraphs(doc: &GlossDoc, base: Inline, top_gap: f32) -> Vec<Flow> {
         cur: Flow::default(),
         links: Vec::new(),
         pending_sep: false,
+        rubies: Vec::new(),
+        open_ruby: NO_RUBY,
+        barrier: false,
     };
-    for id in doc.items() {
-        p.item(id, base);
+    let root = Ctx {
+        inline: base,
+        block: Block::default(),
+        link: NO_LINK,
+        path: Some(NodePath::ROOT),
+    };
+    for (i, id) in doc.items().enumerate() {
+        p.item(id, root.at(i));
         p.pending_sep = true;
     }
     p.flush();
@@ -1483,8 +2591,21 @@ fn paragraphs(doc: &GlossDoc, base: Inline, top_gap: f32) -> Vec<Flow> {
 
 impl Paragraphs<'_> {
     /// One top-level glossary item.
-    fn item(&mut self, id: NodeId, base: Inline) {
+    fn item(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
+        // An item opens no block of its
+        // own, so the paragraph it
+        // lands in is attributed to the
+        // item - which for the 20
+        // census dictionaries that emit
+        // one plain string per item is
+        // the only address a scene
+        // element can have. A block
+        // inside it takes the address
+        // back.
+        if self.cur.text.is_empty() {
+            self.cur.path = ctx.path;
+        }
         match doc.node(id).item_type {
             // Ticket 12 owns image
             // items; today they draw
@@ -1492,7 +2613,7 @@ impl Paragraphs<'_> {
             // the plain-text walk also
             // does with them.
             ItemType::Image => {}
-            ItemType::Text => self.text(doc.text(id), base, NO_LINK),
+            ItemType::Text => self.text(doc.text(id), ctx.inline, ctx.link),
             // Yomitan drops a
             // `structured-content`
             // item's children straight
@@ -1501,40 +2622,34 @@ impl Paragraphs<'_> {
             // neither opens a paragraph
             // nor takes part in the
             // drop rules.
-            ItemType::StructuredContent => self.children(id, base, true, NO_LINK),
-            _ if doc.is_plain_string(id) => self.text(doc.text(id), base, NO_LINK),
-            _ => self.node(id, base, NO_LINK),
+            ItemType::StructuredContent => self.children(id, ctx),
+            _ if doc.is_plain_string(id) => self.text(doc.text(id), ctx.inline, ctx.link),
+            _ => self.node(id, ctx),
         }
     }
 
     /// One node.
-    fn node(&mut self, id: NodeId, parent: Inline, link: u32) {
+    fn node(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         let node = *doc.node(id);
         if doc.is_dropped_subtree(id) || doc.is_part_of_speech(id) {
             return;
         }
         match node.tag {
-            // Ticket 11 owns ruby. Until
-            // it lands a base renders and
-            // its reading does not: `rt`
-            // dropped into the flow would
-            // read as 漢かん字じ, and `rp`
-            // is the fallback for a
-            // renderer that cannot draw
-            // ruby - which this one is
-            // about to stop being. `ruby`
-            // itself is a transparent
-            // inline wrapper, so ticket 11
-            // plugs in at this arm and
-            // nowhere else.
-            Tag::Rt | Tag::Rp => return,
+            // A reading is drawn above
+            // its base rather than in
+            // the line beside it, so
+            // the whole subtree is
+            // handled at once: dropped
+            // into the flow it would
+            // read as 漢かん字じ.
+            Tag::Ruby => return self.ruby(id, ctx),
             // Both engines break hard on
             // a newline, so a dictionary's
             // own break reaches the panel
             // inside the paragraph rather
             // than splitting it.
-            Tag::Br => return self.text("\n", parent, link),
+            Tag::Br => return self.text("\n", ctx.inline, ctx.link),
             _ => {}
         }
         // Ticket 12 owns images.
@@ -1542,19 +2657,70 @@ impl Paragraphs<'_> {
             return;
         }
         if node.kind == Kind::Text && node.tag == Tag::None {
-            return self.text(doc.text(id), parent, link);
+            return self.text(doc.text(id), ctx.inline, ctx.link);
         }
+        let inline = self.styled(id, ctx.inline);
+        let block = self.boxed(id, ctx.block, inline);
         // A block *opens* a line and
         // never closes one, exactly as
         // the plain-text walk's mark
         // does: text after a block joins
-        // the block's own paragraph.
+        // the block's own paragraph -
+        // and so does the block's own
+        // box, which is why one
+        // paragraph carries one box.
         if node.tag.is_block() || doc.has_marker(id) {
-            self.flush();
+            self.open(ctx.path, block);
         }
-        let style = self.styled(id, parent);
-        let link = self.link_of(id, link);
-        self.children(id, style, !node.tag.is_inline(), link);
+        let next = Ctx {
+            inline,
+            block: block.inherited(),
+            link: self.link_of(id, ctx.link),
+            path: ctx.path,
+        };
+        // An inline node carrying ink is
+        // a pill, and a pill is drawn as
+        // an inline box: it keeps its
+        // place on its line instead of
+        // breaking one.
+        if !node.tag.is_block() && block.style.paints() {
+            return self.pill(id, next, block.style);
+        }
+        self.children(id, next);
+    }
+
+    /// One inline box's own run, kept
+    /// out of its neighbours' spans.
+    ///
+    /// The box is drawn around exactly
+    /// the spans this node produced, so
+    /// a barrier goes in at each end:
+    /// coalescing is what would
+    /// otherwise hand the box a
+    /// neighbour's text as well.
+    fn pill(&mut self, id: NodeId, ctx: Ctx, style: BoxStyle) {
+        self.barrier = true;
+        let from = self.cur.spans.len() as u32;
+        self.children(id, ctx);
+        let to = self.cur.spans.len() as u32;
+        self.barrier = true;
+        // `to < from` when the node held
+        // a block after all and flushed
+        // the paragraph out from under
+        // itself; a box over no span is
+        // no box either way.
+        if to > from {
+            self.cur.inline.push(InlineRun { from, to, style });
+        }
+    }
+
+    /// Ends the paragraph being built
+    /// and starts one that belongs to
+    /// `path`, carrying `block`'s box.
+    fn open(&mut self, path: Option<NodePath>, block: Block) {
+        self.flush();
+        self.cur.path = path;
+        self.cur.block = block;
     }
 
     /// A node's children.
@@ -1568,17 +2734,45 @@ impl Paragraphs<'_> {
     /// only a run that is *entirely*
     /// bare strings, and holds more
     /// than one, becomes paragraphs.
-    fn children(&mut self, id: NodeId, style: Inline, block_ctx: bool, link: u32) {
+    ///
+    /// `ctx` is what the children
+    /// inherit, so its box is already
+    /// the empty one
+    /// [`Block::inherited`] hands down:
+    /// a bare string declares no box
+    /// and each of these paragraphs
+    /// carries none.
+    fn children(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
-        if block_ctx && doc.is_string_list(id) {
-            for child in doc.children(id) {
-                self.flush();
-                self.text(doc.text(child), style, link);
+        if !doc.node(id).tag.is_inline() && doc.is_string_list(id) {
+            for (i, child) in doc.children(id).enumerate() {
+                self.open(ctx.at(i).path, ctx.block);
+                self.text(doc.text(child), ctx.inline, ctx.link);
             }
             return;
         }
-        for child in doc.children(id) {
-            self.node(child, style, link);
+        for (i, child) in doc.children(id).enumerate() {
+            self.node(child, ctx.at(i));
+            // A `summary` closes its line
+            // as well as opening one, and
+            // it is the only tag that
+            // does. What a block
+            // otherwise does is *open* a
+            // line - the rule the
+            // plain-text walk shares - so
+            // text after one joins it.
+            // For a `details` that text
+            // is the disclosure's body,
+            // which a browser draws under
+            // the summary and not as one
+            // sentence with it. The
+            // paragraph reopened here
+            // belongs to the `details`,
+            // whose path is this walk's
+            // own.
+            if doc.node(child).tag == Tag::Summary {
+                self.open(ctx.path, ctx.block);
+            }
         }
     }
 
@@ -1609,15 +2803,71 @@ impl Paragraphs<'_> {
     fn push(&mut self, text: &str, style: Inline, link: u32) {
         let at = self.cur.text.len() as u32;
         let len = text.len() as u32;
+        let ruby = self.open_ruby;
+        let joins = !std::mem::take(&mut self.barrier);
         self.cur.text.push_str(text);
         match self.cur.spans.last_mut() {
             Some(last)
-                if last.style == style && last.link == link && last.at + last.len == at =>
+                if joins
+                    && !last.filler
+                    && last.style == style
+                    && last.link == link
+                    && last.ruby == ruby
+                    && last.at + last.len == at =>
             {
                 last.len += len;
             }
-            _ => self.cur.spans.push(FlowSpan { at, len, style, link }),
+            _ => self.cur.spans.push(FlowSpan {
+                at,
+                len,
+                style,
+                link,
+                ruby,
+                filler: false,
+            }),
         }
+    }
+
+    /// Buys the open slot's reading its
+    /// room, if the slot has a base to
+    /// hang it over.
+    ///
+    /// A [`RUBY_FILLER`] span of its
+    /// own, appended straight after the
+    /// base: the character is a word
+    /// joiner, so no wrap can put it on
+    /// a different line from the base
+    /// whose line it is there to grow.
+    /// Its size is left as the base's
+    /// and raised by
+    /// [`measure_readings`], which is
+    /// the first point at which the
+    /// reading's height is known.
+    ///
+    /// Nothing is appended for a slot
+    /// no base text reached: an empty
+    /// ruby would otherwise buy a
+    /// taller line for a reading with
+    /// nothing to read.
+    fn push_filler(&mut self, style: Inline) {
+        let slot = self.open_ruby;
+        if !self.cur.spans.iter().any(|s| s.ruby == slot && !s.filler) {
+            return;
+        }
+        let at = self.cur.text.len() as u32;
+        self.cur.text.push_str(RUBY_FILLER);
+        self.cur.spans.push(FlowSpan {
+            at,
+            len: RUBY_FILLER.len() as u32,
+            style,
+            link: NO_LINK,
+            ruby: slot,
+            filler: true,
+        });
+        // The run after it is its own
+        // span: joining it would give a
+        // whole word the filler's size.
+        self.barrier = true;
     }
 
     /// Ends the open paragraph.
@@ -1637,15 +2887,26 @@ impl Paragraphs<'_> {
         if self.cur.text.trim().is_empty() {
             self.cur.text.clear();
             self.cur.spans.clear();
+            self.cur.inline.clear();
+            // The dropped paragraph's
+            // block goes with it: a
+            // `div` holding only
+            // whitespace pays no margin,
+            // and its address belongs to
+            // no element.
+            self.cur.block = Block::default();
+            self.cur.path = None;
             return;
         }
         let mut flow = std::mem::take(&mut self.cur);
         trim(&mut flow);
         // Renumber onto this paragraph's
-        // own list: an `<a>` holding a
+        // own lists: an `<a>` holding a
         // block spans two paragraphs,
         // and neither may name an index
-        // the other owns.
+        // the other owns. A reading is
+        // renumbered the same way, for
+        // the same reason.
         let mut seen: Vec<(u32, u32)> = Vec::new();
         for span in &mut flow.spans {
             if span.link == NO_LINK {
@@ -1657,6 +2918,21 @@ impl Paragraphs<'_> {
                     let new = flow.links.len() as u32;
                     flow.links.push(self.links[span.link as usize].clone());
                     seen.push((span.link, new));
+                    new
+                }
+            };
+        }
+        let mut seen: Vec<(u32, u32)> = Vec::new();
+        for span in &mut flow.spans {
+            if span.ruby == NO_RUBY {
+                continue;
+            }
+            span.ruby = match seen.iter().find(|(old, _)| *old == span.ruby) {
+                Some((_, new)) => *new,
+                None => {
+                    let new = flow.ruby.len() as u32;
+                    flow.ruby.push(self.rubies[span.ruby as usize].clone());
+                    seen.push((span.ruby, new));
                     new
                 }
             };
@@ -1682,6 +2958,104 @@ impl Paragraphs<'_> {
             }
             None => inherited,
         }
+    }
+
+    /// One `ruby` node: bases in the
+    /// flow, readings above them.
+    ///
+    /// One slot per `rt` and not per
+    /// `ruby`, because
+    /// `<ruby>漢<rt>かん</rt>字<rt>じ
+    /// </rt></ruby>` is two pairings in
+    /// one node - which is how a
+    /// dictionary writes per-character
+    /// furigana. Each slot is opened
+    /// before the base text that will
+    /// wear it and closed by the `rt`
+    /// that follows, so a base is
+    /// stamped with its own reading and
+    /// not with its neighbour's.
+    fn ruby(&mut self, id: NodeId, ctx: Ctx) {
+        let doc = self.doc;
+        let style = self.styled(id, ctx.inline);
+        let link = self.link_of(id, ctx.link);
+        let slot = self.open_slot(style);
+        let outer = std::mem::replace(&mut self.open_ruby, slot);
+        // `rp` holds the parentheses
+        // HTML wrote for a renderer
+        // that cannot draw ruby. This
+        // one can, so they are held
+        // back and spent only if no
+        // reading ever arrives, which
+        // is the whole of the fallback
+        // this tag exists for.
+        let mut fallback: Vec<(String, Inline)> = Vec::new();
+        let mut read = false;
+        let inner = Ctx { inline: style, link, ..ctx };
+        for (i, child) in doc.children(id).enumerate() {
+            match doc.node(child).tag {
+                Tag::Rt => {
+                    if self.reading(child) {
+                        read = true;
+                        self.push_filler(style);
+                    }
+                    self.open_ruby = self.open_slot(style);
+                }
+                Tag::Rp => fallback.push((text_of(doc, child), self.styled(child, style))),
+                _ => self.node(child, inner.at(i)),
+            }
+        }
+        self.open_ruby = outer;
+        if !read {
+            for (text, style) in &fallback {
+                self.text(text, *style, link);
+            }
+        }
+    }
+
+    /// A fresh slot, for the base text
+    /// that follows it.
+    ///
+    /// Carries the style the reading
+    /// will inherit, already stepped
+    /// down to [`RUBY_RATIO`], so that
+    /// a `fontSize` on the `rt` itself
+    /// is relative to the reading's
+    /// size as CSS says and not to the
+    /// base's.
+    fn open_slot(&mut self, base: Inline) -> u32 {
+        self.rubies.push(FlowRuby {
+            text: String::new(),
+            style: Inline { size: base.size * RUBY_RATIO, ..base },
+        });
+        self.rubies.len() as u32 - 1
+    }
+
+    /// One `rt`, into the slot its base
+    /// was stamped with.
+    ///
+    /// One run, however many wrappers a
+    /// dictionary put inside the `rt`:
+    /// a reading is one to four kana
+    /// over a single base, so a style
+    /// change part-way through it has
+    /// nowhere to go. The `rt`'s own
+    /// resolved style is kept, so a
+    /// dictionary that colours its
+    /// readings is honoured.
+    ///
+    /// `false` for an `rt` that renders
+    /// nothing, which leaves the `rp`
+    /// fallback still owed.
+    fn reading(&mut self, id: NodeId) -> bool {
+        let text = text_of(self.doc, id);
+        if text.trim().is_empty() {
+            return false;
+        }
+        let slot = self.open_ruby as usize;
+        let style = self.styled(id, self.rubies[slot].style);
+        self.rubies[slot] = FlowRuby { text, style };
+        true
     }
 
     /// One node's resolved inline
@@ -1713,6 +3087,74 @@ impl Paragraphs<'_> {
         }
         style
     }
+
+    /// One node's resolved
+    /// block-level style.
+    ///
+    /// The inherited half comes from
+    /// the node above; the box starts
+    /// empty, because CSS inherits none
+    /// of it. `inline` is this node's
+    /// own resolved text style, and it
+    /// is load-bearing twice: it seeds
+    /// `border-color`, whose CSS
+    /// initial value is
+    /// `currentColor`, and it is the em
+    /// a box length resolves against -
+    /// `padding: 0.25em` is a quarter
+    /// of the element's *own* font
+    /// size, where `fontSize: 0.8em`
+    /// is eight tenths of its parent's.
+    ///
+    /// Ticket 17 feeds this from a
+    /// dictionary's own `styles.css`
+    /// by widening the same resolved
+    /// record, so nothing here learns
+    /// that CSS exists.
+    fn boxed(&self, id: NodeId, parent: Block, inline: Inline) -> Block {
+        let doc = self.doc;
+        let mut block = Block {
+            style: BoxStyle { border_color: inline.color, ..BoxStyle::default() },
+            ..parent
+        };
+        let record = doc.style(id);
+        for (i, (key, value)) in record.iter().enumerate() {
+            // First occurrence wins, as
+            // it does for a span.
+            if record[..i].iter().any(|(seen, _)| seen == key) {
+                continue;
+            }
+            apply_box(doc, *key, *value, inline.size, &mut block);
+        }
+        block
+    }
+}
+
+/// Every text descendant of a node,
+/// concatenated.
+///
+/// What a reading and an `rp` fallback
+/// are: one run of text, however many
+/// wrappers a dictionary put around
+/// it. The same "a text node is
+/// `Kind::Text` with no tag" rule
+/// [`Paragraphs::node`] uses, so the
+/// two walks cannot disagree about
+/// what text a subtree holds.
+fn text_of(doc: &GlossDoc, id: NodeId) -> String {
+    let mut out = String::new();
+    push_text_of(doc, id, &mut out);
+    out
+}
+
+fn push_text_of(doc: &GlossDoc, id: NodeId, out: &mut String) {
+    let node = doc.node(id);
+    if node.kind == Kind::Text && node.tag == Tag::None {
+        out.push_str(doc.text(id));
+    }
+    for child in doc.children(id) {
+        push_text_of(doc, child, out);
+    }
 }
 
 /// Drops a paragraph's edge
@@ -1727,8 +3169,17 @@ impl Paragraphs<'_> {
 /// blocks from measuring as a span of
 /// one space.
 fn trim(flow: &mut Flow) {
-    let start = flow.text.len() - flow.text.trim_start().len();
-    let end = flow.text.trim_end().len();
+    // `white-space: pre-line`
+    // preserves a segment break and
+    // collapses everything else, so a
+    // paragraph that declares it keeps
+    // the newline a dictionary put at
+    // its edge and loses only the
+    // spaces around it.
+    let edge: &[char] =
+        if flow.block.pre_line { &[' ', '\t'] } else { &[' ', '\t', '\n', '\r'] };
+    let start = flow.text.len() - flow.text.trim_start_matches(edge).len();
+    let end = flow.text.trim_end_matches(edge).len();
     if start == 0 && end == flow.text.len() {
         return;
     }
@@ -1757,8 +3208,18 @@ fn tag_style(tag: Tag, parent: Inline) -> Inline {
         // A header cell is bold by the
         // spec's own defaults table; its
         // tinted background is a box
-        // property and ticket 08's.
-        Tag::B | Tag::Strong | Tag::Th => style.weight = BOLD_WEIGHT,
+        // property, resolved as one.
+        //
+        // A `summary` is its `details`'
+        // heading and takes the same
+        // weight from the same table.
+        // The panel renders the pair
+        // expanded with no disclosure
+        // affordance (see the spec's Out
+        // of Scope), so the weight is
+        // what tells a reader which of
+        // the two blocks is the label.
+        Tag::B | Tag::Strong | Tag::Th | Tag::Summary => style.weight = BOLD_WEIGHT,
         Tag::I | Tag::Em => style.italic = true,
         Tag::Sup => {
             style.size = parent.size / FONT_STEP;
@@ -1817,6 +3278,251 @@ fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut 
     }
 }
 
+/// Folds one resolved style property
+/// into a block's box.
+///
+/// The census's high-usage,
+/// previously unsupported set and no
+/// others
+/// (`docs/research/dict-shapes.md`):
+/// `color` is a span's and
+/// [`apply_style`] already resolved
+/// it, the list and table properties
+/// are 09's and 10's, and a value
+/// this build cannot read leaves the
+/// box as it was rather than taking
+/// half a declaration.
+///
+/// CSS forbids a negative padding,
+/// border width and radius and allows
+/// a negative margin, so each arm
+/// clamps exactly what CSS clamps.
+fn apply_box(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut Block) {
+    let bx = &mut out.style;
+    match key {
+        StyleKey::Margin => {
+            if let Some(e) = box_edges(doc, value, em) {
+                bx.margin = e;
+            }
+        }
+        StyleKey::MarginTop => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.margin.top = v;
+            }
+        }
+        StyleKey::MarginRight => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.margin.right = v;
+            }
+        }
+        StyleKey::MarginBottom => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.margin.bottom = v;
+            }
+        }
+        StyleKey::MarginLeft => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.margin.left = v;
+            }
+        }
+        StyleKey::Padding => {
+            if let Some(e) = box_edges(doc, value, em) {
+                bx.padding = e.non_negative();
+            }
+        }
+        StyleKey::PaddingTop => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.padding.top = v.max(0.0);
+            }
+        }
+        StyleKey::PaddingRight => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.padding.right = v.max(0.0);
+            }
+        }
+        StyleKey::PaddingBottom => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.padding.bottom = v.max(0.0);
+            }
+        }
+        StyleKey::PaddingLeft => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.padding.left = v.max(0.0);
+            }
+        }
+        StyleKey::BorderWidth => {
+            if let Some(e) = box_edges(doc, value, em) {
+                bx.border = e.non_negative();
+            }
+        }
+        StyleKey::BorderStyle => {
+            if let Some(e) = border_styles(doc, value) {
+                bx.border_style = e;
+            }
+        }
+        StyleKey::BorderColor => {
+            if let Some(c) = color_of(doc, value) {
+                bx.border_color = c;
+            }
+        }
+        StyleKey::BorderRadius => {
+            if let Some(v) = box_len(doc, value, em) {
+                bx.radius = v.max(0.0);
+            }
+        }
+        StyleKey::BackgroundColor => {
+            if let Some(c) = color_of(doc, value) {
+                bx.background = Some(c);
+            }
+        }
+        StyleKey::TextAlign => {
+            if let Some(a) = text_align_of(doc, value) {
+                out.align = a;
+            }
+        }
+        StyleKey::WhiteSpace => {
+            if let Some(pre) = pre_line_of(doc, value) {
+                out.pre_line = pre;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A box length, in the panel's own
+/// pixels.
+///
+/// Unlike [`length_px`] a box length
+/// may be zero and may be negative: a
+/// `marginRight: 0` overriding a
+/// wider rule is real - Jitendex
+/// writes exactly that - and a
+/// negative margin is legal CSS.
+/// Filtering either out here would
+/// silently leave the wider rule
+/// standing.
+fn box_len(doc: &GlossDoc, value: Scalar, em: f32) -> Option<f32> {
+    match value {
+        Scalar::Num(n) => finite(em * n as f32),
+        Scalar::Text(span) => css_len(doc.span(span), em),
+        Scalar::Bool(_) | Scalar::Null => None,
+    }
+}
+
+/// One to four box lengths, as
+/// [`edges_of`] splits them.
+fn box_edges(doc: &GlossDoc, value: Scalar, em: f32) -> Option<Edges<f32>> {
+    match value {
+        Scalar::Num(n) => Some(Edges::all(finite(em * n as f32)?)),
+        Scalar::Text(span) => edges_of(doc.span(span), |s| css_len(s, em)),
+        Scalar::Bool(_) | Scalar::Null => None,
+    }
+}
+
+/// One border style per edge.
+///
+/// The same shorthand grammar:
+/// `border-style: none none none
+/// solid` is how one real dictionary
+/// draws a left rule and nothing else.
+fn border_styles(doc: &GlossDoc, value: Scalar) -> Option<Edges<BorderStyle>> {
+    edges_of(doc.scalar_str(value)?, border_style_of)
+}
+
+/// CSS's one-to-four-value edge
+/// grammar, in CSS's own order.
+///
+/// One value is all four edges, two
+/// are vertical then horizontal,
+/// three name the fourth from its
+/// opposite, and four are literal. A
+/// fifth value makes the declaration
+/// invalid, and so does any single
+/// value this build cannot read: the
+/// box keeps what it had rather than
+/// taking half a shorthand.
+fn edges_of<T: Copy>(text: &str, one: impl Fn(&str) -> Option<T>) -> Option<Edges<T>> {
+    let mut parts = text.split_whitespace();
+    let top = one(parts.next()?)?;
+    let Some(right) = parts.next() else { return Some(Edges::all(top)) };
+    let right = one(right)?;
+    let Some(bottom) = parts.next() else {
+        return Some(Edges { top, right, bottom: top, left: right });
+    };
+    let bottom = one(bottom)?;
+    let Some(left) = parts.next() else {
+        return Some(Edges { top, right, bottom, left: right });
+    };
+    let left = one(left)?;
+    parts.next().is_none().then_some(Edges { top, right, bottom, left })
+}
+
+/// One `border-style` keyword.
+///
+/// `groove`, `ridge`, `inset` and
+/// `outset` resolve to `solid`, which
+/// is what a browser draws them as at
+/// the hairline widths dictionaries
+/// use - a border the author asked
+/// for, drawn plainly, is closer than
+/// none. `hidden` is `none` plus a
+/// table border-conflict rule this
+/// renderer has no cascade for.
+fn border_style_of(word: &str) -> Option<BorderStyle> {
+    Some(match word {
+        "none" | "hidden" => BorderStyle::None,
+        "solid" | "groove" | "ridge" | "inset" | "outset" => BorderStyle::Solid,
+        "dashed" => BorderStyle::Dashed,
+        "dotted" => BorderStyle::Dotted,
+        "double" => BorderStyle::Double,
+        _ => return None,
+    })
+}
+
+/// `textAlign`, as the scene carries
+/// alignment.
+///
+/// `start` and `left` are one value
+/// here and `end` and `right` another:
+/// a Japanese-first product has no
+/// bidi, by the spec's own Out of
+/// Scope. `justify` keeps whatever
+/// alignment it inherited rather than
+/// quietly reading as `start`, because
+/// there is no justification pass
+/// behind it.
+fn text_align_of(doc: &GlossDoc, value: Scalar) -> Option<Align> {
+    Some(match doc.scalar_str(value)?.trim() {
+        "start" | "left" => Align::Leading,
+        "center" => Align::Center,
+        "end" | "right" => Align::Trailing,
+        _ => return None,
+    })
+}
+
+/// `whiteSpace`, of which this build
+/// reads one value.
+///
+/// `pre-line` preserves the
+/// dictionary's own newlines and
+/// still wraps, which is exactly what
+/// both text engines do with a string
+/// holding one - so honouring it
+/// costs the paragraph's edge trim
+/// and nothing else. `pre`,
+/// `pre-wrap` and `nowrap` all turn
+/// wrapping off in ways the
+/// measurement seam has no request
+/// for, so they leave the paragraph as
+/// it was.
+fn pre_line_of(doc: &GlossDoc, value: Scalar) -> Option<bool> {
+    match doc.scalar_str(value)?.trim() {
+        "pre-line" => Some(true),
+        "normal" => Some(false),
+        _ => None,
+    }
+}
+
 /// A CSS length, in the panel's own
 /// pixels.
 ///
@@ -1824,29 +3530,48 @@ fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut 
 /// convention, the same one the HTML
 /// renderer prints with an `em`
 /// suffix. A string carries its own
-/// unit: `em` and `%` are relative to
-/// the em it sits in, and `px` is
-/// relative to Yomitan's own base (see
-/// [`YOMITAN_BASE_PX`]).
+/// unit, which [`css_len`] reads.
+/// Zero and below are no font size, so
+/// a `fontSize: 0` leaves the
+/// inherited one standing.
 fn length_px(doc: &GlossDoc, value: Scalar, em: f32) -> Option<f32> {
     let px = match value {
         Scalar::Num(n) => em * n as f32,
-        Scalar::Text(span) => {
-            let text = doc.span(span).trim();
-            let at = text
-                .find(|c: char| !matches!(c, '0'..='9' | '.' | '-' | '+'))
-                .unwrap_or(text.len());
-            let n: f32 = text[..at].parse().ok()?;
-            match text[at..].trim() {
-                "em" | "" => em * n,
-                "%" => em * n / 100.0,
-                "px" => em * n / YOMITAN_BASE_PX,
-                _ => return None,
-            }
-        }
+        Scalar::Text(span) => css_len(doc.span(span), em)?,
         Scalar::Bool(_) | Scalar::Null => return None,
     };
     (px.is_finite() && px > 0.0).then_some(px)
+}
+
+/// One CSS length with its own unit,
+/// sign and zero intact.
+///
+/// `em` and `%` are relative to the em
+/// it sits in, and `px` is relative to
+/// Yomitan's own base (see
+/// [`YOMITAN_BASE_PX`]) so that an
+/// absolute pixel scales with the
+/// panel instead of shrinking on a
+/// dense screen. A bare number is an
+/// em multiplier, as the schema's own
+/// numeric values are.
+fn css_len(text: &str, em: f32) -> Option<f32> {
+    let text = text.trim();
+    let at = text
+        .find(|c: char| !matches!(c, '0'..='9' | '.' | '-' | '+'))
+        .unwrap_or(text.len());
+    let n: f32 = text[..at].parse().ok()?;
+    finite(match text[at..].trim() {
+        "em" | "" => em * n,
+        "%" => em * n / 100.0,
+        "px" => em * n / YOMITAN_BASE_PX,
+        _ => return None,
+    })
+}
+
+/// A length a box can use.
+fn finite(px: f32) -> Option<f32> {
+    px.is_finite().then_some(px)
 }
 
 /// `fontWeight` on DirectWrite's
@@ -2221,6 +3946,19 @@ fn build_elements(
                 // and a third view of one tree is the bug class this spec
                 // set out to close.
                 let mut flows = paragraphs(&entry.doc, Inline::body(theme), LINE_GAP);
+                // The row behind every
+                // paragraph of it, which the
+                // tree itself cannot know.
+                // With the node path each
+                // paragraph already carries,
+                // this is what turns "select
+                // the text" into "select sense
+                // 3 of 大辞林" (stories 45
+                // and 46).
+                for flow in &mut flows {
+                    flow.dict_id = block.dict_id;
+                    flow.entry_id = entry.entry_id;
+                }
                 let Some(first) = flows.first_mut() else { continue };
                 if numbered {
                     first.number(i + 1, Inline::body(theme));

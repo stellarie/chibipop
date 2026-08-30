@@ -28,7 +28,7 @@
 //! same factor.
 
 use crate::popup::{DrawRun, PanelText, PANEL_ALPHA};
-use chibipop::ui::layout::{self, Align, ElemKind, Measured, MeasureRun};
+use chibipop::ui::layout::{self, Align, ElemBox, ElemKind, Measured, MeasureRun};
 use chibipop::ui::layout::{PopupScene, Rgb, StyledSpan};
 use chibipop::ui::theme::{Theme, SCROLLBAR_W};
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut};
@@ -86,12 +86,29 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
             fill(target, elem.rect.x, painted.pen.1, elem.rect.w, elem.rect.h, elem.color);
             continue;
         }
-        // `Trailing` is the frequency corner. DirectWrite gets the
-        // whole wrap box plus an alignment flag; a `DrawRun` carries
-        // no alignment, so we hand over the ink box the scene already
-        // right-aligned instead. Same pixels, no second concept.
+        // Boxes first, under the text: a pill's fill is behind the
+        // label it tints, and a block's border frames the paragraph
+        // inside it. The scene resolved every rect, so this walk
+        // decides nothing - it only draws.
+        let dy = painted.pen.1 - elem.pen.1;
+        for b in elem.boxes() {
+            box_of(target, b, dy);
+        }
+        // `Trailing` is the frequency corner, and a `textAlign` on a
+        // gloss. DirectWrite gets the whole wrap box plus an
+        // alignment flag; a `DrawRun` carries no alignment, so we
+        // hand over the ink box the scene already aligned instead.
+        // Same pixels for a box holding one line, which is every
+        // aligned box the corpus draws - a corner, an attribution,
+        // a centred cell. A *wrapped* aligned paragraph puts its
+        // shorter lines at the ink box's left edge rather than
+        // centring each: `DrawRun` would have to carry alignment for
+        // that, which is a change to the Linux text seam and not to
+        // the box model.
         let (origin, max_w) = match elem.align {
-            Align::Trailing => ((elem.rect.x, painted.pen.1), elem.rect.w.max(1.0)),
+            Align::Trailing | Align::Center => {
+                ((elem.rect.x, painted.pen.1), elem.rect.w.max(1.0))
+            }
             Align::Leading => (painted.pen, elem.wrap_w),
         };
         spans.clear();
@@ -99,6 +116,27 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
         shifts.clear();
         shifts.extend(elem.spans.iter().map(|s| s.shift));
         text.draw_run(DrawRun { spans: &spans, shifts: &shifts, max_w, origin }, target);
+        // The readings, over the bases
+        // they were placed against. Not
+        // spans of the run above: a
+        // reading takes no horizontal
+        // room from the line it sits on,
+        // so it is drawn where the scene
+        // put it and at the width the
+        // scene measured it at, which is
+        // the element's own.
+        for run in &elem.ruby {
+            let span = run.styled_span(&theme.font_name);
+            text.draw_run(
+                DrawRun {
+                    spans: &[span],
+                    shifts: &[0.0],
+                    max_w: elem.wrap_w,
+                    origin: (origin.0 + run.x, origin.1 + run.y),
+                },
+                target,
+            );
+        }
     }
 
     // 5. The "See also" column. Its rule divides the whole panel, not
@@ -293,10 +331,61 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
     p.finish()
 }
 
+/// One scene box: its fill, then its border.
+///
+/// `dy` is the scroll the element was drawn at, since a box's rect is
+/// in unscrolled panel space like every other rect the scene reports.
+///
+/// A stroke is inset by half its width so the border sits inside the
+/// box, which is what CSS's border box means and what the panel's own
+/// edge already does. Whether one stroke will do is
+/// `BoxStyle::even_border`'s answer, not this painter's: a rounded
+/// corner between two different widths has no single path, and the only
+/// asymmetric border in the census corpus is a one-sided rule, which a
+/// rect draws exactly.
+///
+/// Every drawn style strokes solid. The scene carries `dashed`,
+/// `dotted` and `double` faithfully for a later painter; the corpus's
+/// only observed values are `solid` and `none`.
+fn box_of(target: &mut PixmapMut<'_>, b: &ElemBox, dy: f32) {
+    let (x, y, w, h) = (b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let radius = b.style.radius;
+    if let Some(bg) = b.style.background {
+        if let Some(shape) = rounded(x, y, w, h, radius) {
+            let paint = solid(bg);
+            target.fill_path(&shape, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    let color = b.style.border_color;
+    // One stroke or four fills is core's call, not the painter's, so
+    // both bins answer it the same way (`BoxStyle::even_border`).
+    if let Some(width) = b.style.even_border() {
+        let inset = width / 2.0;
+        if let Some(edge) =
+            rounded(x + inset, y + inset, w - width, h - width, radius - inset)
+        {
+            let stroke = Stroke { width, ..Stroke::default() };
+            target.stroke_path(&edge, &solid(color), &stroke, Transform::identity(), None);
+        }
+        return;
+    }
+    let e = b.style.border_used();
+    fill(target, x, y, w, e.top, color);
+    fill(target, x, y + h - e.bottom, w, e.bottom, color);
+    fill(target, x, y, e.left, h, color);
+    fill(target, x + w - e.right, y, e.right, h, color);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chibipop::ui::layout::{AnkiSlot, ElemSpan, GlyphBox, LineBox, SceneElem, SceneRect};
+    use chibipop::ui::layout::{AnkiSlot, BorderStyle, BoxStyle, Edges};
+    use chibipop::ui::layout::{ElemSpan, GlyphBox, LineBox, RubyRun};
+    use chibipop::ui::layout::{SceneElem, SceneRect};
     use chibipop::ui::layout::{MeasureError, Metrics, SidePanel, SideRow, SpanBox, TextMeasure};
     use tiny_skia::Pixmap;
 
@@ -434,11 +523,17 @@ mod tests {
         }
     }
 
+    /// The premultiplied value a solid channel leaves behind after the
+    /// fade.
+    fn faded(channel: u8) -> u8 {
+        let prod = u32::from(channel) * u32::from(PANEL_ALPHA) + 128;
+        ((prod + (prod >> 8)) >> 8) as u8
+    }
+
     /// The premultiplied red channel a solid `color` leaves behind
     /// after the fade.
     fn faded_red(color: Rgb) -> u8 {
-        let prod = u32::from(color.0) * u32::from(PANEL_ALPHA) + 128;
-        ((prod + (prod >> 8)) >> 8) as u8
+        faded(color.0)
     }
 
     fn text_elem(text: &str, pen: (f32, f32), align: Align) -> SceneElem {
@@ -482,6 +577,10 @@ mod tests {
             lines: 1,
             advance: 20.0,
             spans,
+            ruby: Vec::new(),
+            block_box: None,
+            inline_boxes: Vec::new(),
+            origin: None,
         }
     }
 
@@ -557,6 +656,138 @@ mod tests {
         let run = text.runs.first().expect("the corner run must be drawn");
         assert_eq!(150.0, run.origin.0, "the scene already right-aligned this box");
         assert_eq!(38.0, run.max_w, "and its width is the box, not the wrap width");
+    }
+
+    /// A box carrying nothing but a style with no ink.
+    fn elem_box(rect: SceneRect, style: BoxStyle) -> ElemBox {
+        ElemBox { rect, style }
+    }
+
+    /// A pill's fill and its border both reach the buffer, and the fill
+    /// is *under* the text: the box pass runs before the run is drawn.
+    #[test]
+    fn a_pill_paints_its_fill_and_its_border_under_the_text() {
+        let theme = Theme::dark();
+        let mut elem = text_elem("noun", (40.0, 40.0), Align::Leading);
+        elem.inline_boxes = vec![elem_box(
+            SceneRect { x: 30.0, y: 30.0, w: 60.0, h: 40.0 },
+            BoxStyle {
+                background: Some((255, 0, 0)),
+                border: Edges::all(4.0),
+                border_style: Edges::all(BorderStyle::Solid),
+                border_color: (0, 255, 0),
+                radius: 6.0,
+                ..BoxStyle::default()
+            },
+        )];
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+
+        // Inside the border, away from every corner: the fill.
+        let inside = pix.pixel(60, 50).unwrap();
+        assert_eq!(faded_red((255, 0, 0)), inside.red(), "the fill covers the box");
+        assert_eq!(0, inside.green(), "and it is the fill's colour, not the border's");
+        // On the border, two pixels in from the left edge.
+        let edge = pix.pixel(32, 50).unwrap();
+        assert_eq!(faded(255), edge.green(), "the border strokes inside the box");
+        assert_eq!(0, edge.red(), "over the fill, not blended with it");
+        // Outside it, the panel's own background.
+        let outside = pix.pixel(20, 50).unwrap();
+        assert_eq!(faded_red(theme.background), outside.red());
+        assert_eq!(1, text.runs.len(), "and the text is still drawn, once");
+    }
+
+    /// A radius is a radius: the corner of a rounded box is not filled.
+    #[test]
+    fn a_rounded_box_leaves_its_corners_unfilled() {
+        let theme = Theme::dark();
+        let mut elem = text_elem("x", (40.0, 40.0), Align::Leading);
+        let rect = SceneRect { x: 30.0, y: 30.0, w: 60.0, h: 40.0 };
+        elem.block_box =
+            Some(elem_box(rect, BoxStyle { background: Some((255, 0, 0)), radius: 12.0,
+                ..BoxStyle::default() }));
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+
+        assert_eq!(faded_red((255, 0, 0)), pix.pixel(60, 50).unwrap().red(), "the middle fills");
+        assert_eq!(
+            faded_red(theme.background),
+            pix.pixel(31, 31).unwrap().red(),
+            "a 12px radius clears the top-left corner"
+        );
+    }
+
+    /// `border-style: none none none solid` is a left rule and nothing
+    /// else: the asymmetric path fills one edge, not four.
+    #[test]
+    fn a_one_sided_border_paints_only_that_side() {
+        let theme = Theme::dark();
+        let mut elem = text_elem("note", (40.0, 40.0), Align::Leading);
+        elem.block_box = Some(elem_box(
+            SceneRect { x: 30.0, y: 30.0, w: 60.0, h: 40.0 },
+            BoxStyle {
+                border: Edges::all(4.0),
+                border_style: Edges {
+                    top: BorderStyle::None,
+                    right: BorderStyle::None,
+                    bottom: BorderStyle::None,
+                    left: BorderStyle::Solid,
+                },
+                border_color: (0, 255, 0),
+                ..BoxStyle::default()
+            },
+        ));
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+
+        assert_eq!(faded(255), pix.pixel(31, 50).unwrap().green(), "the left rule");
+        let right = pix.pixel(88, 50).unwrap();
+        assert_eq!(faded(theme.background.1), right.green(), "and no right one");
+    }
+
+    /// A box's rect is unscrolled panel space, like every other rect the
+    /// scene reports, so the box pass applies the same scroll the text
+    /// does - or the border would slide off the paragraph it frames.
+    #[test]
+    fn a_scrolled_box_moves_with_the_text_it_frames() {
+        let theme = Theme::dark();
+        let mut elem = text_elem("x", (12.0, 60.0), Align::Leading);
+        elem.block_box = Some(elem_box(
+            SceneRect { x: 30.0, y: 60.0, w: 60.0, h: 20.0 },
+            BoxStyle { background: Some((255, 0, 0)), ..BoxStyle::default() },
+        ));
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+        scene.content_h = 200.0;
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 40.0, 1.0), &mut text, &mut pix.as_mut());
+
+        let run = text.runs.first().expect("the run is drawn scrolled");
+        assert_eq!(20.0, run.origin.1, "the text moved up by the scroll");
+        assert_eq!(
+            faded_red((255, 0, 0)),
+            pix.pixel(60, 25).unwrap().red(),
+            "and so did the box that frames it"
+        );
+        assert_eq!(
+            faded_red(theme.background),
+            pix.pixel(60, 65).unwrap().red(),
+            "leaving nothing where it was"
+        );
     }
 
     /// The scene decides the weight.
@@ -640,6 +871,48 @@ mod tests {
             run.spans.iter().map(|s| (s.weight, s.size, s.shift)).collect::<Vec<_>>()
         );
         assert_eq!(176.0, run.max_w, "and one wrap width for the paragraph");
+    }
+
+    /// The reading is drawn, and drawn where the scene put it.
+    ///
+    /// A bin that painted only `spans` would draw the base and silently
+    /// lose the furigana - the same deletion ticket 11 closes in the
+    /// layout, one layer further out. It is a second run and not a span of
+    /// the first, because a reading takes no horizontal room from the line
+    /// it sits on.
+    #[test]
+    fn a_reading_is_drawn_over_its_base_where_the_scene_placed_it() {
+        let theme = Theme::dark();
+        let mut elem =
+            styled_elem((12.0, 12.0), Align::Leading, &[("猫", 15.0, 400, false, 0.0)]);
+        elem.ruby = vec![RubyRun {
+            text: "ねこ".into(),
+            x: 1.875,
+            y: 0.0,
+            w: 7.5,
+            h: 15.0,
+            size: 7.5,
+            color: (9, 8, 7),
+            weight: 400,
+            italic: false,
+        }];
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+
+        assert_eq!(2, text.runs.len(), "the base, then its reading");
+        assert_eq!("猫", text.runs[0].text());
+
+        let read = &text.runs[1];
+        assert_eq!("ねこ", read.text());
+        assert_eq!((13.875, 12.0), read.origin, "the element's pen plus the offset");
+        assert_eq!(7.5, read.one().size);
+        assert_eq!((9, 8, 7), read.one().color);
+        assert_eq!(0.0, read.one().shift, "a reading is placed, not shifted");
+        assert_eq!(176.0, read.max_w, "at the width the scene measured it at");
     }
 
     /// Colour is per span, not per element.

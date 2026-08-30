@@ -23,12 +23,53 @@ use super::{GlossDoc, ItemType, Kind, NodeId, Tag};
 /// renderer decided on.
 const BLOCK_MARK: &str = "\u{0}LI\u{0}";
 
-/// Furigana and images carry no plain text. `rt`/`rp` would interleave a
-/// reading into its own base text, and an image is a character this renderer
-/// has no way to draw - the popup renderer does, which is why the tree keeps
-/// them.
-fn is_dropped(tag: Tag) -> bool {
-    matches!(tag, Tag::Rt | Tag::Rp | Tag::Img)
+/// A reading, in parentheses after its base.
+///
+/// `<ruby>猫<rt>ねこ</rt></ruby>` is `猫(ねこ)` here, which is what the
+/// census's highest-volume bilingual dictionary already writes by hand -
+/// JMdict renders readings as parenthetical text and never emits `ruby` at
+/// all - so the two shapes reach a card as one shape.
+///
+/// The parentheses are added only when nothing already supplies them.
+/// `<rp>` exists precisely to carry them for a renderer that cannot draw
+/// ruby, and this is that renderer, so a ruby that brought its own is left
+/// alone rather than printed as `猫((ねこ))`; so is a reading a dictionary
+/// wrote already bracketed.
+///
+/// One slot per `rt`, in document order, so per-character furigana -
+/// `<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>` - renders `漢(かん)字(じ)`
+/// and not `漢字(かんじ)`.
+fn ruby_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
+    let fenced = doc.children(id).any(|c| doc.node(c).tag == Tag::Rp);
+    for child in doc.children(id) {
+        if doc.node(child).tag != Tag::Rt {
+            node_into(doc, child, out);
+            continue;
+        }
+        let mut reading = String::new();
+        children_into(doc, child, false, &mut reading);
+        let reading = reading.trim();
+        if reading.is_empty() {
+            continue;
+        }
+        if fenced || bracketed(reading) {
+            out.push_str(reading);
+            continue;
+        }
+        out.push('(');
+        out.push_str(reading);
+        out.push(')');
+    }
+}
+
+/// Does this reading already carry its own brackets?
+///
+/// Both widths, because a Japanese dictionary writing them by hand writes
+/// the full-width pair.
+fn bracketed(reading: &str) -> bool {
+    let open = reading.starts_with('(') || reading.starts_with('（');
+    let close = reading.ends_with(')') || reading.ends_with('）');
+    open && close
 }
 
 /// One plain-text string per top-level glossary item.
@@ -128,13 +169,24 @@ fn collect_pos(doc: &GlossDoc, id: NodeId, out: &mut Vec<String>, buf: &mut Stri
 /// A node's own rendering never depends on the context it sits in - only its
 /// children's do, and that context comes from this node's own tag. So the
 /// walk carries no inherited state: whether a run of strings becomes lines is
-/// decided in [`children_into`] from the parent tag alone.
+/// decided in [`children_into`] from the parent tag alone, and whether a
+/// reading is bracketed in [`ruby_into`] from the `ruby` it sits under.
+///
+/// An image is the one tag with no plain rendering at all: it is a character
+/// this renderer cannot draw, which is why the tree keeps it for the popup
+/// renderer that can. An `rt` or `rp` reached outside a `ruby` is malformed
+/// and renders as the plain text it holds, which is exactly what the popup's
+/// inline pass does with it.
 fn node_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
     let n = doc.node(id);
     if doc.is_dropped_subtree(id) || doc.is_part_of_speech(id) {
         return;
     }
-    if is_dropped(n.tag) || n.kind == Kind::Image {
+    if n.kind == Kind::Image {
+        return;
+    }
+    if n.tag == Tag::Ruby {
+        ruby_into(doc, id, out);
         return;
     }
     if n.tag == Tag::Br {
@@ -283,8 +335,12 @@ mod tests {
         assert_eq!(vec!["あ い\nう".to_string()], plain(&g));
     }
 
+    /// Ticket 11 took `rt` off the drop list: a reading is information a
+    /// reader of a plain string wants, and dropping it silently was the bug.
+    /// An image stays dropped - it is a character this renderer cannot
+    /// draw.
     #[test]
-    fn furigana_and_images_are_dropped_but_ruby_base_text_is_kept() {
+    fn a_reading_renders_after_its_base_and_an_image_is_still_dropped() {
         let g = json!([{"type": "structured-content", "content": [
             {"tag": "ruby", "content": [
                 {"tag": "span", "content": "猫"},
@@ -292,7 +348,60 @@ mod tests {
             ]},
             {"tag": "img", "content": "ignored"}
         ]}]);
-        assert_eq!(vec!["猫".to_string()], plain(&g));
+        assert_eq!(vec!["猫(ねこ)".to_string()], plain(&g));
+    }
+
+    /// `rp` carries the parentheses HTML wrote for a renderer that cannot
+    /// draw ruby, and this is that renderer, so it must not add a second
+    /// pair around them.
+    #[test]
+    fn a_ruby_that_brought_its_own_parentheses_is_not_bracketed_twice() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "ruby", "content": [
+                "猫",
+                {"tag": "rp", "content": "(«"},
+                {"tag": "rt", "content": "ねこ"},
+                {"tag": "rp", "content": "»)"}
+            ]}
+        ]}]);
+        assert_eq!(vec!["猫(«ねこ»)".to_string()], plain(&g));
+    }
+
+    /// The same rule when the dictionary bracketed the reading itself
+    /// rather than delegating to `rp`, in the full width a Japanese
+    /// dictionary writes.
+    #[test]
+    fn a_reading_written_already_bracketed_is_left_alone() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "ruby", "content": ["猫", {"tag": "rt", "content": "（ねこ）"}]}
+        ]}]);
+        assert_eq!(vec!["猫（ねこ）".to_string()], plain(&g));
+    }
+
+    /// Per-character furigana is several pairings in one `ruby`, which is
+    /// how a monolingual dictionary writes a two-kanji headword. Each
+    /// reading follows its own base, not all of them the last one.
+    #[test]
+    fn per_character_furigana_brackets_each_reading_after_its_own_base() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "ruby", "content": [
+                "漢", {"tag": "rt", "content": "かん"},
+                "字", {"tag": "rt", "content": "じ"}
+            ]}
+        ]}]);
+        assert_eq!(vec!["漢(かん)字(じ)".to_string()], plain(&g));
+    }
+
+    /// An `rt` reached with no `ruby` around it is malformed. It renders as
+    /// the text it holds, unbracketed, which is exactly what the popup's
+    /// inline pass does with it - the two renderers may not disagree.
+    #[test]
+    fn an_orphaned_rt_renders_as_plain_text() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "span", "content": "reading: "},
+            {"tag": "rt", "content": "ねこ"}
+        ]}]);
+        assert_eq!(vec!["reading: ねこ".to_string()], plain(&g));
     }
 
     #[test]
@@ -346,12 +455,14 @@ mod tests {
         assert_eq!(vec!["repetition mark".to_string()], plain(&g));
     }
 
+    /// A `ruby` whose content is a single node rather than an array, which
+    /// is the shape most of the census's ruby-emitting dictionaries write.
     #[test]
-    fn ruby_keeps_base_when_content_is_not_a_list() {
+    fn ruby_reads_a_non_list_content_and_still_brackets_its_reading() {
         let g = json!([{"type": "structured-content", "content": {
             "tag": "ruby", "content": ["一", {"tag": "rt", "content": "いち"}]
         }}]);
-        assert_eq!(vec!["一".to_string()], plain(&g));
+        assert_eq!(vec!["一(いち)".to_string()], plain(&g));
     }
 
     #[test]

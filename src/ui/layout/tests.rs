@@ -5,6 +5,7 @@
 //! font, no platform: these run in both CI jobs, forever.
 
 use super::*;
+use crate::dict::gloss::{render_html, RoleFilter, Selection, Tag};
 use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
 
 /// Advance per UTF-16 unit, as a
@@ -59,6 +60,22 @@ struct Frag {
     h: f32,
 }
 
+/// Characters a real shaper gives a
+/// glyph of zero advance.
+///
+/// Probed against cosmic-text rather
+/// than assumed: a `\u{2060}` between
+/// two kanji shaped to `w 0` and still
+/// set its line's height from its own
+/// size, which is the whole basis of
+/// the ruby filler. A fake that
+/// charged it a full unit would
+/// mismeasure precisely the thing it
+/// exists to model.
+fn zero_advance(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| matches!(c, '\u{2060}' | '\u{200b}'))
+}
+
 /// The fake's greedy wrap.
 ///
 /// Lays one rectangle per UTF-16 unit
@@ -74,16 +91,22 @@ fn wrap(run: MeasureRun<'_>) -> (Vec<Frag>, Measured) {
     let mut frags = Vec::new();
     let (mut line, mut x, mut from) = (0usize, 0.0f32, 0usize);
     for (span, s) in run.spans.iter().enumerate() {
-        let advance = s.size * ADVANCE;
+        let advance = if zero_advance(s.text) { 0.0 } else { s.size * ADVANCE };
         let h = s.size * LINE_H;
         let mut left = s.text.encode_utf16().count();
         loop {
-            // Never zero at the head of
+            // A span that advances
+            // nothing always fits, and
+            // never zero at the head of
             // a line: a measurer that
             // cannot wrap narrower than
             // one glyph overflows rather
             // than loops.
-            let mut room = ((max_w - x) / advance).floor().max(0.0) as usize;
+            let mut room = if advance <= 0.0 {
+                left
+            } else {
+                ((max_w - x) / advance).floor().max(0.0) as usize
+            };
             if room == 0 && x == 0.0 {
                 room = 1;
             }
@@ -249,6 +272,7 @@ fn block(dict: &str, glosses: &[&str]) -> GlossBlock {
 fn rows(dict: &str, per_row: &[&[&str]]) -> GlossBlock {
     GlossBlock {
         dict_name: dict.to_string(),
+        dict_id: crate::present::NO_ROW,
         entries: per_row.iter().map(|glosses| entry(glosses, &[])).collect(),
     }
 }
@@ -260,13 +284,18 @@ fn entry(glosses: &[&str], tags: &[&str]) -> GlossEntry {
 
 /// One dictionary's block, from one row's raw structured content.
 fn tree(dict: &str, glossary: &str) -> GlossBlock {
-    GlossBlock { dict_name: dict.to_string(), entries: vec![row_of(glossary, &[])] }
+    GlossBlock {
+        dict_name: dict.to_string(),
+        dict_id: crate::present::NO_ROW,
+        entries: vec![row_of(glossary, &[])],
+    }
 }
 
 /// One matched row, from the raw glossary JSON the record stores.
 fn row_of(glossary: &str, tags: &[&str]) -> GlossEntry {
     let doc = std::sync::Arc::new(crate::dict::gloss::GlossDoc::parse(glossary));
     GlossEntry {
+        entry_id: crate::present::NO_ROW,
         glosses: crate::dict::gloss::plain_items(&doc),
         tags: tags.iter().map(|s| s.to_string()).collect(),
         doc,
@@ -1215,6 +1244,285 @@ fn text_top_lifts_a_small_span_to_its_lines_own_text_top() {
     assert_eq!(theme.body_size * LINE_H, gloss[0].rect.h, "and the line is unmoved");
 }
 
+// ---- ruby ----
+
+/// The acceptance geometry: a reading takes a slot of its own out of the
+/// line, above the base, and the line above keeps every pixel it had.
+///
+/// Six body units at a 30px content width is four to a line, so the base
+/// lands on the second line and there is a first line for it to clear. The
+/// control is the same paragraph with the `ruby` wrapper taken off, which
+/// pins the two facts that matter: the reading's top edge is exactly where
+/// the second line used to start, so nothing overlaps and no gap opens;
+/// and its bottom edge is exactly its base's own ink top.
+///
+/// The slot is bought by a [`RUBY_FILLER`] span, and a line gives only its
+/// ascent share of any growth to the space above its baseline - half, for
+/// this fake, and about four fifths for a real CJK face. So the line grows
+/// by `reading / ascent` and not by `reading`. That is the price of a slot
+/// the *measurer* reserves: line boxes grown after the wrap would be
+/// geometry the bins' own re-measure never reproduces.
+#[test]
+fn a_reading_reserves_its_own_slot_and_clears_the_line_above() {
+    let theme = Theme::dark();
+    let base_line = theme.body_size * LINE_H;
+    let read_line = theme.body_size * RUBY_RATIO * LINE_H;
+    // The fake hangs every line off an ascent of its tallest span's own
+    // size, so its ascent share is `1 / LINE_H`.
+    let ascent = 1.0 / LINE_H;
+    let ruby_line = base_line + read_line / ascent;
+
+    // A `span` and not a bare second string: an array of nothing but bare
+    // strings is a list, one paragraph per string, and the control has to
+    // be the same one paragraph the ruby fixture is.
+    let plain = laid_out(
+        &rich(&sc(r#"["aaaa",{"tag":"span","content":"bb"}]"#)),
+        54.0,
+        4000.0,
+        false,
+        false,
+    );
+    let plain = bodies(&plain)[0];
+    assert_eq!(2, plain.lines, "the control wrapped to two lines");
+    assert_eq!(2.0 * base_line, plain.rect.h);
+    assert!(plain.ruby.is_empty(), "and carries no reading");
+
+    let s = laid_out(
+        &rich(&sc(r#"["aaaa",{"tag":"ruby","content":["bb",{"tag":"rt","content":"cc"}]}]"#)),
+        54.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert_eq!(
+        "aaaabb\u{2060}",
+        gloss.text,
+        "the reading itself is not in the flow's text - only the filler that \
+         buys its slot, which advances nothing",
+    );
+    assert_eq!(2, gloss.lines, "and adds no line of its own");
+    assert_eq!(base_line + ruby_line, gloss.rect.h, "the base's line grew, once");
+    assert_eq!(gloss.rect.h, gloss.advance, "which is what the block walk stacks");
+
+    let read = &gloss.ruby[0];
+    assert_eq!(read_line, read.h);
+    assert_eq!(
+        base_line, read.y,
+        "the reading starts exactly where line one ends: no overlap, no gap",
+    );
+    // The base's own ink top: its line's baseline, less its own ascent.
+    let base_ink = base_line + ascent * ruby_line - ascent * base_line;
+    assert_eq!(base_ink, read.y + read.h, "and ends on its base's own ink top");
+}
+
+/// A reading is centred over the horizontal extent its base measured to,
+/// and a base is addressable on its own even when the text beside it is in
+/// the identical style - which is why a base gets its own span.
+#[test]
+fn a_reading_centres_over_its_own_base_and_not_over_its_neighbours() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let s = laid_out(
+        &rich(&sc(r#"["aa",{"tag":"ruby","content":["b",{"tag":"rt","content":"c"}]},"cc"]"#)),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert_eq!("aab\u{2060}cc", gloss.text);
+    assert_eq!(4, gloss.spans.len(), "the base did not coalesce into its neighbours");
+
+    // The base is one unit at two units in; the reading is one unit of a
+    // half-size run, so it is half as wide and sits a quarter of a base in.
+    let read = &gloss.ruby[0];
+    assert_eq!(2.0 * unit + (unit - unit * RUBY_RATIO) / 2.0, read.x);
+    assert_eq!(unit * RUBY_RATIO, read.w);
+}
+
+/// A reading wider than its base overhangs it, as a browser lets it, and
+/// the element's ink box covers what it drew.
+#[test]
+fn a_reading_wider_than_its_base_overhangs_and_widens_the_ink_box() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let s = laid_out(
+        &rich(&sc(r#"[{"tag":"ruby","content":["a",{"tag":"rt","content":"bbbb"}]}]"#)),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+    let read = &gloss.ruby[0];
+
+    // One base unit against four half-size reading units: the reading is
+    // twice its base and would hang half a base off either side. The left
+    // is clamped into the panel, so all of the overhang shows on the right.
+    assert_eq!(4.0 * unit * RUBY_RATIO, read.w);
+    assert_eq!(0.0, read.x, "clamped into the panel, not off its left edge");
+    assert_eq!(read.w, gloss.rect.w, "and the ink box covers what was drawn");
+}
+
+/// Ruby is inline: a ruby run wraps with the text around it and forces no
+/// break of its own. Pinned against the identical paragraph with the
+/// wrapper removed - same line count, same wrap - so the only difference
+/// the wrapper makes is the slot above the line its base landed on.
+#[test]
+fn a_ruby_run_mid_sentence_wraps_with_its_text_and_forces_no_break() {
+    let base_line = Theme::dark().body_size * LINE_H;
+    let read_line = Theme::dark().body_size * RUBY_RATIO * LINE_H;
+    let narrow = 39.0;
+
+    let plain = laid_out(
+        &rich(&sc(r#"["aa",{"tag":"span","content":"b"},"cc"]"#)),
+        narrow,
+        4000.0,
+        false,
+        false,
+    );
+    let plain = bodies(&plain)[0];
+
+    let s = laid_out(
+        &rich(&sc(r#"["aa",{"tag":"ruby","content":["b",{"tag":"rt","content":"c"}]},"cc"]"#)),
+        narrow,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert_eq!(3, plain.lines, "two units to a line puts the base on line two");
+    assert_eq!(plain.lines, gloss.lines, "ruby broke no line the text did not");
+    // A line gives only its ascent share of any growth to the space above
+    // its baseline, so it grows by `reading / ascent` - see
+    // `a_reading_reserves_its_own_slot_and_clears_the_line_above`.
+    let ascent = 1.0 / LINE_H;
+    assert_eq!(plain.rect.h + read_line / ascent, gloss.rect.h, "it only took its slot");
+
+    let read = &gloss.ruby[0];
+    assert_eq!(base_line, read.y, "and the reading followed its base to line two");
+    // The base starts the line, so the half-width reading sits a quarter
+    // of a base in - centred over it, not flush with the line.
+    let unit = Theme::dark().body_size * ADVANCE;
+    assert_eq!((unit - unit * RUBY_RATIO) / 2.0, read.x);
+}
+
+/// One slot per `rt`, so per-character furigana pairs each reading with the
+/// base it was written after. Two kanji, two readings, two slots.
+#[test]
+fn per_character_furigana_gives_each_base_its_own_reading() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let s = laid_out(
+        &rich(&sc(
+            r#"[{"tag":"ruby","content":["漢",{"tag":"rt","content":"かん"},"字",{"tag":"rt","content":"じ"}]}]"#,
+        )),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert_eq!("漢\u{2060}字\u{2060}", gloss.text, "one filler per reading");
+    assert_eq!(4, gloss.spans.len(), "each base and each filler its own span");
+    assert_eq!(
+        vec!["かん", "じ"],
+        gloss.ruby.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+    );
+    // Two half-size units are exactly one base wide, so かん covers 漢
+    // flush; じ is half that and sits a quarter of a base into 字.
+    assert_eq!(0.0, gloss.ruby[0].x);
+    assert_eq!(unit, gloss.ruby[0].w);
+    assert_eq!(unit + (unit - unit * RUBY_RATIO) / 2.0, gloss.ruby[1].x);
+}
+
+/// Story 13. `rp` holds the parentheses HTML wrote for a renderer that
+/// cannot draw ruby. This one can, so they are spent only when no reading
+/// arrives - and then a malformed ruby degrades to readable text instead of
+/// to a bare base.
+#[test]
+fn an_rp_fallback_renders_only_when_no_reading_arrives() {
+    let with_rt = laid_out(
+        &rich(&sc(
+            r#"[{"tag":"ruby","content":["猫",{"tag":"rp","content":"("},{"tag":"rt","content":"ねこ"},{"tag":"rp","content":")"}]}]"#,
+        )),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let with_rt = bodies(&with_rt)[0];
+    assert_eq!("猫\u{2060}", with_rt.text, "the parentheses stay unspent");
+    assert_eq!(vec!["ねこ"], with_rt.ruby.iter().map(|r| r.text.as_str()).collect::<Vec<_>>());
+
+    let without = laid_out(
+        &rich(&sc(
+            r#"[{"tag":"ruby","content":["猫",{"tag":"rp","content":"（"},{"tag":"rp","content":"）"}]}]"#,
+        )),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let without = bodies(&without)[0];
+    assert_eq!("猫（）", without.text, "with no reading the fallback flows inline");
+    assert!(without.ruby.is_empty(), "and nothing is placed above the base");
+}
+
+/// The reading's size is the base's stepped by the theme-independent ruby
+/// ratio, and the `rt`'s own resolved style is kept on top of it: a
+/// dictionary that colours its readings is honoured, and a `fontSize` on
+/// the `rt` is relative to the reading's size rather than the base's, as
+/// CSS says.
+#[test]
+fn a_readings_size_halves_its_base_and_its_own_style_survives() {
+    let theme = Theme::dark();
+    let s = laid_out(
+        &rich(&sc(
+            r#"[{"tag":"ruby","content":["猫",{"tag":"rt","content":"ねこ"}]},{"tag":"ruby","content":["犬",{"tag":"rt","style":{"color":"red","fontSize":"0.5em"},"content":"いぬ"}]}]"#,
+        )),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert_eq!(theme.body_size * RUBY_RATIO, gloss.ruby[0].size);
+    assert_eq!(theme.body_text, gloss.ruby[0].color);
+    assert_eq!(theme.body_weight, gloss.ruby[0].weight);
+
+    assert_eq!(theme.body_size * RUBY_RATIO * 0.5, gloss.ruby[1].size);
+    assert_eq!((255, 0, 0), gloss.ruby[1].color);
+}
+
+/// A matched row's number is written in the body's own style, and joins the
+/// span it precedes when nothing about the two differs. A ruby base
+/// differs: joined, the reading would centre over `1. 猫` instead of over
+/// `猫`.
+#[test]
+fn a_row_number_does_not_join_the_ruby_base_it_precedes() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let block = GlossBlock {
+        dict_name: "大辞林".into(),
+        dict_id: crate::present::NO_ROW,
+        entries: vec![
+            row_of(&sc(r#"[{"tag":"ruby","content":["猫",{"tag":"rt","content":"ねこ"}]}]"#), &[]),
+            row_of(&sc(r#"["dog"]"#), &[]),
+        ],
+    };
+    let s = laid_out(&card_with(vec![block]), 424.0, 4000.0, false, false);
+    let gloss = bodies(&s)[0];
+
+    assert_eq!("1. 猫\u{2060}", gloss.text);
+    assert_eq!(3, gloss.spans.len(), "the number is its own span");
+    // Three units of number, then the base: the reading is two half-size
+    // units, exactly one base wide, so it sits flush over it.
+    assert_eq!(3.0 * unit, gloss.ruby[0].x);
+}
+
 /// An internal cross-reference drills down, and its rect covers its own
 /// spans on every line they reached.
 #[test]
@@ -1360,23 +1668,6 @@ fn a_header_cell_is_bold_on_the_same_line_as_its_data_cells() {
     );
 }
 
-/// Ruby renders its base and drops its reading, which is what the
-/// plain-text renderer has always done. Ticket 11 is what puts the reading
-/// above the base; until then a monolingual definition reads correctly
-/// rather than as 漢かん字じ.
-#[test]
-fn ruby_renders_its_base_and_drops_its_reading_for_now() {
-    let p = rich(&sc(
-        r#"[{"tag":"ruby","content":["\u6f22\u5b57",{"tag":"rt","content":"\u304b\u3093\u3058"},{"tag":"rp","content":"()"}]}]"#,
-    ));
-    let s = laid_out(&p, 424.0, 4000.0, false, false);
-    let gloss = bodies(&s);
-
-    assert_eq!(1, gloss.len());
-    assert_eq!("\u{6f22}\u{5b57}", gloss[0].text);
-    assert_eq!(1, gloss[0].spans.len());
-}
-
 /// A pathological tree terminates and its outer levels reach the panel.
 #[test]
 fn a_tree_nested_past_the_depth_cap_still_renders_its_outer_levels() {
@@ -1415,6 +1706,486 @@ fn a_numbered_row_numbers_only_its_first_paragraph() {
     assert_eq!(vec!["1. first", "second", "2. first", "second"], bodies);
     let numbered = s.elems.iter().find(|e| e.text == "1. first").unwrap();
     assert_eq!(1, numbered.spans.len(), "the number joins the text it leads");
+}
+
+// ---- the block box pass ----
+
+/// The em a box length resolves against: a box property is a fraction of
+/// its *own* element's font size, so every expectation below is
+/// `Theme::body_size` times the number the fixture declares.
+const BOX_EM: f32 = 15.0;
+
+/// One line of body text, as `FakeMeasure` measures it.
+const BODY_LINE: f32 = BOX_EM * LINE_H;
+
+/// The gloss body of a scene with exactly one.
+fn one_body(s: &PopupScene) -> &SceneElem {
+    let found = bodies(s);
+    assert_eq!(1, found.len(), "expected one gloss element, got {found:?}");
+    found[0]
+}
+
+/// The block box a gloss element is, which must exist.
+fn block_box(e: &SceneElem) -> &ElemBox {
+    e.block_box.as_ref().expect("this element must carry a block box")
+}
+
+/// The acceptance geometry: the walk advances by the box's *outer* height,
+/// margins and all, while the element's own ink box stays the height of the
+/// text inside it.
+#[test]
+fn a_box_with_margin_and_padding_advances_the_walk_by_its_outer_height() {
+    let p = rich(&sc(
+        r#"{"tag":"div","style":{"margin":0.4,"padding":0.2},"content":"boxed"}"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    // margin 6, padding 3, on all four edges; one 30px line inside.
+    assert_eq!(BODY_LINE, gloss.rect.h, "the ink box is the text, as it always was");
+    assert_eq!(
+        6.0 + 3.0 + BODY_LINE + 3.0 + 6.0,
+        gloss.advance,
+        "and the advance is the outer height"
+    );
+    // The border box is the fill and the stroke: padding in, margin out.
+    assert_eq!(3.0 + BODY_LINE + 3.0, block_box(gloss).rect.h);
+}
+
+/// The chosen rule, asserted: **adjacent siblings do not collapse.** A
+/// browser would draw 6px between these two blocks; the panel draws 12.
+///
+/// Collapsing needs the box tree CSS resolves it against - parent to first
+/// child, parent to last child, adjacent siblings, and an empty block
+/// through itself - and this walk is a forward accumulation with no box
+/// tree to resolve against. Implementing one of those four rules and not
+/// the others is the "unexpectedly" the ticket warns about, so none is
+/// implemented and the divergence is bounded to the pair of dictionaries
+/// that declare `marginTop` (3) and `marginBottom` (12) on facing edges.
+#[test]
+fn adjacent_block_siblings_do_not_collapse_their_margins() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"div","content":["#,
+        r#"{"tag":"div","style":{"marginBottom":0.4},"content":"one"},"#,
+        r#"{"tag":"div","style":{"marginTop":0.4},"content":"two"}]}"#
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(2, gloss.len(), "two sibling blocks, two elements");
+    assert_eq!(BODY_LINE + 6.0, gloss[0].advance, "its own bottom margin");
+    assert_eq!(6.0 + BODY_LINE, gloss[1].advance, "and its own top margin");
+    assert_eq!(
+        BODY_LINE + 6.0 + LINE_GAP + 6.0,
+        gloss[1].pen.1 - gloss[0].pen.1,
+        "both margins are paid; collapsing would pay the larger one once"
+    );
+}
+
+/// A block's text is inset by its padding, and its wrap width shrinks by
+/// it: a padded box that did not narrow its content would overflow itself.
+#[test]
+fn a_blocks_padding_insets_its_text_and_narrows_its_wrap() {
+    let plain = rich(&sc(r#"{"tag":"div","content":"padded"}"#));
+    let padded = rich(&sc(
+        r#"{"tag":"div","style":{"paddingLeft":0.4,"paddingRight":0.2},"content":"padded"}"#,
+    ));
+    let bare = laid_out(&plain, 424.0, 4000.0, false, false);
+    let s = laid_out(&padded, 424.0, 4000.0, false, false);
+    let (bare, gloss) = (one_body(&bare), one_body(&s));
+
+    assert_eq!(bare.pen.0 + 6.0, gloss.pen.0, "the pen moves in by padding-left");
+    assert_eq!(bare.wrap_w - 9.0, gloss.wrap_w, "and the wrap loses both sides");
+}
+
+/// The visible goal: a pill. Border width, style, colour and radius all
+/// reach the scene, and the box is drawn around the pill's own run rather
+/// than around the paragraph holding it.
+#[test]
+fn a_bordered_pill_puts_its_border_and_radius_in_the_scene() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":[{"tag":"span","style":{"##,
+        r##""borderWidth":0.2,"borderStyle":"solid","borderColor":"#ff0000","##,
+        r##""borderRadius":0.4,"padding":0.2,"backgroundColor":"green"},"##,
+        r##""content":"noun"}," a word"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    assert_eq!(None, gloss.block_box, "an inline box is not the block's");
+    assert_eq!(1, gloss.inline_boxes.len(), "one line, one box");
+    let pill = gloss.inline_boxes[0];
+    assert_eq!(Edges::all(3.0), pill.style.border);
+    assert_eq!(Edges::all(BorderStyle::Solid), pill.style.border_style);
+    assert_eq!((255, 0, 0), pill.style.border_color);
+    assert_eq!(6.0, pill.style.radius);
+    assert_eq!(Some((0, 128, 0)), pill.style.background);
+
+    // "noun" is four units at 7.5, outset by 3 of padding and 3 of border
+    // on every side. It hugs its own run, not the whole paragraph.
+    assert_eq!(gloss.pen.0 - 6.0, pill.rect.x);
+    assert_eq!(gloss.pen.1 - 6.0, pill.rect.y);
+    assert_eq!(4.0 * BOX_EM * ADVANCE + 12.0, pill.rect.w);
+    assert_eq!(BODY_LINE + 12.0, pill.rect.h);
+    assert_eq!(
+        "noun a word", gloss.text,
+        "and it kept its place on the line rather than breaking one"
+    );
+}
+
+/// A background pill needs no border at all: Jitendex's own
+/// `span[data-sc-class="tag"]` is a background, a radius and a padding,
+/// and nothing else.
+#[test]
+fn a_background_pill_draws_without_a_border() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"span","style":{"backgroundColor":"#565656","##,
+        r##""borderRadius":0.3,"padding":0.2,"marginRight":0.5},"content":"noun"}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    let pill = gloss.inline_boxes[0];
+    assert_eq!(Some((0x56, 0x56, 0x56)), pill.style.background);
+    assert_eq!(Edges::default(), pill.style.border_used(), "no border declared");
+    assert!(pill.style.paints(), "a fill is ink even with no border");
+    assert_eq!(4.5, pill.style.radius);
+}
+
+/// CSS fidelity that a plausible bug would get wrong: `border-style` is
+/// `none` until declared, and `none` forces the used width to zero however
+/// wide the author wrote it. A width alone draws nothing in a browser and
+/// must draw nothing here.
+#[test]
+fn a_border_width_with_no_style_draws_nothing() {
+    let p = rich(&sc(
+        r#"{"tag":"div","style":{"borderWidth":0.2},"content":"unbordered"}"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    assert_eq!(None, gloss.block_box, "no style, no border, no box");
+    assert_eq!(BODY_LINE, gloss.advance, "and it takes no space either");
+}
+
+/// The shorthand grammars, over the two edge types that use them. Every
+/// case is one a real dictionary writes: Jitendex declares `padding: 0.2em
+/// 0.3em` on its pill and `border-style: none none none solid` on its
+/// info box.
+#[test]
+fn edge_shorthands_expand_the_way_css_expands_them() {
+    // (declaration, top, right, bottom, left)
+    let lengths: &[(&str, f32, f32, f32, f32)] = &[
+        (r#""0.2em""#, 3.0, 3.0, 3.0, 3.0),
+        (r#""0.2em 0.4em""#, 3.0, 6.0, 3.0, 6.0),
+        (r#""0.2em 0.4em 0.8em""#, 3.0, 6.0, 12.0, 6.0),
+        (r#""0.2em 0.4em 0.8em 1em""#, 3.0, 6.0, 12.0, 15.0),
+        // A fifth value is not a shorthand; CSS drops the declaration.
+        (r#""1em 1em 1em 1em 1em""#, 0.0, 0.0, 0.0, 0.0),
+        // Nor is a unit this build cannot read - and it must not take
+        // the half it understood.
+        (r#""0.2em 3vw""#, 0.0, 0.0, 0.0, 0.0),
+        // A bare number is Yomitan's own em multiplier.
+        ("0.2", 3.0, 3.0, 3.0, 3.0),
+        // `px` is relative to Yomitan's base, so it scales with the panel.
+        (r#""14px""#, 15.0, 15.0, 15.0, 15.0),
+    ];
+    for &(decl, top, right, bottom, left) in lengths {
+        let p = rich(&sc(&format!(
+            r#"{{"tag":"div","style":{{"padding":{decl}}},"content":"x"}}"#
+        )));
+        let s = laid_out(&p, 424.0, 4000.0, false, false);
+        let got = one_body(&s).block_box.map_or(Edges::default(), |b| b.style.padding);
+        assert_eq!(Edges { top, right, bottom, left }, got, "padding: {decl}");
+    }
+
+    let styles: &[(&str, Edges<BorderStyle>)] = &[
+        ("solid", Edges::all(BorderStyle::Solid)),
+        ("dashed", Edges::all(BorderStyle::Dashed)),
+        // `groove` is drawn as one solid rule at a hairline width.
+        ("groove", Edges::all(BorderStyle::Solid)),
+        ("hidden", Edges::all(BorderStyle::None)),
+        (
+            "none none none solid",
+            Edges {
+                top: BorderStyle::None,
+                right: BorderStyle::None,
+                bottom: BorderStyle::None,
+                left: BorderStyle::Solid,
+            },
+        ),
+    ];
+    for &(decl, want) in styles {
+        let p = rich(&sc(&format!(
+            r#"{{"tag":"div","style":{{"borderWidth":0.2,"borderStyle":"{decl}"}},"content":"x"}}"#
+        )));
+        let s = laid_out(&p, 424.0, 4000.0, false, false);
+        let gloss = one_body(&s);
+        let got = gloss.block_box.map_or(Edges::default(), |b| b.style.border_style);
+        assert_eq!(want, got, "borderStyle: {decl}");
+    }
+}
+
+/// One real dictionary's left rule, end to end: the used width is zero on
+/// the three edges whose style is `none`, so the box takes space and draws
+/// ink on one side only.
+#[test]
+fn a_one_sided_border_takes_space_on_that_side_alone() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"div","style":{"borderStyle":"none none none solid","#,
+        r#""borderWidth":0.2,"borderColor":"green"},"content":"note"}"#
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    let used = block_box(gloss).style.border_used();
+    assert_eq!(Edges { top: 0.0, right: 0.0, bottom: 0.0, left: 3.0 }, used);
+    assert_eq!(BODY_LINE, gloss.advance, "a vertical border of nothing adds nothing");
+    assert_eq!(3.0, gloss.pen.0 - s.origin, "and the text starts inside the rule");
+}
+
+/// `textAlign` positions a line within its block's width, and the element
+/// reports the alignment so both painters can hand it to their engine.
+#[test]
+fn text_align_centre_and_end_position_a_line_in_its_block() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"div","content":["#,
+        r#"{"tag":"div","style":{"textAlign":"center"},"content":"mid"},"#,
+        r#"{"tag":"div","style":{"textAlign":"end"},"content":"end"},"#,
+        r#"{"tag":"div","content":"start"}]}"#
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+    let ink = 3.0 * BOX_EM * ADVANCE;
+
+    assert_eq!(Align::Center, gloss[0].align);
+    assert_eq!(gloss[0].pen.0 + (gloss[0].wrap_w - ink) / 2.0, gloss[0].rect.x);
+    assert_eq!(Align::Trailing, gloss[1].align);
+    assert_eq!(gloss[1].pen.0 + gloss[1].wrap_w - ink, gloss[1].rect.x);
+    assert_eq!(Align::Leading, gloss[2].align, "and it is not inherited from a sibling");
+    assert_eq!(gloss[2].pen.0, gloss[2].rect.x);
+}
+
+/// `whiteSpace: pre-line` preserves the dictionary's own newline, at the
+/// paragraph's edges as well as inside it. Without it, a browser collapses
+/// the edge break away and so does the panel.
+#[test]
+fn white_space_pre_line_preserves_a_literal_newline() {
+    let cases: &[(&str, &str)] = &[
+        (r#","style":{"whiteSpace":"pre-line"}"#, "\none\ntwo\n"),
+        ("", "one\ntwo"),
+        // Not `pre-line`: the seam has no request for turning wrapping
+        // off, so the paragraph is left exactly as it was.
+        (r#","style":{"whiteSpace":"nowrap"}"#, "one\ntwo"),
+    ];
+    for &(style, want) in cases {
+        let p = rich(&sc(&format!(
+            r#"{{"tag":"div"{style},"content":"\none\ntwo\n"}}"#
+        )));
+        let s = laid_out(&p, 424.0, 4000.0, false, false);
+        assert_eq!(want, one_body(&s).text, "whiteSpace{style}");
+    }
+}
+
+/// A `details`/`summary` pair is two elements, not one concatenated
+/// sentence: four census dictionaries and 31k nodes used to run the summary
+/// into the body it labels. Rendered expanded, with the summary carrying
+/// the heading weight the spec's defaults table gives a header cell - the
+/// panel has no disclosure affordance and the weight is what distinguishes
+/// them.
+#[test]
+fn a_details_summary_pair_is_two_distinguishable_elements() {
+    let theme = Theme::dark();
+    let p = rich(&sc(concat!(
+        r#"{"tag":"details","content":[{"tag":"summary","content":"Etymology"},"#,
+        r#""from Middle Chinese"]}"#
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(
+        vec!["Etymology", "from Middle Chinese"],
+        gloss.iter().map(|e| e.text.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(BOLD_WEIGHT, gloss[0].spans[0].weight, "the summary is the heading");
+    assert_eq!(theme.body_weight, gloss[1].spans[0].weight, "the body is not");
+}
+
+// ---- sense identity ----
+
+/// Every element built from a `GlossDoc` node carries the node's path, and
+/// the path resolves back to that node in that document. The panel's own
+/// chrome carries none, because it was built from a `Presentation` and
+/// addresses no tree.
+#[test]
+fn every_gloss_element_carries_a_path_that_resolves_to_its_own_node() {
+    let p = rich(&sc(
+        r#"[{"tag":"div","content":"to eat"},{"tag":"div","content":"to dine"}]"#,
+    ));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let doc = &p.top.as_ref().unwrap().blocks[0].entries[0].doc;
+
+    for gloss in bodies(&s) {
+        let origin = gloss.origin.expect("a gloss element names its row");
+        let path = origin.path.expect("and the node it renders");
+        let id = path.resolve(doc).expect("which must exist in that document");
+        assert_eq!(Tag::Div, doc.node(id).tag, "the block that opened the paragraph");
+    }
+    let head = find(&s, ElemKind::Headword);
+    assert_eq!(None, head.origin, "the panel's chrome addresses no tree");
+}
+
+/// Stories 45 and 46, end to end: a hit on a sense resolves to that
+/// sense's node path, and the path round trips through ticket 04's
+/// renderer - it yields that sense's markup and nothing else.
+///
+/// This is the half of the sense picker that is expensive to retrofit. The
+/// interaction is out of scope; the addressability is not.
+#[test]
+fn a_senses_path_round_trips_through_the_subtree_renderer() {
+    let p = rich(&sc(concat!(
+        r#"[{"tag":"div","content":"to eat"},"#,
+        r#"{"tag":"div","content":[{"tag":"i","content":"formal"}," to dine"]}]"#
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let doc = &p.top.as_ref().unwrap().blocks[0].entries[0].doc;
+    let gloss = bodies(&s);
+
+    assert_eq!(2, gloss.len(), "two sibling blocks are two senses");
+    let second = gloss[1].origin.and_then(|o| o.path).expect("the second sense's path");
+
+    let picked = render_html(doc, Selection::Nodes(&[second]), RoleFilter::CARD);
+
+    assert_eq!(vec!["<div><i>formal</i> to dine</div>".to_string()], picked);
+    let whole = render_html(doc, Selection::Whole, RoleFilter::CARD);
+    assert!(whole[0].contains("to eat"), "the whole entry still holds both: {whole:?}");
+}
+
+/// The other two thirds of the identity: the dictionary and the row. A
+/// path alone means "the second block of some tree"; with these it means
+/// "sense 2 of this 大辞林 row".
+#[test]
+fn a_gloss_element_names_the_dictionary_and_the_row_it_came_from() {
+    let mut block = tree("\u{5927}\u{8f9e}\u{6797}", &sc(r#""to eat""#));
+    block.dict_id = 7;
+    block.entries[0].entry_id = 4321;
+    let s = laid_out(&card_with(vec![block]), 424.0, 4000.0, false, false);
+
+    let origin = one_body(&s).origin.expect("a gloss element names its row");
+    assert_eq!(7, origin.dict_id);
+    assert_eq!(4321, origin.entry_id);
+}
+
+/// A node past a `NodePath`'s reach is unaddressable rather than aliased
+/// to an ancestor: `child()` refuses the seventeenth step, so the element
+/// still names its row and reports no path. Aliasing would hand a sense
+/// picker the wrong subtree.
+#[test]
+fn a_node_deeper_than_a_path_reaches_carries_no_path() {
+    let deep = (0..20).fold(r#""deep""#.to_string(), |inner, _| {
+        format!(r#"{{"tag":"div","content":{inner}}}"#)
+    });
+    let s = laid_out(&rich(&sc(&deep)), 424.0, 4000.0, false, false);
+    let gloss = one_body(&s);
+
+    let origin = gloss.origin.expect("it still names its row");
+    assert_eq!(None, origin.path, "and refuses to name a node it cannot address");
+    assert_eq!("deep", gloss.text, "while the text still renders");
+}
+
+/// The box model must not disturb the targets the panel already had.
+///
+/// One card twice, once with a plain gloss and once with every box
+/// property the census ranks on it. "Unchanged" cannot mean "at the same
+/// y": a box that takes space pushes what follows it down, and that is
+/// the whole point of it. What must hold is that the panel's own targets
+/// keep their kind, their order and their size, that the ones *above* the
+/// gloss do not move at all, and that the ones below move by exactly the
+/// box's own added height - once, not twice.
+#[test]
+fn the_box_model_leaves_the_panels_own_hit_targets_alone() {
+    let boxed = concat!(
+        r#"{"tag":"div","style":{"margin":0.4,"padding":0.2,"borderWidth":0.2,"#,
+        r#""borderStyle":"solid","borderRadius":0.4,"backgroundColor":"green","#,
+        r#""textAlign":"center"},"content":"chatting"}"#
+    );
+    let anki = AnkiPopupState { connected: true, ..AnkiPopupState::fresh(true) };
+    let theme = Theme::dark();
+    let of = |p: &Presentation| {
+        scene(
+            &SceneRequest {
+                presentation: p,
+                theme: &theme,
+                max_w: 424.0,
+                max_h: 4000.0,
+                show_back: true,
+                side_panel: false,
+                anki: Some(&anki),
+            },
+            &mut FakeMeasure::default(),
+        )
+        .expect("FakeMeasure never refuses a run")
+    };
+
+    let with_gloss = |glossary: &str| {
+        let mut p = with_collapsed();
+        p.top.as_mut().unwrap().blocks = vec![tree("Jitendex", glossary)];
+        p
+    };
+    let plain = of(&with_gloss(&sc(r#""chatting""#)));
+    let styled = of(&with_gloss(&sc(boxed)));
+
+    // margin 6, border 3 and padding 3, top and bottom.
+    let grew = 2.0 * (6.0 + 3.0 + 3.0);
+    let gloss_y = bodies(&plain)[0].pen.1;
+    assert!(!plain.hits.is_empty(), "the panel does have targets to disturb");
+    assert_eq!(plain.hits.len(), styled.hits.len(), "and the same ones");
+    for (a, b) in plain.hits.iter().zip(&styled.hits) {
+        assert_eq!(a.action, b.action, "same target, same action");
+        assert_eq!((a.x, a.w, a.h), (b.x, b.w, b.h), "and the same rect");
+        let moved = if a.y < gloss_y { 0.0 } else { grew };
+        assert_eq!(a.y + moved, b.y, "{:?} moved by the box and no more", a.action);
+    }
+    assert_eq!(
+        plain.anki.map(|a| (a.label, a.rect.h)),
+        styled.anki.map(|a| (a.label, a.rect.h)),
+        "the Anki slot keeps its label and its height"
+    );
+    assert_eq!(grew, styled.content_h - plain.content_h, "the box is paid once");
+}
+
+/// The one decision the two painters share, decided here so they cannot
+/// decide it differently.
+///
+/// Neither bin has a test that can see its drawing API - Direct2D needs a
+/// window - so "one stroke around the rounded box, or a fill per edge?"
+/// is answered in core and asserted here.
+#[test]
+fn an_even_border_strokes_once_and_an_uneven_one_fills_each_edge() {
+    let solid = Edges::all(BorderStyle::Solid);
+    let left_only = Edges {
+        top: BorderStyle::None,
+        right: BorderStyle::None,
+        bottom: BorderStyle::None,
+        left: BorderStyle::Solid,
+    };
+    // (border widths, per-edge styles, one stroke of this width?)
+    let cases: &[(Edges<f32>, Edges<BorderStyle>, Option<f32>)] = &[
+        (Edges::all(2.0), solid, Some(2.0)),
+        // No style is no border, however wide: CSS's own rule.
+        (Edges::all(2.0), Edges::default(), None),
+        // A width of nothing is nothing to stroke.
+        (Edges::all(0.0), solid, None),
+        // One real dictionary's left rule: four equal widths, but three
+        // edges whose style zeroes them, so the used widths are uneven.
+        (Edges::all(2.0), left_only, None),
+        // Genuinely uneven widths have no single rounded path either.
+        (Edges { top: 1.0, right: 2.0, bottom: 1.0, left: 2.0 }, solid, None),
+    ];
+    for &(border, border_style, want) in cases {
+        let bx = BoxStyle { border, border_style, ..BoxStyle::default() };
+        assert_eq!(want, bx.even_border(), "{border:?} / {border_style:?}");
+    }
 }
 
 // ---- element construction ----
@@ -1750,6 +2521,7 @@ fn a_rows_tags_draw_a_dimmed_line_and_an_empty_set_draws_none() {
     let theme = Theme::dark();
     let p = card_with(vec![GlossBlock {
         dict_name: "大辞林".into(),
+        dict_id: crate::present::NO_ROW,
         entries: vec![entry(&["ある"], &["noun", "suru"]), entry(&["いる"], &[])],
     }]);
     let (elems, _) = build_elements(&p, &theme, false, false);

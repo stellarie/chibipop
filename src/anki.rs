@@ -356,7 +356,11 @@ mod tests {
             .into_iter()
             .filter_map(|g| block(dict, g).entries.into_iter().next())
             .collect();
-        GlossBlock { dict_name: dict.to_string(), entries }
+        GlossBlock {
+            dict_name: dict.to_string(),
+            dict_id: crate::present::NO_ROW,
+            entries,
+        }
     }
 
     /// The headword half of a card. The blocks are passed to

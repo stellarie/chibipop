@@ -44,6 +44,12 @@ pub struct Card {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlossBlock {
     pub dict_name: String,
+    /// The dictionary's own row id, which is what identifies it - the name
+    /// is what a reader sees and two libraries can spell it differently.
+    /// Half of the stable identity a scene element carries (stories 45 and
+    /// 46); the other half is the row's `entry_id` and the node path inside
+    /// its tree.
+    pub dict_id: i64,
     /// One per matched term-bank row, in the order the rows ranked.
     pub entries: Vec<GlossEntry>,
 }
@@ -51,6 +57,12 @@ pub struct GlossBlock {
 /// One matched term-bank row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlossEntry {
+    /// The Entry this row is, as the database numbers it.
+    ///
+    /// Carried so that a scene element built from this row names the row it
+    /// came from and not just the text it drew: "sense 3 of 大辞林" rather
+    /// than a character range. [`NO_ROW`] when no stored row is behind it.
+    pub entry_id: i64,
     /// The plain-text render, one string per glossary item. Precomputed
     /// because `layout::scene` runs per frame and the panel needs a string.
     pub glosses: Vec<String>,
@@ -67,18 +79,30 @@ pub struct GlossEntry {
     pub doc: Arc<GlossDoc>,
 }
 
+/// The id content with no database row behind it carries.
+///
+/// SQLite numbers rows from one, so zero names no dictionary and no
+/// term-bank row. What a demo, a geometry fixture, or a test builds: its
+/// scene elements are still addressable *within their own tree*, and
+/// identify no stored Entry - which is the truth about them, where any
+/// plausible-looking id would be a lie a sense picker would go looking for.
+pub const NO_ROW: i64 = 0;
+
 impl GlossBlock {
     /// A one-row block from one raw glossary payload, in the form the
     /// record stores.
     ///
     /// The hover path goes through `Hit`, which already carries a parsed
-    /// tree; this is for callers that hold the stored text - the popup demo,
-    /// the geometry fixtures, and tests.
+    /// tree and the ids behind it; this is for callers that hold the stored
+    /// text and nothing else - the popup demo, the geometry fixtures, and
+    /// tests - so the block it builds carries [`NO_ROW`].
     pub fn parse(dict_name: &str, glossary: &str) -> GlossBlock {
         let doc = Arc::new(GlossDoc::parse(glossary));
         GlossBlock {
             dict_name: dict_name.to_string(),
+            dict_id: NO_ROW,
             entries: vec![GlossEntry {
+                entry_id: NO_ROW,
                 glosses: crate::dict::gloss::plain_items(&doc),
                 tags: Vec::new(),
                 doc,
@@ -280,6 +304,7 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
     for hit in hits {
         let dict_id = hit.entry.dict_id;
         let entry = GlossEntry {
+            entry_id: hit.entry.entry_id,
             glosses: hit.entry.glosses(),
             tags: definition_tags(&hit.entry.pos),
             doc: Arc::clone(&hit.entry.gloss),
@@ -289,7 +314,11 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
             None => {
                 let dict_name = dict_name_for(dict_id, dicts);
                 let rank = dict_order_rank(&dict_name, &cfg.dict_order).unwrap_or(usize::MAX);
-                ranked.push((rank, dict_id, GlossBlock { dict_name, entries: vec![entry] }));
+                ranked.push((
+                    rank,
+                    dict_id,
+                    GlossBlock { dict_name, dict_id, entries: vec![entry] },
+                ));
             }
         }
     }

@@ -517,8 +517,11 @@ mod tests {
         assert_eq!(vec!["<b>bold</b><span> and </span><i>italic</i>".to_string()], html(&g));
     }
 
+    /// A card gets real ruby markup, which is the one thing the plain-text
+    /// renderer cannot give it: it writes the reading in parentheses after
+    /// its base instead.
     #[test]
-    fn ruby_and_rt_are_kept_unlike_the_plain_text_renderer() {
+    fn ruby_and_rt_keep_their_own_markup() {
         let g = json!([{"type": "structured-content", "content": [
             {"tag": "ruby", "content": [
                 {"tag": "span", "content": "猫"},
