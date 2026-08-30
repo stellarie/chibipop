@@ -73,8 +73,36 @@ def _rust_match_keys(src: str, fn: str, where_: Path) -> set[str]:
     return keys
 
 
-def read_support() -> dict[str, set[str]]:
+def _rust_needles(src: str, where_: Path) -> list[tuple[str, str]]:
+    """`const NEEDLES: [(&str, Role); N]` as `[(needle, role), ...]`, in the
+    table's own order."""
+    m = re.search(
+        r"const NEEDLES\s*:\s*\[\(&str,\s*Role\);\s*\d+\]\s*=\s*\[(.*?)\n\];", src, re.S
+    )
+    if not m:
+        raise SystemExit(f"census: could not parse NEEDLES out of {where_}")
+    rows = re.findall(r'\("([^"]+)",\s*Role::(\w+)\)', m.group(1))
+    if not rows:
+        raise SystemExit(f"census: NEEDLES in {where_} parsed to no rows")
+    return rows
+
+
+def _rust_role_order(src: str, where_: Path) -> list[str]:
+    """The `Role` variants in declaration order, which *is* the
+    classification precedence - lowest wins. Parsed rather than copied so a
+    reordered enum reorders this too."""
+    m = re.search(r"pub enum Role \{(.*?)\n\}", src, re.S)
+    if not m:
+        raise SystemExit(f"census: could not parse enum Role out of {where_}")
+    order = re.findall(r"^\s{4}(\w+),", m.group(1), re.M)
+    if not order:
+        raise SystemExit(f"census: enum Role in {where_} parsed to no variants")
+    return order
+
+
+def read_support() -> dict[str, object]:
     parse_src = PARSE_RS.read_text(encoding="utf-8")
+    gloss_src = GLOSS_RS.read_text(encoding="utf-8")
     sheet_src = SHEET_RS.read_text(encoding="utf-8")
     return {
         # The tags the arena parser resolves to its own `Tag` enum. Anything
@@ -82,9 +110,12 @@ def read_support() -> dict[str, set[str]]:
         "tags": _rust_match_keys(parse_src, "tag_for", PARSE_RS),
         # Inline `style` keys, camelCase as the schema spells them.
         "styles": _rust_match_keys(parse_src, "style_key_for", PARSE_RS),
-        "drop_content": _rust_str_array(
-            GLOSS_RS.read_text(encoding="utf-8"), "DROP_CONTENT", GLOSS_RS
-        ),
+        # The editorial-role classifier: the needle table, the three keys
+        # whose value carries the role, and the precedence the `Role` enum's
+        # declaration order defines.
+        "role_needles": _rust_needles(parse_src, PARSE_RS),
+        "role_value_keys": _rust_str_array(parse_src, "VALUE_KEYS", PARSE_RS),
+        "role_order": _rust_role_order(gloss_src, GLOSS_RS),
         # The `styles.css` half: the CSS spelling of the same properties, and
         # the selector grammar the matcher compiles.
         "css_props": _rust_match_keys(sheet_src, "css_key", SHEET_RS),
@@ -95,6 +126,62 @@ def read_support() -> dict[str, set[str]]:
             sheet_src, "SUPPORTED_PSEUDO_CLASSES", SHEET_RS
         ),
     }
+
+
+# ---- the editorial-role classifier, mirroring src/dict/gloss/parse.rs ----
+
+
+def fold(text: str) -> str:
+    """`parse::fold`, one string at a time: ASCII case, full-width ASCII
+    letters and digits, and the ideographic space."""
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if 0x41 <= o <= 0x5A:
+            out.append(chr(o + 32))
+        elif 0xFF21 <= o <= 0xFF3A:
+            out.append(chr(o - 0xFF21 + 0x61))
+        elif 0xFF41 <= o <= 0xFF5A:
+            out.append(chr(o - 0xFF41 + 0x61))
+        elif 0xFF10 <= o <= 0xFF19:
+            out.append(chr(o - 0xFF10 + 0x30))
+        elif o == 0x3000:
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+class Roles:
+    """The classifier, resolved once against the Rust tables."""
+
+    def __init__(self, support: dict) -> None:
+        self.order = support["role_order"]
+        self.rank = {name: i for i, name in enumerate(self.order)}
+        self.content = self.rank["Content"]
+        self.needles = [
+            (fold(needle), self.rank[role]) for needle, role in support["role_needles"]
+        ]
+        self.value_keys = {fold(k) for k in support["role_value_keys"]}
+
+    def of_text(self, text: str) -> int:
+        folded = fold(text)
+        best = self.content
+        for needle, rank in self.needles:
+            if rank < best and needle in folded:
+                best = rank
+        return best
+
+    def of_entry(self, key: str, value) -> int:
+        """One `data` entry's role. The value side is an *exact* key match on
+        the three conventions, and only a string value names a role."""
+        best = self.of_text(key)
+        if fold(key) in self.value_keys and isinstance(value, str):
+            best = min(best, self.of_text(value))
+        return best
+
+    def name(self, rank: int) -> str:
+        return self.order[rank]
 
 
 # ---- the walk ----
@@ -120,21 +207,20 @@ def new_stats(path: str) -> dict:
         "img_sized": 0,
         "img_unsized": 0,
         "gaiji_nodes": 0,
-        "dropped_by_content": 0,
         "maxdepth": 0,
         "error": None,
         "styles_css": None,
     }
 
 
-def walk(node, st: dict, depth: int, drop_content: set[str]) -> None:
+def walk(node, st: dict, depth: int) -> None:
     if depth > st["maxdepth"]:
         st["maxdepth"] = depth
     if isinstance(node, str) or node is None:
         return
     if isinstance(node, list):
         for child in node:
-            walk(child, st, depth, drop_content)
+            walk(child, st, depth)
         return
     if not isinstance(node, dict):
         return
@@ -150,8 +236,6 @@ def walk(node, st: dict, depth: int, drop_content: set[str]) -> None:
                 st["data"][f"{key}={value}"] += 1
             if key == "gaiji":
                 st["gaiji_nodes"] += 1
-            if key == "content" and value in drop_content:
-                st["dropped_by_content"] += 1
 
     style = node.get("style")
     if isinstance(style, dict):
@@ -165,7 +249,7 @@ def walk(node, st: dict, depth: int, drop_content: set[str]) -> None:
     if tag == "img":
         count_image(node, st)
 
-    walk(node.get("content"), st, depth + 1, drop_content)
+    walk(node.get("content"), st, depth + 1)
 
 
 def count_image(node: dict, st: dict) -> None:
@@ -766,10 +850,8 @@ def read_styles_css(
     return css_stats(raw, support)
 
 
-def census(job: tuple[str, int, dict[str, list[str]]]) -> dict:
-    path, row_cap, support_lists = job
-    support = {k: set(v) for k, v in support_lists.items()}
-    drop_content = support["drop_content"]
+def census(job: tuple[str, int, dict[str, object]]) -> dict:
+    path, row_cap, support = job
     st = new_stats(path)
     try:
         with zipfile.ZipFile(path) as z:
@@ -806,7 +888,7 @@ def census(job: tuple[str, int, dict[str, list[str]]]) -> dict:
                             kind = item.get("type", "(untyped)")
                             st["kinds"][kind] += 1
                             if kind == "structured-content":
-                                walk(item.get("content"), st, 1, drop_content)
+                                walk(item.get("content"), st, 1)
                             elif kind == "image":
                                 count_image(item, st)
                         else:
@@ -841,9 +923,12 @@ def main() -> int:
         print(f"census: no .zip archives under {args.corpus}", file=sys.stderr)
         return 1
 
+    # `read_support` already hands back JSON-serialisable shapes, and two of
+    # them are *ordered*: the needle table and the `Role` precedence. Sorting
+    # them here, as an earlier version did to every column alike, would
+    # alphabetise the precedence and silently change what wins.
     support = read_support()
-    support_lists = {k: sorted(v) for k, v in support.items()}
-    jobs = [(path, args.rows, support_lists) for path in archives]
+    jobs = [(path, args.rows, support) for path in archives]
 
     started = time.time()
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
@@ -857,7 +942,10 @@ def main() -> int:
                 "corpus": str(args.corpus),
                 "row_cap": args.rows,
                 "elapsed_s": round(elapsed, 1),
-                "support": {k: sorted(v) for k, v in support.items()},
+                "support": {
+                    k: sorted(v) if isinstance(v, set) else v
+                    for k, v in support.items()
+                },
                 "dictionaries": results,
             },
             ensure_ascii=False,

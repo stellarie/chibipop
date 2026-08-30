@@ -10,12 +10,20 @@
 //! collapsed-row summary, which is one line by construction, and the Anki
 //! plain-text `glossary` field.
 //!
+//! Both are summaries, so this walk applies [`RoleFilter::SUMMARY`] - one
+//! named policy through the one role gate every renderer over this tree
+//! shares, rather than a fourth idea of what an example is. It is a fixed
+//! policy and not a parameter because [`renders_text`] is the *build*-time
+//! gate on whether a term row becomes an `entry` row at all: a setting that
+//! reached in here would make a dictionary's row count depend on a popup
+//! preference.
+//!
 //! The line-breaking rules are ticket 01's and are reproduced exactly.
 //! A block tag emits a mark, [`tidy`] turns every mark into a line break and
 //! drops the empty parts, and an inline tag's children cannot break a line
 //! because the schema admits no break there.
 
-use super::{GlossDoc, ItemType, Kind, NodeId, Tag};
+use super::{GlossDoc, ItemType, Kind, NodeId, Role, RoleFilter, Tag};
 
 /// A pending line break, written into the render buffer and resolved by
 /// [`tidy`]. A private-use control sequence rather than `\n` so that a
@@ -144,20 +152,29 @@ pub fn pos_labels(doc: &GlossDoc) -> Vec<String> {
     out
 }
 
+/// One node's part-of-speech labels, and its children's.
+///
+/// Two roles stop this walk, and they stop it for opposite reasons.
+/// [`Role::PartOfSpeech`] is the label itself: collect it and do not
+/// descend, because a label is a leaf as far as this field goes. An example
+/// or an attribution stops it because the subtree is editorial matter the
+/// summary drops whole - a label written inside a quoted sentence describes
+/// the quotation, not the entry, so hoisting it into the card's own `pos`
+/// field would put a word in the dictionary's mouth. That was the deleted
+/// drop list's rule too; the role is only how the rule is spelled now.
 fn collect_pos(doc: &GlossDoc, id: NodeId, out: &mut Vec<String>, buf: &mut String) {
-    if let Some(marker) = doc.marker(id) {
-        if doc.is_dropped_subtree(id) {
-            return;
+    let role = doc.role(id);
+    if role == Role::PartOfSpeech {
+        buf.clear();
+        children_into(doc, id, !doc.node(id).tag.is_inline(), buf);
+        let label = tidy(buf);
+        if !label.is_empty() && !out.contains(&label) {
+            out.push(label);
         }
-        if marker == super::POS_CONTENT {
-            buf.clear();
-            children_into(doc, id, !doc.node(id).tag.is_inline(), buf);
-            let label = tidy(buf);
-            if !label.is_empty() && !out.contains(&label) {
-                out.push(label);
-            }
-            return;
-        }
+        return;
+    }
+    if !RoleFilter::SUMMARY.allows(role) {
+        return;
     }
     for child in doc.children(id) {
         collect_pos(doc, child, out, buf);
@@ -179,7 +196,7 @@ fn collect_pos(doc: &GlossDoc, id: NodeId, out: &mut Vec<String>, buf: &mut Stri
 /// inline pass does with it.
 fn node_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
     let n = doc.node(id);
-    if doc.is_dropped_subtree(id) || doc.is_part_of_speech(id) {
+    if !RoleFilter::SUMMARY.allows(doc.role(id)) {
         return;
     }
     if n.kind == Kind::Image {

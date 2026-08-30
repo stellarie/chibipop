@@ -5,7 +5,7 @@
 //! font, no platform: these run in both CI jobs, forever.
 
 use super::*;
-use crate::dict::gloss::{render_html, Role, RoleFilter, Selection, Tag};
+use crate::dict::gloss::{render_html, RoleFilter, Selection, Tag};
 use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
 
 /// Advance per UTF-16 unit, as a
@@ -1880,6 +1880,77 @@ fn a_background_pill_draws_without_a_border() {
     assert_eq!(4.5, pill.style.radius);
 }
 
+/// A defect ticket 17's author found against real Jitendex data: a node
+/// carrying `data.content` opens a block however inline its tag is
+/// (`GlossDoc::has_marker`), so a pill carrying one used to carry the
+/// *same* resolved box twice - once as `block_box`, once in
+/// `inline_boxes` - and a bin looping over `SceneElem::boxes()` painted
+/// it twice. Jitendex's `span[data-sc-class="tag"]` is exactly this
+/// shape: a `data.content` key and a CSS pill.
+///
+/// One rule kept, one rule moved. `has_marker` still opens a line,
+/// because that is ticket 01's sense separator and it predates the tree.
+/// The box follows the tag, and `span` is inline by the spec's own
+/// division, so the box is the pill's and never the paragraph's.
+#[test]
+fn a_pill_carrying_a_content_marker_draws_one_box_and_not_two() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","content":["before",{"tag":"span","##,
+        r##""data":{"content":"misc-info"},"##,
+        r##""style":{"backgroundColor":"#565656","borderRadius":0.3,"padding":0.2},"##,
+        r##""content":"noun"}," a word"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(2, gloss.len(), "the marker still opens a line of its own");
+    assert_eq!("before", gloss[0].text);
+    assert_eq!("noun a word", gloss[1].text, "and the text after it joins that line");
+
+    let pill = gloss[1];
+    assert_eq!(1, pill.boxes().count(), "one pill, one box - a bin paints `boxes()`");
+    assert_eq!(None, pill.block_box, "an inline tag's box is its own, marker or not");
+    assert_eq!(Some((0x56, 0x56, 0x56)), pill.inline_boxes[0].style.background);
+    // And it hugs its own run rather than the paragraph it opened:
+    // "noun" is four units at 7.5, outset by 3 of padding per side.
+    assert_eq!(4.0 * BOX_EM * ADVANCE + 6.0, pill.inline_boxes[0].rect.w);
+    assert_eq!(BODY_LINE + 6.0, pill.inline_boxes[0].rect.h);
+}
+
+/// The other defect ticket 17's author found: `css_len` read `em`, `%`
+/// and `px` and dropped `rem`, which Jitendex writes on its
+/// `div[data-sc-class="extra-box"]` (`0.4rem`/`0.5rem`) and
+/// Onomatoproject writes on 3 096 inline nodes.
+///
+/// `rem` is the *root* em, and this popup's root is the theme's body
+/// size - what Yomitan's root font size is, since `display.js` writes
+/// the reader's own font-size setting onto
+/// `documentElement.style.fontSize`. So a node that shrank its own text
+/// still measures a `rem` against the panel, which is the bug a
+/// plausible fix would introduce by reaching for the em already in hand.
+#[test]
+fn a_rem_length_resolves_against_the_panel_and_not_the_nodes_own_em() {
+    let p = rich(&sc(concat!(
+        r#"[{"tag":"div","style":{"padding":"0.4rem","marginRight":"0.5rem"},"#,
+        r#""content":"root"},"#,
+        r#"{"tag":"div","style":{"fontSize":"0.5em","padding":"0.4rem"},"#,
+        r#""content":"half"}]"#
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    let root = block_box(gloss_of(&s, "root")).style;
+    assert_eq!(Edges::all(0.4 * BOX_EM), root.padding, "0.4 of the panel's own em");
+    assert_eq!(0.5 * BOX_EM, root.margin.right);
+
+    let half = gloss_of(&s, "half");
+    assert_eq!(BOX_EM / 2.0, half.font_size, "this node halved its own text");
+    assert_eq!(
+        Edges::all(0.4 * BOX_EM),
+        block_box(half).style.padding,
+        "and its `rem` is unmoved by that: a root em is not an em"
+    );
+}
+
 /// CSS fidelity that a plausible bug would get wrong: `border-style` is
 /// `none` until declared, and `none` forces the used width to zero however
 /// wide the author wrote it. A width alone draws nothing in a browser and
@@ -1917,6 +1988,9 @@ fn edge_shorthands_expand_the_way_css_expands_them() {
         ("0.2", 3.0, 3.0, 3.0, 3.0),
         // `px` is relative to Yomitan's base, so it scales with the panel.
         (r#""14px""#, 15.0, 15.0, 15.0, 15.0),
+        // `rem` is the panel's own body size, whatever em the node
+        // declaring it resolved to.
+        (r#""0.4rem""#, 6.0, 6.0, 6.0, 6.0),
     ];
     for &(decl, top, right, bottom, left) in lengths {
         let p = rich(&sc(&format!(
@@ -4448,35 +4522,46 @@ fn gloss_of<'a>(s: &'a PopupScene, text: &str) -> &'a SceneElem {
         .unwrap_or_else(|| panic!("no gloss element says {text:?} in {:?}", texts(s)))
 }
 
-/// A card whose one row's tree has every `tag` node classified `role`.
+/// A gloss carrying two example sentences and an attribution, each under a
+/// real census `data` hook so the parser classifies them.
 ///
-/// Ticket 15 owns the classifier, so a fixture is the only place a role
-/// exists today (`GlossDoc::classify`). Everything the popup filters on
-/// is the card renderer's own vocabulary, so this fixture serves the same
-/// purpose here as `gloss::html`'s does there.
-fn roled(content: &str, tag: Tag, role: Role) -> Presentation {
-    let mut doc = crate::dict::gloss::GlossDoc::parse(&sc(content));
-    doc.classify(tag, role);
-    card_with(vec![GlossBlock {
+/// The two examples are deliberately two *different* conventions: Jitendex's
+/// ASCII `content=example-sentence` and 明鏡国語辞典's Japanese `example=`,
+/// the key that used to keep 38 892 example nodes on screen while Jitendex
+/// lost every one of its own. The whole point of ticket 15 is that these two
+/// now behave the same, so the fixture would fail on a classifier that
+/// covered only one alphabet.
+const EDITORIAL: &str = concat!(
+    r#"[{"tag":"span","content":"to eat"},"#,
+    r#"{"tag":"div","data":{"content":"example-sentence"},"#,
+    r#""content":"\u3054\u98ef\u3092\u98df\u3079\u308b"},"#,
+    r#"{"tag":"div","data":{"example":""},"#,
+    r#""content":"\u30d1\u30f3\u3092\u98df\u3079\u308b"},"#,
+    r#"{"tag":"ul","data":{"content":"attribution"},"#,
+    r#""content":[{"tag":"li","content":"JMdict"}]}]"#
+);
+
+/// [`EDITORIAL`] parsed once, behind both the panel and the card.
+///
+/// One `Arc`, so a test can ask the two renderers about the same document
+/// rather than about two parses of one string - which is what makes story
+/// 42's "hidden here, present there" an assertion about the *filters* and
+/// not about the fixture.
+fn editorial() -> (std::sync::Arc<crate::dict::gloss::GlossDoc>, Presentation) {
+    let doc = std::sync::Arc::new(crate::dict::gloss::GlossDoc::parse(&sc(EDITORIAL)));
+    let p = card_with(vec![GlossBlock {
         dict_name: "Jitendex".to_string(),
         dict_id: crate::present::NO_ROW,
         entries: vec![GlossEntry {
             entry_id: crate::present::NO_ROW,
             glosses: crate::dict::gloss::plain_items(&doc),
             tags: vec![],
-            doc: std::sync::Arc::new(doc),
+            doc: std::sync::Arc::clone(&doc),
             media: Vec::new(),
         }],
-    }])
+    }]);
+    (doc, p)
 }
-
-/// A gloss whose sense carries an example sentence and an attribution,
-/// each in its own tag so a fixture can classify them apart.
-const EDITORIAL: &str = concat!(
-    r#"[{"tag":"span","content":"to eat"},"#,
-    r#"{"tag":"div","content":"\u3054\u98ef\u3092\u98df\u3079\u308b"},"#,
-    r#"{"tag":"ul","content":[{"tag":"li","content":"JMdict"}]}]"#
-);
 
 /// A glossary list, the shape compact mode is defined over.
 const GLOSSARY_LIST: &str = concat!(
@@ -4566,62 +4651,59 @@ fn compact_gives_the_terse_one_line_per_dictionary_popup_back() {
     assert_eq!(4, bodies(&shown(&p, RenderSettings::default())).len(), "roomy draws four");
 }
 
-/// Examples on and off, at the element count the spec asks for.
+/// Examples on and off, at the element count the spec asks for - and the
+/// ticket-15 acceptance that two dictionaries' examples behave the same.
 ///
-/// The knob filters on [`Role`], which is where ticket 15's classifier
-/// will write, so the fixture classifies and the setting is exercised
-/// end to end. Today's real data reaches neither branch: every node
-/// parses as `Role::Unclassified`, which every filter keeps, and
-/// Jitendex's own examples are still dropped by the name-matched list
-/// this ticket deliberately left standing.
+/// The two example blocks are one ASCII hook and one Japanese one. Before
+/// ticket 15 the popup drew *neither* branch of this test on real data:
+/// every node parsed unclassified, the setting had nothing to bite on, and
+/// Jitendex's own examples went unconditionally through a six-name drop
+/// list that never named 明鏡's key at all.
 #[test]
-fn examples_off_drops_the_example_and_leaves_the_gloss() {
-    let p = roled(EDITORIAL, Tag::Div, Role::Example);
+fn examples_off_drops_every_dictionarys_examples_and_leaves_the_gloss() {
+    let (_, p) = editorial();
 
     let all = shown(&p, RenderSettings::default());
     let with = bodies(&all);
-    assert_eq!(3, with.len(), "the gloss, the example, and the attribution");
-    assert!(with.iter().any(|e| e.text.contains('\u{98df}')), "the example is one of them");
+    assert_eq!(4, with.len(), "the gloss, two examples, and the attribution");
+    assert_eq!(
+        2,
+        with.iter().filter(|e| e.text.contains('\u{98df}')).count(),
+        "both dictionaries' examples draw: {:?}",
+        with.iter().map(|e| e.text.clone()).collect::<Vec<_>>()
+    );
 
     let without_examples = shown(&p, without(|r| r.roles.examples = false));
     let kept = bodies(&without_examples);
-    assert_eq!(2, kept.len(), "one element fewer");
+    assert_eq!(2, kept.len(), "two elements fewer");
     assert!(
         !kept.iter().any(|e| e.text.contains('\u{98df}')),
-        "and it is the example that went: {kept:?}"
+        "and it is both examples that went, ASCII hook and Japanese alike: {kept:?}"
     );
     assert!(kept.iter().any(|e| e.text == "to eat"), "the gloss stays");
     assert!(kept.iter().any(|e| e.text == "JMdict"), "and so does the attribution");
 }
 
 /// Story 27: attributions are a separate knob, so a user can keep
-/// sources without keeping three sentences per sense.
+/// sources without keeping three sentences per sense. All four
+/// combinations, over one parse of one document.
 #[test]
 fn attributions_are_hidden_independently_of_examples() {
-    let mut doc = crate::dict::gloss::GlossDoc::parse(&sc(EDITORIAL));
-    doc.classify(Tag::Div, Role::Example);
-    doc.classify(Tag::Ul, Role::Attribution);
-    doc.classify(Tag::Li, Role::Attribution);
-    let p = card_with(vec![GlossBlock {
-        dict_name: "Jitendex".to_string(),
-        dict_id: crate::present::NO_ROW,
-        entries: vec![GlossEntry {
-            entry_id: crate::present::NO_ROW,
-            glosses: crate::dict::gloss::plain_items(&doc),
-            tags: vec![],
-            doc: std::sync::Arc::new(doc),
-            media: Vec::new(),
-        }],
-    }]);
+    let (_, p) = editorial();
+    let eaten = [
+        "\u{3054}\u{98ef}\u{3092}\u{98df}\u{3079}\u{308b}",
+        "\u{30d1}\u{30f3}\u{3092}\u{98df}\u{3079}\u{308b}",
+    ];
 
     let count = |render: RenderSettings| {
-        bodies(&shown(&p, render)).iter().map(|e| e.text.clone()).collect::<Vec<_>>()
+        let s = shown(&p, render);
+        bodies(&s).iter().map(|e| e.text.clone()).collect::<Vec<_>>()
     };
-    assert_eq!(3, count(RenderSettings::default()).len());
+    assert_eq!(4, count(RenderSettings::default()).len(), "both knobs on draws everything");
     assert_eq!(
-        vec!["to eat".to_string(), "\u{3054}\u{98ef}\u{3092}\u{98df}\u{3079}\u{308b}".to_string()],
+        vec!["to eat".to_string(), eaten[0].to_string(), eaten[1].to_string()],
         count(without(|r| r.roles.attributions = false)),
-        "the sources go and the example stays"
+        "the sources go and both examples stay"
     );
     assert_eq!(
         vec!["to eat".to_string(), "JMdict".to_string()],
@@ -4638,9 +4720,33 @@ fn attributions_are_hidden_independently_of_examples() {
     );
 }
 
-/// Story 32, on the one path real data reaches today.
+/// Story 42, at the seam where it is finally reachable: one document, one
+/// parse, the example gone from the panel and present on the card.
 ///
-/// A part-of-speech label is name-matched until ticket 15 classifies -
+/// The two filters are independent by construction - the popup resolves
+/// its own from config at `build_elements` and the card renderer takes
+/// `RoleFilter::CARD`, which no setting reaches. Until ticket 15 every
+/// node was unclassified, so neither filter could tell an example from a
+/// gloss and this assertion could not be written.
+#[test]
+fn an_example_hidden_in_the_popup_is_still_on_the_card() {
+    let (doc, p) = editorial();
+
+    let hidden = shown(&p, without(|r| r.roles.examples = false));
+    let panel = bodies(&hidden);
+    assert!(
+        !panel.iter().any(|e| e.text.contains('\u{98df}')),
+        "the panel hides them: {panel:?}"
+    );
+
+    let card = render_html(&doc, Selection::Whole, RoleFilter::CARD).join("");
+    assert!(card.contains("\u{3054}\u{98ef}\u{3092}\u{98df}\u{3079}\u{308b}"), "{card}");
+    assert!(card.contains("\u{30d1}\u{30f3}\u{3092}\u{98df}\u{3079}\u{308b}"), "{card}");
+}
+
+/// Story 32.
+///
+/// A part-of-speech label classifies to `Role::PartOfSpeech` from
 /// `data.content = "part-of-speech-info"`, which Jitendex writes over
 /// 48 776 nodes - and the popup has always dropped it because the card's
 /// own `pos` field prints it above the glosses. The setting is what makes
@@ -4986,14 +5092,15 @@ fn the_jitendex_pill_reaches_the_scene_as_a_box() {
     )]);
     let s = laid_out(&p, 400.0, 4000.0, false, false);
     let boxes = drawn_boxes(&s);
-    // Two entries, one style. `data.content` present makes a node a block
-    // however inline its tag is (`GlossDoc::has_marker`), so this span both
-    // heads its own paragraph - a `block_box` - and is a run inside it - an
-    // `inline_box`. Ticket 08 owns that shape; what matters here is that the
-    // resolved style reaching both is the stylesheet's.
-    assert_eq!(2, boxes.len(), "{boxes:?}");
+    // One entry, one style. This pill carries `data.content`, which opens a
+    // line, and an inline tag, which is what decides its box is the run's
+    // and not the paragraph's - so the resolved box reaches the scene
+    // exactly once. It used to reach it twice, as a `block_box` and as an
+    // `inline_box` over the same style, and a bin looping over
+    // `SceneElem::boxes()` painted it twice; see
+    // `a_pill_carrying_a_content_marker_draws_one_box_and_not_two`.
+    assert_eq!(1, boxes.len(), "{boxes:?}");
     let (text, style) = boxes[0];
-    assert_eq!(style, boxes[1].1, "one resolved box, drawn at two levels");
     assert!(text.contains("abbr."), "{text:?}");
     assert_eq!(12.0 * 0.3, style.radius, "border-radius: 0.3em of a 12px element");
     assert_eq!(
@@ -5012,6 +5119,54 @@ fn the_jitendex_pill_reaches_the_scene_as_a_box() {
     let pill = s.elems.iter().find(|e| e.text.contains("abbr.")).expect("the pill run");
     assert_eq!(12.0, pill.font_size, "font-size: 0.8em");
     assert_eq!(BOLD_WEIGHT, pill.weight, "font-weight: bold");
+}
+
+/// Jitendex's other box, and the one `rem` was found on: the rule is
+/// `div[data-sc-class="extra-box"]` verbatim from the archive's own
+/// `styles.css`, `rem` and unreadable `calc()` and all. 101 360 of the
+/// library's 435 448 entries carry one.
+///
+/// Two facts a reader should not have to rediscover. The `border-width` is
+/// `calc(3em / var(--font-size-no-units, 14))`, which no part of this build
+/// reads, so the box declares a left `solid` style over a used width of
+/// zero and draws no rule - which leaves margin and padding as the whole of
+/// what it does. And on real data the box is still not *drawn*, because a
+/// real extra-box holds two `div`s and nothing else, so the paragraph it
+/// opens is flushed empty and an ancestor's box over its child blocks needs
+/// the box-tree composition ticket 08 recorded as absent. What this test
+/// pins is the half `rem` owns: the lengths resolve, against the panel.
+#[test]
+fn jitendexs_extra_box_resolves_its_rem_lengths() {
+    let p = card_with(vec![css_tree(
+        "Jitendex.org",
+        &sc(r#"{"tag":"div","data":{"class":"extra-box","content":"xref"},"content":"See also"}"#),
+        "div[data-sc-class=\"extra-box\"] {
+             border-radius: 0.4rem;
+             border-style: none none none solid;
+             border-width: calc(3em / var(--font-size-no-units, 14));
+             margin-bottom: 0.5rem;
+             margin-top: 0.5rem;
+             padding: 0.5rem;
+             width: fit-content;
+         }",
+    )]);
+    let s = laid_out(&p, 400.0, 4000.0, false, false);
+    let style = block_box(gloss_of(&s, "See also")).style;
+
+    assert_eq!(0.4 * BOX_EM, style.radius, "border-radius: 0.4rem");
+    assert_eq!(Edges::all(0.5 * BOX_EM), style.padding, "padding: 0.5rem");
+    assert_eq!(
+        Edges { top: 0.5 * BOX_EM, right: 0.0, bottom: 0.5 * BOX_EM, left: 0.0 },
+        style.margin,
+        "margin-top and margin-bottom: 0.5rem, and no other edge",
+    );
+    assert_eq!(
+        Edges::default(),
+        style.border_used(),
+        "a `calc()` width is unreadable, so the declared left rule draws nothing",
+    );
+    assert!(style.spaces(), "margin and padding are the whole of this box");
+    assert!(!style.paints(), "and it has no ink at all");
 }
 
 /// The setting from ticket 14 governs a stylesheet declaration exactly as it

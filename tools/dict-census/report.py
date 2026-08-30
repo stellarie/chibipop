@@ -14,6 +14,8 @@ import collections
 import json
 from pathlib import Path
 
+from census import Roles
+
 DEFAULT_IN = Path(__file__).parent / "results" / "census.json"
 DEFAULT_OUT = Path(__file__).parent / "results" / "tables.md"
 
@@ -27,6 +29,18 @@ def rank(dicts: list[dict], field: str) -> list[tuple[str, int, int]]:
             per_dict[key] += 1
             per_node[key] += count
     return [(k, c, per_node[k]) for k, c in per_dict.most_common()]
+
+
+def role_counts(d: dict, roles: Roles, order: list[str]) -> dict[str, int]:
+    """One dictionary's `data` hooks, bucketed by the role the shipped
+    classifier gives each of them."""
+    counts = {role: 0 for role in order}
+    for entry, n in d["data"].items():
+        key, _, value = entry.partition("=")
+        role = roles.name(roles.of_entry(key, value))
+        if role in counts:
+            counts[role] += n
+    return counts
 
 
 def table(rows: list[str], header: str, sep: str) -> list[str]:
@@ -254,6 +268,10 @@ def render(run: dict) -> str:
     support = run["support"]
     ok_tags = set(support["tags"])
     ok_styles = set(support["styles"])
+    # The same classifier the census ran, rebuilt from the tables the run
+    # recorded - so a hook's role in this report is the role the shipped
+    # parser would give it, not a second guess at it.
+    roles = Roles(support)
 
     with_terms = [d for d in dicts if d["rows"] > 0]
     no_terms = [d for d in dicts if d["rows"] == 0 and not d["error"]]
@@ -322,23 +340,58 @@ def render(run: dict) -> str:
     ]
     out += table(rows, "| dictionary | image nodes | gaiji-marked |", "|---|---:|---:|")
 
-    out.append("## Editorial drops")
+    out.append("## Editorial roles")
     out.append("")
-    owners = [(d["title"], d["dropped_by_content"]) for d in sc if d["dropped_by_content"]]
-    if owners:
-        for title, n in sorted(owners, key=lambda t: -t[1]):
-            out.append(f"- `DROP_CONTENT` removes {n:,} nodes from **{title}**.")
-    else:
-        out.append("- `DROP_CONTENT` removes nothing from this corpus.")
+    out.append(
+        "Every `data` hook the corpus carries, run through the shipped "
+        "classifier - `NEEDLES`, `VALUE_KEYS` and the `Role` precedence, read out "
+        "of the Rust source by `census.py`, so this table scores the parser that "
+        "ships rather than a second guess at it."
+    )
     out.append("")
-    out.append("Example content carried under other keys, which chibipop renders today:")
+    order = [r for r in support["role_order"] if r != "Content"]
+    per_dict = {
+        id(d): role_counts(d, roles, order) for d in sc
+    }
+    classified = [d for d in sc if sum(per_dict[id(d)].values())]
+    out.append(
+        f"- {len(classified)} of {len(sc)} structured-content dictionaries carry a "
+        f"classified role. The other {len(sc) - len(classified)} classify entirely as "
+        "content, which is to say they render in full."
+    )
+    for role in order:
+        total = sum(per_dict[id(d)][role] for d in sc)
+        users = sum(1 for d in sc if per_dict[id(d)][role])
+        out.append(f"- **{role}**: {total:,} hooks across {users} dictionaries.")
+    out.append("")
+    header = "| dictionary | " + " | ".join(order) + " |"
+    rule = "|---|" + "---:|" * len(order)
+    rows = [
+        f"| {d['title'] or '?'} | "
+        + " | ".join(f"{per_dict[id(d)][r]:,}" for r in order)
+        + " |"
+        for d in sorted(classified, key=lambda d: -sum(per_dict[id(d)].values()))
+    ]
+    out += table(rows, header, rule)
+
+    out.append(
+        "Counted per **hook**, which is a node count except that a node carrying "
+        "two hooks of one role is counted twice - 旺文社 全訳古語辞典 writes "
+        "`用例囲みG` and `class=fill 用例 FM` on one node. The parser itself "
+        "classifies per node and takes the leftmost column a node's hooks name, so "
+        "these totals are an upper bound on nodes and the columns cannot overlap."
+    )
+    out.append("")
+    out.append("The hooks behind those columns, by volume:")
     out.append("")
     rows = []
     for d in sc:
         for key, n in sorted(d["data"].items(), key=lambda kv: -kv[1]):
-            if "example" in key.lower() or "attribution" in key.lower():
-                rows.append(f"| {d['title'] or '?'} | `{key}` | {n:,} |")
-    out += table(rows, "| dictionary | data hook | #nodes |", "|---|---|---:|")
+            name, _, value = key.partition("=")
+            role = roles.name(roles.of_entry(name, value))
+            if role != "Content":
+                rows.append(f"| {d['title'] or '?'} | `{key}` | {role} | {n:,} |")
+    out += table(rows, "| dictionary | data hook | role | #hooks |", "|---|---|---|---:|")
 
     out.append("## Nesting depth")
     out.append("")

@@ -286,18 +286,51 @@ pub enum StyleKey {
 /// A node's classified editorial purpose - what the render settings filter
 /// on.
 ///
-/// Ticket 02 carries the field and ticket 15 populates it. Every node parses
-/// as [`Role::Unclassified`] today; the classifier reads the `data` map, which
-/// this parser already stores in full.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// A closed set of six, populated by [`parse`]'s classifier on every node.
+/// There is no "unclassified": a node the classifier recognises nothing
+/// about is [`Role::Content`], which every filter keeps. That is the failure
+/// direction the evidence demands - the `data` namespace is per-dictionary
+/// and unbounded, so an unrecognised node must render, never vanish.
+///
+/// Three of the six are droppable ([`RoleFilter`] has a knob for each) and
+/// three are not. [`Role::Reference`] and [`Role::Commentary`] are
+/// classified but never hidden: `docs/research/dict-shapes.md` counts 116 000
+/// cross-reference and 184 000 commentary nodes across eight dictionaries
+/// each, and no setting asks for them to go. Classifying them anyway makes
+/// them addressable - a later ticket that adds a setting adds the knob and
+/// not the classifier.
+///
+/// **The declaration order is the classification precedence**, lowest first,
+/// and [`Ord`] is derived for exactly that: a node carrying two editorial
+/// hooks takes the smaller role, so the answer does not depend on the order a
+/// dictionary happened to write its `data` fields in. No node in the census
+/// corpus carries two conflicting hooks, so the order only decides input the
+/// corpus does not contain; it is chosen so the most destructive
+/// misclassification is the one that cannot happen.
+/// [`Role::PartOfSpeech`] wins because it alone *moves* content rather than
+/// merely hiding it - the label is lifted into the card's own `pos` field, so
+/// losing the lift loses the label everywhere, while misfiling a label as an
+/// example only hides it from one panel.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 #[repr(u8)]
 pub enum Role {
-    #[default]
-    Unclassified,
-    Content,
-    Example,
-    Attribution,
+    /// A label surfaced as the card's own `pos` field rather than drawn
+    /// inline. Yomitan's `data.content = "part-of-speech-info"`, 27 680
+    /// census nodes, all Jitendex.
     PartOfSpeech,
+    /// A source, licence, or footnote line.
+    Attribution,
+    /// An example sentence, its translation, its keyword, or its metadata.
+    Example,
+    /// A cross-reference: see-also, synonym, antonym. Not droppable.
+    Reference,
+    /// Editorial commentary: explanation, supplementary note, etymology.
+    /// Not droppable.
+    Commentary,
+    /// Ordinary gloss content. The default, and the answer for every
+    /// dictionary that uses none of the known conventions.
+    #[default]
+    Content,
 }
 
 /// One node. `Copy`, 44 bytes, no owned allocation.
@@ -309,7 +342,9 @@ pub struct Node {
     pub kind: Kind,
     pub tag: Tag,
     pub item_type: ItemType,
-    /// Set by ticket 15's classifier, read by the render-settings filter.
+    /// The node's editorial purpose, classified at parse time from its
+    /// `data` map. Read by [`RoleFilter::allows`], which is the only gate
+    /// any renderer over this tree consults.
     pub role: Role,
     /// Into the document's text buffer.
     text: Span,
@@ -371,28 +406,6 @@ pub struct GlossDoc {
 /// isolation catches what the cap does not.
 pub const MAX_DEPTH: u32 = 48;
 
-/// `data.content` values whose subtree carries no gloss text.
-///
-/// Name-matched, and therefore wrong in the way
-/// `docs/research/dict-shapes.md` measures: these six names fire on Jitendex
-/// and on no other dictionary in a 97-archive corpus, while 明鏡国語辞典 tags
-/// 38 892 example sentences under a key this list does not happen to name.
-/// Ticket 15 replaces the list with a classified [`Role`] on the node, which
-/// the renderers will then filter on. Until then the behaviour is preserved
-/// rather than half-changed, because a half-change is a third inconsistency.
-const DROP_CONTENT: [&str; 6] = [
-    "attribution",
-    "attribution-footnote",
-    "example-keyword",
-    "example-sentence",
-    "example-sentence-a",
-    "example-sentence-b",
-];
-
-/// `data.content` value marking a part-of-speech label. Surfaced separately
-/// as the card's own labels, so it never appears inline.
-const POS_CONTENT: &str = "part-of-speech-info";
-
 impl Default for GlossDoc {
     fn default() -> Self {
         GlossDoc {
@@ -425,23 +438,6 @@ impl GlossDoc {
     /// win comes from.
     pub fn all_nodes(&self) -> &[Node] {
         &self.nodes
-    }
-
-    /// Marks every node carrying `tag` with `role`.
-    ///
-    /// Test-only, and `#[cfg(test)]` rather than `pub` for that reason:
-    /// ticket 15 owns the classifier, and until it lands the parser
-    /// writes [`Role::Unclassified`] on every node, so a role filter has
-    /// nothing to bite on unless a fixture sets one. Two renderers filter
-    /// on [`Role`] - the Anki card's and the popup's - and both need to
-    /// be able to say "suppose this subtree were an example", so the
-    /// mutator lives here once rather than once per test module. It
-    /// cannot reach a shipped build.
-    #[cfg(test)]
-    pub(crate) fn classify(&mut self, tag: Tag, role: Role) {
-        for node in self.nodes.iter_mut().filter(|n| n.tag == tag) {
-            node.role = role;
-        }
     }
 
     /// The top-level glossary items, in order.
@@ -603,16 +599,13 @@ impl GlossDoc {
         matches!(self.data_of(id, "content"), Some(v) if v != Scalar::Null)
     }
 
-    /// Is this node's whole subtree editorial matter the renderers drop -
-    /// attribution, footnote, or example sentence?
-    pub fn is_dropped_subtree(&self, id: NodeId) -> bool {
-        self.marker(id).is_some_and(|m| DROP_CONTENT.contains(&m))
-    }
-
-    /// Is this node a part-of-speech label, surfaced as the card's own field
-    /// rather than inline?
-    pub fn is_part_of_speech(&self, id: NodeId) -> bool {
-        self.marker(id) == Some(POS_CONTENT)
+    /// This node's classified editorial purpose.
+    ///
+    /// The whole of what the old name-matched drop list used to answer, and
+    /// now the answer for every dictionary rather than for the one whose
+    /// six `data.content` spellings the list happened to hold.
+    pub fn role(&self, id: NodeId) -> Role {
+        self.nodes[id as usize].role
     }
 
     /// Glossary items that failed to parse and were degraded to text.

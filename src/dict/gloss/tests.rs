@@ -189,7 +189,7 @@ fn an_image_node_keeps_every_field_the_census_counted() {
 /// Jitendex. Built from the hooks the census names for it -
 /// `content=part-of-speech-info` pills, `content=sense`, `content=glossary`,
 /// `content=example-sentence*`, `content=attribution` - which are the six
-/// `DROP_CONTENT` names plus the two the drop list does not cover.
+/// names the deleted drop list held plus the two it did not cover.
 #[test]
 fn jitendex_parses_to_pills_a_sense_list_and_dropped_editorial_matter() {
     let g = json!([{"type": "structured-content", "content": [
@@ -226,7 +226,7 @@ fn jitendex_parses_to_pills_a_sense_list_and_dropped_editorial_matter() {
         d.style_of(list, StyleKey::ListStyleType).and_then(|v| d.scalar_str(v))
     );
     let attribution = d.items().next().map(|item| d.children(item).nth(4).unwrap()).unwrap();
-    assert!(d.is_dropped_subtree(attribution));
+    assert_eq!(Role::Attribution, d.role(attribution));
     // Dropped from the *render*, kept in the tree: ticket 14's "show
     // attributions" setting has nothing to switch on otherwise.
     assert_eq!(Tag::A, d.node(d.children(attribution).next().unwrap()).tag);
@@ -252,26 +252,33 @@ fn daijirin_keeps_its_own_sense_markers_and_its_example_hooks() {
         ]}}]);
     let d = doc(&g);
 
-    // Two senses as sibling blocks, each on its own line, with the
-    // dictionary's own marker intact and no synthesised number.
-    assert_eq!(
-        vec!["①走る。駆ける。\n馬が―\n②流れる。\n水が―".to_string()],
-        plain_items(&d)
-    );
+    // Both example hooks classify, so 大辞林's examples now behave the way
+    // Jitendex's always did: two senses as sibling blocks, each on its own
+    // line, the dictionary's own marker intact, no synthesised number, and
+    // the two `用例` blocks out of the summary. Before ticket 15 the drop
+    // list named neither `用例` nor `慣用例` and both rendered.
+    assert_eq!(vec!["①走る。駆ける。\n②流れる。".to_string()], plain_items(&d));
 
-    // The example hooks reach the tree under their own names, which is what
-    // ticket 15 classifies on: a fixed drop list cannot name them.
-    let names: Vec<&str> = (0..d.all_nodes().len() as NodeId)
-        .filter_map(|i| d.data_of(i, "name").and_then(|v| d.scalar_str(v)))
+    let roles: Vec<(&str, Role)> = (0..d.all_nodes().len() as NodeId)
+        .filter_map(|i| d.data_of(i, "name").and_then(|v| d.scalar_str(v)).map(|n| (n, d.role(i))))
         .collect();
-    assert_eq!(vec!["語義番号", "用例", "語義番号", "慣用例"], names);
+    assert_eq!(
+        vec![
+            ("語義番号", Role::Content),
+            ("用例", Role::Example),
+            ("語義番号", Role::Content),
+            ("慣用例", Role::Example),
+        ],
+        roles,
+        "a sense number is content; a substring needle covers both example spellings"
+    );
 }
 
 /// 明鏡国語辞典 第三版, whose 38 892 example sentences hang off an `example=`
-/// key that `DROP_CONTENT` does not name - so they render today, and the
-/// parser's job is to keep the key that ticket 15 will classify.
+/// key no fixed drop list ever named - the headline defect ticket 15 closes,
+/// since Jitendex lost its examples while this dictionary kept every one.
 #[test]
-fn meikyo_examples_reach_the_tree_under_a_key_the_drop_list_does_not_name() {
+fn meikyo_examples_classify_under_a_key_no_drop_list_ever_named() {
     let g = json!([{"type": "structured-content", "content": {
         "tag": "div", "content": [
             {"tag": "span", "content": "非常に。たいそう。"},
@@ -279,11 +286,15 @@ fn meikyo_examples_reach_the_tree_under_a_key_the_drop_list_does_not_name() {
         ]}}]);
     let d = doc(&g);
 
-    assert_eq!(vec!["非常に。たいそう。\n―うれしい".to_string()], plain_items(&d));
     let example = (0..d.all_nodes().len() as NodeId)
         .find(|&i| d.data_of(i, "example").is_some())
         .expect("the example hook survived the parse");
-    assert_eq!(Role::Unclassified, d.node(example).role, "ticket 15 classifies, 02 carries");
+    assert_eq!(Role::Example, d.role(example));
+    assert_eq!(vec!["非常に。たいそう。".to_string()], plain_items(&d));
+    assert!(
+        render_html(&d, Selection::Whole, RoleFilter::CARD)[0].contains("―うれしい"),
+        "and the card keeps it, which is the whole of story 42"
+    );
 }
 
 /// 字通: 139 138 image nodes and 278 340 gaiji markers, more than four image
@@ -325,9 +336,23 @@ fn sanseido_inline_monochrome_svg_sits_inside_its_sense() {
     let img = find_tag(&d, Tag::Img).unwrap();
     assert_eq!(Some("monochrome"), d.attr_of(img, "appearance").and_then(|v| d.scalar_str(v)));
     assert_eq!(Some(Scalar::Num(1.0)), d.attr_of(img, "height"));
+
+    // 三省堂's own `用例G` hook classifies, so its example leaves the summary
+    // exactly as Jitendex's always did - and no fixed drop list ever named
+    // this key.
+    let example = (0..d.all_nodes().len() as NodeId)
+        .find(|&i| d.data_of(i, "name").is_some())
+        .expect("the example hook survived the parse");
+    assert_eq!(Role::Example, d.role(example));
+    assert_eq!(vec!["みじかい".to_string()], plain_items(&d));
+
     // The image is a sibling of the text inside one block, not a block of
-    // its own: it must not break the line it sits in.
-    assert_eq!(vec!["みじかい\n―スカート".to_string()], plain_items(&d));
+    // its own: it must not break the line it sits in. Asserted on the card,
+    // which keeps the example, so the whole line is observable.
+    assert_eq!(
+        vec!["<div><span>みじかい</span>短<div>―スカート</div></div>".to_string()],
+        render_html(&d, Selection::Whole, RoleFilter::CARD)
+    );
 }
 
 /// A conjugation table: 18 dictionaries emit `tr`/`td`, 11 emit `th`, and 7
@@ -410,6 +435,269 @@ fn a_details_summary_dictionary_keeps_both_tags_and_separates_them() {
     assert!(find_tag(&d, Tag::Details).is_some());
     assert!(find_tag(&d, Tag::Summary).is_some());
     assert_eq!(vec!["活用\nたべる／たべ／たべれ".to_string()], plain_items(&d));
+}
+
+// ---------------------------------------------------------------------------
+// editorial role classification
+// ---------------------------------------------------------------------------
+
+/// One node carrying one `data` entry, which is the shape the classifier
+/// reads.
+fn roled(key: &str, value: &str) -> (GlossDoc, NodeId) {
+    let d = doc(&json!([{"tag": "span", "data": {key: value}, "content": "x"}]));
+    let id = d.items().next().expect("the node parsed");
+    (d, id)
+}
+
+fn role_of_hook(key: &str, value: &str) -> Role {
+    let (d, id) = roled(key, value);
+    d.role(id)
+}
+
+/// Every row of `docs/research/dict-shapes.md`'s bilingual role table, in the
+/// real spelling the census recorded rather than a paraphrase of it.
+///
+/// `(data key, data value, role)`. A row with an empty value is a key-side
+/// hook - the dictionary's own field name carries the role and the value is
+/// the empty marker the census records as `用例=`. A row with a value is a
+/// value-side hook on one of the three convention keys.
+///
+/// The Japanese half is the majority by more than an order of magnitude:
+/// 755 264 example nodes across four dictionaries against roughly 62 000
+/// under the ASCII spellings, so a table that held only the ASCII rows would
+/// pass while missing twelve example nodes in thirteen.
+const CENSUS_ROLES: [(&str, &str, Role); 34] = [
+    // -- example, Japanese keys: 755 264 nodes, 4 dictionaries.
+    ("用例", "", Role::Example),
+    ("用例G", "", Role::Example),
+    ("用例訳", "", Role::Example),
+    ("用例引用", "", Role::Example),
+    ("用例活用", "", Role::Example),
+    ("慣用例", "", Role::Example),
+    ("囲み用例", "", Role::Example),
+    ("例文", "", Role::Example),
+    ("識別例文", "", Role::Example),
+    // -- example, ASCII: ~62 000 nodes, 7 dictionaries.
+    ("content", "example-sentence", Role::Example),
+    ("content", "example-sentence-a", Role::Example),
+    ("content", "example-sentence-b", Role::Example),
+    ("content", "example-keyword", Role::Example),
+    ("content", "examples", Role::Example),
+    ("name", "example_1", Role::Example),
+    ("name", "example_8", Role::Example),
+    ("name", "examples", Role::Example),
+    ("example", "", Role::Example),
+    ("ExampleG", "", Role::Example),
+    ("ExampleC", "", Role::Example),
+    // -- attribution: 72 000 nodes, 4 dictionaries.
+    ("content", "attribution", Role::Attribution),
+    ("content", "attribution-footnote", Role::Attribution),
+    ("出典", "", Role::Attribution),
+    // -- reference: 116 000 nodes, 8 dictionaries. Classified, never hidden.
+    ("参照", "", Role::Reference),
+    ("類語", "", Role::Reference),
+    ("対義", "", Role::Reference),
+    ("content", "xref", Role::Reference),
+    // -- commentary: 184 000 nodes, 8 dictionaries. Classified, never hidden.
+    ("解説", "", Role::Commentary),
+    ("補説", "", Role::Commentary),
+    ("語源", "", Role::Commentary),
+    // -- part of speech: Yomitan's own convention, 27 680 Jitendex nodes.
+    ("content", "part-of-speech-info", Role::PartOfSpeech),
+    // -- the structural hooks that dominate the corpus and are not roles.
+    ("content", "sense", Role::Content),
+    ("ruby", "", Role::Content),
+    ("gaiji", "", Role::Content),
+];
+
+#[test]
+fn every_row_of_the_census_role_table_classifies_to_its_named_role() {
+    for (key, value, want) in CENSUS_ROLES {
+        assert_eq!(want, role_of_hook(key, value), "data {key}={value}");
+    }
+}
+
+/// The substring rule, on the spellings that motivated it: 旺文社 全訳古語辞典
+/// writes eleven distinct `用例`-prefixed keys and 大辞林 two more, and no
+/// equality table would have named them all.
+#[test]
+fn a_key_that_only_contains_a_needle_still_classifies() {
+    for key in ["用例メタデータ", "用例囲みG", "用例訳注ロゴテキスト", "用例注釈", "注内用例G"] {
+        assert_eq!(Role::Example, role_of_hook(key, ""), "{key}");
+    }
+    assert_eq!(Role::Reference, role_of_hook("参照語義番号", ""));
+    assert_eq!(Role::Commentary, role_of_hook("語義パネル解説G", ""));
+    assert_eq!(Role::Attribution, role_of_hook("出典G", ""));
+}
+
+/// Normalisation, one row per fold, and each row is a spelling a converter
+/// produces rather than one invented to exercise the code.
+#[test]
+fn classification_normalises_case_width_and_the_ideographic_space() {
+    // Case: 旺文社漢字典 writes `ExampleG` where Jitendex writes
+    // `example-sentence`.
+    assert_eq!(Role::Example, role_of_hook("EXAMPLE", ""));
+    assert_eq!(Role::Example, role_of_hook("ExAmPlE", ""));
+    assert_eq!(Role::PartOfSpeech, role_of_hook("content", "Part-Of-Speech-Info"));
+    // Width: an HTML- or EPUB-sourced dictionary writes full-width Latin.
+    assert_eq!(Role::Example, role_of_hook("Ｅｘａｍｐｌｅ", ""));
+    assert_eq!(Role::Example, role_of_hook("name", "ｅｘａｍｐｌｅ＿１"));
+    // A class list, as 旺文社 全訳古語辞典 writes it - and with the
+    // ideographic space a Japanese source is as likely to use.
+    assert_eq!(Role::Example, role_of_hook("class", "fill 用例 FM"));
+    assert_eq!(Role::Example, role_of_hook("class", "fill　用例　FM"));
+    assert_eq!(Role::Example, role_of_hook("class", "用例活用 IM"));
+}
+
+/// The value side is three exact conventions, not a family of spellings.
+///
+/// Nine census keys hold `content`, `name` or `class` without being one. A
+/// substring rule there would read a role out of their values, and every one
+/// of those reads could only ever hide content.
+#[test]
+fn a_key_that_merely_contains_a_convention_name_is_not_a_convention_key() {
+    for key in ["contents", "Contents", "jukugoitemcontent", "CampaignName", "filename"] {
+        assert_eq!(
+            Role::Content,
+            role_of_hook(key, "example-sentence"),
+            "{key} is content of its own, not a Yomitan convention"
+        );
+    }
+}
+
+/// A dictionary using none of the conventions renders in full - 78 of the
+/// census's 97 archives, and the failure direction the evidence demands.
+#[test]
+fn a_dictionary_using_no_known_convention_classifies_entirely_as_content() {
+    let d = doc(&json!([{"type": "structured-content", "content": {
+        "tag": "div", "data": {"xmlns": "http://www.w3.org/1999/xhtml", "body": ""},
+        "content": [
+            {"tag": "span", "data": {"headword": ""}, "content": "猫"},
+            {"tag": "div", "data": {"meaning": "", "class": "full"}, "content": "cat"},
+            {"tag": "ruby", "data": {"ruby": ""}, "content": [
+                {"tag": "span", "content": "猫"},
+                {"tag": "rt", "data": {"rt": ""}, "content": "ねこ"}
+            ]}
+        ]}}]));
+
+    assert!(
+        d.all_nodes().iter().all(|n| n.role == Role::Content),
+        "roles: {:?}",
+        d.all_nodes().iter().map(|n| n.role).collect::<Vec<_>>()
+    );
+    assert_eq!(vec!["猫\ncat猫(ねこ)".to_string()], plain_items(&d));
+}
+
+/// Two hooks on one node take the smaller role whichever order the
+/// dictionary wrote them in, so the classifier does not inherit a JSON
+/// field order as a policy.
+#[test]
+fn two_hooks_on_one_node_resolve_by_precedence_not_by_field_order() {
+    let one = doc(&json!([{"tag": "span",
+        "data": {"content": "part-of-speech-info", "用例": ""}, "content": "noun"}]));
+    let other = doc(&json!([{"tag": "span",
+        "data": {"用例": "", "content": "part-of-speech-info"}, "content": "noun"}]));
+
+    let role = |d: &GlossDoc| d.role(d.items().next().unwrap());
+    assert_eq!(Role::PartOfSpeech, role(&one));
+    assert_eq!(Role::PartOfSpeech, role(&other), "field order is not precedence");
+}
+
+/// A convention key whose value is not a string names no role, but still
+/// marks a block - the two questions are separate and stay separate.
+#[test]
+fn a_convention_key_with_a_non_string_value_is_content_and_still_a_block() {
+    let d = doc(&json!([{"tag": "span", "data": {"content": 3}, "content": "x"}]));
+    let id = d.items().next().unwrap();
+    assert_eq!(Role::Content, d.role(id));
+    assert!(d.has_marker(id), "a non-string marker still opens a block");
+}
+
+/// The equivalence the deleted drop list used to give exactly one dictionary.
+///
+/// Its six names were three example spellings and two attribution ones, and
+/// the part-of-speech marker sat beside it. Each one classifies to the role
+/// whose knob now governs it, so a summary drops what the list dropped -
+/// and every other dictionary's hooks now reach the same knobs.
+#[test]
+fn the_deleted_drop_list_is_now_the_role_the_knobs_govern() {
+    const WAS_DROPPED: [&str; 6] = [
+        "attribution",
+        "attribution-footnote",
+        "example-keyword",
+        "example-sentence",
+        "example-sentence-a",
+        "example-sentence-b",
+    ];
+    for name in WAS_DROPPED {
+        let (d, id) = roled("content", name);
+        let role = d.role(id);
+        assert!(
+            matches!(role, Role::Example | Role::Attribution),
+            "content={name} classified {role:?}"
+        );
+        assert!(!RoleFilter::SUMMARY.allows(role), "a summary drops it, as the list did");
+        assert!(RoleFilter::CARD.allows(role), "and the card keeps it, as the list never did");
+    }
+    assert!(!RoleFilter::CARD.allows(role_of_hook("content", "part-of-speech-info")));
+}
+
+/// Story 42, at the tree's own seam: one document, one parse, the example
+/// gone from the summary and present on the card.
+#[test]
+fn an_example_leaves_the_summary_and_stays_on_the_card() {
+    let d = doc(&json!([{"type": "structured-content", "content": [
+        {"tag": "span", "content": "to eat"},
+        {"tag": "div", "data": {"content": "example-sentence"}, "content": "ご飯を食べる"}
+    ]}]));
+
+    assert_eq!(vec!["to eat".to_string()], plain_items(&d));
+    let card = render_html(&d, Selection::Whole, RoleFilter::CARD);
+    assert!(card[0].contains("ご飯を食べる"), "the card keeps it: {card:?}");
+}
+
+/// Attributions and examples are two knobs over one document, and all four
+/// combinations differ - story 27.
+#[test]
+fn examples_and_attributions_filter_independently_in_all_four_combinations() {
+    let d = doc(&json!([{"type": "structured-content", "content": [
+        {"tag": "span", "content": "to eat"},
+        {"tag": "div", "data": {"用例": ""}, "content": "ご飯を食べる"},
+        {"tag": "div", "data": {"出典": ""}, "content": "JMdict"}
+    ]}]));
+
+    let html = |examples, attributions| {
+        let roles = RoleFilter { examples, attributions, part_of_speech: false };
+        render_html(&d, Selection::Whole, roles).join("")
+    };
+    let both = html(true, true);
+    assert!(both.contains("ご飯を食べる") && both.contains("JMdict"), "{both}");
+    let no_examples = html(false, true);
+    assert!(!no_examples.contains("ご飯を食べる") && no_examples.contains("JMdict"));
+    let no_sources = html(true, false);
+    assert!(no_sources.contains("ご飯を食べる") && !no_sources.contains("JMdict"));
+    let neither = html(false, false);
+    assert!(!neither.contains("ご飯を食べる") && !neither.contains("JMdict"));
+    for got in [&both, &no_examples, &no_sources, &neither] {
+        assert!(got.contains("to eat"), "the gloss survives every combination: {got}");
+    }
+}
+
+/// A part-of-speech label reaches the card's `pos` field and neither the
+/// gloss body nor the Anki HTML field, which is what makes it a *moved*
+/// role rather than a hidden one.
+#[test]
+fn a_part_of_speech_label_is_lifted_and_never_left_inline() {
+    let d = doc(&json!([{"type": "structured-content", "content": [
+        {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": "noun"},
+        {"tag": "span", "content": "chatting"}
+    ]}]));
+
+    assert_eq!(vec!["noun".to_string()], pos_labels(&d));
+    assert_eq!(vec!["chatting".to_string()], plain_items(&d));
+    let card = render_html(&d, Selection::Whole, RoleFilter::CARD).join("");
+    assert!(!card.contains("noun"), "the card's own pos field prints it: {card}");
+    assert!(card.contains("chatting"));
 }
 
 // ---------------------------------------------------------------------------

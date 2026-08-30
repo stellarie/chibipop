@@ -27,19 +27,19 @@
 
 use super::{GlossDoc, ItemType, Kind, NodeId, NodePath, Role, Scalar, Selection, StyleKey, Tag};
 
-/// Which editorial roles reach the card.
+/// Which editorial roles reach a rendering.
 ///
 /// Deliberately a value the caller passes rather than a rule this module
 /// knows, because the whole point is that the card's answer and the popup's
 /// are separate: ticket 14 gives the popup its own settings and this stays
 /// untouched by them.
 ///
-/// Ticket 15 populates [`Role`]; today the parser writes
-/// [`Role::Unclassified`] on every node, which every filter keeps. So what
-/// this changes *today* is only that the HTML renderer stopped consulting the
-/// name-matched drop list the plain-text renderer still uses - which is
-/// exactly the independence story 42 asks for, one dictionary at a time as
-/// ticket 15 starts classifying.
+/// Three knobs against six [`Role`]s, because three of the six are not
+/// droppable - [`Role::Reference`] and [`Role::Commentary`] are classified so
+/// a later ticket can add a knob without touching the classifier, and
+/// [`Role::Content`] is what a node with no recognised hook gets. So
+/// [`allows`](Self::allows) is total over the enum and keeps everything it
+/// has no knob for, which is the failure direction the evidence demands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RoleFilter {
     pub examples: bool,
@@ -58,19 +58,37 @@ impl RoleFilter {
     pub const CARD: RoleFilter =
         RoleFilter { examples: true, attributions: true, part_of_speech: false };
 
+    /// What a one-line summary keeps: the gloss, and nothing editorial.
+    ///
+    /// The plain-text renderer's policy, and the *whole* of what the deleted
+    /// name-matched drop list used to do - its six `data.content` spellings
+    /// were three example roles and two attribution ones, plus the
+    /// part-of-speech marker beside them. So this const is that behaviour,
+    /// now given to every dictionary rather than to the one whose spellings
+    /// the list happened to hold.
+    ///
+    /// Its two consumers are a summary by construction: the collapsed row,
+    /// which is one truncated line, and the Anki plain-text `glossary` field,
+    /// which sits beside `glossary_html` - and *that* field takes
+    /// [`CARD`](Self::CARD) and keeps every example. Story 42's "keep them on
+    /// the card" is answered there, in markup, rather than by pushing three
+    /// sentences per sense into a numbered plain-text list.
+    pub const SUMMARY: RoleFilter =
+        RoleFilter { examples: false, attributions: false, part_of_speech: false };
+
     /// Does this filter keep a node with `role`?
     ///
-    /// Public because there are two callers and always were going to be:
-    /// this renderer, and the popup's own filter in `ui::layout`. One
-    /// predicate over one enum is what keeps the card's answer and the
-    /// panel's from drifting into two different ideas of what an example
-    /// is.
+    /// Public because there are three callers and always were going to be:
+    /// this renderer, the plain-text one, and the popup's own filter in
+    /// `ui::layout`. One predicate over one enum is what keeps the card's
+    /// answer and the panel's from drifting into two different ideas of what
+    /// an example is.
     pub fn allows(self, role: Role) -> bool {
         match role {
             Role::Example => self.examples,
             Role::Attribution => self.attributions,
             Role::PartOfSpeech => self.part_of_speech,
-            Role::Unclassified | Role::Content => true,
+            Role::Content | Role::Reference | Role::Commentary => true,
         }
     }
 }
@@ -231,7 +249,7 @@ fn push(html: String, out: &mut Vec<String>) {
 
 /// One top-level glossary item to HTML.
 fn item_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
-    if !keeps(doc, id, roles) {
+    if !roles.allows(doc.role(id)) {
         return String::new();
     }
     match doc.node(id).item_type {
@@ -245,7 +263,7 @@ fn item_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
 /// One node to HTML.
 fn node_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
     let node = doc.node(id);
-    if !keeps(doc, id, roles) {
+    if !roles.allows(doc.role(id)) {
         return String::new();
     }
     if node.kind == Kind::Image {
@@ -273,18 +291,6 @@ fn node_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
 
 fn children_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
     doc.children(id).map(|child| node_html(doc, child, roles)).collect()
-}
-
-/// Does this node's editorial role reach the card?
-fn keeps(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> bool {
-    if !roles.allows(doc.node(id).role) {
-        return false;
-    }
-    // Ticket 15 replaces this with `Role::PartOfSpeech` on the node. Until it
-    // classifies, the name-matched marker is the only thing here that can
-    // tell a label from a gloss, and printing the labels inline would repeat
-    // the card's own `pos` field.
-    roles.part_of_speech || !doc.is_part_of_speech(id)
 }
 
 /// An image as text.
@@ -431,15 +437,6 @@ mod tests {
         render_html(&doc(g), Selection::Whole, RoleFilter::CARD)
     }
 
-    /// Marks every node carrying `tag` with `role`.
-    ///
-    /// One line now that `GlossDoc` carries the test-only mutator both
-    /// role-filtering renderers need (`GlossDoc::classify`); kept as a
-    /// local name because every test below reads better for it.
-    fn classify(d: &mut GlossDoc, tag: Tag, role: Role) {
-        d.classify(tag, role);
-    }
-
     fn pos_doc(labels: &[&str]) -> Value {
         let mut spans: Vec<Value> = labels
             .iter()
@@ -466,8 +463,10 @@ mod tests {
         json!([{"type": "structured-content", "content": spans}])
     }
 
-    /// A Jitendex-shaped entry: a gloss, then an example the popup's drop
-    /// list names, then an attribution it also names.
+    /// A Jitendex-shaped entry: a gloss, then an example, then an
+    /// attribution, each under the real `data.content` hook the census
+    /// records for it - so the parser classifies them and no test needs to
+    /// say what they are.
     fn gloss_with_editorial_matter() -> Value {
         json!([{"type": "structured-content", "content": [
             {"tag": "span", "content": "to eat"},
@@ -704,9 +703,8 @@ mod tests {
     // -- editorial roles, filtered independently of the popup --
 
     /// Story 42: popup density and card completeness are separate choices.
-    /// The popup's plain-text renderer still drops both, from the same tree,
-    /// in the same process - which is the strongest form of "independent"
-    /// reachable before ticket 14 gives the popup a setting of its own.
+    /// The popup's plain-text renderer drops both, from the same tree, in
+    /// the same process, while the card keeps both.
     #[test]
     fn an_example_the_popup_drops_still_reaches_the_card() {
         let d = doc(&gloss_with_editorial_matter());
@@ -724,8 +722,7 @@ mod tests {
 
     #[test]
     fn the_card_filter_drops_examples_when_asked_to() {
-        let mut d = doc(&gloss_with_editorial_matter());
-        classify(&mut d, Tag::Div, Role::Example);
+        let d = doc(&gloss_with_editorial_matter());
         let kept = render_html(&d, Selection::Whole, RoleFilter::CARD);
         assert!(kept[0].contains("ご飯を食べる"), "examples are on by default: {kept:?}");
         let without =
@@ -739,9 +736,7 @@ mod tests {
 
     #[test]
     fn attributions_hide_independently_of_examples() {
-        let mut d = doc(&gloss_with_editorial_matter());
-        classify(&mut d, Tag::Div, Role::Example);
-        classify(&mut d, Tag::Ul, Role::Attribution);
+        let d = doc(&gloss_with_editorial_matter());
         let without = render_html(
             &d,
             Selection::Whole,
@@ -754,15 +749,13 @@ mod tests {
         );
     }
 
-    /// Ticket 15's acceptance, asserted through the role rather than through
-    /// the marker name the current parser still matches on.
+    /// Ticket 15's acceptance, through the role the parser classified.
     #[test]
     fn a_part_of_speech_role_stays_out_of_the_card_body() {
-        let mut d = doc(&json!([{"type": "structured-content", "content": [
-            {"tag": "b", "content": "noun"},
+        let d = doc(&json!([{"type": "structured-content", "content": [
+            {"tag": "b", "data": {"content": "part-of-speech-info"}, "content": "noun"},
             {"tag": "span", "content": "a cat"}
         ]}]));
-        classify(&mut d, Tag::B, Role::PartOfSpeech);
         assert_eq!(
             vec!["<span>a cat</span>".to_string()],
             render_html(&d, Selection::Whole, RoleFilter::CARD),
@@ -870,8 +863,7 @@ mod tests {
 
     #[test]
     fn a_selected_subtree_is_role_filtered_the_same_way_the_document_is() {
-        let mut d = doc(&gloss_with_editorial_matter());
-        classify(&mut d, Tag::Div, Role::Example);
+        let d = doc(&gloss_with_editorial_matter());
         let item = NodePath::ROOT.child(0).expect("the item path");
         assert_eq!(
             vec!["<span>to eat</span><ul><li>JMdict</li></ul>".to_string()],

@@ -48,9 +48,13 @@ archives.
 `census.py` parses its support columns out of the Rust source instead of
 duplicating them:
 
-- `tag_for` and `style_key_for` from `src/dict/gloss/parse.rs` — the tags and
-  the inline `style` keys the arena parser resolves.
-- `DROP_CONTENT` from `src/dict/gloss/mod.rs`.
+- `tag_for`, `style_key_for`, `NEEDLES` and `VALUE_KEYS` from
+  `src/dict/gloss/parse.rs` — the tags and inline `style` keys the arena parser
+  resolves, and the editorial-role classifier's needle table and convention
+  keys.
+- `enum Role` from `src/dict/gloss/mod.rs` — its declaration order *is* the
+  classification precedence, so the report's role columns run in the same order
+  the parser resolves them.
 - `css_key`, `SUPPORTED_SELECTOR_KINDS` and `SUPPORTED_PSEUDO_CLASSES` from
   `src/dict/sheet/mod.rs` — the `styles.css` property table and the selector
   grammar the matcher compiles.

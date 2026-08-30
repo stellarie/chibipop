@@ -3856,6 +3856,50 @@ enum Elem {
 /// shrinking on a dense screen.
 const YOMITAN_BASE_PX: f32 = 14.0;
 
+/// The two font sizes a CSS length
+/// can be a fraction of.
+///
+/// `em` and `%` are the element's own
+/// and `rem` is the document root's -
+/// two different numbers on any node
+/// that changed its size, so one
+/// `f32` cannot answer both.
+///
+/// The popup's root is the theme's
+/// body size, because that is what
+/// Yomitan's root font size is.
+/// `ext/css/display.css` only
+/// *declares* `--font-size: calc(1px
+/// * 14)` and applies it to no
+/// element; the size that reaches the
+/// document comes from
+/// `ext/js/display/display.js`'s
+/// `setFontOptions`, which writes the
+/// reader's own font-size setting onto
+/// `documentElement.style.fontSize`.
+/// So `0.4rem` is four tenths of the
+/// body text a Yomitan reader chose,
+/// and it scales when they scale the
+/// popup. Pinning it to
+/// [`YOMITAN_BASE_PX`] would freeze it
+/// at Yomitan's default instead -
+/// right for a reader who never
+/// touched the setting, wrong for
+/// everyone else, and the same
+/// mistake the `px` arm of
+/// [`css_len`] exists to avoid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Ems {
+    /// The element's own resolved font
+    /// size, which `em` and `%` are a
+    /// fraction of.
+    own: f32,
+    /// The panel's body size: the
+    /// popup's root font size, which
+    /// `rem` is a fraction of.
+    root: f32,
+}
+
 /// The ratio CSS's absolute-size
 /// keywords step by, which is also
 /// what `smaller` and `larger` step
@@ -4313,6 +4357,17 @@ impl Block {
     /// What a child inherits: the
     /// inherited half, and an empty
     /// box.
+    ///
+    /// Also what an *inline* node's own
+    /// line carries. A box belongs to
+    /// the node that declared it, and
+    /// an inline node's box is drawn
+    /// around its own run rather than
+    /// around the paragraph
+    /// ([`Paragraphs::node`]), so the
+    /// line a `data.content` marker
+    /// opens on a `span` takes the
+    /// inherited half and no box.
     fn inherited(self) -> Block {
         Block { style: BoxStyle::default(), ..self }
     }
@@ -5095,6 +5150,17 @@ struct Paragraphs<'a> {
     /// `#333333` on a near-identical
     /// dark background.
     tint: Rgb,
+    /// The popup's root font size: what
+    /// a `rem` in a dictionary's own
+    /// declarations is a fraction of
+    /// ([`Ems`]).
+    ///
+    /// The theme's body size, taken
+    /// once here rather than re-derived
+    /// per node, because a node's own
+    /// em changes as the walk descends
+    /// and the root's does not.
+    root_em: f32,
 }
 
 /// One row's gloss tree, laid out as
@@ -5141,6 +5207,7 @@ fn paragraphs(
         images: Vec::new(),
         rule: theme.collapsed_text,
         tint: theme.separator,
+        root_em: theme.body_size,
     };
     let root = Ctx {
         inline: base,
@@ -5211,36 +5278,29 @@ impl Paragraphs<'_> {
     /// screen and keep them on a mined
     /// card.
     ///
-    /// Two clauses, and the second is
-    /// the temporary one. Ticket 15
-    /// classifies; until it does every
-    /// node parses as
-    /// `Role::Unclassified`, which
-    /// every filter keeps, so the
-    /// name-matched part-of-speech
-    /// marker is the only thing here
-    /// that can tell a label from a
-    /// gloss - and the labels are
-    /// already the card's own `pos`
-    /// field, drawn above the glosses,
-    /// so inline they would read
-    /// twice. `gloss::html` gates its
-    /// own copy of that clause the
-    /// same way, and for the same
-    /// reason.
+    /// One clause, over the role the
+    /// parser classified. Ticket 15
+    /// deleted the name-matched
+    /// part-of-speech marker and the
+    /// six-name drop list that used to
+    /// stand beside this call: the
+    /// role is now on the node for
+    /// every dictionary, so
+    /// `RoleFilter::allows` is the
+    /// whole gate here, in
+    /// `gloss::html`, and in
+    /// `gloss::plain`.
     ///
     /// [`Role`]: crate::dict::gloss::Role
     fn shows(&self, id: NodeId) -> bool {
-        let roles = self.render.roles;
-        roles.allows(self.doc.node(id).role)
-            && (roles.part_of_speech || !self.doc.is_part_of_speech(id))
+        self.render.roles.allows(self.doc.role(id))
     }
 
     /// One node.
     fn node(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         let node = *doc.node(id);
-        if doc.is_dropped_subtree(id) || !self.shows(id) {
+        if !self.shows(id) {
             return;
         }
         match node.tag {
@@ -5287,8 +5347,38 @@ impl Paragraphs<'_> {
         // and so does the block's own
         // box, which is why one
         // paragraph carries one box.
-        if node.tag.is_block() || doc.has_marker(id) {
+        //
+        // The box follows the **tag**,
+        // though, and not the line
+        // break. `has_marker` is a
+        // line-break rule inherited from
+        // the plain-text walk: ticket 01
+        // gave a `data.content` node a
+        // block mark because that mark
+        // is what separated senses
+        // before a tree existed. What
+        // decides where a box goes is
+        // the schema's own block/inline
+        // division, by tag, and `span`
+        // is inline - so a `span`
+        // carrying `data.content` opens
+        // its line with no box of its
+        // own and draws its box once,
+        // below, as the pill it is.
+        // Answering both questions with
+        // one test gave such a node the
+        // *same* resolved `BoxStyle`
+        // twice, once as `block_box` and
+        // once in `inline_boxes`, and a
+        // bin looping over
+        // `SceneElem::boxes()` painted
+        // Jitendex's
+        // `span[data-sc-class="tag"]`
+        // twice.
+        if node.tag.is_block() {
             self.open(ctx.path, block);
+        } else if doc.has_marker(id) {
+            self.open(ctx.path, block.inherited());
         }
         let next = Ctx {
             inline,
@@ -5300,7 +5390,15 @@ impl Paragraphs<'_> {
         // a pill, and a pill is drawn as
         // an inline box: it keeps its
         // place on its line instead of
-        // breaking one.
+        // breaking one. Ink is the whole
+        // of the gate, because the seam
+        // takes styled spans and no
+        // boxes (ADR-0013): an inline
+        // box cannot push its neighbours
+        // aside, so a margin or a
+        // padding with nothing to draw
+        // resolves to nothing - whatever
+        // its node marks.
         if !node.tag.is_block() && block.style.paints() {
             return self.pill(id, next, block.style);
         }
@@ -6440,7 +6538,7 @@ impl Paragraphs<'_> {
             if record[..i].iter().any(|(seen, _)| seen == key) {
                 continue;
             }
-            apply_style(doc, *key, *value, parent.size, &mut style);
+            apply_style(doc, *key, *value, self.ems(parent.size), &mut style);
         }
         style
     }
@@ -6476,6 +6574,14 @@ impl Paragraphs<'_> {
         self.declared(id, start, inline.size)
     }
 
+    /// The two bases a length in this
+    /// node's declarations resolves
+    /// against: the node's own em, and
+    /// the panel's.
+    fn ems(&self, own: f32) -> Ems {
+        Ems { own, root: self.root_em }
+    }
+
     /// One node's own declarations,
     /// folded over the box it starts
     /// from.
@@ -6487,11 +6593,14 @@ impl Paragraphs<'_> {
     /// ([`Paragraphs::cell_defaults`]),
     /// and the dictionary's last word
     /// must be applied the same way to
-    /// both. `em` is the node's *own*
+    /// both. `own` is the node's *own*
     /// resolved font size, because a
-    /// box length is a fraction of it.
-    fn declared(&self, id: NodeId, mut block: Block, em: f32) -> Block {
+    /// box length is a fraction of it -
+    /// of the panel's, for a `rem`
+    /// ([`Ems`]).
+    fn declared(&self, id: NodeId, mut block: Block, own: f32) -> Block {
         let doc = self.doc;
+        let em = self.ems(own);
         let record = self.declarations(id);
         for (i, (key, value)) in record.iter().enumerate() {
             // First occurrence wins, as
@@ -6632,7 +6741,7 @@ fn tag_style(tag: Tag, parent: Inline) -> Inline {
 /// build cannot read leaves the
 /// inherited one standing rather than
 /// guessing.
-fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut Inline) {
+fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: Ems, out: &mut Inline) {
     match key {
         StyleKey::FontSize => {
             if let Some(size) = length_px(doc, value, em) {
@@ -6655,7 +6764,7 @@ fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut 
             }
         }
         StyleKey::VerticalAlign => {
-            if let Some((shift, align)) = align_of(doc, value, em) {
+            if let Some((shift, align)) = align_of(doc, value, em.own) {
                 out.shift = shift;
                 out.align = align;
             }
@@ -6684,7 +6793,7 @@ fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut 
 /// border width and radius and allows
 /// a negative margin, so each arm
 /// clamps exactly what CSS clamps.
-fn apply_box(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut Block) {
+fn apply_box(doc: &GlossDoc, key: StyleKey, value: Scalar, em: Ems, out: &mut Block) {
     let bx = &mut out.style;
     match key {
         StyleKey::Margin => {
@@ -6788,9 +6897,9 @@ fn apply_box(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut Bl
 /// Filtering either out here would
 /// silently leave the wider rule
 /// standing.
-fn box_len(doc: &GlossDoc, value: Scalar, em: f32) -> Option<f32> {
+fn box_len(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<f32> {
     match value {
-        Scalar::Num(n) => finite(em * n as f32),
+        Scalar::Num(n) => finite(em.own * n as f32),
         Scalar::Text(span) => css_len(doc.span(span), em),
         Scalar::Bool(_) | Scalar::Null => None,
     }
@@ -6798,9 +6907,9 @@ fn box_len(doc: &GlossDoc, value: Scalar, em: f32) -> Option<f32> {
 
 /// One to four box lengths, as
 /// [`edges_of`] splits them.
-fn box_edges(doc: &GlossDoc, value: Scalar, em: f32) -> Option<Edges<f32>> {
+fn box_edges(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<Edges<f32>> {
     match value {
-        Scalar::Num(n) => Some(Edges::all(finite(em * n as f32)?)),
+        Scalar::Num(n) => Some(Edges::all(finite(em.own * n as f32)?)),
         Scalar::Text(span) => edges_of(doc.span(span), |s| css_len(s, em)),
         Scalar::Bool(_) | Scalar::Null => None,
     }
@@ -6921,9 +7030,9 @@ fn pre_line_of(doc: &GlossDoc, value: Scalar) -> Option<bool> {
 /// Zero and below are no font size, so
 /// a `fontSize: 0` leaves the
 /// inherited one standing.
-fn length_px(doc: &GlossDoc, value: Scalar, em: f32) -> Option<f32> {
+fn length_px(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<f32> {
     let px = match value {
-        Scalar::Num(n) => em * n as f32,
+        Scalar::Num(n) => em.own * n as f32,
         Scalar::Text(span) => css_len(doc.span(span), em)?,
         Scalar::Bool(_) | Scalar::Null => return None,
     };
@@ -6934,24 +7043,42 @@ fn length_px(doc: &GlossDoc, value: Scalar, em: f32) -> Option<f32> {
 /// sign and zero intact.
 ///
 /// `em` and `%` are relative to the em
-/// it sits in, and `px` is relative to
-/// Yomitan's own base (see
+/// the length sits in, `rem` to the
+/// panel's own body size ([`Ems`]),
+/// and `px` to Yomitan's own base (see
 /// [`YOMITAN_BASE_PX`]) so that an
 /// absolute pixel scales with the
 /// panel instead of shrinking on a
 /// dense screen. A bare number is an
 /// em multiplier, as the schema's own
 /// numeric values are.
-fn css_len(text: &str, em: f32) -> Option<f32> {
+///
+/// Those four are every length unit
+/// real dictionaries write. Counted
+/// over the corpus of
+/// `docs/research/dict-shapes.md`:
+/// inside inline `style` objects, `em`
+/// 5 690 564, `px` 151 516, `rem`
+/// 3 096 and no `%` at all; inside
+/// stylesheet declaration values, `em`
+/// 1 377, `px` 84 and `rem` 33. What
+/// is left unread is `s` (4), `deg`
+/// (3) and `fr` (3), none of them a
+/// length and all three on properties
+/// this build does not map -
+/// `transition`, `transform` and
+/// `grid-template-*`.
+fn css_len(text: &str, em: Ems) -> Option<f32> {
     let text = text.trim();
     let at = text
         .find(|c: char| !matches!(c, '0'..='9' | '.' | '-' | '+'))
         .unwrap_or(text.len());
     let n: f32 = text[..at].parse().ok()?;
     finite(match text[at..].trim() {
-        "em" | "" => em * n,
-        "%" => em * n / 100.0,
-        "px" => em * n / YOMITAN_BASE_PX,
+        "em" | "" => em.own * n,
+        "rem" => em.root * n,
+        "%" => em.own * n / 100.0,
+        "px" => em.own * n / YOMITAN_BASE_PX,
         _ => return None,
     })
 }
