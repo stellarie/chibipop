@@ -393,4 +393,47 @@ mod tests {
         let plain = cache.surface(&svg, Tint::None, (0, 0, 0)).expect("it paints");
         assert_eq!((64, 32), (plain.width(), plain.height()));
     }
+
+    /// The contract `Popup::reconfigure` exists to honour: **a rebuild is
+    /// only visible to a handle that reopens.**
+    ///
+    /// A rebuild renames a new file over the dictionary's path, so this
+    /// read-only connection keeps the replaced inode for as long as it is
+    /// held - and a rebuild also re-numbers `dict_id`, which is half of the
+    /// key this cache is built on. A popup holding the old handle therefore
+    /// draws the *previous* dictionary's gaiji for the new dictionary's
+    /// entries, and nothing about the picture says so.
+    ///
+    /// The worker has always reopened its own handle on `reload`
+    /// (`worker::ReopenDict`). This one arrived with ticket 03 and is the
+    /// second handle in the process, so the reload has two to do.
+    #[test]
+    fn a_rebuild_is_invisible_to_a_handle_that_did_not_reopen() {
+        let (db, _guard) = built("reopen_after_rebuild");
+        let mut stale = MediaSurfaces::open(&db).expect("the store opens");
+        let key = MediaKey::new(1, "gaiji/one.png");
+        assert!(stale.surface(&key, AS_DRAWN.0, AS_DRAWN.1).is_ok(), "the asset is there");
+
+        // A rebuild from an archive that ships no media at all, over the
+        // same path.
+        let terms = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/yomitan/terms.zip");
+        chibipop::dict::build::build(&[terms], &[], &db, &|_| {}).expect("the rebuild promotes");
+
+        assert!(
+            MediaSurfaces::open(&db)
+                .expect("the new store opens")
+                .surface(&key, AS_DRAWN.0, AS_DRAWN.1)
+                .is_err(),
+            "a reopened handle reads the dictionary that is actually there now",
+        );
+        // A fresh key, so the answer comes off the new file and not out of
+        // the cache the first ask filled.
+        let other = MediaKey::new(1, "gaiji/three.jpg");
+        assert!(
+            stale.surface(&other, AS_DRAWN.0, AS_DRAWN.1).is_ok(),
+            "while the handle that did not reopen is still serving the replaced file - \
+             which is why the reload has to reopen it",
+        );
+    }
 }

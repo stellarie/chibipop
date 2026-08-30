@@ -1,5 +1,6 @@
 //! Editing a live database.
 
+use crate::dict::build::DICT_KEYED;
 use crate::dict::frequency::lookup_freq;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -175,33 +176,100 @@ pub fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
 pub struct Removed {
     pub dict_id: i64,
     pub dicts: usize,
-    pub entries: usize,
-    pub terms: usize,
     pub sources: usize,
-    /// Media rows this dictionary owned.
-    pub media: usize,
-    /// Blobs the sweep dropped afterwards, which is fewer than `media`
-    /// whenever another dictionary ships the same asset.
+    /// Blobs the sweep dropped afterwards, which is fewer than the media
+    /// rows whenever another dictionary ships the same asset.
     pub blobs: usize,
+    /// Rows deleted per dict-keyed table, in [`DICT_KEYED`] order.
+    ///
+    /// One array rather than one field each, because the array *is* the list
+    /// the removal walks: a table added to the schema widens the walk and
+    /// this report together, and there is no second place left to forget it.
+    /// Read it through [`Removed::rows_in`] or one of the three named
+    /// accessors, never by index.
+    pub rows: [usize; DICT_KEYED.len()],
+}
+
+impl Removed {
+    /// Rows deleted from one table by name.
+    ///
+    /// A table this build does not know is `0`, which is the truth: a
+    /// removal that walked no such table deleted nothing from it.
+    pub fn rows_in(&self, table: &str) -> usize {
+        DICT_KEYED.iter().position(|t| *t == table).map_or(0, |i| self.rows[i])
+    }
+
+    pub fn terms(&self) -> usize {
+        self.rows_in("term")
+    }
+
+    pub fn entries(&self) -> usize {
+        self.rows_in("entry")
+    }
+
+    pub fn media(&self) -> usize {
+        self.rows_in("media")
+    }
 }
 
 /// Deletes one dictionary.
 ///
 /// Absent ids are a no-op.
+///
+/// Every table [`DICT_KEYED`] names, children first, then the `dict` row
+/// itself. The list is checked against the schema of the database in hand
+/// before a single row goes ([`refuse_unlisted_tables`]), because the
+/// removal falling behind the schema is the defect this shape exists to
+/// prevent - ticket 17 added `dict_style` and left the removal alone, and
+/// the next removal died on that table's foreign key.
 pub fn remove_dictionary(conn: &mut Connection, dict_id: i64, archive: &Path) -> Result<Removed> {
     let tx = conn.transaction().context("opening the removal transaction")?;
     crate::dict::build::ensure_indexes(&tx)?;
+    refuse_unlisted_tables(&tx)?;
 
-    let terms = delete_rows(&tx, "term", dict_id)?;
-    let entries = delete_rows(&tx, "entry", dict_id)?;
-    let media = delete_rows(&tx, "media", dict_id)?;
+    let mut rows = [0usize; DICT_KEYED.len()];
+    for (slot, table) in rows.iter_mut().zip(DICT_KEYED) {
+        *slot = delete_rows(&tx, table, dict_id)?;
+    }
     let blobs = sweep_orphan_blobs(&tx)?;
     let dicts = delete_rows(&tx, "dict", dict_id)?;
     let sources = if dicts == 0 { 0 } else { forget_source(&tx, archive)? };
     refresh_stats(&tx)?;
 
     tx.commit().context("committing the removal")?;
-    Ok(Removed { dict_id, dicts, entries, terms, sources, media, blobs })
+    Ok(Removed { dict_id, dicts, sources, blobs, rows })
+}
+
+/// Refuses a removal that would leave a row behind.
+///
+/// Which tables a removal has to walk is knowledge, and ticket 17 proved it
+/// is knowledge that goes stale silently: `dict_style` arrived with the
+/// schema and not with the removal, and because no committed fixture ships a
+/// `styles.css` the table was empty in every test, so a removal that
+/// forgot it passed the whole suite. The next real removal deleted the
+/// `dict` row out from under a live `dict_style` row and died on the foreign
+/// key.
+///
+/// So the list is not trusted, it is checked - against the live schema,
+/// before anything is deleted, inside the transaction. A table this build's
+/// own DDL creates with a `dict_id` column and [`DICT_KEYED`] does not name
+/// aborts the removal and says which table and what to do about it.
+fn refuse_unlisted_tables(conn: &Connection) -> Result<()> {
+    let present = crate::dict::build::dict_keyed_tables(conn)?;
+    let unlisted: Vec<&str> = present
+        .iter()
+        .map(String::as_str)
+        // `dict` is the parent row, deleted last and counted on its own.
+        .filter(|t| *t != "dict" && !DICT_KEYED.contains(t))
+        .collect();
+    if !unlisted.is_empty() {
+        anyhow::bail!(
+            "{} is keyed on dict_id and this removal would leave its rows behind; \
+             add it to dict::build::DICT_KEYED, children before parents",
+            unlisted.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Drops the blobs no media row references any more.
@@ -211,6 +279,11 @@ pub fn remove_dictionary(conn: &mut Connection, dict_id: i64, archive: &Path) ->
 /// remove its blobs - the next dictionary may ship the same asset. A sweep
 /// is the only correct answer, and its cost lands on removing a dictionary
 /// rather than on any hover.
+///
+/// `media_blob` is deliberately not in [`DICT_KEYED`]: it carries no
+/// `dict_id`, because content is what addresses it. This sweep is the whole
+/// of its removal, and it runs after the per-dictionary deletes so that
+/// "referenced by nobody" is already true of the rows it looks at.
 fn sweep_orphan_blobs(conn: &Connection) -> Result<usize> {
     conn.execute("DELETE FROM media_blob WHERE blob_id NOT IN (SELECT blob_id FROM media)", [])
         .context("dropping unreferenced media blobs")
@@ -553,8 +626,8 @@ mod tests {
 
         assert_eq!(1, gone.dict_id);
         assert_eq!(1, gone.dicts);
-        assert_eq!(3, gone.entries);
-        assert_eq!(5, gone.terms);
+        assert_eq!(3, gone.entries());
+        assert_eq!(5, gone.terms());
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM term WHERE dict_id = 1"));
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM entry WHERE dict_id = 1"));
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM dict WHERE dict_id = 1"));
@@ -595,8 +668,8 @@ mod tests {
             .expect("an absent dictionary is not an error");
 
         assert_eq!(0, gone.dicts);
-        assert_eq!(0, gone.entries);
-        assert_eq!(0, gone.terms);
+        assert_eq!(0, gone.entries());
+        assert_eq!(0, gone.terms());
         assert_eq!(0, gone.sources);
         assert_eq!(one, snapshot(&conn, 1));
         assert_eq!(two, snapshot(&conn, 2));
@@ -941,13 +1014,13 @@ mod tests {
         assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media_blob"), "and one set of blobs");
 
         let gone = remove_dictionary(&mut conn, first.dict_id, &media_zip()).unwrap();
-        assert_eq!(8, gone.media);
+        assert_eq!(8, gone.media());
         assert_eq!(0, gone.blobs, "the surviving dictionary still ships every asset");
         assert_eq!(8, count(&conn, "SELECT COUNT(*) FROM media"));
         assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media_blob"));
 
         let gone = remove_dictionary(&mut conn, second.dict_id, &media_zip()).unwrap();
-        assert_eq!(8, gone.media);
+        assert_eq!(8, gone.media());
         assert_eq!(7, gone.blobs, "the last reference going takes the bytes with it");
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM media_blob"));
     }
@@ -966,5 +1039,155 @@ mod tests {
         assert_eq!(2, after.len(), "two dictionaries, two rows");
         assert_eq!(vec![blobs[0], blobs[0]], after, "and one blob behind both");
         assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media_blob"));
+    }
+
+    // ---- removing a dictionary and adding the same one back ----
+
+    /// One archive carrying every kind of row a `dict_id` keys: a term bank,
+    /// the dictionary's own `styles.css`, and a referenced image asset.
+    ///
+    /// Built here rather than committed, because the point of it is that it
+    /// is *complete*. `tests/fixtures/yomitan/terms.zip` ships neither a
+    /// stylesheet nor media, so every removal test written against it
+    /// exercises a database in which `dict_style` and `media` are empty -
+    /// which is exactly why a removal that forgets `dict_style` passed the
+    /// suite for a whole ticket. The PNG is the real committed asset from
+    /// `tests/fixtures/media`, so no new binary blob enters the tree.
+    fn complete_archive(test_name: &str) -> (PathBuf, TempDbGuard) {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join("chibipop_edit_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("a_{}_{test_name}_complete.zip", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let png = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/one.png");
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file("index.json", opts).unwrap();
+        zip.write_all(br#"{"title":"FixtureComplete","format":3,"revision":"1"}"#).unwrap();
+        zip.start_file("term_bank_1.json", opts).unwrap();
+        zip.write_all(
+            br#"[["\u732b","\u306d\u3053","","",0,
+                 [{"type":"structured-content","content":[
+                   {"tag":"img","path":"gaiji/one.png","height":1.0,"sizeUnits":"em"},
+                   {"tag":"span","data":{"fbox":"1"},"content":"cat"}]}],0,""]]"#,
+        )
+        .unwrap();
+        zip.start_file("styles.css", opts).unwrap();
+        zip.write_all(b"span[data-sc-fbox] { padding: 0.1em }\n").unwrap();
+        zip.start_file("gaiji/one.png", opts).unwrap();
+        zip.write_all(&std::fs::read(&png).unwrap()).unwrap();
+        zip.finish().unwrap();
+        (path.clone(), TempDbGuard(path))
+    }
+
+    /// A database holding exactly one dictionary, built from `archive` by the
+    /// real builder.
+    fn db_from(test_name: &str, archive: &Path) -> (Connection, TempDbGuard) {
+        let dir = std::env::temp_dir().join("chibipop_edit_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join(format!("t_{}_{test_name}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let guard = TempDbGuard(out.clone());
+        let terms = [archive.to_path_buf()];
+        crate::dict::build::build(&terms, &[], &out, &|_| {}).unwrap();
+        (Connection::open(&out).unwrap(), guard)
+    }
+
+    fn integrity(conn: &Connection) -> String {
+        conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap()
+    }
+
+    fn fk_violations(conn: &Connection) -> Vec<String> {
+        rows(conn, "PRAGMA foreign_key_check")
+    }
+
+    /// The user's exact path: remove a dictionary from the list, then add the
+    /// same archive straight back.
+    #[test]
+    fn removing_a_dictionary_and_adding_it_back_leaves_a_sound_database() {
+        let (archive, _aguard) = complete_archive("round_trip");
+        let (mut conn, _guard) = db_from("round_trip", &archive);
+        assert_eq!(1, count(&conn, "SELECT COUNT(*) FROM dict_style"), "the fixture ships one");
+        assert_eq!(1, count(&conn, "SELECT COUNT(*) FROM media"), "and one asset");
+
+        remove_dictionary(&mut conn, 1, &archive).expect("the removal must succeed");
+        let made = add_dictionary(&mut conn, &archive, &[], &|_| {})
+            .expect("adding the same archive back must succeed");
+
+        assert_eq!("ok", integrity(&conn), "the database must still be sound");
+        assert!(fk_violations(&conn).is_empty(), "no dangling reference may survive");
+        assert_eq!(
+            1,
+            count(&conn, "SELECT COUNT(*) FROM dict_style"),
+            "one dictionary, one stylesheet"
+        );
+        // And the lookup the user could no longer get a popup from.
+        let sql = "SELECT COUNT(*) FROM term WHERE surface = 'ねこ' AND dict_id = {d}";
+        assert_eq!(vec!["Integer(1)"], of_dict(&conn, sql, made.dict_id), "the term is back");
+    }
+
+    /// A removal leaves no row keyed on the removed `dict_id`, in **any**
+    /// table - and the set of tables is read out of the schema rather than
+    /// written down here.
+    ///
+    /// That is the whole point. A test listing the tables it checks is a
+    /// second list to forget, and forgetting the list is the defect: this
+    /// one goes red on its own the moment the DDL grows a `dict_id` column
+    /// the removal does not delete from, with no test edit at all. The
+    /// fixture is the complete archive, so every table it checks actually
+    /// holds rows to begin with - a check against an empty table proves
+    /// nothing, which is how this stayed hidden.
+    #[test]
+    fn a_removal_leaves_no_row_keyed_on_the_removed_dictionary_in_any_table() {
+        let (archive, _aguard) = complete_archive("no_rows_left");
+        let (mut conn, _guard) = db_from("no_rows_left", &archive);
+        let keyed = crate::dict::build::dict_keyed_tables(&conn).unwrap();
+        assert!(keyed.len() >= 5, "the schema's dict-keyed tables: {keyed:?}");
+        for table in &keyed {
+            let held = count(&conn, &format!("SELECT COUNT(*) FROM {table} WHERE dict_id = 1"));
+            assert!(held > 0, "{table} has no row for dict 1, so checking it proves nothing");
+        }
+
+        remove_dictionary(&mut conn, 1, &archive).expect("the removal must succeed");
+
+        for table in &keyed {
+            assert_eq!(
+                0,
+                count(&conn, &format!("SELECT COUNT(*) FROM {table} WHERE dict_id = 1")),
+                "{table} still holds rows for the removed dictionary",
+            );
+        }
+        assert!(fk_violations(&conn).is_empty(), "and nothing dangles");
+    }
+
+    /// The guard itself: a table the schema keys on `dict_id` and
+    /// `DICT_KEYED` does not name aborts the removal by name, before a row
+    /// moves.
+    ///
+    /// This is the production half of the test above. The next person to add
+    /// a table gets a message naming their table rather than a foreign-key
+    /// error two tickets later, and a user whose database somehow carries an
+    /// unknown table keeps it whole.
+    #[test]
+    fn a_dict_keyed_table_the_removal_does_not_know_aborts_it_by_name() {
+        let (mut conn, _guard) = fixture_db("unlisted_table_refused");
+        conn.execute_batch(
+            "CREATE TABLE dict_note (
+                 dict_id INTEGER PRIMARY KEY REFERENCES dict(dict_id),
+                 note    TEXT NOT NULL
+             );
+             INSERT INTO dict_note (dict_id, note) VALUES (1, 'ticket 23 was here');",
+        )
+        .unwrap();
+        let before = snapshot(&conn, 1);
+
+        let err = remove_dictionary(&mut conn, 1, Path::new("terms.zip"))
+            .expect_err("an unlisted dict-keyed table must abort the removal");
+
+        let text = format!("{err:#}");
+        assert!(text.contains("dict_note"), "the message has to name the table: {text}");
+        assert!(text.contains("DICT_KEYED"), "and say what to do about it: {text}");
+        assert_eq!(before, snapshot(&conn, 1), "and nothing may have moved");
+        assert_eq!(1, count(&conn, "SELECT COUNT(*) FROM dict_note"));
     }
 }

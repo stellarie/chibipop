@@ -1762,6 +1762,14 @@ mod tests {
         }
     }
 
+    /// The copy lands on disk under a free name, and the manifest then
+    /// offers it as one dictionary rather than two.
+    ///
+    /// `stocked` already holds `terms.zip`, so staging the same fixture
+    /// copies it in as `terms (2).zip`: a second file, byte-identical to
+    /// the first. `Library::load` collapses the pair, because two names for
+    /// one archive are one dictionary and building both would answer every
+    /// headword twice. The file itself stays where it was put.
     #[test]
     fn an_add_lands_a_copy_in_the_library_and_in_the_manifest() {
         let (dir, _guard) = stocked("add");
@@ -1775,8 +1783,12 @@ mod tests {
             files_in(&dir)
         );
         let lib = Library::load(&dir).unwrap();
-        assert_eq!(3, lib.entries.len());
-        assert_eq!(2, lib.term_paths(&dir).len(), "the copy is a term archive");
+        assert_eq!(2, lib.entries.len(), "the copy is not a second dictionary");
+        assert_eq!(
+            vec![dir.join("terms.zip")],
+            lib.term_paths(&dir),
+            "and the name the manifest already held is the one that builds",
+        );
     }
 
     /// Not before the rebuild.

@@ -92,6 +92,73 @@ impl Library {
             let index = crate::dict::archive::read_index(&path).unwrap_or(Value::Null);
             self.entries.push(Entry { name: title_of(&index, &file), file, kind });
         }
+        // Last, so the listed entries are already ahead of the strays.
+        self.collapse_duplicates(dir);
+    }
+
+    /// Collapses byte-identical archives to one entry.
+    ///
+    /// Two copies of one dictionary under two names are one dictionary, and
+    /// a library offering both builds it twice: two `dict` rows, two
+    /// stylesheets, every asset stored under two ids, and every hover
+    /// answering each headword twice. A user reported exactly that, from a
+    /// `library.json` naming one archive beside an unlisted, byte-identical
+    /// copy of it.
+    ///
+    /// **The first entry wins**, and the order this runs in is what makes
+    /// that the right rule: `reconcile` keeps the manifest's own entries in
+    /// manifest order and appends adopted strays after them, so a listed
+    /// archive always beats an unlisted copy of itself. The manifest is what
+    /// the user curated; the stray is only what happened to be in the
+    /// directory. Nothing is deleted either way - adoption is deliberate,
+    /// and a file the user put here stays where they put it.
+    ///
+    /// **What it costs.** Hashing every archive on every load is not
+    /// affordable: [`crate::dict::build::hash_file`] runs at about
+    /// 400 MiB/s, so one 38 MB dictionary costs ~95 ms and a
+    /// twelve-dictionary library costs seconds - on a path that runs every
+    /// time the settings window opens. So the hash is gated on the one
+    /// discriminator that is free and has no false negatives: byte-identical
+    /// files are the same length. A library of distinct dictionaries
+    /// therefore hashes **nothing at all**, and only a real length collision
+    /// pays - two 38 MB copies, one ~190 ms load, once.
+    fn collapse_duplicates(&mut self, dir: &Path) {
+        let sizes: Vec<u64> = self
+            .entries
+            .iter()
+            .map(|e| std::fs::metadata(dir.join(&e.file)).map(|m| m.len()).unwrap_or(0))
+            .collect();
+        // A length no other archive shares cannot be a duplicate of
+        // anything, so its bytes are never read. Length 0 is a file that
+        // would not stat; it stays listed so it can be removed.
+        let contested = |i: usize| {
+            sizes[i] > 0 && sizes.iter().enumerate().any(|(j, s)| j != i && *s == sizes[i])
+        };
+        if !(0..sizes.len()).any(contested) {
+            return;
+        }
+        let mut kept: Vec<Entry> = Vec::with_capacity(self.entries.len());
+        let mut hashes: Vec<String> = Vec::new();
+        for (i, entry) in std::mem::take(&mut self.entries).into_iter().enumerate() {
+            if !contested(i) {
+                kept.push(entry);
+                continue;
+            }
+            match crate::dict::build::hash_file(&dir.join(&entry.file)) {
+                // A copy of an archive already kept, so it is not a second
+                // dictionary.
+                Ok(hash) if hashes.contains(&hash) => {}
+                Ok(hash) => {
+                    hashes.push(hash);
+                    kept.push(entry);
+                }
+                // Unreadable is not the same thing as duplicate: it stays
+                // listed so the user can remove it, as `Kind::Unreadable`
+                // already does.
+                Err(_) => kept.push(entry),
+            }
+        }
+        self.entries = kept;
     }
 
     /// Atomic manifest write.
@@ -599,5 +666,88 @@ mod tests {
         Library::default().save(&dir).unwrap();
 
         assert!(Library::load(&dir).unwrap().is_empty());
+    }
+
+    // ---- one dictionary under two names ----
+
+    /// The reported shape: `library.json` names one archive, and a
+    /// byte-identical copy of it sits unlisted beside it. Adoption makes the
+    /// copy an entry, and the build then makes it a second dictionary - two
+    /// `dict` rows, two stylesheets, and every headword answered twice.
+    ///
+    /// Built for real rather than counted, because "one dictionary" is a
+    /// claim about the database, and `term_paths` is what the rebuild hands
+    /// the builder.
+    #[test]
+    fn two_byte_identical_archives_under_different_names_are_one_dictionary() {
+        let (dir, _guard) = scratch("identical_copy");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        lib.save(&dir).unwrap();
+        // The unlisted copy, exactly as a re-import left one behind.
+        std::fs::copy(fixture("terms.zip"), dir.join("[JA-EN] terms (2026-08-11).zip")).unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+
+        assert_eq!(1, loaded.entries.len(), "got {:?}", loaded.entries);
+        assert_eq!(
+            "terms.zip", loaded.entries[0].file,
+            "the manifest's own entry wins over an unlisted copy of it",
+        );
+        assert_eq!(vec![dir.join("terms.zip")], loaded.term_paths(&dir));
+
+        let out = dir.join("built.sqlite");
+        crate::dict::build::build(&loaded.term_paths(&dir), &[], &out, &|_| {}).unwrap();
+        let conn = rusqlite::Connection::open(&out).unwrap();
+        let dicts: i64 = conn.query_row("SELECT COUNT(*) FROM dict", [], |r| r.get(0)).unwrap();
+        assert_eq!(1, dicts, "one archive, however many names it wears");
+    }
+
+    /// Nothing is deleted. Adoption is deliberate and the file is the
+    /// user's; only the second *entry* goes, and it stays collapsed on every
+    /// later load rather than reappearing.
+    #[test]
+    fn collapsing_a_duplicate_leaves_the_file_where_the_user_put_it() {
+        let (dir, _guard) = scratch("keeps_the_file");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        lib.save(&dir).unwrap();
+        std::fs::copy(fixture("terms.zip"), dir.join("copy.zip")).unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+        loaded.save(&dir).unwrap();
+
+        assert!(dir.join("copy.zip").is_file(), "the archive itself is untouched");
+        assert_eq!(1, Library::load(&dir).unwrap().entries.len(), "and stays collapsed");
+    }
+
+    /// The hash decides, not the length. Two archives can be exactly as long
+    /// as each other and hold different dictionaries, and the length is only
+    /// the gate that decides whether reading them is worth it.
+    #[test]
+    fn two_equally_long_archives_with_different_contents_stay_two_dictionaries() {
+        let (dir, _guard) = scratch("same_size");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.zip");
+        let b = dir.join("b.zip");
+        std::fs::copy(fixture("terms.zip"), &a).unwrap();
+        std::fs::copy(fixture("terms.zip"), &b).unwrap();
+        // One byte flipped inside the zip comment, which every reader
+        // ignores: the same length, a different sha256, still two readable
+        // archives.
+        let mut bytes = std::fs::read(&b).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&b, &bytes).unwrap();
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().len(),
+            std::fs::metadata(&b).unwrap().len(),
+            "the gate has to actually be contested",
+        );
+        Library::default().save(&dir).unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+
+        assert_eq!(2, loaded.entries.len(), "got {:?}", loaded.entries);
     }
 }

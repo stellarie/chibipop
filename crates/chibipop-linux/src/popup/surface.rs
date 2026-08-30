@@ -180,6 +180,18 @@ pub struct Popup {
     /// `Sync`. `None` is a real state and not a failure: the popup still
     /// paints, with every image on the `alt`-text rung of its ladder.
     media: Option<chibipop_linux::media::MediaSurfaces>,
+    /// Where the dictionary lives, kept so `reconfigure` can reopen
+    /// `media` after a rebuild.
+    ///
+    /// This is the popup's half of the reload contract and it is easy to
+    /// miss: a rebuild renames a **new file** over this path, so a
+    /// connection opened before it keeps reading the replaced inode for as
+    /// long as it is held. The worker reopens the dictionary on
+    /// `Event::ConfigReloaded` (`worker::ReopenDict`); until ticket 03 this
+    /// process held no second handle, and now it holds this one. A reload
+    /// that reopened only the worker's would leave the popup drawing the
+    /// old dictionary's gaiji at the new dictionary's ids.
+    db: std::path::PathBuf,
     /// The logical theme; every render scales a copy of it.
     theme: Theme,
     layer: Layer,
@@ -297,16 +309,7 @@ impl Popup {
         // open is one diagnostic and no images, never a popup that will
         // not draw: an image node then renders its `alt` text, which is
         // the character it stood for.
-        let media = match chibipop_linux::media::MediaSurfaces::open(db) {
-            Ok(cache) => Some(cache),
-            Err(e) => {
-                notes.push(format!(
-                    "popup: no dictionary media - {e:#}; image nodes will render their \
-                     alt text"
-                ));
-                None
-            }
-        };
+        let media = open_media(db, &mut notes);
 
         Ok(Popup {
             qh: qh.clone(),
@@ -322,6 +325,7 @@ impl Popup {
             next_id: 0,
             text,
             media,
+            db: db.to_path_buf(),
             theme,
             layer: layer_of(config.popup_layer()),
             caps: (config.popup.max_width_percent, config.popup.max_height_percent),
@@ -710,10 +714,20 @@ impl Popup {
         }
     }
 
-    /// Re-read the settings a reload can change. `set_layer` needs no
-    /// recreation, which is exactly why `popup.layer` is a runtime
-    /// toggle and not a restart.
+    /// Re-read the settings a reload can change, and reopen the dictionary
+    /// a rebuild replaced. `set_layer` needs no recreation, which is exactly
+    /// why `popup.layer` is a runtime toggle and not a restart.
     pub fn reconfigure(&mut self, config: &Config) {
+        // The popup's half of the reload. `reload` arrives here for two
+        // reasons at once: the settings window applied a config, and the
+        // settings window finished a rebuild - the socket carries no way to
+        // tell them apart (ADR-0005: the config file is the only truth), and
+        // nothing here needs to. Reopening on a plain config reload costs one
+        // `sqlite3_open` and an emptied cache; not reopening after a rebuild
+        // costs the popup every gaiji it draws, because a rebuild renames a
+        // new file over this path and re-numbers the `dict_id` this cache is
+        // keyed on. The worker reopens its own handle off the same event.
+        self.media = open_media(&self.db, &mut self.notes);
         let layer = layer_of(config.popup_layer());
         if layer != self.layer {
             self.layer = layer;
@@ -1037,6 +1051,29 @@ fn to_argb(data: &mut [u8]) {
     let (pixels, _) = data.as_chunks_mut::<4>();
     for px in pixels {
         px.swap(0, 2);
+    }
+}
+
+/// The painter's decoded-asset cache on a fresh connection, or `None` and a
+/// note.
+///
+/// One function for both call sites, because opening the store at bind time
+/// and reopening it after a rebuild have to answer a failure the same way:
+/// a database this build cannot open is one diagnostic and no images, never
+/// a popup that will not draw. An image node then renders its `alt` text,
+/// which is the character it stood for.
+fn open_media(
+    db: &std::path::Path,
+    notes: &mut Vec<String>,
+) -> Option<chibipop_linux::media::MediaSurfaces> {
+    match chibipop_linux::media::MediaSurfaces::open(db) {
+        Ok(cache) => Some(cache),
+        Err(e) => {
+            notes.push(format!(
+                "popup: no dictionary media - {e:#}; image nodes will render their alt text"
+            ));
+            None
+        }
     }
 }
 

@@ -107,6 +107,51 @@ CREATE TABLE media (             -- one row per referenced (dictionary, path)
 ) WITHOUT ROWID;
 ";
 
+/// Every table `dict_id` keys, children before parents, and the one list
+/// [`crate::dict::edit::remove_dictionary`] walks.
+///
+/// It lives here, next to [`DDL`], because the two have to be read
+/// together. Ticket 17 added `dict_style` above and did not add it to the
+/// removal, and no test noticed for a whole ticket, because every committed
+/// fixture ships no `styles.css` and so leaves `dict_style` empty - a
+/// removal against an empty table passes whatever it forgets. One list read
+/// beside the schema it belongs to is the cheapest thing that cannot drift.
+///
+/// `dict` itself is deliberately absent: it is the parent row the removal
+/// deletes *last*, and it is counted on its own.
+///
+/// The order is the foreign-key order, and it is the one thing here that
+/// cannot be derived cheaply - `term` references `entry`, and every table
+/// references `dict`, so children have to go first. The *membership* is
+/// checked against the schema of the database in hand
+/// ([`dict_keyed_tables`]), so a table added above and forgotten here
+/// aborts a removal by name instead of orphaning a row.
+pub const DICT_KEYED: [&str; 4] = ["term", "entry", "media", "dict_style"];
+
+/// Every table in *this* database that carries a `dict_id` column.
+///
+/// Read out of the live schema rather than assumed, because the point of it
+/// is to catch a schema this code has not been taught about. `dict` is in
+/// the answer - its primary key is named `dict_id` - and the caller is what
+/// knows to hold it back to the end.
+pub fn dict_keyed_tables(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND EXISTS (SELECT 1 FROM pragma_table_info(sqlite_master.name)
+                           WHERE name = 'dict_id')
+             ORDER BY name",
+        )
+        .context("preparing the dict_id-keyed table query")?;
+    let found = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .context("listing the dict_id-keyed tables")?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .context("reading the dict_id-keyed tables")?;
+    Ok(found)
+}
+
 const INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS idx_term_surface ON term(surface);
 CREATE INDEX IF NOT EXISTS idx_term_entry_id ON term(entry_id);
@@ -292,7 +337,7 @@ pub fn build(
     }
 
     // Never destroy out on failure.
-    let tmp = building_path(out);
+    let tmp = suffixed(out, ".building");
     if tmp.exists() {
         std::fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
     }
@@ -301,16 +346,153 @@ pub fn build(
         let _ = std::fs::remove_file(&tmp);
     })?;
 
-    std::fs::rename(&tmp, out)
-        .with_context(|| format!("replacing {} with {}", out.display(), tmp.display()))?;
+    promote(&tmp, out, on_progress).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
     Ok(counts)
 }
 
-/// `out` with a .building suffix.
-fn building_path(out: &Path) -> PathBuf {
+/// `out` with `suffix` appended to the whole file name.
+///
+/// Appended, not swapped for the extension: `chibipop.sqlite-wal` is the
+/// name SQLite itself derives, and `chibipop.sqlite.building` sorts beside
+/// the file it will become.
+fn suffixed(out: &Path, suffix: &str) -> PathBuf {
     let mut name = out.as_os_str().to_owned();
-    name.push(".building");
+    name.push(suffix);
     PathBuf::from(name)
+}
+
+/// Puts a finished build in place of the live database.
+///
+/// Three things happen here, and their order is the whole crash-safety
+/// story:
+///
+/// 1. **The built file is read back.** [`build_into`] runs the bulk load
+///    under `synchronous = OFF`, which is the right trade for a load that
+///    writes into a throwaway file - but it means this is the only place a
+///    bad build can still be caught. A `quick_check` here costs one pass
+///    over the new pages and buys the guarantee that a database nobody can
+///    read is thrown away rather than promoted over a working one and
+///    discovered on the next hover.
+/// 2. **The previous database's `-wal` and `-shm` go.** A write-ahead log's
+///    sidecars are keyed to the database's *file name*, never to its inode,
+///    and `rename` replaces only the main file. So a rename on its own
+///    leaves the old database's log sitting beside the new database, under
+///    the name the new one now answers to, and the next reader **recovers
+///    that log into the new file**. That is not a theoretical hazard: it is
+///    `database disk image is malformed`, and it is what a user reported.
+///    The checkpoint before the removal is what makes the removal lossless.
+/// 3. **The rename.** One instant, and the only one.
+///
+/// Every prefix of that sequence leaves a database a reader can open:
+///
+/// - died during 1: `out` is untouched and whole. The orphaned `.building`
+///   is removed by the next build, which unlinks it before it starts.
+/// - died during 2: `out` is still the *old* database, and the checkpoint
+///   moved everything its log held into it before the log was unlinked - so
+///   the old database alone is complete. Living readers are unaffected
+///   either way: an unlink drops a name, never an open file.
+/// - died during 3: impossible. A rename is atomic, and both sides of it
+///   are a whole database with no sidecar to recover.
+///
+/// The order that is *not* safe is the obvious one - rename first, tidy up
+/// after - because the window between those two steps is exactly the bug.
+fn promote(tmp: &Path, out: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
+    verify_built(tmp, on_progress)?;
+    drain_wal(out);
+    drop_sidecars(out)?;
+    std::fs::rename(tmp, out)
+        .with_context(|| format!("replacing {} with {}", out.display(), tmp.display()))
+}
+
+/// Reads the finished build back before anything is allowed to depend on it.
+///
+/// The checkpoint first, so `quick_check` reads the pages a fresh reader
+/// would and the promoted file needs no log of its own. Then the `fsync`,
+/// because `synchronous = OFF` means nothing so far has promised the bytes
+/// left the page cache - and `quick_check` reads back *through* that cache,
+/// so it would happily bless a file that is not on the platter. A rename is
+/// only worth as much as the file it publishes.
+fn verify_built(built: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
+    on_progress("building  checking the new database");
+    let conn = Connection::open(built)
+        .with_context(|| format!("reopening {} to check it", built.display()))?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .with_context(|| format!("checkpointing {}", built.display()))?;
+    // quick_check, not integrity_check: the same page-level structural
+    // check without the index-against-table cross-check, which on a
+    // multi-gigabyte corpus is the difference between seconds and minutes.
+    let verdict: String = conn
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .with_context(|| format!("checking {}", built.display()))?;
+    if verdict != "ok" {
+        anyhow::bail!(
+            "the dictionary this build wrote did not check out ({verdict}); \
+             your existing dictionary has been left alone"
+        );
+    }
+    drop(conn);
+    File::open(built)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("flushing {} to disk", built.display()))?;
+    Ok(())
+}
+
+/// Moves everything the live database's log holds into the database itself,
+/// so unlinking the log loses nothing.
+///
+/// Best effort, and deliberately: a reader mid-transaction can refuse a
+/// truncating checkpoint, a file too damaged to open has nothing worth
+/// draining, and this database is about to be replaced whichever way it
+/// goes. What the attempt buys is the crash window in [`promote`]'s step 2 -
+/// when it succeeds, the old database on its own is complete, so dying
+/// before the rename leaves a whole database rather than a torso.
+fn drain_wal(out: &Path) {
+    if !out.exists() {
+        return;
+    }
+    if let Ok(conn) = Connection::open(out) {
+        // Never waits. A rebuild happens while the daemon is serving
+        // lookups, so a reader is *expected* to be holding a snapshot, and
+        // the default five-second busy timeout would spend five seconds of
+        // every rebuild waiting for a checkpoint whose failure costs
+        // nothing. `PASSIVE` first because it copies back every frame no
+        // reader still needs and cannot block at all; `TRUNCATE` then
+        // finishes the job whenever the readers happen to be between
+        // transactions.
+        let _ = conn.execute_batch(
+            "PRAGMA busy_timeout = 0;
+             PRAGMA wal_checkpoint(PASSIVE);
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        );
+    }
+}
+
+/// Removes the sidecars the previous database left under this name.
+///
+/// A hard error, not a best effort: a sidecar that will not go is a sidecar
+/// the next reader recovers into the new file, so refusing to promote leaves
+/// the user a working dictionary instead of a malformed one. That is also
+/// the honest answer on a platform where an open file cannot be unlinked.
+fn drop_sidecars(out: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        let path = suffixed(out, suffix);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "removing {}, which belongs to the dictionary being replaced and \
+                         would be recovered into the new one",
+                        path.display()
+                    )
+                })
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_into(
@@ -844,8 +1026,14 @@ pub(crate) fn source_hash(path: &Path) -> Result<SourceHash> {
     Ok(SourceHash { name, bytes, sha256: hash_file(path)? })
 }
 
-/// SHA-256 of a file's bytes.
-fn hash_file(path: &Path) -> Result<String> {
+/// SHA-256 of a file's bytes, lowercase hex.
+///
+/// The one hash in the crate: `meta.source_hashes` records it per archive,
+/// and [`crate::library::Library`] uses it to tell two names for one
+/// dictionary apart from two dictionaries. Streamed in 64 KB reads, which
+/// on this implementation is about 400 MiB/s - the number the library's
+/// gate on it is sized against.
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65_536];
@@ -1267,7 +1455,7 @@ mod tests {
 
         assert!(build(std::slice::from_ref(&bad), &[], &out, &|_| {}).is_err());
         assert_eq!(b"PRECIOUS".to_vec(), std::fs::read(&out).unwrap(), "output untouched");
-        assert!(!building_path(&out).exists(), "no .building left behind");
+        assert!(!suffixed(&out, ".building").exists(), "no .building left behind");
     }
 
     #[test]
@@ -1290,7 +1478,191 @@ mod tests {
     #[test]
     fn a_successful_build_leaves_no_building_file() {
         let (_conn, guard) = build_fixture_db("no_building_left");
-        assert!(!building_path(&guard.0).exists());
+        assert!(!suffixed(&guard.0, ".building").exists());
+    }
+
+    // ---- promoting a finished build over the live database ----
+
+    /// The named dictionary in a database, which is how these tests tell the
+    /// old file from the new one.
+    fn first_dict(db: &Path) -> String {
+        let conn = Connection::open(db).unwrap();
+        conn.query_row("SELECT name FROM dict WHERE dict_id = 1", [], |r| r.get(0)).unwrap()
+    }
+
+    fn verdict(db: &Path) -> String {
+        let conn = Connection::open(db).unwrap();
+        conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap()
+    }
+
+    fn marker(db: &Path) -> Option<String> {
+        use rusqlite::OptionalExtension as _;
+        let conn = Connection::open(db).unwrap();
+        conn.query_row("SELECT v FROM meta WHERE k = 'marker'", [], |r| r.get(0))
+            .optional()
+            .unwrap()
+    }
+
+    /// A live database, grown past one page and then checkpointed, with a
+    /// still-open write connection.
+    ///
+    /// Grown on purpose. That is what makes a stale-log failure the user's
+    /// failure rather than a merely stale answer: a log whose pages are
+    /// replayed into a file laid out differently leaves the header claiming
+    /// what the file does not hold, which is `database disk image is
+    /// malformed`. A single-page database has nothing to disagree about.
+    fn live_with_a_log(out: &Path) -> Connection {
+        build(&[fixture("terms.zip")], &[], out, &|_| {}).expect("the first build");
+        let live = Connection::open(out).unwrap();
+        live.execute_batch(
+            "INSERT INTO meta (k, v)
+               WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 4000)
+               SELECT 'pad' || i, hex(zeroblob(100)) FROM s;
+             PRAGMA wal_checkpoint(TRUNCATE);
+             INSERT OR REPLACE INTO meta (k, v) VALUES ('marker', 'old');",
+        )
+        .unwrap();
+        assert!(suffixed(out, "-wal").exists(), "the log is what this test is about");
+        live
+    }
+
+    /// The same database held the way a running daemon holds it, and left in
+    /// the only state a stale log can actually do harm from: a log whose
+    /// frames are **not yet copied back** into the database.
+    ///
+    /// Every step of that is load-bearing, so none of it is decoration.
+    /// The reader takes its snapshot *before* the last commit, so no close
+    /// can copy that commit back. The reader is read-only, so it can neither
+    /// drain the log nor delete it. Between them the log outlives the writer
+    /// with live frames in it - which is exactly the state a daemon holding a
+    /// dictionary leaves a rebuild to find, and the state in which replaying
+    /// the log into a different file destroys it. A fully copied-back log is
+    /// harmless: its index says there is nothing to replay, and a reader
+    /// reads straight past it.
+    fn held_by_a_reader(out: &Path) -> Connection {
+        build(&[fixture("terms.zip")], &[], out, &|_| {}).expect("the first build");
+        let writer = Connection::open(out).unwrap();
+        writer
+            .execute_batch(
+                "INSERT INTO meta (k, v)
+                   WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 120)
+                   SELECT 'pad' || i, hex(zeroblob(100)) FROM s;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let reader = Connection::open_with_flags(out, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader.execute_batch("BEGIN; SELECT COUNT(*) FROM meta;").unwrap();
+        writer
+            .execute_batch("INSERT OR REPLACE INTO meta (k, v) VALUES ('marker', 'old');")
+            .unwrap();
+        drop(writer);
+        assert!(suffixed(out, "-wal").exists(), "a held-open reader keeps the log alive");
+        reader
+    }
+
+    /// The bug a user hit, and the reason [`drop_sidecars`] exists.
+    ///
+    /// A write-ahead log's sidecars are keyed to the database's **file
+    /// name**, never to its inode, and `rename` replaces only the main
+    /// file. So a promote that renames and stops leaves the old database's
+    /// log sitting under the new database's name, and the next cold reader
+    /// recovers it straight into the new file - writing the old
+    /// dictionary's pages over the new one's, permanently, on disk. The
+    /// reader does not get a stale answer, it gets
+    /// `database disk image is malformed`.
+    ///
+    /// Without [`drop_sidecars`] this test reports
+    /// `wrong # of entries in index sqlite_autoindex_meta_1` from
+    /// `integrity_check` - the same class of answer as the
+    /// `Tree 3 page 3 cell 0: invalid page number` the user's database gave.
+    /// Which page-level complaint comes out depends on which of the new
+    /// file's pages the old log happens to land on, so the assertion that
+    /// matters is the invariant: **no sidecar of the replaced database may
+    /// survive the promote.**
+    #[test]
+    fn a_promote_never_leaves_the_previous_databases_log_beside_the_new_one() {
+        let out = out_path("stale_log");
+        let guard = TempDbGuard(out.clone());
+        let live = held_by_a_reader(&out);
+
+        // A different dictionary built over it with `live` still open -
+        // exactly as the daemon's connection is during a rebuild.
+        build(&[media_archive()], &[], &out, &|_| {}).expect("the rebuild promotes");
+
+        // The invariant, checked while the daemon's handle is still there.
+        assert!(!suffixed(&out, "-wal").exists(), "the old log must not outlive the promote");
+        assert!(!suffixed(&out, "-shm").exists(), "nor its index");
+
+        // Then the symptom, met the way the user met it: the process that
+        // held the old log has gone, and something opens the file cold.
+        drop(live);
+        assert_eq!("ok", verdict(&out), "a cold reader must find the promoted file sound");
+        assert_eq!("FixtureMedia", first_dict(&out), "it is the dictionary just built");
+        assert_eq!(None, marker(&out), "with nothing recovered out of the old log");
+        drop(guard);
+    }
+
+    /// The crash window [`promote`]'s ordering exists to make safe. Between
+    /// the old log going and the rename landing, the old database has to be
+    /// one a reader can still open whole - which is what the checkpoint
+    /// before the removal buys, and why the removal cannot come after the
+    /// rename instead.
+    #[test]
+    fn a_promote_interrupted_before_the_rename_leaves_the_old_database_whole() {
+        let out = out_path("interrupted");
+        let guard = TempDbGuard(out.clone());
+        let live = live_with_a_log(&out);
+        let tmp = suffixed(&out, ".building");
+        let tmp_guard = TempDbGuard(tmp.clone());
+        build_into(&[media_archive()], &[], &tmp, &|_| {}).expect("the new build");
+
+        verify_built(&tmp, &|_| {}).expect("the new build checks out");
+        drain_wal(&out);
+        drop_sidecars(&out).expect("the old log goes");
+        // -- the process dies here, one syscall short of the rename --
+
+        assert_eq!("ok", verdict(&out), "the old database has to still be readable");
+        assert_eq!("FixtureTerms", first_dict(&out), "and still be the old one");
+        assert_eq!(
+            Some("old".to_string()),
+            marker(&out),
+            "the checkpoint is what keeps the log's own rows: dropping a log \
+             that had not been drained is how a promote loses a transaction",
+        );
+        drop(live);
+        drop(tmp_guard);
+        drop(guard);
+    }
+
+    /// The promote gate. `build_into` runs the bulk load under
+    /// `synchronous = OFF`, so a build killed mid-write can leave a file
+    /// that opens and does not read - and promoting that over a working
+    /// dictionary turns one lost rebuild into a lost dictionary. Driven
+    /// through [`promote`] rather than [`build`] on purpose: a torn page is
+    /// not something a successful build can be asked to produce.
+    #[test]
+    fn a_build_that_does_not_check_out_is_refused_rather_than_promoted() {
+        let out = out_path("torn_build");
+        let guard = TempDbGuard(out.clone());
+        build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out, &|_| {}).unwrap();
+        let good = std::fs::read(&out).unwrap();
+
+        // A finished build with a page zeroed out of the middle of it. Page
+        // 1 is the header and would fail to open at all, which would prove
+        // only that SQLite reads headers; this is the harder case, a file
+        // that opens cleanly and is not a database.
+        let tmp = suffixed(&out, ".building");
+        let tmp_guard = TempDbGuard(tmp.clone());
+        let mut torn = good.clone();
+        assert!(torn.len() > 3 * 8192, "the fixture has to be more than three pages");
+        torn[2 * 8192..3 * 8192].fill(0);
+        std::fs::write(&tmp, &torn).unwrap();
+
+        let err = promote(&tmp, &out, &|_| {}).expect_err("a torn build must not be promoted");
+        assert!(format!("{err:#}").contains("did not check out"), "got: {err:#}");
+        assert_eq!(good, std::fs::read(&out).unwrap(), "the working database is untouched");
+        drop(tmp_guard);
+        drop(guard);
     }
 
     #[test]
