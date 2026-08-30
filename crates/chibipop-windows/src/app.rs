@@ -1126,8 +1126,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         Ordering::SeqCst,
     );
 
-    let mut renderer =
-        Renderer::new(popup.hwnd()).context("creating the D2D/DirectWrite renderer")?;
+    // The painter opens its own read-only connection onto the media store:
+    // the worker owns the dictionary on another thread.
+    let mut renderer = Renderer::new(popup.hwnd(), &db_path)
+        .context("creating the D2D/DirectWrite renderer")?;
     let mut theme = theme_from_config(&live.popup);
     let alpha = (theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
     popup.set_alpha(alpha);

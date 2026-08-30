@@ -172,6 +172,14 @@ pub struct Popup {
     /// Hands out `Panel::id`; never reused.
     next_id: usize,
     text: TextEngine,
+    /// The painter's decoded-asset cache, or `None` when this build cannot
+    /// open the dictionary database.
+    ///
+    /// Its own `MediaStore` connection, on this thread, because the worker
+    /// owns the dictionary on another and a `rusqlite::Connection` is not
+    /// `Sync`. `None` is a real state and not a failure: the popup still
+    /// paints, with every image on the `alt`-text rung of its ladder.
+    media: Option<chibipop_linux::media::MediaSurfaces>,
     /// The logical theme; every render scales a copy of it.
     theme: Theme,
     layer: Layer,
@@ -208,7 +216,12 @@ impl Popup {
     /// An `Err` from this function therefore means something no session
     /// can work without (no `wl_compositor`, no `wl_shm`, no shared
     /// memory), which the capability report has already named as fatal.
-    pub fn bind(globals: &GlobalList, qh: &QueueHandle<App>, config: &Config) -> Result<Popup> {
+    pub fn bind(
+        globals: &GlobalList,
+        qh: &QueueHandle<App>,
+        config: &Config,
+        db: &std::path::Path,
+    ) -> Result<Popup> {
         let compositor = CompositorState::bind(globals, qh)
             .map_err(|e| anyhow!("binding wl_compositor: {e}"))?;
         let shm = Shm::bind(globals, qh).map_err(|e| anyhow!("binding wl_shm: {e}"))?;
@@ -275,6 +288,21 @@ impl Popup {
         pointer.set_script(script);
         notes.extend(script_notes);
 
+        // The painter's own media store. A database this build cannot
+        // open is one diagnostic and no images, never a popup that will
+        // not draw: an image node then renders its `alt` text, which is
+        // the character it stood for.
+        let media = match chibipop_linux::media::MediaSurfaces::open(db) {
+            Ok(cache) => Some(cache),
+            Err(e) => {
+                notes.push(format!(
+                    "popup: no dictionary media - {e:#}; image nodes will render their \
+                     alt text"
+                ));
+                None
+            }
+        };
+
         Ok(Popup {
             qh: qh.clone(),
             compositor,
@@ -288,6 +316,7 @@ impl Popup {
             panels: Vec::new(),
             next_id: 0,
             text,
+            media,
             theme,
             layer: layer_of(config.popup_layer()),
             caps: (config.popup.max_width_percent, config.popup.max_height_percent),
@@ -895,6 +924,7 @@ impl Popup {
                     scale: pending.scale as f32,
                 },
                 &mut self.text,
+                self.media.as_mut(),
                 &mut pixmap,
             );
             to_argb(pixmap.data_mut());

@@ -13,6 +13,7 @@
 
 use crate::controller::HitAction;
 use crate::dict::gloss::{GlossDoc, ItemType, Kind, NodeId, NodePath, Scalar, StyleKey, Tag};
+use crate::dict::media::{Intrinsic, MediaFormat, MediaKey};
 use crate::present::{AnkiPopupState, Presentation};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
 use std::fmt;
@@ -323,6 +324,42 @@ pub enum ElemKind {
     /// Per-character click targets.
     Headword,
     BackButton,
+    /// One asset, composited inline.
+    ///
+    /// Its `rect` is the resolved
+    /// image box and its `image` names
+    /// the asset (see [`SceneImage`]);
+    /// its `text` and `spans` are the
+    /// `alt` fallback a bin draws when
+    /// the asset will not decode. It
+    /// advances no y, because the
+    /// paragraph it sits inside
+    /// already reserved its line.
+    Image,
+    /// A table's block container.
+    ///
+    /// Its `rect` is the whole grid,
+    /// its `block_box` the `table`'s
+    /// own declared box, and it has no
+    /// text: every word in a table
+    /// belongs to a cell. It leads the
+    /// cells in draw order, so a
+    /// table's own background sits
+    /// under them.
+    Table,
+    /// One cell's box.
+    ///
+    /// Its `rect` and its `block_box`
+    /// are the cell's border box, with
+    /// the collapse already resolved
+    /// into the box's edge widths
+    /// ([`collapsed`]). Also textless:
+    /// the cell's own paragraphs are
+    /// the elements that follow it,
+    /// each with its own address, so a
+    /// cell holding two blocks is two
+    /// runs inside one border.
+    Cell,
 }
 
 impl ElemKind {
@@ -335,6 +372,9 @@ impl ElemKind {
             ElemKind::Collapsed => "Collapsed",
             ElemKind::Headword => "Headword",
             ElemKind::BackButton => "BackButton",
+            ElemKind::Image => "Image",
+            ElemKind::Table => "Table",
+            ElemKind::Cell => "Cell",
         }
     }
 }
@@ -433,6 +473,150 @@ impl RubyRun {
             italic: self.italic,
             color: self.color,
         }
+    }
+}
+
+/// How an asset is meant to be
+/// painted.
+///
+/// The schema's own two values. 15 of
+/// the census's 72 dictionaries
+/// declare `monochrome` over 117 687
+/// nodes, and it means the asset is a
+/// *mask*: black ink on transparency,
+/// authored for a light page. Painted
+/// as-is it is invisible on a dark
+/// panel, which is why it is a
+/// property the scene carries rather
+/// than a detail the store keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Appearance {
+    /// Composite the asset's own
+    /// pixels. The schema's `auto`,
+    /// and the absence of the field.
+    #[default]
+    Auto,
+    /// A mask: tint it with the text
+    /// colour it stands in for.
+    Monochrome,
+}
+
+/// What a painter does with a
+/// monochrome asset's pixels.
+///
+/// Decided here rather than in each
+/// bin, so the two cannot disagree
+/// about which assets take the
+/// expensive path - and so the bound
+/// is one table-driven test instead of
+/// two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tint {
+    /// Composite them unchanged.
+    None,
+    /// Multiply their alpha by the
+    /// text colour, in place.
+    Alpha,
+    /// Rasterise the vector at this
+    /// pixel size first, then multiply.
+    Raster(u32, u32),
+}
+
+/// One asset, as a scene element names
+/// it.
+///
+/// No pixels and no bytes: core has
+/// the rect from the media row's
+/// recorded intrinsic size and the key
+/// to fetch bytes with, which is the
+/// whole reason ticket 03 records
+/// sizes at extraction time. Decoding
+/// is the bin's, behind its own
+/// surface cache.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneImage {
+    /// The asset to composite, or
+    /// `None` for the placeholder rung.
+    ///
+    /// `None` means the store had no
+    /// row - no bytes, or no readable
+    /// intrinsic size - *and* the node
+    /// carried no `alt` text to put in
+    /// the flow instead. The element is
+    /// then a box a bin outlines, which
+    /// is the last rung of the ladder
+    /// and never nothing: nothing is a
+    /// hole in a word.
+    pub key: Option<MediaKey>,
+    /// The format the media row
+    /// recorded, which is what decides
+    /// whether tinting has to rasterise
+    /// a vector first.
+    pub format: Option<MediaFormat>,
+    pub appearance: Appearance,
+    /// The schema's `background`.
+    /// `false` paints no backing fill,
+    /// which is what every image node
+    /// in the census's samples asks
+    /// for.
+    pub background: bool,
+    /// Read and carried, acted on by
+    /// nothing: the spec builds no
+    /// hover-to-reveal affordance, and
+    /// dropping the fields would mean
+    /// re-deriving them when it does.
+    pub collapsed: bool,
+    pub collapsible: bool,
+}
+
+impl SceneImage {
+    /// What to do with this asset's
+    /// pixels, given the box it
+    /// resolved to and the em it sits
+    /// in.
+    ///
+    /// Hoshi Reader's bound, and it
+    /// exists because rasterise-then-
+    /// tint is the expensive path: a
+    /// vector has no pixels until
+    /// something picks a size, and
+    /// picking the panel's own would
+    /// re-rasterise a 300x150 default-
+    /// object SVG on every theme
+    /// change. So the path is taken
+    /// only for a gaiji-sized box -
+    /// [`IMAGE_TINT_EM`] on both axes -
+    /// at twice the device pixel ratio
+    /// for legibility, clamped to
+    /// [`IMAGE_TINT_CLAMP`] on the
+    /// longest edge. A larger
+    /// monochrome asset composites
+    /// untinted, which is Hoshi
+    /// Reader's answer too: an
+    /// illustration is not a mask.
+    pub fn tint(&self, rect: SceneRect, em: f32, dpr: f32) -> Tint {
+        if self.appearance != Appearance::Monochrome {
+            return Tint::None;
+        }
+        if self.format != Some(MediaFormat::Svg) {
+            // A raster mask already has
+            // pixels, so tinting it is
+            // one pass over the surface
+            // the cache already holds.
+            return Tint::Alpha;
+        }
+        let bound = IMAGE_TINT_EM * em;
+        if !(rect.w > 0.0 && rect.h > 0.0 && rect.w <= bound && rect.h <= bound) {
+            return Tint::None;
+        }
+        let scale = IMAGE_TINT_SCALE * dpr.max(1.0);
+        let (w, h) = (rect.w * scale, rect.h * scale);
+        let longest = w.max(h);
+        let fit = if longest > IMAGE_TINT_CLAMP { IMAGE_TINT_CLAMP / longest } else { 1.0 };
+        Tint::Raster(
+            (w * fit).round().max(1.0) as u32,
+            (h * fit).round().max(1.0) as u32,
+        )
     }
 }
 
@@ -821,6 +1005,20 @@ pub struct SceneElem {
     /// came from, or `None` for the
     /// panel's own chrome.
     pub origin: Option<GlossOrigin>,
+    /// The asset an
+    /// [`ElemKind::Image`] element
+    /// composites, and `None` on every
+    /// other kind.
+    ///
+    /// Separate from the kind because
+    /// [`ElemKind`] is `Copy` and a
+    /// [`MediaKey`] owns its path: the
+    /// path is a dictionary-authored
+    /// string that has to round-trip
+    /// verbatim, so it is stored once
+    /// and not copied per element per
+    /// frame.
+    pub image: Option<SceneImage>,
 }
 
 impl SceneElem {
@@ -1074,29 +1272,33 @@ pub fn scene(
 
     let mut y = 0.0f32;
     let mut reserved_w = 0.0f32;
-    let mut out = Vec::with_capacity(elems.len());
-    let mut hits = Vec::new();
     let mut probes = Vec::new();
-    let mut measured = Measured::default();
-    // The gloss walk's two scratch
-    // buffers: one paragraph's spans
-    // as the seam takes them, and the
-    // per-line boxes one run of spans
-    // covers - a link's, for its hit
-    // targets, and a pill's, for its
-    // box. Both are refilled per
-    // element, so a rich entry costs
-    // no allocation per element per
-    // frame.
-    let mut run: Vec<StyledSpan<'_>> = Vec::new();
-    let mut cover: Vec<Cover> = Vec::new();
+    // Every buffer the gloss walk
+    // reuses, and the scene it is
+    // filling. Bundled because a
+    // table lays its cells out
+    // through the same paragraph
+    // pass the panel's own stream
+    // uses, so the pass has to be
+    // callable from two places
+    // without threading eight
+    // arguments through both.
+    let mut pass = Pass {
+        font,
+        theme,
+        measured: Measured::default(),
+        run: Vec::new(),
+        cover: Vec::new(),
+        out: Vec::with_capacity(elems.len()),
+        hits: Vec::new(),
+    };
 
     for elem in &elems {
         let advance = match elem {
             Elem::Separator { top_gap } => {
                 let h = theme.separator_height;
                 y += top_gap;
-                out.push(SceneElem {
+                pass.out.push(SceneElem {
                     kind: ElemKind::Separator,
                     text: String::new(),
                     color: theme.separator,
@@ -1115,6 +1317,7 @@ pub fn scene(
                     block_box: None,
                     inline_boxes: Vec::new(),
                     origin: None,
+                    image: None,
                 });
                 h
             }
@@ -1124,8 +1327,8 @@ pub fn scene(
                 // the run is measured
                 // pre-alignment, so x comes
                 // from the width.
-                let met = measure_line(m, font, line, content_w, &mut measured)?;
-                out.push(SceneElem {
+                let met = measure_line(m, font, line, content_w, &mut pass.measured)?;
+                pass.out.push(SceneElem {
                     kind: ElemKind::Corner,
                     text: line.text.clone(),
                     color: line.color,
@@ -1149,6 +1352,7 @@ pub fn scene(
                     block_box: None,
                     inline_boxes: Vec::new(),
                     origin: None,
+                    image: None,
                 });
                 reserved_w = met.w + CORNER_GAP;
                 0.0
@@ -1156,20 +1360,20 @@ pub fn scene(
             Elem::Text(line) => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                let met = measure_line(m, font, line, avail_w, &mut measured)?;
+                let met = measure_line(m, font, line, avail_w, &mut pass.measured)?;
                 let h = met.h;
                 y += line.top_gap;
-                out.push(text_elem(ElemKind::Text, line, &met, origin, y, avail_w));
+                pass.out.push(text_elem(ElemKind::Text, line, &met, origin, y, avail_w));
                 h
             }
             Elem::Collapsed(idx, line) => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                let met = measure_line(m, font, line, avail_w, &mut measured)?;
+                let met = measure_line(m, font, line, avail_w, &mut pass.measured)?;
                 let h = met.h;
                 y += line.top_gap;
-                out.push(text_elem(ElemKind::Collapsed, line, &met, origin, y, avail_w));
-                hits.push(HitTarget {
+                pass.out.push(text_elem(ElemKind::Collapsed, line, &met, origin, y, avail_w));
+                pass.hits.push(HitTarget {
                     x: None,
                     y: origin + y,
                     w: None,
@@ -1181,10 +1385,10 @@ pub fn scene(
             Elem::Headword { headword, prefix_u16, line } => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                let met = measure_line(m, font, line, avail_w, &mut measured)?;
+                let met = measure_line(m, font, line, avail_w, &mut pass.measured)?;
                 let h = met.h;
                 y += line.top_gap;
-                out.push(text_elem(ElemKind::Headword, line, &met, origin, y, avail_w));
+                pass.out.push(text_elem(ElemKind::Headword, line, &met, origin, y, avail_w));
 
                 let mut at = Vec::new();
                 let mut chars = Vec::new();
@@ -1205,7 +1409,7 @@ pub fn scene(
                         &mut probes,
                     )?;
                     for (ch, b) in chars.iter().zip(probes.iter()) {
-                        hits.push(HitTarget {
+                        pass.hits.push(HitTarget {
                             x: Some(origin + b.x),
                             y: origin + y + b.y,
                             w: Some(b.w),
@@ -1219,227 +1423,19 @@ pub fn scene(
             Elem::Gloss(flow) => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
-                // The box first: its margin,
-                // border and padding decide
-                // the width the paragraph is
-                // measured at, so they cannot
-                // be applied afterwards. A
-                // paragraph carrying no box
-                // gets `avail_w` and the pen
-                // it always got, which is why
-                // no geometry golden moves.
-                let bx = flow.block.style;
-                let (margin, border, padding) =
-                    (bx.margin, bx.border_used(), bx.padding);
-                let lead = Edges {
-                    top: margin.top + border.top + padding.top,
-                    right: margin.right + border.right + padding.right,
-                    bottom: margin.bottom + border.bottom + padding.bottom,
-                    left: margin.left + border.left + padding.left,
-                };
-                let wrap_w = (avail_w - lead.horizontal()).max(1.0);
-
-                // The whole paragraph in one
-                // request: its spans wrap
-                // together, so a bold word and
-                // a normal one beside it in the
-                // source share a line and the
-                // paragraph rewraps as one unit
-                // (ADR-0013).
-                run.clear();
-                run.extend(flow.styled_spans(font));
-                // The readings first, because
-                // what they measure to is what
-                // sizes the filler span that
-                // buys each one its slot - so
-                // the paragraph below is
-                // measured with the taller
-                // lines already asked for, and
-                // `met.h` counts the readings
-                // without anything after the
-                // fact touching it. A bin
-                // re-measuring these same
-                // spans gets the same lines.
-                let read = measure_readings(m, font, flow, wrap_w, &mut run)?;
-                m.measure(MeasureRun { spans: &run, max_w: wrap_w }, &mut measured)?;
-                let met = measured.metrics;
-                y += flow.top_gap;
-                // Margins are in the advance,
-                // and are *not* collapsed
-                // against a sibling's: see
-                // [`Flow::block`].
-                let h = lead.top + met.h + padding.bottom + border.bottom + margin.bottom;
-                let pen = (origin + lead.left, origin + y + lead.top);
-                // One offset per line, so a
-                // centred paragraph that
-                // wrapped centres each of its
-                // lines and not just its ink
-                // box.
-                let slack = flow.block.align.slack_before();
-                let line_at = |line: LineBox| pen.0 + (wrap_w - line.w).max(0.0) * slack;
-                // Each reading over the base
-                // it belongs to, in the slot
-                // the lines already carry.
-                let ruby = place_ruby(flow, &read, &measured, wrap_w, slack);
-
-                let spans = flow
-                    .spans
-                    .iter()
-                    .zip(run.iter())
-                    .enumerate()
-                    .map(|(i, (s, asked))| {
-                        // A span that wrapped is
-                        // placed against the
-                        // first line it touches;
-                        // one that measured to
-                        // nothing keeps the
-                        // shift its em alone
-                        // decided.
-                        let (line, span_h) = first_box(&measured, i as u32);
-                        ElemSpan {
-                            at: s.at,
-                            len: s.len,
-                            color: s.style.color,
-                            // The size the seam was
-                            // handed, which for a
-                            // ruby filler is not
-                            // the size the walk
-                            // resolved.
-                            size: asked.size,
-                            weight: s.style.weight,
-                            italic: s.style.italic,
-                            shift: shift_on(s.style, line, span_h),
-                        }
-                    })
-                    .collect();
-
-                // One target per line a link
-                // touches, so a cross-reference
-                // that wrapped is clickable on
-                // both halves of itself.
-                for (i, action) in flow.links.iter().enumerate() {
-                    span_cover(&measured, &mut cover, |b| {
-                        flow.spans.get(b as usize).is_some_and(|s| s.link == i as u32)
-                    });
-                    for &(line, left, right, _) in &cover {
-                        let line = measured.lines[line as usize];
-                        hits.push(HitTarget {
-                            x: Some(line_at(line) + left),
-                            y: pen.1 + line.y,
-                            w: Some(right - left),
-                            h: line.h,
-                            action: action.clone(),
-                        });
-                    }
-                }
-
-                // A pill per line its run
-                // touches, drawn around the
-                // text rather than pushing it
-                // aside: the measurement seam
-                // takes styled spans and no
-                // boxes (ADR-0013), so an
-                // inline box's padding cannot
-                // reserve room on its line.
-                // Every census pill is a short
-                // label its dictionary already
-                // spaces with `marginRight`, so
-                // what this costs is the pill's
-                // border overlapping the gap
-                // beside it, never a glyph.
-                let mut inline_boxes = Vec::new();
-                for run in &flow.inline {
-                    span_cover(&measured, &mut cover, |b| {
-                        b >= run.from && b < run.to
-                    });
-                    let (p, b) = (run.style.padding, run.style.border_used());
-                    for &(line, left, right, span_h) in &cover {
-                        let line = measured.lines[line as usize];
-                        let shift = flow
-                            .spans
-                            .get(run.from as usize)
-                            .map_or(0.0, |s| shift_on(s.style, line, span_h));
-                        // The run's own text box
-                        // on this line, from the
-                        // two facts the seam
-                        // reports about a line:
-                        // how tall it is and how
-                        // far down it the
-                        // baseline sits.
-                        let ascent = if line.h > 0.0 {
-                            span_h * line.baseline / line.h
-                        } else {
-                            span_h
-                        };
-                        let top = line.y + line.baseline - shift - ascent;
-                        inline_boxes.push(ElemBox {
-                            rect: SceneRect {
-                                x: line_at(line) + left - p.left - b.left,
-                                y: pen.1 + top - p.top - b.top,
-                                w: (right - left) + p.horizontal() + b.horizontal(),
-                                h: span_h + p.vertical() + b.vertical(),
-                            },
-                            style: run.style,
-                        });
-                    }
-                }
-
-                let base = flow.base(theme);
-                // A reading wider than its
-                // base overhangs it, and the
-                // ink box is the ink: without
-                // this an element would report
-                // a width its own furigana
-                // exceeds. It can only ever
-                // overhang to the right -
-                // [`place_ruby`] clamps the
-                // left edge into the box.
-                let ink_w = ruby.iter().fold(met.w, |a, r| a.max(r.x + r.w));
-                out.push(SceneElem {
-                    kind: ElemKind::Text,
-                    text: flow.text.clone(),
-                    color: base.color,
-                    font_size: base.size,
-                    weight: base.weight,
-                    italic: base.italic,
-                    top_gap: flow.top_gap,
-                    wrap_w,
-                    align: flow.block.align,
-                    pen,
-                    rect: SceneRect {
-                        x: pen.0 + (wrap_w - met.w).max(0.0) * slack,
-                        y: pen.1,
-                        w: ink_w,
-                        h: met.h,
-                    },
-                    lines: met.lines,
-                    advance: h,
-                    spans,
-                    ruby,
-                    block_box: bx.exists().then(|| ElemBox {
-                        rect: SceneRect {
-                            x: origin + margin.left,
-                            y: origin + y + margin.top,
-                            w: (avail_w - margin.horizontal()).max(0.0),
-                            h: border.vertical() + padding.vertical() + met.h,
-                        },
-                        style: bx,
-                    }),
-                    inline_boxes,
-                    origin: Some(GlossOrigin {
-                        dict_id: flow.dict_id,
-                        entry_id: flow.entry_id,
-                        path: flow.path,
-                    }),
-                });
-                h
+                pass.gloss(m, flow, (origin, origin + y), avail_w)?.1
+            }
+            Elem::Table(grid) => {
+                let avail_w = (content_w - reserved_w).max(1.0);
+                reserved_w = 0.0;
+                pass.table(m, grid, (origin, origin + y), avail_w)?.1
             }
             Elem::BackButton(line) => {
-                let met = measure_line(m, font, line, content_w, &mut measured)?;
+                let met = measure_line(m, font, line, content_w, &mut pass.measured)?;
                 let h = met.h;
                 y += line.top_gap;
-                out.push(text_elem(ElemKind::BackButton, line, &met, origin, y, content_w));
-                hits.push(HitTarget {
+                pass.out.push(text_elem(ElemKind::BackButton, line, &met, origin, y, content_w));
+                pass.hits.push(HitTarget {
                     x: None,
                     y: origin + y,
                     w: None,
@@ -1455,7 +1451,7 @@ pub fn scene(
     let used_h = y;
 
     let side = if has_side {
-        Some(side_panel(&entries, theme, origin, content_w, m, &mut measured)?)
+        Some(side_panel(&entries, theme, origin, content_w, m, &mut pass.measured)?)
     } else {
         None
     };
@@ -1487,7 +1483,7 @@ pub fn scene(
                     color,
                 },
                 w,
-                &mut measured,
+                &mut pass.measured,
             )?;
             Some(AnkiSlot {
                 label,
@@ -1501,8 +1497,8 @@ pub fn scene(
     Ok(PopupScene {
         origin,
         content_w,
-        elems: out,
-        hits,
+        elems: pass.out,
+        hits: pass.hits,
         side,
         anki,
         used_h,
@@ -1510,6 +1506,1058 @@ pub fn scene(
         view_h,
         panel_w,
     })
+}
+
+/// One popup's layout, in progress.
+///
+/// Two things at once, and
+/// deliberately: the scene being
+/// filled, and every buffer filling
+/// it reuses. A gloss paragraph is
+/// laid out from the panel's own
+/// element stream *and* from inside a
+/// table cell, so the code that does
+/// it has to be callable twice - and
+/// a free function would have carried
+/// eight arguments, six of which
+/// never change over a whole panel.
+///
+/// `'a` is the element stream's: the
+/// spans handed to the seam borrow a
+/// paragraph's own text, so the
+/// scratch run cannot outlive the
+/// paragraphs it was filled from.
+struct Pass<'a> {
+    font: &'a str,
+    theme: &'a Theme,
+    /// One paragraph's measured lines
+    /// and span boxes.
+    measured: Measured,
+    /// One paragraph's spans, as the
+    /// seam takes them.
+    run: Vec<StyledSpan<'a>>,
+    /// The per-line boxes one run of
+    /// spans covers - a link's, for
+    /// its hit targets, and a pill's,
+    /// for its box.
+    cover: Vec<Cover>,
+    /// The scene so far, in draw
+    /// order.
+    out: Vec<SceneElem>,
+    /// The targets it has earned.
+    hits: Vec<HitTarget>,
+}
+
+impl<'a> Pass<'a> {
+    /// One gloss paragraph, measured,
+    /// placed and pushed.
+    ///
+    /// `at` is the top-left corner of
+    /// the paragraph's margin box,
+    /// before its own `top_gap`, and
+    /// `avail_w` is what the container
+    /// around it offers. Two answers
+    /// come back: the width the
+    /// paragraph would like - its ink
+    /// plus everything its box puts
+    /// beside it, which is what a
+    /// table column's demand is built
+    /// from - and the y the walk
+    /// advances by, its gap included.
+    fn gloss(
+        &mut self,
+        m: &mut dyn TextMeasure,
+        flow: &'a Flow,
+        at: (f32, f32),
+        avail_w: f32,
+    ) -> Result<(f32, f32), MeasureError> {
+        let (font, theme) = (self.font, self.theme);
+        // The box first: its margin,
+        // border and padding decide
+        // the width the paragraph is
+        // measured at, so they cannot
+        // be applied afterwards. A
+        // paragraph carrying no box
+        // gets `avail_w` and the pen
+        // it always got, which is why
+        // no geometry golden moves.
+        let bx = flow.block.style;
+        let (margin, border, padding) = (bx.margin, bx.border_used(), bx.padding);
+        // Every list level above it,
+        // added up and *outside* the
+        // box: the indent is the
+        // list's own padding
+        // (`--list-padding1`), so it
+        // shifts an item's border box
+        // where the item's own padding
+        // insets the text inside that
+        // box. [`Block::indent`] says
+        // why it cannot ride in the
+        // box itself.
+        let indent = flow.block.indent;
+        let lead = Edges {
+            top: margin.top + border.top + padding.top,
+            right: margin.right + border.right + padding.right,
+            bottom: margin.bottom + border.bottom + padding.bottom,
+            left: indent + margin.left + border.left + padding.left,
+        };
+        let wrap_w = (avail_w - lead.horizontal()).max(1.0);
+
+        // The whole paragraph in one
+        // request: its spans wrap
+        // together, so a bold word and
+        // a normal one beside it in the
+        // source share a line and the
+        // paragraph rewraps as one unit
+        // (ADR-0013).
+        self.run.clear();
+        self.run.extend(flow.styled_spans(font));
+        // The readings first, because
+        // what they measure to is what
+        // sizes the filler span that
+        // buys each one its slot - so
+        // the paragraph below is
+        // measured with the taller
+        // lines already asked for, and
+        // `met.h` counts the readings
+        // without anything after the
+        // fact touching it. A bin
+        // re-measuring these same
+        // spans gets the same lines.
+        let read = measure_readings(m, font, flow, wrap_w, &mut self.run)?;
+        // The images next, for the
+        // same reason and by the same
+        // rule: an image occupies
+        // inline space and grows the
+        // line it sits on, and the
+        // only thing that can do
+        // either is a span the
+        // measurer is charged for.
+        measure_images(m, font, flow, wrap_w, &mut self.run)?;
+        m.measure(MeasureRun { spans: &self.run, max_w: wrap_w }, &mut self.measured)?;
+        let met = self.measured.metrics;
+        let top = at.1 + flow.top_gap;
+        // Margins are in the advance,
+        // and are *not* collapsed
+        // against a sibling's: see
+        // [`Flow::block`].
+        let h = lead.top + met.h + padding.bottom + border.bottom + margin.bottom;
+        let pen = (at.0 + lead.left, top + lead.top);
+        // One offset per line, so a
+        // centred paragraph that
+        // wrapped centres each of its
+        // lines and not just its ink
+        // box.
+        let slack = flow.block.align.slack_before();
+        let line_at = |line: LineBox| pen.0 + (wrap_w - line.w).max(0.0) * slack;
+        // Each reading over the base
+        // it belongs to, in the slot
+        // the lines already carry.
+        let ruby = place_ruby(flow, &read, &self.measured, wrap_w, slack);
+        // Each image over the spacer
+        // run that bought its room.
+        let images = place_images(flow, &self.measured, pen, line_at);
+
+        let spans = flow
+            .spans
+            .iter()
+            .zip(self.run.iter())
+            .enumerate()
+            .map(|(i, (s, asked))| {
+                // A span that wrapped is
+                // placed against the
+                // first line it touches;
+                // one that measured to
+                // nothing keeps the
+                // shift its em alone
+                // decided.
+                let (line, span_h) = first_box(&self.measured, i as u32);
+                ElemSpan {
+                    at: s.at,
+                    len: s.len,
+                    color: s.style.color,
+                    // The size the seam was
+                    // handed, which for a
+                    // ruby filler is not
+                    // the size the walk
+                    // resolved.
+                    size: asked.size,
+                    weight: s.style.weight,
+                    italic: s.style.italic,
+                    shift: shift_on(s.style, line, span_h),
+                }
+            })
+            .collect();
+
+        // One target per line a link
+        // touches, so a cross-reference
+        // that wrapped is clickable on
+        // both halves of itself.
+        for (i, action) in flow.links.iter().enumerate() {
+            span_cover(&self.measured, &mut self.cover, |b| {
+                flow.spans.get(b as usize).is_some_and(|s| s.link == i as u32)
+            });
+            for &(line, left, right, _) in &self.cover {
+                let line = self.measured.lines[line as usize];
+                self.hits.push(HitTarget {
+                    x: Some(line_at(line) + left),
+                    y: pen.1 + line.y,
+                    w: Some(right - left),
+                    h: line.h,
+                    action: action.clone(),
+                });
+            }
+        }
+
+        // A pill per line its run
+        // touches, drawn around the
+        // text rather than pushing it
+        // aside: the measurement seam
+        // takes styled spans and no
+        // boxes (ADR-0013), so an
+        // inline box's padding cannot
+        // reserve room on its line.
+        // Every census pill is a short
+        // label its dictionary already
+        // spaces with `marginRight`, so
+        // what this costs is the pill's
+        // border overlapping the gap
+        // beside it, never a glyph.
+        let mut inline_boxes = Vec::new();
+        for run in &flow.inline {
+            span_cover(&self.measured, &mut self.cover, |b| b >= run.from && b < run.to);
+            let (p, b) = (run.style.padding, run.style.border_used());
+            for &(line, left, right, span_h) in &self.cover {
+                let line = self.measured.lines[line as usize];
+                let shift = flow
+                    .spans
+                    .get(run.from as usize)
+                    .map_or(0.0, |s| shift_on(s.style, line, span_h));
+                // The run's own text box
+                // on this line, from the
+                // two facts the seam
+                // reports about a line:
+                // how tall it is and how
+                // far down it the
+                // baseline sits.
+                let ascent = if line.h > 0.0 {
+                    span_h * line.baseline / line.h
+                } else {
+                    span_h
+                };
+                let top = line.y + line.baseline - shift - ascent;
+                inline_boxes.push(ElemBox {
+                    rect: SceneRect {
+                        x: line_at(line) + left - p.left - b.left,
+                        y: pen.1 + top - p.top - b.top,
+                        w: (right - left) + p.horizontal() + b.horizontal(),
+                        h: span_h + p.vertical() + b.vertical(),
+                    },
+                    style: run.style,
+                });
+            }
+        }
+
+        let base = flow.base(theme);
+        // A reading wider than its
+        // base overhangs it, and the
+        // ink box is the ink: without
+        // this an element would report
+        // a width its own furigana
+        // exceeds. It can only ever
+        // overhang to the right -
+        // [`place_ruby`] clamps the
+        // left edge into the box.
+        let ink_w = ruby.iter().fold(met.w, |a, r| a.max(r.x + r.w));
+        self.out.push(SceneElem {
+            kind: ElemKind::Text,
+            text: flow.text.clone(),
+            color: base.color,
+            font_size: base.size,
+            weight: base.weight,
+            italic: base.italic,
+            top_gap: flow.top_gap,
+            wrap_w,
+            align: flow.block.align,
+            pen,
+            rect: SceneRect {
+                x: pen.0 + (wrap_w - met.w).max(0.0) * slack,
+                y: pen.1,
+                w: ink_w,
+                h: met.h,
+            },
+            lines: met.lines,
+            advance: h,
+            spans,
+            ruby,
+            block_box: bx.exists().then(|| ElemBox {
+                rect: SceneRect {
+                    x: at.0 + indent + margin.left,
+                    y: top + margin.top,
+                    w: (avail_w - indent - margin.horizontal()).max(0.0),
+                    h: border.vertical() + padding.vertical() + met.h,
+                },
+                style: bx,
+            }),
+            inline_boxes,
+            origin: Some(GlossOrigin {
+                dict_id: flow.dict_id,
+                entry_id: flow.entry_id,
+                path: flow.path,
+            }),
+            image: None,
+        });
+        // After the paragraph, so an
+        // asset composites over the
+        // spacer run it stands on
+        // rather than under it. Each
+        // advances nothing: the line
+        // the riser grew is already
+        // in `h`.
+        self.out.extend(images);
+        Ok((lead.horizontal() + ink_w, flow.top_gap + h))
+    }
+
+    /// A run of pieces, stacked.
+    ///
+    /// What a table cell is: a block
+    /// container holding paragraphs
+    /// and, where a dictionary nested
+    /// one, another table. Reports the
+    /// widest piece and the total
+    /// advance.
+    fn block(
+        &mut self,
+        m: &mut dyn TextMeasure,
+        pieces: &'a [Piece],
+        at: (f32, f32),
+        avail_w: f32,
+    ) -> Result<(f32, f32), MeasureError> {
+        let (mut want, mut y) = (0.0f32, 0.0f32);
+        for piece in pieces {
+            let (w, advance) = match piece {
+                Piece::Flow(flow) => self.gloss(m, flow, (at.0, at.1 + y), avail_w)?,
+                Piece::Table(grid) => self.table(m, grid, (at.0, at.1 + y), avail_w)?,
+            };
+            want = want.max(w);
+            y += advance;
+        }
+        Ok((want, y))
+    }
+
+    /// How wide `pieces` would like to
+    /// be, without keeping the layout
+    /// that found out.
+    ///
+    /// A column's width comes from its
+    /// cells' content and a cell's
+    /// content cannot be measured
+    /// without a width, so the grid
+    /// lays each cell out once at the
+    /// width every column shares,
+    /// reads the extent, and rolls the
+    /// elements and targets back off
+    /// the scene. Truncating two
+    /// vectors is the whole of the
+    /// rollback, and it hands their
+    /// capacity straight to the real
+    /// pass.
+    fn trial(
+        &mut self,
+        m: &mut dyn TextMeasure,
+        pieces: &'a [Piece],
+        avail_w: f32,
+    ) -> Result<f32, MeasureError> {
+        let (elems, hits) = (self.out.len(), self.hits.len());
+        let want = self.block(m, pieces, (0.0, 0.0), avail_w)?.0;
+        self.out.truncate(elems);
+        self.hits.truncate(hits);
+        Ok(want)
+    }
+
+    /// One table, as a grid.
+    ///
+    /// Four steps, in order, and none
+    /// of them iterates: one rule
+    /// width for the whole grid, the
+    /// column widths from the cells'
+    /// content ([`Pass::columns`]),
+    /// every cell laid out at its
+    /// column with its y deferred, and
+    /// then the row heights, which is
+    /// the first moment a cell's own
+    /// top is known.
+    ///
+    /// The table element itself leads
+    /// the cells in draw order, so a
+    /// declared background sits under
+    /// them; its geometry is filled in
+    /// last, because a shrink-to-fit
+    /// table is exactly as wide as the
+    /// grid inside it.
+    fn table(
+        &mut self,
+        m: &mut dyn TextMeasure,
+        grid: &'a Grid,
+        at: (f32, f32),
+        avail_w: f32,
+    ) -> Result<(f32, f32), MeasureError> {
+        let bx = grid.block.style;
+        let (margin, border, padding) = (bx.margin, bx.border_used(), bx.padding);
+        let indent = grid.block.indent;
+        let lead = Edges {
+            top: margin.top + border.top + padding.top,
+            right: margin.right + border.right + padding.right,
+            bottom: margin.bottom + border.bottom + padding.bottom,
+            left: indent + margin.left + border.left + padding.left,
+        };
+        let avail = (avail_w - lead.horizontal()).max(1.0);
+        let top = at.1 + grid.top_gap;
+        let (x0, y0) = (at.0 + lead.left, top + lead.top);
+        let table_at = self.out.len();
+        self.out.push(box_elem(ElemKind::Table, grid.base, grid.block.align, grid.origin()));
+
+        // One rule width for the whole
+        // grid, the widest any cell
+        // asked for. That *is*
+        // `border-collapse`'s own
+        // conflict rule - the wider
+        // border wins the shared edge -
+        // and one width per grid is
+        // what makes the column
+        // arithmetic a sum instead of a
+        // negotiation.
+        let rule = grid.cells.iter().fold(0.0f32, |w, cell| {
+            let e = cell.style.border_used();
+            w.max(e.top).max(e.right).max(e.bottom).max(e.left)
+        });
+        // A grid of `cols` columns has
+        // `cols + 1` rules down it.
+        let rules = rule * (grid.cols as f32 + 1.0);
+        // Everything the columns have
+        // between them. Never negative:
+        // a table with more rules than
+        // room collapses its columns
+        // rather than reserving width
+        // it does not have.
+        let share = (avail - rules).max(0.0);
+        let inner = self.columns(m, grid, rule, share)?;
+
+        // Column edges: the *outside*
+        // of the rule before each
+        // column, and one past the
+        // last. Accumulated once and
+        // read twice, so two
+        // neighbours share one number
+        // and abut exactly - an edge
+        // differenced back out of a
+        // running sum does not, and
+        // `(x + rule) - rule` is not
+        // `x`.
+        let mut ex = Vec::with_capacity(grid.cols + 1);
+        let mut x = x0;
+        for w in &inner {
+            ex.push(x);
+            x += rule + w;
+        }
+        ex.push(x);
+
+        // Every cell at its column,
+        // with its y deferred to zero:
+        // a row is as tall as its
+        // tallest cell, so no cell's
+        // own top is known until every
+        // cell in that row has been
+        // measured.
+        let mut tall = Vec::with_capacity(grid.cells.len());
+        let mut placed = Vec::with_capacity(grid.cells.len());
+        for cell in &grid.cells {
+            let (c, across) = (cell.at.1, cell.span.1);
+            let pad = cell.style.padding;
+            // A cell spanning columns
+            // gets them and the rules it
+            // swallowed, less its own
+            // padding. Summed from the
+            // widths rather than taken
+            // off `ex`, because a wrap
+            // width one ulp short of its
+            // own text breaks a line
+            // that fits (see [`extent`]).
+            let w = (extent(&inner, c, across, rule) - pad.horizontal()).max(1.0);
+            let (elems, hits) = (self.out.len(), self.hits.len());
+            self.out.push(box_elem(ElemKind::Cell, cell.base, grid.block.align, cell.origin(grid)));
+            let advance = self.block(m, &cell.body, (ex[c] + rule + pad.left, 0.0), w)?.1;
+            placed.push((elems, self.out.len(), hits, self.hits.len()));
+            tall.push(pad.vertical() + advance);
+        }
+
+        let mut rows = vec![0.0f32; grid.rows];
+        distribute(
+            &mut rows,
+            grid.cells.iter().zip(&tall).map(|(c, &h)| (c.at.0, c.span.0, h)),
+            rule,
+        );
+        let mut ey = Vec::with_capacity(grid.rows + 1);
+        let mut y = y0;
+        for h in &rows {
+            ey.push(y);
+            y += rule + h;
+        }
+        ey.push(y);
+
+        for (i, cell) in grid.cells.iter().enumerate() {
+            let (r, c) = cell.at;
+            let (down, across) = cell.span;
+            let pad = cell.style.padding;
+            let (from, to, hit_from, hit_to) = placed[i];
+            // The content, dropped into
+            // the row the grid grew for
+            // it. Nothing stretches: a
+            // cell shorter than its row
+            // sits at the row's top,
+            // which is Yomitan's own
+            // `vertical-align: top`, and
+            // every line box is still
+            // the one the measurer
+            // reported.
+            shift(
+                &mut self.out[from + 1..to],
+                &mut self.hits[hit_from..hit_to],
+                ey[r] + rule + pad.top,
+            );
+            let style =
+                collapsed(cell.style, rule, c + across == grid.cols, r + down == grid.rows);
+            let used = style.border_used();
+            // A cell that draws a rule
+            // starts on its outside and
+            // one that does not starts
+            // on its inside, so the box
+            // holds exactly the rules
+            // this cell owns and its
+            // neighbour's box begins
+            // where this one ends.
+            let edge = |at: f32, own: f32| if own > 0.0 { at } else { at + rule };
+            let (left, top) = (edge(ex[c], used.left), edge(ey[r], used.top));
+            let rect = SceneRect {
+                x: left,
+                y: top,
+                w: ex[c + across] + used.right - left,
+                h: ey[r + down] + used.bottom - top,
+            };
+            let elem = &mut self.out[from];
+            elem.wrap_w = (extent(&inner, c, across, rule) - pad.horizontal()).max(1.0);
+            elem.pen = (ex[c] + rule + pad.left, ey[r] + rule + pad.top);
+            elem.rect = rect;
+            elem.block_box = Some(ElemBox { rect, style });
+        }
+
+        let grid_w = ex[grid.cols] + rule - x0;
+        let grid_h = ey[grid.rows] + rule - y0;
+        // Ticket 08's own arithmetic,
+        // with the grid's height where
+        // a paragraph's would be.
+        let h = lead.top + grid_h + padding.bottom + border.bottom + margin.bottom;
+        let elem = &mut self.out[table_at];
+        elem.top_gap = grid.top_gap;
+        elem.wrap_w = avail;
+        elem.pen = (x0, y0);
+        elem.rect = SceneRect { x: x0, y: y0, w: grid_w, h: grid_h };
+        elem.advance = h;
+        // Shrink-to-fit, as a table
+        // with no declared width is in
+        // a browser: the box is the
+        // grid's own width and not the
+        // container's.
+        elem.block_box = bx.exists().then(|| ElemBox {
+            rect: SceneRect {
+                x: at.0 + indent + margin.left,
+                y: top + margin.top,
+                w: border.horizontal() + padding.horizontal() + grid_w,
+                h: border.vertical() + padding.vertical() + grid_h,
+            },
+            style: bx,
+        });
+        Ok((lead.horizontal() + grid_w, grid.top_gap + h))
+    }
+
+    /// Every column's width, from the
+    /// content of the cells in it.
+    ///
+    /// Fixed sizing in one pass, and
+    /// deliberately not CSS
+    /// auto-layout:
+    ///
+    /// 1. Each cell is laid out once
+    ///    at `share` - the whole width
+    ///    the columns have between
+    ///    them - and what it measures
+    ///    to plus its own horizontal
+    ///    padding is what it asks for.
+    /// 2. A column takes the widest
+    ///    ask among the single-column
+    ///    cells in it, and a cell
+    ///    spanning several adds only
+    ///    its shortfall, spread evenly
+    ///    ([`distribute`]).
+    /// 3. If the columns together
+    ///    still want more than
+    ///    `share`, every one is
+    ///    multiplied by the single
+    ///    factor that makes them fit
+    ///    exactly.
+    ///
+    /// Step 3 is what keeps a table
+    /// inside the panel: the columns
+    /// shrink and their content
+    /// rewraps, so a wide table can
+    /// never ask the panel to widen
+    /// for it. There is no second
+    /// round and no negotiation - the
+    /// only thing measured again after
+    /// this is each cell at its final
+    /// width, which is the height
+    /// pass.
+    fn columns(
+        &mut self,
+        m: &mut dyn TextMeasure,
+        grid: &'a Grid,
+        rule: f32,
+        share: f32,
+    ) -> Result<Vec<f32>, MeasureError> {
+        let mut want = Vec::with_capacity(grid.cells.len());
+        for cell in &grid.cells {
+            let pad = cell.style.padding.horizontal();
+            // An empty cell asks for
+            // nothing and is not worth a
+            // measurement - which is most
+            // of a Jitendex forms table.
+            let ink = if cell.body.is_empty() {
+                0.0
+            } else {
+                self.trial(m, &cell.body, (share - pad).max(1.0))?
+            };
+            want.push(pad + ink);
+        }
+        let mut inner = vec![0.0f32; grid.cols];
+        distribute(
+            &mut inner,
+            grid.cells.iter().zip(&want).map(|(c, &w)| (c.at.1, c.span.1, w)),
+            rule,
+        );
+        let total: f32 = inner.iter().sum();
+        if total > share {
+            let scale = share / total;
+            for col in &mut inner {
+                *col *= scale;
+            }
+        }
+        Ok(inner)
+    }
+}
+
+// ---- tables ----
+
+/// Yomitan's own table cell border,
+/// as the spec's defaults table
+/// states it: `1em / 14`, one pixel
+/// at the base font size, so a cell
+/// rule scales with the panel instead
+/// of vanishing on a dense screen
+/// (`.gloss-sc-th, .gloss-sc-td {
+/// border-width: calc(1em /
+/// var(--font-size-no-units)) }`).
+///
+/// A division rather than a
+/// reciprocal constant, so that a
+/// panel drawn at Yomitan's own base
+/// size gets exactly the one pixel
+/// the rule promises
+/// ([`YOMITAN_BASE_PX`]).
+fn cell_border(em: f32) -> f32 {
+    em / YOMITAN_BASE_PX
+}
+
+/// Yomitan's own table cell padding,
+/// as a fraction of the em it sits
+/// in: `padding: 0.25em`, from the
+/// same rule.
+const CELL_PADDING: f32 = 0.25;
+
+/// HTML's own cap on a cell's span.
+///
+/// The schema puts no bound on
+/// `colSpan` and a grid costs memory
+/// per column, so an absurd one is a
+/// bill rather than a wide cell.
+/// 1000 is the number HTML itself
+/// clamps `colspan` to.
+const MAX_SPAN: usize = 1000;
+
+/// One piece of a row's gloss.
+///
+/// A table is not a paragraph and
+/// cannot be flattened into one - its
+/// cells are laid out on a grid, and
+/// the grid has to measure each one
+/// separately - so the block half of
+/// the inline pass emits a sum type
+/// rather than a list of paragraphs.
+enum Piece {
+    Flow(Flow),
+    Table(Grid),
+}
+
+impl Piece {
+    /// Sets the gap owed above it.
+    fn top_gap(&mut self, gap: f32) {
+        match self {
+            Piece::Flow(flow) => flow.top_gap = gap,
+            Piece::Table(grid) => grid.top_gap = gap,
+        }
+    }
+
+    /// Stamps the term-bank row behind
+    /// every paragraph of it, the ones
+    /// inside cells included.
+    ///
+    /// The tree itself does not know
+    /// which row stored it, so this is
+    /// [`build_elements`]' job - and a
+    /// cell's paragraph needs the same
+    /// address as any other, or a hit
+    /// inside a conjugation table
+    /// resolves to no sense at all.
+    fn stamp(&mut self, dict_id: i64, entry_id: i64) {
+        match self {
+            Piece::Flow(flow) => {
+                flow.dict_id = dict_id;
+                flow.entry_id = entry_id;
+            }
+            Piece::Table(grid) => {
+                grid.dict_id = dict_id;
+                grid.entry_id = entry_id;
+                for cell in &mut grid.cells {
+                    for piece in &mut cell.body {
+                        piece.stamp(dict_id, entry_id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One table cell, before the grid
+/// measures it.
+struct Cell {
+    /// Its content. A cell is a block
+    /// container, so it holds
+    /// paragraphs - and, where a
+    /// dictionary nested one, a table.
+    body: Vec<Piece>,
+    /// Its box: Yomitan's own grid
+    /// defaults with the dictionary's
+    /// declarations over them. The
+    /// grid resolves the collapse into
+    /// it once the rule width is known
+    /// ([`collapsed`]).
+    style: BoxStyle,
+    /// The style its own element
+    /// draws in. It carries no text,
+    /// so only the cull slack rides on
+    /// this.
+    base: Inline,
+    /// `(row, column)`, filled in by
+    /// [`place`].
+    at: (usize, usize),
+    /// `(rowSpan, colSpan)`, at least
+    /// one each and already clipped to
+    /// the grid by [`place`].
+    span: (usize, usize),
+    path: Option<NodePath>,
+}
+
+impl Cell {
+    /// Where in its dictionary it came
+    /// from.
+    fn origin(&self, grid: &Grid) -> GlossOrigin {
+        GlossOrigin { dict_id: grid.dict_id, entry_id: grid.entry_id, path: self.path }
+    }
+}
+
+/// One table, before it is measured.
+///
+/// Structure only: which cell sits in
+/// which slot needs no measurement,
+/// so it is decided while the tree is
+/// walked. What the grid pass adds is
+/// the column widths, the row
+/// heights, and where the whole thing
+/// lands.
+struct Grid {
+    /// Gap owed above it.
+    top_gap: f32,
+    /// Every cell, in document order,
+    /// each carrying the slot it was
+    /// placed in.
+    cells: Vec<Cell>,
+    rows: usize,
+    cols: usize,
+    /// The `table`'s own box, indent
+    /// and alignment.
+    block: Block,
+    /// The style its own element
+    /// draws in.
+    base: Inline,
+    path: Option<NodePath>,
+    dict_id: i64,
+    entry_id: i64,
+}
+
+impl Grid {
+    /// Where in its dictionary it came
+    /// from.
+    fn origin(&self) -> GlossOrigin {
+        GlossOrigin { dict_id: self.dict_id, entry_id: self.entry_id, path: self.path }
+    }
+}
+
+/// Puts every cell in a slot.
+///
+/// HTML's own placement, minus the
+/// parts a dictionary never writes: a
+/// row's cells take the leftmost
+/// column no `rowSpan` from above has
+/// already claimed, and each then
+/// claims `colSpan` columns across
+/// and `rowSpan` rows down. A span
+/// reaching past the last row ends at
+/// it, so every cell's slot is inside
+/// the grid it will be measured
+/// against.
+///
+/// The grid is as wide as the
+/// furthest column any row reached,
+/// so a row holding more cells than
+/// its neighbours widens the table
+/// and the short rows simply end
+/// early. That is the "renders what
+/// it can" a malformed table is owed:
+/// no cell is dropped and no index
+/// can run off the end.
+fn place(rows: Vec<Vec<Cell>>) -> (Vec<Cell>, usize, usize) {
+    let count = rows.len();
+    // How far down each column is
+    // already claimed, as the row
+    // index one past the last claimed.
+    let mut claimed: Vec<usize> = Vec::new();
+    let mut out = Vec::new();
+    for (r, row) in rows.into_iter().enumerate() {
+        let mut c = 0usize;
+        for mut cell in row {
+            while claimed.get(c).is_some_and(|&to| to > r) {
+                c += 1;
+            }
+            let down = cell.span.0.min(count - r);
+            let across = cell.span.1;
+            cell.at = (r, c);
+            cell.span = (down, across);
+            if claimed.len() < c + across {
+                claimed.resize(c + across, 0);
+            }
+            for to in &mut claimed[c..c + across] {
+                *to = r + down;
+            }
+            c += across;
+            out.push(cell);
+        }
+    }
+    let cols = claimed.len();
+    (out, count, cols)
+}
+
+/// A cell's `rowSpan` or `colSpan`.
+///
+/// The schema writes these as
+/// numbers, which is also the only
+/// form the Anki HTML renderer reads
+/// off them. Anything else, and any
+/// value below one, is one cell:
+/// HTML's own parser treats a missing
+/// or zero span that way, and a cell
+/// occupying no slot has nowhere to
+/// draw.
+fn span_of(doc: &GlossDoc, id: NodeId, key: &str) -> usize {
+    match doc.attr_of(id, key) {
+        Some(Scalar::Num(n)) if n >= 1.0 => (n as usize).min(MAX_SPAN),
+        _ => 1,
+    }
+}
+
+/// The `len` tracks from `at`, plus
+/// the rules between them.
+///
+/// What a cell spanning several
+/// columns is offered, and what a cell
+/// spanning several rows fills. Summed
+/// from the track sizes rather than
+/// differenced from two accumulated
+/// edges, and that is load-bearing:
+/// `(x0 + w + rule) - x0 - rule` is a
+/// float ulp short of `w`, and a cell
+/// one ulp narrower than its own text
+/// wraps a line it should not.
+fn extent(tracks: &[f32], at: usize, len: usize, rule: f32) -> f32 {
+    tracks[at..at + len].iter().sum::<f32>() + (len as f32 - 1.0) * rule
+}
+
+/// Grows `tracks` until every span
+/// fits.
+///
+/// The one rule the columns and the
+/// rows share, so it is written once:
+/// a track takes the widest ask among
+/// the cells that live only in it,
+/// and a cell across several tracks
+/// then adds only its *shortfall* -
+/// what it needs beyond the tracks it
+/// already covers, the `rule` between
+/// them included - spread evenly over
+/// them.
+///
+/// Spanning cells are visited once,
+/// in document order, against the
+/// tracks as the cells before them
+/// left them. There is no fixpoint
+/// and no second round: two passes
+/// over the cells, and the answer.
+fn distribute(
+    tracks: &mut [f32],
+    spans: impl Iterator<Item = (usize, usize, f32)> + Clone,
+    rule: f32,
+) {
+    for (at, len, want) in spans.clone() {
+        if len == 1 {
+            tracks[at] = tracks[at].max(want);
+        }
+    }
+    for (at, len, want) in spans {
+        if len < 2 {
+            continue;
+        }
+        let n = len as f32;
+        let have = extent(tracks, at, len, rule);
+        if want > have {
+            let add = (want - have) / n;
+            for track in &mut tracks[at..at + len] {
+                *track += add;
+            }
+        }
+    }
+}
+
+/// One cell's box, with the shared
+/// edges resolved.
+///
+/// `border-collapse: collapse` draws
+/// the rule between two cells once,
+/// so each cell owns the rules on its
+/// left and its top and only the
+/// cells against the grid's right and
+/// bottom edges owe the closing ones.
+/// Two neighbours therefore abut
+/// exactly, with one `rule` between
+/// them rather than two beside each
+/// other - and a spanning cell simply
+/// does not draw the rules it
+/// swallowed.
+///
+/// An edge whose own `border-style`
+/// is `none` still draws nothing: the
+/// grid keeps the slot it reserved
+/// and leaves it empty, exactly as a
+/// browser does.
+fn collapsed(mut style: BoxStyle, rule: f32, last_col: bool, last_row: bool) -> BoxStyle {
+    let own = style.border_used();
+    let edge = |own: f32, draws: bool| if own > 0.0 && draws { rule } else { 0.0 };
+    style.border = Edges {
+        top: edge(own.top, true),
+        right: edge(own.right, last_col),
+        bottom: edge(own.bottom, last_row),
+        left: edge(own.left, true),
+    };
+    style
+}
+
+/// Moves a laid-out run of elements,
+/// and the targets they earned, down
+/// by `dy`.
+///
+/// A cell is laid out before its
+/// row's height is known, because the
+/// row is as tall as its tallest
+/// cell, so the grid places every
+/// cell at the table's own top and
+/// drops it into its row afterwards.
+///
+/// Only origins move. A line box is
+/// the measurer's answer and a
+/// reading's position is
+/// run-relative, so nothing a bin
+/// re-measures changes - which is the
+/// rule [`measure_readings`] sets and
+/// the reason a row's extra height
+/// never reaches the text inside it.
+fn shift(elems: &mut [SceneElem], hits: &mut [HitTarget], dy: f32) {
+    for elem in elems {
+        elem.pen.1 += dy;
+        elem.rect.y += dy;
+        if let Some(b) = &mut elem.block_box {
+            b.rect.y += dy;
+        }
+        for b in &mut elem.inline_boxes {
+            b.rect.y += dy;
+        }
+    }
+    for hit in hits {
+        hit.y += dy;
+    }
+}
+
+/// A textless element, before the
+/// grid knows where it goes.
+///
+/// A table and a cell are boxes
+/// rather than runs: they carry no
+/// text and no spans, and their
+/// geometry is the grid's answer
+/// rather than the measurer's. Each
+/// is pushed as a placeholder because
+/// a container has to lead its own
+/// contents in draw order while its
+/// extent is only known once they
+/// have all been laid out.
+fn box_elem(kind: ElemKind, base: Inline, align: Align, origin: GlossOrigin) -> SceneElem {
+    SceneElem {
+        kind,
+        text: String::new(),
+        color: base.color,
+        font_size: base.size,
+        weight: base.weight,
+        italic: base.italic,
+        top_gap: 0.0,
+        wrap_w: 0.0,
+        align,
+        pen: (0.0, 0.0),
+        rect: SceneRect::default(),
+        lines: 0,
+        advance: 0.0,
+        spans: Vec::new(),
+        ruby: Vec::new(),
+        block_box: None,
+        inline_boxes: Vec::new(),
+        origin: Some(origin),
+        image: None,
+    }
 }
 
 /// The shared text-element shape.
@@ -1547,6 +2595,8 @@ fn text_elem(
         // a parsed tree, so none of
         // them addresses a node.
         origin: None,
+        // Chrome composites no asset.
+        image: None,
     }
 }
 
@@ -1841,6 +2891,363 @@ fn ruby_span<'a>(font: &'a str, ruby: &'a FlowRuby) -> StyledSpan<'a> {
     }
 }
 
+/// Every image of a paragraph, given
+/// the room it needs.
+///
+/// Called *before* the paragraph is
+/// measured, and it is the whole of
+/// how an inline image occupies a
+/// line. The measurement seam takes
+/// styled spans and no boxes
+/// (ADR-0013), so a replaced element
+/// can only take room by *being* a
+/// span the measurer charges for - and
+/// editing the line boxes afterwards
+/// would fool nobody, because both
+/// bins re-measure an element's own
+/// spans to paint it and would get the
+/// ungrown lines back. Ticket 11's
+/// ruby filler is the same trick for
+/// the same reason.
+///
+/// So the run asks, and this decides
+/// what it asks for. Two ratios are
+/// needed and only a measurer knows
+/// either: what one [`IMAGE_SPACER`]
+/// advances per unit of size, and how
+/// far down a line its baseline sits.
+/// One probe answers both.
+///
+/// Then the arithmetic. `n` spacers at
+/// size `s` advance `n * u * s`, so
+/// the width the ladder resolved fixes
+/// `s` exactly. A span of size `r`
+/// gives `asc * r` to the space above
+/// its line's baseline, so the height
+/// fixes the riser. The spacer is
+/// capped at the riser, which is what
+/// keeps a wide short banner from
+/// making its line as tall as it is
+/// wide: past that cap the reservation
+/// comes out a few percent narrow
+/// instead ([`IMAGE_SPACERS_PER_ASPECT`]).
+fn measure_images(
+    m: &mut dyn TextMeasure,
+    font: &str,
+    flow: &Flow,
+    max_w: f32,
+    run: &mut [StyledSpan<'_>],
+) -> Result<(), MeasureError> {
+    if flow.images.is_empty() {
+        return Ok(());
+    }
+    // Only a paragraph holding an image
+    // pays for this buffer, which is
+    // why it is not one of the walk's.
+    let mut scratch = Measured::default();
+    for (slot, img) in flow.images.iter().enumerate() {
+        let probe = StyledSpan {
+            text: IMAGE_SPACER,
+            font,
+            size: img.em,
+            weight: img.style.weight,
+            italic: img.style.italic,
+            color: img.style.color,
+        };
+        m.measure(MeasureRun { spans: &[probe], max_w }, &mut scratch)?;
+        // The span's own box, not
+        // `metrics.w`: DirectWrite's
+        // aggregate width excludes
+        // trailing whitespace, and a
+        // lone no-break space is
+        // nothing but that.
+        let per_size = |px: f32| if img.em > 0.0 { px / img.em } else { 0.0 };
+        let advance = per_size(scratch.spans.first().map_or(0.0, |b| b.w));
+        let ascent = per_size(scratch.lines.first().map_or(0.0, |l| l.baseline));
+        // A raised image needs its rise
+        // above the baseline as well as
+        // its own height; a lowered one
+        // hangs into the descent, which
+        // is what a lowered span does
+        // too and what neither reserves.
+        let rise = img.h + img.style.shift.max(0.0);
+        let riser = if ascent > 0.0 { rise / ascent } else { rise };
+        // A measurer that charges
+        // nothing for a no-break space
+        // can reserve nothing exactly,
+        // so the spacer keeps the em it
+        // was built with: some room for
+        // the image beats none.
+        let spacer = if advance > 0.0 && img.spacers > 0 {
+            (img.w / (advance * img.spacers as f32)).min(riser)
+        } else {
+            img.em
+        };
+        for (span, asked) in flow.spans.iter().zip(run.iter_mut()) {
+            if span.image != slot as u32 {
+                continue;
+            }
+            asked.size = if span.filler { riser } else { spacer };
+        }
+    }
+    Ok(())
+}
+
+/// The paragraph's images, as elements.
+///
+/// Pure: the lines already carry the
+/// room [`measure_images`] bought, so
+/// this only reads back where each
+/// spacer landed and hangs the image
+/// off that line's baseline.
+///
+/// One element per image rather than a
+/// span of the paragraph, because an
+/// image is a replaced element: it has
+/// a rect and a media key and no text
+/// (`ElemKind::Image`). Its `advance`
+/// is zero - the paragraph's own
+/// advance already counts the line the
+/// riser grew - so it stacks nothing
+/// and shifts nothing after it.
+fn place_images(
+    flow: &Flow,
+    measured: &Measured,
+    pen: (f32, f32),
+    line_at: impl Fn(LineBox) -> f32,
+) -> Vec<SceneElem> {
+    let mut out = Vec::new();
+    for (slot, img) in flow.images.iter().enumerate() {
+        let spacer = |b: &&SpanBox| {
+            flow.spans
+                .get(b.span as usize)
+                .is_some_and(|s| s.image == slot as u32 && !s.filler)
+        };
+        // The first line the reservation
+        // landed on. Its spacers are
+        // non-breaking glue, so they
+        // cannot be split across two -
+        // but a measurer that overflows
+        // rather than looping may still
+        // report one box per fragment.
+        let Some(line) = measured.spans.iter().filter(spacer).map(|b| b.line).min() else {
+            continue;
+        };
+        let Some(geom) = measured.lines.get(line as usize) else {
+            continue;
+        };
+        let left = measured
+            .spans
+            .iter()
+            .filter(spacer)
+            .filter(|b| b.line == line)
+            .fold(f32::MAX, |l, b| l.min(b.x));
+        // Its bottom on the line's own
+        // baseline, raised by whatever
+        // `verticalAlign` asked for -
+        // ticket 07's own resolution,
+        // against the line the image
+        // landed on, with the image's box
+        // as the span height a
+        // line-relative value aligns.
+        let shift = shift_on(img.style, *geom, img.h);
+        let rect = SceneRect {
+            x: line_at(*geom) + left,
+            y: pen.1 + geom.y + geom.baseline - shift - img.h,
+            w: img.w,
+            h: img.h,
+        };
+        // The `alt` fallback as one
+        // ordinary span, so a bin that
+        // cannot decode the asset draws
+        // this element exactly as it
+        // draws any other and needs no
+        // second text path.
+        let spans = if img.alt.is_empty() {
+            Vec::new()
+        } else {
+            vec![ElemSpan {
+                at: 0,
+                len: img.alt.len() as u32,
+                color: img.style.color,
+                size: img.em,
+                weight: img.style.weight,
+                italic: img.style.italic,
+                shift: 0.0,
+            }]
+        };
+        out.push(SceneElem {
+            kind: ElemKind::Image,
+            text: img.alt.clone(),
+            color: img.style.color,
+            font_size: img.em,
+            weight: img.style.weight,
+            italic: img.style.italic,
+            top_gap: 0.0,
+            wrap_w: img.w.max(1.0),
+            align: Align::Leading,
+            pen: (rect.x, rect.y),
+            rect,
+            lines: 0,
+            advance: 0.0,
+            spans,
+            ruby: Vec::new(),
+            block_box: None,
+            inline_boxes: Vec::new(),
+            origin: Some(GlossOrigin {
+                dict_id: flow.dict_id,
+                entry_id: flow.entry_id,
+                path: img.path,
+            }),
+            image: Some(img.scene.clone()),
+        });
+    }
+    out
+}
+
+/// One image's box, by the ladder.
+///
+/// What the node declared, then what
+/// the build recorded, then a square
+/// of the text it sits in. No decode
+/// at any rung - that is the whole
+/// reason ticket 03 reads an intrinsic
+/// size out of the container header at
+/// extraction time.
+///
+/// The middle arms are the ones that
+/// earn their keep. `height: 1em` and
+/// no width is the shape 字通 and
+/// 三省堂 both write, and one length
+/// plus a ratio is the other length -
+/// which is why the media row carries
+/// `aspect` as its own column rather
+/// than dividing on read. With no
+/// ratio to hand a single length gives
+/// a square, which at least sits on
+/// the line at the size the dictionary
+/// asked for.
+fn image_size(
+    doc: &GlossDoc,
+    id: NodeId,
+    em: f32,
+    recorded: Option<Intrinsic>,
+) -> (f32, f32) {
+    // `em` multiplies the text the
+    // image sits in; `px` is a scene
+    // pixel. The absent field is `em`,
+    // because the schema's own numeric
+    // lengths are em multipliers - the
+    // same convention [`length_px`]
+    // reads - and Yomitan renders
+    // `width`/`height` as ems.
+    let unit = match doc.attr_of(id, "sizeUnits").and_then(|v| doc.scalar_str(v)) {
+        Some("px") => 1.0,
+        _ => em,
+    };
+    let declared = |name| image_len(doc, id, name).map(|n| (n * unit).min(IMAGE_MAX_PX));
+    let aspect = recorded.map(|size| size.aspect).filter(|a| a.is_finite() && *a > 0.0);
+    match (declared("width"), declared("height")) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, w / aspect.unwrap_or(1.0)),
+        (None, Some(h)) => (h * aspect.unwrap_or(1.0), h),
+        (None, None) => match recorded {
+            Some(size) => (size.width, size.height),
+            None => (em * IMAGE_FALLBACK_EM, em * IMAGE_FALLBACK_EM),
+        },
+    }
+}
+
+/// One declared length, as a bare
+/// number.
+///
+/// The schema's `width` and `height`
+/// are numbers whose unit is the
+/// node's `sizeUnits`, so this is not
+/// [`css_len`]'s job: there is no unit
+/// suffix to read here. A string is
+/// still accepted, because a
+/// dictionary converter writing `"1"`
+/// meant one. Zero and below are no
+/// size at all, which drops to the
+/// next rung rather than collapsing
+/// the image.
+fn image_len(doc: &GlossDoc, id: NodeId, name: &str) -> Option<f32> {
+    let value = doc.attr_of(id, name)?;
+    let n = match value {
+        Scalar::Num(n) => n as f32,
+        _ => doc.scalar_str(value)?.trim().parse::<f32>().ok()?,
+    };
+    finite(n).filter(|n| *n > 0.0)
+}
+
+/// The text an image stands in for.
+///
+/// `alt` then `title`, and each from
+/// the node's attributes then from its
+/// `data` map. Both places are real:
+/// 三省堂 writes `title` beside
+/// `sizeUnits` as an attribute, and
+/// Jitendex writes
+/// `data: {"gaiji": "", "alt":
+/// "［対義語］"}` - so reading one
+/// place would lose one dictionary's
+/// answer to the same question.
+fn image_alt(doc: &GlossDoc, id: NodeId) -> String {
+    for name in ["alt", "title"] {
+        for found in [doc.attr_of(id, name), doc.data_of(id, name)] {
+            match found.and_then(|v| doc.scalar_str(v)) {
+                Some(text) if !text.trim().is_empty() => return text.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    String::new()
+}
+
+/// `appearance`, of which the schema
+/// has two values.
+fn image_appearance(doc: &GlossDoc, id: NodeId) -> Appearance {
+    match doc.attr_of(id, "appearance").and_then(|v| doc.scalar_str(v)) {
+        Some("monochrome") => Appearance::Monochrome,
+        _ => Appearance::Auto,
+    }
+}
+
+/// One boolean image field.
+///
+/// `None` for an absent field and for
+/// one this build cannot read, so each
+/// caller states its own default
+/// rather than sharing a wrong one.
+fn image_flag(doc: &GlossDoc, id: NodeId, name: &str) -> Option<bool> {
+    match doc.attr_of(id, name)? {
+        Scalar::Bool(b) => Some(b),
+        _ => None,
+    }
+}
+
+/// How many [`IMAGE_SPACER`]s one
+/// image reserves with.
+///
+/// From the aspect ratio alone, so it
+/// is decided while the paragraph is
+/// built and is the same number in
+/// every font - the *size* of them is
+/// what [`measure_images`] solves
+/// against the face that is actually
+/// installed.
+fn image_spacers(w: f32, h: f32) -> usize {
+    if !(w > 0.0 && h > 0.0) {
+        return 1;
+    }
+    let wanted = (IMAGE_SPACERS_PER_ASPECT * w / h).ceil();
+    if !wanted.is_finite() || wanted < 1.0 {
+        return 1;
+    }
+    (wanted as usize).min(IMAGE_SPACER_MAX)
+}
+
 /// The one span a `Line` is, as the
 /// seam takes it.
 ///
@@ -2034,6 +3441,14 @@ enum Elem {
     /// that can earn a hit target
     /// inside its own text.
     Gloss(Flow),
+    /// One table of a gloss tree.
+    ///
+    /// A grid rather than a run: its
+    /// cells are measured and placed
+    /// by [`Pass::table`], which is
+    /// the only element that produces
+    /// more than one [`SceneElem`].
+    Table(Grid),
     /// Navigate back in history.
     BackButton(Line),
 }
@@ -2185,6 +3600,209 @@ const NO_RUBY: u32 = u32::MAX;
 /// paint would not reproduce.
 const RUBY_FILLER: &str = "\u{2060}";
 
+/// An image's index in
+/// [`Flow::images`], or no image at
+/// all.
+const NO_IMAGE: u32 = u32::MAX;
+
+/// What an image's inline room is
+/// bought with: U+00A0 NO-BREAK
+/// SPACE.
+///
+/// An inline image is a replaced
+/// element, and the measurement seam
+/// takes styled spans and no boxes
+/// (ADR-0013) - so the only way an
+/// image can occupy room on a line is
+/// to *be* a span the measurer
+/// charges for. Growing the line
+/// boxes afterwards would fool
+/// nobody: both bins re-measure an
+/// element's own spans to paint it and
+/// would get the ungrown lines back.
+///
+/// Three properties earn this
+/// character the job. It carries no
+/// ink, so nothing shows through a
+/// transparent asset. It has an
+/// advance, which is the whole point.
+/// And it is *non-breaking glue* in
+/// UAX #14, so no wrap can split one
+/// image's reservation across two
+/// lines, and no wrap can separate it
+/// from the word it belongs to - an
+/// image mid-sentence therefore wraps
+/// with the text and forces no break.
+///
+/// Not U+2060: that has zero advance,
+/// which is why it is the *riser*
+/// below and not this.
+const IMAGE_SPACER: &str = "\u{a0}";
+
+/// What an image's line height is
+/// bought with, and it is
+/// [`RUBY_FILLER`]'s character for
+/// [`RUBY_FILLER`]'s reason: zero
+/// advance, no break opportunity, and
+/// its own size sets its line's height.
+///
+/// A separate span from
+/// [`IMAGE_SPACER`] because a span's
+/// advance and its line height are
+/// both its size, and an image needs
+/// them decided independently: a wide
+/// short banner must not make its line
+/// as tall as it is wide.
+///
+/// It also earns the image its
+/// paragraph. [`IMAGE_SPACER`] is
+/// *whitespace*, so a paragraph
+/// holding nothing but an image would
+/// measure as empty and be dropped
+/// ([`Paragraphs::flush`]); U+2060 is
+/// not whitespace, so the riser is
+/// what says the paragraph has
+/// content. [`trim`] needs no such
+/// guard: it trims a named set of
+/// space characters that U+00A0 is
+/// deliberately not in.
+const IMAGE_RISER: &str = RUBY_FILLER;
+
+/// No-break spaces per unit of an
+/// image's aspect ratio.
+///
+/// The count is fixed while the
+/// paragraph is built and the *size*
+/// is solved once the measurer has
+/// been asked, because only it knows
+/// what one of these advances
+/// ([`measure_images`]). The count
+/// still has to be generous enough
+/// that the solved size stays under
+/// the size the riser asked for -
+/// otherwise the spacer, not the
+/// image, would decide the line's
+/// height.
+///
+/// Four is that bound for every real
+/// face: a no-break space is a space,
+/// a space is between a quarter and a
+/// third of an em, and a face's ascent
+/// is at most 0.85 em - so a space is
+/// never less than a quarter of the
+/// ascent one of these has to fit
+/// inside. Where a face does go
+/// narrower, [`measure_images`] clamps
+/// the size instead of letting the
+/// line grow, and the reservation
+/// comes out a few percent short of
+/// the image rather than the line
+/// coming out several times too tall.
+const IMAGE_SPACERS_PER_ASPECT: f32 = 4.0;
+
+/// The most no-break spaces one image
+/// may reserve with.
+///
+/// A dictionary's declared size is
+/// arbitrary author input, so the
+/// aspect ratio is too, and 64 spans
+/// per image is already far past any
+/// asset a dictionary ships. Beyond
+/// it the reservation is short, which
+/// costs the image some of its room
+/// and costs the panel nothing.
+const IMAGE_SPACER_MAX: usize = 64;
+
+/// The box a monochrome vector may
+/// have and still be rasterised for
+/// tinting, per axis, in ems.
+///
+/// Hoshi Reader's bound. A gaiji is
+/// `height: 1em`; four ems on a side
+/// admits the largest of them and
+/// refuses an illustration, which is
+/// the distinction the bound is for.
+const IMAGE_TINT_EM: f32 = 4.0;
+
+/// Device pixels per scene pixel a
+/// tinted vector rasterises at, over
+/// the device pixel ratio.
+///
+/// Twice, so a mask standing in for a
+/// character is not the one thing on
+/// the panel that looks soft.
+const IMAGE_TINT_SCALE: f32 = 2.0;
+
+/// The longest edge a tinted raster
+/// may reach, in pixels.
+const IMAGE_TINT_CLAMP: f32 = 256.0;
+
+/// An image's fallback size, in ems:
+/// a square of the text it sits in.
+///
+/// The last rung of the sizing ladder,
+/// reached only when the node declares
+/// no size *and* the store recorded
+/// none - which is to say when there
+/// are no bytes either, so what this
+/// sizes is the placeholder box.
+const IMAGE_FALLBACK_EM: f32 = 1.0;
+
+/// The largest box a declared size may
+/// resolve to, per axis, in pixels.
+///
+/// `dict::media` already refuses a
+/// *recorded* dimension past this, and
+/// for the same reason: a declared
+/// 4 294 967 295 is a corrupt file or
+/// a hostile one, not content, and no
+/// dictionary asset in the census is
+/// anywhere near it. Clamping here is
+/// what keeps author input from
+/// setting a line's height through the
+/// riser [`measure_images`] sizes.
+const IMAGE_MAX_PX: f32 = 65_536.0;
+
+/// Yomitan's own list indent, per
+/// level, as a multiple of the list's
+/// own em.
+///
+/// `--list-padding1` in
+/// `ext/css/display.css`, which
+/// Yomitan puts on every list a
+/// glossary contains. Nested levels
+/// *reuse* it rather than stepping it
+/// down, so a list two deep sits at
+/// twice this and not at some halved
+/// second value; the spec's defaults
+/// table states it as `1.4em`.
+const LIST_INDENT_EM: f32 = 1.4;
+
+/// `list-style-type: disc`, CSS's
+/// initial value: U+2022 BULLET.
+const DISC_MARKER: &str = "\u{2022}";
+/// `circle`: U+25E6 WHITE BULLET.
+const CIRCLE_MARKER: &str = "\u{25E6}";
+/// `square`: U+25AA BLACK SMALL
+/// SQUARE.
+const SQUARE_MARKER: &str = "\u{25AA}";
+
+/// What sits between a marker and the
+/// item text after it.
+///
+/// The marker box's own trailing gap.
+/// A browser puts it in the gutter,
+/// which this renderer has nowhere to
+/// put: the seam takes one run at one
+/// wrap width (ADR-0013), so a marker
+/// is its item paragraph's first span
+/// and the gap is a character. It is
+/// the gap ticket 16's row number
+/// already writes after its `1.`, so
+/// a numbered row and a numbered item
+/// read alike.
+const MARKER_GAP: &str = " ";
+
 /// What a span's `verticalAlign`
 /// still needs from its line.
 ///
@@ -2268,6 +3886,37 @@ struct Block {
     align: Align,
     /// `whiteSpace: pre-line`.
     pre_line: bool,
+    /// Every list level above it,
+    /// added up.
+    ///
+    /// Inherited rather than part of
+    /// `style`, and that is the whole
+    /// of the difference: a box
+    /// property belongs to the node
+    /// that declared it, and a
+    /// paragraph carries only the box
+    /// of the block that *opened* it,
+    /// so an indent kept there would
+    /// lose every level but the
+    /// innermost - `ul > li > ul > li`
+    /// would indent once.
+    /// [`Block::inherited`] resets the
+    /// box and keeps this, so the
+    /// levels add up for the price of
+    /// one `+=` per list.
+    ///
+    /// A separate term from
+    /// `style.padding.left` rather
+    /// than folded into it, because a
+    /// dictionary declaring
+    /// `paddingLeft` on an `li` gets
+    /// both - Jitendex writes exactly
+    /// that - and because this indent
+    /// is the *list's* padding and so
+    /// shifts an item's border box
+    /// rather than insetting the text
+    /// inside it.
+    indent: f32,
 }
 
 impl Block {
@@ -2277,6 +3926,166 @@ impl Block {
     fn inherited(self) -> Block {
         Block { style: BoxStyle::default(), ..self }
     }
+}
+
+/// What a list draws beside each of
+/// its items.
+///
+/// CSS's `list-style-type` has three
+/// shapes this build answers and one
+/// it declines: a bullet glyph, a
+/// counter, a literal string, and the
+/// locale counter algorithms the spec
+/// puts out of scope. A keyword it
+/// cannot read therefore falls back
+/// to the initial value for the
+/// list's own tag, which is a marker
+/// of the wrong shape rather than no
+/// marker at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Marker<'a> {
+    /// One glyph, the same on every
+    /// item.
+    Glyph(&'static str),
+    /// `decimal`: the item's own
+    /// ordinal, from one.
+    Decimal,
+    /// A CSS string counter, drawn
+    /// verbatim on every item - which
+    /// is how a dictionary gets its
+    /// own ①. No counter algorithm
+    /// runs over it and no suffix is
+    /// added to it, which is the whole
+    /// of what verbatim means here.
+    Literal(&'a str),
+    /// `none`, and an empty string
+    /// counter with it.
+    None,
+}
+
+impl Marker<'_> {
+    /// The `n`th item's marker text,
+    /// gap and all.
+    fn label(self, n: usize) -> Option<String> {
+        match self {
+            Marker::Glyph(glyph) => Some(format!("{glyph}{MARKER_GAP}")),
+            // CSS's `decimal` counter
+            // carries a `.` suffix, which
+            // is also what ticket 16's row
+            // number writes.
+            Marker::Decimal => Some(format!("{n}.{MARKER_GAP}")),
+            Marker::Literal(text) => Some(format!("{text}{MARKER_GAP}")),
+            Marker::None => None,
+        }
+    }
+}
+
+/// One list's or one item's
+/// `listStyleType`, as the walk spends
+/// it.
+///
+/// `fallback` is the value already in
+/// force, which is what makes this
+/// both the list's resolver and the
+/// item's: CSS *inherits*
+/// `list-style-type` and draws the
+/// marker at the element with
+/// `display: list-item`, so an item's
+/// own declaration wins over its
+/// list's and a declaration this build
+/// cannot read leaves the inherited
+/// one standing - the same rule
+/// [`apply_style`] follows.
+///
+/// The item half is not a corner case.
+/// Jitendex declares `listStyleType`
+/// on the `li` in every one of the
+/// 38 381 entries that carries one -
+/// 97 150 nodes, all of them `li`,
+/// values `"①"` through `"㊿"` - and
+/// its ①②③ sense numbering is nothing
+/// but that. The list half is what
+/// ticket 17 will feed from a
+/// dictionary's own `styles.css`,
+/// where Jitendex writes
+/// `ul[data-sc-content="sense-groups"]
+/// { list-style-type: "＊" }`.
+///
+/// Independent of any layout mode by
+/// construction: it takes a document,
+/// a node and a fallback, so ticket
+/// 14's compact list and this one
+/// resolve the same marker (see
+/// [`Paragraphs::stack_items`]).
+fn marker_of<'a>(doc: &'a GlossDoc, id: NodeId, fallback: Marker<'a>) -> Marker<'a> {
+    let Some(text) = doc.style_of(id, StyleKey::ListStyleType).and_then(|v| doc.scalar_str(v))
+    else {
+        return fallback;
+    };
+    let text = text.trim();
+    if let Some(literal) = quoted(text) {
+        // An empty counter is CSS's own
+        // way of asking for no marker.
+        return if literal.is_empty() { Marker::None } else { Marker::Literal(literal) };
+    }
+    match text {
+        "disc" => Marker::Glyph(DISC_MARKER),
+        "circle" => Marker::Glyph(CIRCLE_MARKER),
+        // Not in the census, and one
+        // arm: falling back to `disc`
+        // for it would draw a round
+        // bullet where the author asked
+        // for a square one, which is
+        // worse than reading the third
+        // of CSS's three bullet
+        // keywords.
+        "square" => Marker::Glyph(SQUARE_MARKER),
+        "decimal" => Marker::Decimal,
+        // Likewise the one keyword whose
+        // fallback would *add* ink: an
+        // author writing `none` removed
+        // the marker, and `disc` would
+        // hand it back.
+        "none" => Marker::None,
+        // Every remaining keyword is a
+        // locale counter algorithm -
+        // `lower-roman`, `katakana`,
+        // `cjk-ideographic` - which the
+        // spec puts out of scope, so the
+        // value already in force stands.
+        _ => fallback,
+    }
+}
+
+/// A list tag's initial
+/// `list-style-type`.
+///
+/// The one thing `ol` and `ul` differ
+/// in, and the bottom of the
+/// inheritance chain [`marker_of`]
+/// walks.
+fn initial_marker(ordered: bool) -> Marker<'static> {
+    if ordered {
+        Marker::Decimal
+    } else {
+        Marker::Glyph(DISC_MARKER)
+    }
+}
+
+/// A CSS `<string>`, unquoted.
+///
+/// Either quote character, because CSS
+/// takes either and a dictionary
+/// writing its style into JSON reaches
+/// for whichever its own escaping
+/// makes easy: the census holds both
+/// `"'①'"` and `"\"◍\""`.
+fn quoted(text: &str) -> Option<&str> {
+    let quote = text.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    text.strip_prefix(quote)?.strip_suffix(quote)
 }
 
 /// What a node inherits from the one
@@ -2350,7 +4159,64 @@ struct FlowSpan {
     /// [`measure_readings`]. It draws
     /// nothing, advances nothing, and
     /// is never a base.
+    ///
+    /// An [`IMAGE_RISER`] sets it for
+    /// the same reason and reads the
+    /// same way: zero advance, no ink,
+    /// there only to be the tallest
+    /// span on its line.
     filler: bool,
+    /// The image whose room this span
+    /// reserves, or [`NO_IMAGE`].
+    ///
+    /// Set on both of an image's spans:
+    /// the [`IMAGE_SPACER`] that buys
+    /// its width, which is the one
+    /// [`place_images`] reads a box
+    /// back off, and the
+    /// [`IMAGE_RISER`]s that buy its
+    /// height, which carry `filler`
+    /// too.
+    image: u32,
+}
+
+/// One image, before it is placed.
+///
+/// Sized here, while the tree is being
+/// walked, because the sizing ladder
+/// is arithmetic over what the node
+/// declared and what the media row
+/// recorded - no decode, no measurer,
+/// no I/O (`dict::media`).
+#[derive(Clone)]
+struct FlowImage {
+    /// The resolved box, in the
+    /// panel's own pixels.
+    w: f32,
+    h: f32,
+    /// The em the image sits in, which
+    /// is what its `4em` tint bound is
+    /// measured against.
+    em: f32,
+    /// Its `verticalAlign`, already
+    /// resolved as far as the em alone
+    /// can take it - the rest is
+    /// [`shift_on`]'s, against the line
+    /// the image landed on.
+    style: Inline,
+    /// [`IMAGE_SPACER`]s reserving its
+    /// width, so [`measure_images`] can
+    /// solve their size.
+    spacers: usize,
+    /// The `alt` fallback, empty when
+    /// the node named none.
+    alt: String,
+    /// The image node itself, so a hit
+    /// on it resolves to the node and
+    /// not to the paragraph around it.
+    path: Option<NodePath>,
+    /// What a bin needs to paint it.
+    scene: SceneImage,
 }
 
 /// One reading, before it is placed.
@@ -2415,6 +4281,10 @@ struct Flow {
     /// One per ruby base, indexed by
     /// [`FlowSpan::ruby`].
     ruby: Vec<FlowRuby>,
+    /// One per image node this
+    /// paragraph reached, indexed by
+    /// [`FlowSpan::image`].
+    images: Vec<FlowImage>,
     /// The block this paragraph is:
     /// its box, its alignment, and
     /// whether it preserves newlines.
@@ -2490,7 +4360,8 @@ impl Flow {
             Some(first)
                 if first.style == style
                     && first.link == NO_LINK
-                    && first.ruby == NO_RUBY =>
+                    && first.ruby == NO_RUBY
+                    && first.image == NO_IMAGE =>
             {
                 first.at = 0;
                 first.len += shift;
@@ -2504,9 +4375,52 @@ impl Flow {
                     link: NO_LINK,
                     ruby: NO_RUBY,
                     filler: false,
+                    image: NO_IMAGE,
                 },
             ),
         }
+    }
+}
+
+/// What one term-bank row's images can
+/// be sized from.
+///
+/// The dictionary that shipped them -
+/// half of a [`MediaKey`], the other
+/// half being the node's own `path` -
+/// and the intrinsic sizes the build
+/// recorded for the ones it could
+/// store. Resolved before layout runs
+/// and carried on the presentation
+/// (`present::GlossEntry::media`),
+/// because `scene` is a measure pass
+/// with no database behind it and an
+/// image must not put a query on the
+/// paint path.
+///
+/// An empty table is a real state and
+/// not a missing input: a tree parsed
+/// from a string - a demo, a geometry
+/// fixture, an Anki round trip - has
+/// no store behind it, and its images
+/// take the `alt`-text rung.
+#[derive(Clone, Copy)]
+struct Assets<'a> {
+    dict_id: i64,
+    sizes: &'a [(String, Intrinsic)],
+}
+
+impl Assets<'_> {
+    /// One asset's recorded size.
+    ///
+    /// A linear scan, because a row
+    /// names a handful of assets - 字通
+    /// averages more than four - and a
+    /// map would cost more to build
+    /// than these comparisons cost to
+    /// run.
+    fn size(&self, path: &str) -> Option<Intrinsic> {
+        self.sizes.iter().find(|(p, _)| p == path).map(|(_, size)| *size)
     }
 }
 
@@ -2528,7 +4442,7 @@ impl Flow {
 struct Paragraphs<'a> {
     doc: &'a GlossDoc,
     /// Finished, in order.
-    out: Vec<Flow>,
+    out: Vec<Piece>,
     /// The one still filling.
     cur: Flow,
     /// Every link seen so far;
@@ -2557,11 +4471,115 @@ struct Paragraphs<'a> {
     /// box would be drawn around its
     /// neighbours too.
     barrier: bool,
+    /// A list marker owed to the next
+    /// run of text worth marking.
+    ///
+    /// Owed rather than pushed, because
+    /// the paragraph an item's marker
+    /// belongs to is the one the item's
+    /// first text lands in - for
+    /// `<li><div>x</div></li>` the
+    /// `div`'s, not the `li`'s. A
+    /// marker pushed where it is
+    /// resolved would be flushed out as
+    /// a paragraph of its own holding
+    /// nothing but a bullet.
+    pending_marker: Option<(String, Inline)>,
+    /// Does a list stack its items?
+    ///
+    /// The one thing ticket 14's
+    /// compact mode changes about a
+    /// list, and the only field in this
+    /// pass that may know a layout mode
+    /// exists: `true` gives every item
+    /// its own paragraph and the
+    /// indent, `false` joins the items
+    /// into the paragraph already open
+    /// with [`ITEM_SEPARATOR`] between
+    /// them.
+    ///
+    /// Marker resolution sits *above*
+    /// it and is shared by both:
+    /// [`marker_of`] reads the list's
+    /// own `listStyleType` and
+    /// [`Marker::label`] writes the
+    /// `n`th label, neither of them
+    /// aware of this flag. Ticket 14
+    /// wires it by passing its own
+    /// compact setting through
+    /// [`paragraphs`]; until then the
+    /// panel asks for the stacked
+    /// layout a browser draws.
+    stack_items: bool,
+    /// The media store's answers for
+    /// the row being walked.
+    assets: Assets<'a>,
+    /// Every image seen so far;
+    /// [`Flow`] gets the ones that
+    /// landed in it, renumbered.
+    images: Vec<FlowImage>,
+    /// What a table cell's border
+    /// draws in, where the dictionary
+    /// declares none.
+    ///
+    /// Yomitan gives a cell
+    /// `border-color:
+    /// var(--text-color-light2)`
+    /// rather than the `currentColor`
+    /// CSS would otherwise use - the
+    /// middle rung of its three-step
+    /// text ladder, so a grid reads as
+    /// a grid without shouting. This
+    /// panel's ladder is `body_text`,
+    /// `collapsed_text`,
+    /// `dimmed_text`, and its middle
+    /// rung carries `#969aa0` dark and
+    /// `#64666e` light against
+    /// Yomitan's own `#999999` and
+    /// `#666666`: the same rung, and
+    /// very nearly the same colour.
+    rule: Rgb,
+    /// What a header cell's background
+    /// draws in.
+    ///
+    /// Yomitan gives `thead` and `th`
+    /// `background-color:
+    /// var(--background-color-dark1)`,
+    /// which is its palette's one step
+    /// off the panel fill. This
+    /// theme's one step off the panel
+    /// fill is `separator`, the colour
+    /// every other hairline and tint
+    /// in the panel already uses -
+    /// `#323238` against Yomitan's own
+    /// `#333333` on a near-identical
+    /// dark background.
+    tint: Rgb,
 }
 
 /// One row's gloss tree, laid out as
-/// paragraphs at `top_gap` apart.
-fn paragraphs(doc: &GlossDoc, base: Inline, top_gap: f32) -> Vec<Flow> {
+/// paragraphs and tables at `top_gap`
+/// apart.
+///
+/// `stack_items` is
+/// [`Paragraphs::stack_items`]: the
+/// parameter ticket 14 wires its
+/// compact list setting to.
+///
+/// The theme rather than a resolved
+/// [`Inline`], because a table cell's
+/// Yomitan defaults need two colours
+/// the body role does not carry - the
+/// cell rule and the header tint (see
+/// [`Paragraphs::cell_defaults`]).
+fn paragraphs(
+    doc: &GlossDoc,
+    theme: &Theme,
+    top_gap: f32,
+    stack_items: bool,
+    assets: Assets<'_>,
+) -> Vec<Piece> {
+    let base = Inline::body(theme);
     let mut p = Paragraphs {
         doc,
         out: Vec::new(),
@@ -2571,6 +4589,12 @@ fn paragraphs(doc: &GlossDoc, base: Inline, top_gap: f32) -> Vec<Flow> {
         rubies: Vec::new(),
         open_ruby: NO_RUBY,
         barrier: false,
+        pending_marker: None,
+        stack_items,
+        assets,
+        images: Vec::new(),
+        rule: theme.collapsed_text,
+        tint: theme.separator,
     };
     let root = Ctx {
         inline: base,
@@ -2583,8 +4607,8 @@ fn paragraphs(doc: &GlossDoc, base: Inline, top_gap: f32) -> Vec<Flow> {
         p.pending_sep = true;
     }
     p.flush();
-    for flow in &mut p.out {
-        flow.top_gap = top_gap;
+    for piece in &mut p.out {
+        piece.top_gap(top_gap);
     }
     p.out
 }
@@ -2607,12 +4631,13 @@ impl Paragraphs<'_> {
             self.cur.path = ctx.path;
         }
         match doc.node(id).item_type {
-            // Ticket 12 owns image
-            // items; today they draw
-            // nothing, which is what
-            // the plain-text walk also
-            // does with them.
-            ItemType::Image => {}
+            // A `type: image` item is an
+            // image node with no tag, and
+            // the same replaced element:
+            // it takes room on the line
+            // the item lands on rather
+            // than opening one.
+            ItemType::Image => self.image(id, ctx),
             ItemType::Text => self.text(doc.text(id), ctx.inline, ctx.link),
             // Yomitan drops a
             // `structured-content`
@@ -2650,11 +4675,21 @@ impl Paragraphs<'_> {
             // inside the paragraph rather
             // than splitting it.
             Tag::Br => return self.text("\n", ctx.inline, ctx.link),
+            // A table is a grid rather
+            // than a run of lines, and
+            // every word in one belongs
+            // to a cell, so the whole
+            // subtree is taken over at
+            // once - down to the `tr`,
+            // which is a block here only
+            // because a row breaks a
+            // line for the plain-text
+            // walk.
+            Tag::Table => return self.table(id, ctx),
             _ => {}
         }
-        // Ticket 12 owns images.
         if node.kind == Kind::Image {
-            return;
+            return self.image(id, ctx);
         }
         if node.kind == Kind::Text && node.tag == Tag::None {
             return self.text(doc.text(id), ctx.inline, ctx.link);
@@ -2685,6 +4720,12 @@ impl Paragraphs<'_> {
         // breaking one.
         if !node.tag.is_block() && block.style.paints() {
             return self.pill(id, next, block.style);
+        }
+        // A list marks and indents its
+        // own children, so it takes
+        // them over from `children`.
+        if node.kind == Kind::List {
+            return self.list(id, next, node.tag == Tag::Ol);
         }
         self.children(id, next);
     }
@@ -2776,14 +4817,587 @@ impl Paragraphs<'_> {
         }
     }
 
+    /// One image node.
+    ///
+    /// An image is a *character*, not
+    /// an illustration: 427 786 census
+    /// nodes carry a gaiji marker and
+    /// sit at `height: 1em` in the
+    /// middle of a definition. So it
+    /// takes room on the line it lands
+    /// on and opens no line of its own:
+    /// `Tag::Img` is inline, and this
+    /// keeps it that way.
+    ///
+    /// The ladder, in the order the
+    /// ticket names it. With bytes
+    /// behind the path the image is an
+    /// element of its own, sized from
+    /// what the node declared or from
+    /// what the build recorded. With no
+    /// bytes there is nothing to
+    /// composite, so the `alt` text
+    /// goes into the flow instead -
+    /// which is the *better* rung, not
+    /// a worse one: real text wraps
+    /// with the sentence around it. And
+    /// with neither, a placeholder box
+    /// of one em. Never nothing:
+    /// nothing is a hole in a word.
+    fn image(&mut self, id: NodeId, ctx: Ctx) {
+        let doc = self.doc;
+        let style = self.styled(id, ctx.inline);
+        let path = doc
+            .attr_of(id, "path")
+            .and_then(|v| doc.scalar_str(v))
+            .filter(|p| !p.is_empty());
+        let recorded = path.and_then(|p| self.assets.size(p));
+        let (w, h) = image_size(doc, id, style.size, recorded);
+        let alt = image_alt(doc, id);
+        if recorded.is_none() && !alt.is_empty() {
+            return self.text(&alt, style, ctx.link);
+        }
+        let scene = SceneImage {
+            // Only a stored asset gets a
+            // key. Handing a bin a key
+            // with no row behind it would
+            // buy a decode attempt and a
+            // cache entry for an answer
+            // this walk already has.
+            key: recorded
+                .and(path)
+                .map(|p| MediaKey::new(self.assets.dict_id, p)),
+            format: recorded.map(|size| size.format),
+            appearance: image_appearance(doc, id),
+            // Yomitan's default is to
+            // draw the backing; every
+            // image node in the census's
+            // samples turns it off.
+            background: image_flag(doc, id, "background").unwrap_or(true),
+            collapsed: image_flag(doc, id, "collapsed").unwrap_or(false),
+            collapsible: image_flag(doc, id, "collapsible").unwrap_or(false),
+        };
+        self.reserve(
+            FlowImage {
+                w,
+                h,
+                em: style.size,
+                style,
+                spacers: image_spacers(w, h),
+                alt,
+                path: ctx.path,
+                scene,
+            },
+            ctx.link,
+        );
+    }
+
+    /// Buys one image its room on the
+    /// line it lands on.
+    ///
+    /// Two spans, because a span's
+    /// advance and its line height are
+    /// the same number - its size - and
+    /// an image needs them apart: the
+    /// [`IMAGE_SPACER`] run is charged
+    /// for the width and the
+    /// [`IMAGE_RISER`] for the height.
+    /// [`measure_images`] solves both
+    /// sizes once the measurer has said
+    /// what one of each costs.
+    ///
+    /// The spans are pushed rather than
+    /// coalesced, and a barrier is left
+    /// behind them: an image's
+    /// reservation must be exactly its
+    /// own, or [`place_images`] would
+    /// read a box that included the
+    /// word beside it.
+    fn reserve(&mut self, img: FlowImage, link: u32) {
+        // An image is worth an item
+        // separator and worth a list
+        // marker, for the same reason
+        // text is: it is content, and
+        // `<li><img></li>` draws its
+        // bullet.
+        if std::mem::take(&mut self.pending_sep) && !self.cur.text.is_empty() {
+            self.push(ITEM_SEPARATOR, img.style, link);
+        }
+        self.mark();
+        let slot = self.images.len() as u32;
+        let (style, spacers) = (img.style, img.spacers);
+        self.images.push(img);
+        self.raw(&IMAGE_SPACER.repeat(spacers), style, link, slot, false);
+        self.raw(IMAGE_RISER, style, link, slot, true);
+        self.barrier = true;
+    }
+
+    /// One of an image's own spans,
+    /// joined to nothing.
+    ///
+    /// `link` rides along so an image
+    /// inside a cross-reference is part
+    /// of that link's hit target - a
+    /// gaiji in a "see also" is as
+    /// clickable as the word beside it.
+    /// `ruby` does not: an image is
+    /// never a ruby base, and claiming
+    /// a slot would centre a reading
+    /// over a picture.
+    fn raw(&mut self, text: &str, style: Inline, link: u32, image: u32, filler: bool) {
+        let at = self.cur.text.len() as u32;
+        self.cur.text.push_str(text);
+        self.cur.spans.push(FlowSpan {
+            at,
+            len: text.len() as u32,
+            style,
+            link,
+            ruby: NO_RUBY,
+            filler,
+            image,
+        });
+    }
+
+    /// One `ul` or `ol`: its items,
+    /// each marked and one level in.
+    ///
+    /// The list is where a marker
+    /// starts: `listStyleType` is
+    /// declared on it and an ordinal
+    /// counts its own items, so both
+    /// are resolved once here. Each
+    /// item then resolves its own
+    /// `listStyleType` against the
+    /// list's, because CSS inherits the
+    /// property and the item is what
+    /// draws the marker.
+    ///
+    /// The indent goes on the list too,
+    /// exactly where Yomitan's
+    /// stylesheet puts it, which is
+    /// what lets it accumulate without
+    /// this walk counting levels: an
+    /// item inherits its list's indent
+    /// ([`Block::indent`]) and a list
+    /// inside an item adds another
+    /// [`LIST_INDENT_EM`] to it.
+    fn list(&mut self, id: NodeId, ctx: Ctx, ordered: bool) {
+        let doc = self.doc;
+        let ctx = Ctx {
+            block: Block {
+                indent: ctx.block.indent + LIST_INDENT_EM * ctx.inline.size,
+                ..ctx.block
+            },
+            ..ctx
+        };
+        // Nothing to mark: `display:
+        // list-item` is what earns a
+        // marker and only an `li` has
+        // it, so a list holding none is
+        // walked as any other block -
+        // which keeps `children`'s
+        // bare-string rule over it.
+        if !doc.children(id).any(|child| doc.node(child).kind == Kind::ListItem) {
+            return self.children(id, ctx);
+        }
+        // The list's own declaration
+        // over its tag's initial value.
+        // Each item then resolves again
+        // against this, because the
+        // property is inherited and the
+        // item is what draws the marker.
+        let inherited = marker_of(doc, id, initial_marker(ordered));
+        let mut n = 0usize;
+        for (i, child) in doc.children(id).enumerate() {
+            let at = ctx.at(i);
+            if doc.node(child).kind != Kind::ListItem {
+                self.node(child, at);
+                continue;
+            }
+            n += 1;
+            if let Some(label) = marker_of(doc, child, inherited).label(n) {
+                // The item's own resolved
+                // style: CSS's `::marker`
+                // inherits from the item, not
+                // from the `b` the item's text
+                // may sit inside.
+                let style = self.styled(child, ctx.inline);
+                self.owe(label, style);
+            }
+            if self.stack_items {
+                self.node(child, at);
+            } else {
+                // Ticket 14's compact list:
+                // the item's content joins the
+                // paragraph already open,
+                // separated as the panel has
+                // always separated glossary
+                // items. The `li` opens no
+                // line here, so it draws no
+                // block box either - it is
+                // inline content, and CSS
+                // draws no block box around
+                // inline content.
+                self.pending_sep = true;
+                let inline = self.styled(child, ctx.inline);
+                let link = self.link_of(child, ctx.link);
+                self.children(child, Ctx { inline, link, ..at });
+            }
+            // A marker never outlives the
+            // item that owes it: an item
+            // holding no text at all draws
+            // none, rather than marking the
+            // next item twice.
+            self.pending_marker = None;
+        }
+    }
+
+    /// One `table`: its rows, as a
+    /// grid.
+    ///
+    /// The table is also the block
+    /// container Yomitan wraps one in
+    /// (`.gloss-sc-table-container {
+    /// display: block }`): it closes
+    /// the paragraph before it and
+    /// opens none of its own, because
+    /// every word in a table belongs
+    /// to a cell.
+    ///
+    /// A `table` inside a cell is a
+    /// table inside a cell: a cell's
+    /// content is a list of
+    /// [`Piece`]s, and [`Pass::block`]
+    /// lays a nested grid out through
+    /// the same two methods the outer
+    /// one used.
+    fn table(&mut self, id: NodeId, ctx: Ctx) {
+        // A marker owed to an item
+        // whose only content is a table
+        // has no line inside the table
+        // to sit on, so it takes the
+        // line above - which is where a
+        // browser puts a `::marker`
+        // beside a block too.
+        self.mark();
+        self.flush();
+        let inline = self.styled(id, ctx.inline);
+        let block = self.boxed(id, ctx.block, inline);
+        let inner = Ctx {
+            inline,
+            // A cell pays the box and the
+            // list indent once, through
+            // the table that holds it -
+            // the same reason
+            // [`Block::inherited`] hands
+            // a child an empty box.
+            block: Block { indent: 0.0, ..block.inherited() },
+            link: self.link_of(id, ctx.link),
+            path: ctx.path,
+        };
+        let mut rows = Vec::new();
+        self.rows_of(id, inner, false, &mut rows);
+        let (cells, rows, cols) = place(rows);
+        // A table of nothing draws
+        // nothing, rather than an empty
+        // rule.
+        if cells.is_empty() {
+            return;
+        }
+        self.out.push(Piece::Table(Grid {
+            top_gap: 0.0,
+            cells,
+            rows,
+            cols,
+            block,
+            base: inline,
+            path: ctx.path,
+            dict_id: 0,
+            entry_id: 0,
+        }));
+    }
+
+    /// Every row under a `table` or a
+    /// row group, in document order.
+    ///
+    /// `thead`, `tbody` and `tfoot` are
+    /// scaffolding rather than
+    /// structure, and the parser
+    /// already classes all three
+    /// `Kind::Table`, so they
+    /// contribute their rows and
+    /// nothing else. A `thead` also
+    /// carries Yomitan's header styling
+    /// to the cells inside it, which is
+    /// how a `td` in a header row comes
+    /// out bold and tinted. `tfoot` is
+    /// out of this ticket's scope and
+    /// contributes its rows plainly,
+    /// which loses no text and invents
+    /// no styling for a shape the
+    /// census counts zero of.
+    ///
+    /// Content a dictionary wrote
+    /// outside any cell becomes an
+    /// implied cell in an implied row,
+    /// so a malformed table loses none
+    /// of it. An implied cell holding
+    /// only the whitespace between two
+    /// written cells is dropped, and
+    /// with it the column it would
+    /// otherwise have invented.
+    fn rows_of(&mut self, id: NodeId, ctx: Ctx, head: bool, out: &mut Vec<Vec<Cell>>) {
+        let doc = self.doc;
+        let mut stray: Vec<Cell> = Vec::new();
+        for (i, child) in doc.children(id).enumerate() {
+            let at = ctx.at(i);
+            let tag = doc.node(child).tag;
+            let row_level = matches!(tag, Tag::Tr | Tag::Thead | Tag::Tbody | Tag::Tfoot);
+            if row_level && !stray.is_empty() {
+                out.push(std::mem::take(&mut stray));
+            }
+            match tag {
+                Tag::Tr => {
+                    let row = self.row(child, at, head);
+                    if !row.is_empty() {
+                        out.push(row);
+                    }
+                }
+                Tag::Thead | Tag::Tbody | Tag::Tfoot => {
+                    let inline = self.styled(child, ctx.inline);
+                    let block = self.boxed(child, ctx.block, inline);
+                    let inner = Ctx { inline, block: block.inherited(), ..at };
+                    self.rows_of(child, inner, head || tag == Tag::Thead, out);
+                }
+                Tag::Td | Tag::Th => stray.push(self.cell(child, at, head, false)),
+                _ => stray.extend(self.implied(child, at, head)),
+            }
+        }
+        if !stray.is_empty() {
+            out.push(stray);
+        }
+    }
+
+    /// One `tr`: its cells, in order.
+    ///
+    /// A row's own box is not drawn.
+    /// Under `border-collapse` a row's
+    /// border collapses into its
+    /// cells', which is where this grid
+    /// resolves it, and Yomitan
+    /// declares no `tr` rule at all -
+    /// so the one real dictionary that
+    /// writes a `tr` border writes a
+    /// width with no style, which draws
+    /// nothing in a browser either.
+    fn row(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Vec<Cell> {
+        let doc = self.doc;
+        let inline = self.styled(id, ctx.inline);
+        let block = self.boxed(id, ctx.block, inline);
+        let inner = Ctx {
+            inline,
+            block: block.inherited(),
+            link: self.link_of(id, ctx.link),
+            path: ctx.path,
+        };
+        let mut out = Vec::new();
+        for (i, child) in doc.children(id).enumerate() {
+            let at = inner.at(i);
+            match doc.node(child).tag {
+                Tag::Td | Tag::Th => out.push(self.cell(child, at, head, false)),
+                _ => out.extend(self.implied(child, at, head)),
+            }
+        }
+        out
+    }
+
+    /// A cell for content written
+    /// outside one, if it renders
+    /// anything.
+    ///
+    /// An explicit empty `<td>` is a
+    /// blank in a paradigm and keeps
+    /// its border; an implied cell
+    /// holding nothing is the
+    /// whitespace a dictionary left
+    /// between two written cells, and
+    /// a border round it would invent a
+    /// column. The node's own
+    /// declarations are not read into
+    /// the cell's box either: they
+    /// belong to the node, which
+    /// [`Paragraphs::node`] resolves
+    /// again inside the cell, and
+    /// taking them twice would pay a
+    /// margin twice.
+    fn implied(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Option<Cell> {
+        let cell = self.cell(id, ctx, head, true);
+        (!cell.body.is_empty()).then_some(cell)
+    }
+
+    /// One cell: a `td`, a `th`, or a
+    /// slot implied by content written
+    /// outside one.
+    ///
+    /// The cell opens a paragraph of
+    /// its own rather than joining the
+    /// one before it, which `td` and
+    /// `th` do not do anywhere else in
+    /// this walk: they are in neither
+    /// [`Tag::is_block`] nor
+    /// [`Tag::is_inline`] precisely
+    /// because a cell is a grid problem
+    /// and not a line-break one. That
+    /// paragraph carries the cell's own
+    /// address, so a hit inside a
+    /// conjugation table resolves to
+    /// that cell's subtree.
+    fn cell(&mut self, id: NodeId, ctx: Ctx, head: bool, implied: bool) -> Cell {
+        let doc = self.doc;
+        let inline = self.styled(id, ctx.inline);
+        // Yomitan tints a `th` and
+        // everything inside a `thead`.
+        // The bold half of the same rule
+        // is [`tag_style`]'s, so a `td`
+        // in a header row inherits its
+        // weight from the `thead` and no
+        // second rule belongs here.
+        let tint = head || doc.node(id).tag == Tag::Th;
+        let mut block = self.cell_defaults(ctx.block, inline, tint);
+        if !implied {
+            block = self.declared(id, block, inline.size);
+        }
+        let inner = Ctx {
+            inline,
+            block: block.inherited(),
+            link: self.link_of(id, ctx.link),
+            path: ctx.path,
+        };
+        // The cell's own paragraphs,
+        // collected off to one side: the
+        // grid measures each cell
+        // separately, so they cannot go
+        // into the stream the panel is
+        // stacking.
+        let outer = std::mem::take(&mut self.out);
+        self.open(ctx.path, block.inherited());
+        if implied {
+            self.node(id, ctx);
+        } else {
+            self.children(id, inner);
+        }
+        self.flush();
+        let mut body = std::mem::replace(&mut self.out, outer);
+        for (i, piece) in body.iter_mut().enumerate() {
+            // A cell's first paragraph
+            // starts at the cell's own
+            // top; the ones under it are
+            // spaced as the panel spaces
+            // every other stacked
+            // paragraph.
+            piece.top_gap(if i == 0 { 0.0 } else { LINE_GAP });
+        }
+        Cell {
+            body,
+            style: block.style,
+            base: inline,
+            at: (0, 0),
+            span: (span_of(doc, id, "rowSpan"), span_of(doc, id, "colSpan")),
+            path: ctx.path,
+        }
+    }
+
+    /// Yomitan's own cell box, before
+    /// the dictionary speaks.
+    ///
+    /// The spec's defaults table,
+    /// verbatim: a solid border of
+    /// [`cell_border`] on every edge in
+    /// the panel's rule colour,
+    /// [`CELL_PADDING`] of padding, and
+    /// a tinted background on a header
+    /// cell. `vertical-align: top` is
+    /// the other half of that table and
+    /// needs no field - it is what
+    /// [`Pass::table`] does by placing
+    /// a short cell at its row's top.
+    fn cell_defaults(&self, parent: Block, inline: Inline, tint: bool) -> Block {
+        let em = inline.size;
+        Block {
+            style: BoxStyle {
+                border: Edges::all(cell_border(em)),
+                border_style: Edges::all(BorderStyle::Solid),
+                border_color: self.rule,
+                padding: Edges::all(em * CELL_PADDING),
+                background: tint.then_some(self.tint),
+                ..BoxStyle::default()
+            },
+            ..parent
+        }
+    }
+
+    /// Owes `label` to the next run of
+    /// text, in `style`.
+    ///
+    /// Appended when a marker is
+    /// already owed, which is an item
+    /// whose only content is a nested
+    /// list: both levels' markers then
+    /// share the one line they have
+    /// between them, as a browser draws
+    /// them. The outer level's style
+    /// stands, because that line is the
+    /// outer item's.
+    fn owe(&mut self, label: String, style: Inline) {
+        match &mut self.pending_marker {
+            Some((owed, _)) => owed.push_str(&label),
+            None => self.pending_marker = Some((label, style)),
+        }
+    }
+
+    /// Spends the marker owed to the
+    /// run about to be pushed.
+    ///
+    /// Its own span at both ends, and
+    /// out of both the open reading's
+    /// slot and the link around it: a
+    /// marker joined to a ruby base
+    /// would hand the reading
+    /// `\u{2022} 猫` to centre over, a
+    /// marker joined to the item's `b`
+    /// would come out bold, and
+    /// `::marker` is no part of an
+    /// `<a>`.
+    fn mark(&mut self) {
+        let Some((label, style)) = self.pending_marker.take() else {
+            return;
+        };
+        let slot = std::mem::replace(&mut self.open_ruby, NO_RUBY);
+        self.barrier = true;
+        self.push(&label, style, NO_LINK);
+        self.barrier = true;
+        self.open_ruby = slot;
+    }
+
     /// Appends text, paying any owed
-    /// item separator first.
+    /// item separator and list marker
+    /// first.
     fn text(&mut self, text: &str, style: Inline, link: u32) {
         if text.is_empty() {
             return;
         }
         if std::mem::take(&mut self.pending_sep) && !self.cur.text.is_empty() {
             self.push(ITEM_SEPARATOR, style, link);
+        }
+        // A marker waits for text worth
+        // marking: `<li><br>a</li>` puts
+        // it on the `a` rather than on
+        // the break, and an item holding
+        // only the whitespace a
+        // dictionary left between two
+        // nodes draws none at all.
+        if !text.trim().is_empty() {
+            self.mark();
         }
         self.push(text, style, link);
     }
@@ -2810,6 +5424,7 @@ impl Paragraphs<'_> {
             Some(last)
                 if joins
                     && !last.filler
+                    && last.image == NO_IMAGE
                     && last.style == style
                     && last.link == link
                     && last.ruby == ruby
@@ -2824,6 +5439,7 @@ impl Paragraphs<'_> {
                 link,
                 ruby,
                 filler: false,
+                image: NO_IMAGE,
             }),
         }
     }
@@ -2863,6 +5479,7 @@ impl Paragraphs<'_> {
             link: NO_LINK,
             ruby: slot,
             filler: true,
+            image: NO_IMAGE,
         });
         // The run after it is its own
         // span: joining it would give a
@@ -2937,7 +5554,22 @@ impl Paragraphs<'_> {
                 }
             };
         }
-        self.out.push(flow);
+        let mut seen: Vec<(u32, u32)> = Vec::new();
+        for span in &mut flow.spans {
+            if span.image == NO_IMAGE {
+                continue;
+            }
+            span.image = match seen.iter().find(|(old, _)| *old == span.image) {
+                Some((_, new)) => *new,
+                None => {
+                    let new = flow.images.len() as u32;
+                    flow.images.push(self.images[span.image as usize].clone());
+                    seen.push((span.image, new));
+                    new
+                }
+            };
+        }
+        self.out.push(Piece::Flow(flow));
     }
 
     /// The link a node's content sits
@@ -3112,11 +5744,29 @@ impl Paragraphs<'_> {
     /// record, so nothing here learns
     /// that CSS exists.
     fn boxed(&self, id: NodeId, parent: Block, inline: Inline) -> Block {
-        let doc = self.doc;
-        let mut block = Block {
+        let start = Block {
             style: BoxStyle { border_color: inline.color, ..BoxStyle::default() },
             ..parent
         };
+        self.declared(id, start, inline.size)
+    }
+
+    /// One node's own declarations,
+    /// folded over the box it starts
+    /// from.
+    ///
+    /// Split out because a table cell
+    /// starts from Yomitan's own grid
+    /// defaults rather than from an
+    /// empty box
+    /// ([`Paragraphs::cell_defaults`]),
+    /// and the dictionary's last word
+    /// must be applied the same way to
+    /// both. `em` is the node's *own*
+    /// resolved font size, because a
+    /// box length is a fraction of it.
+    fn declared(&self, id: NodeId, mut block: Block, em: f32) -> Block {
+        let doc = self.doc;
         let record = doc.style(id);
         for (i, (key, value)) in record.iter().enumerate() {
             // First occurrence wins, as
@@ -3124,7 +5774,7 @@ impl Paragraphs<'_> {
             if record[..i].iter().any(|(seen, _)| seen == key) {
                 continue;
             }
-            apply_box(doc, *key, *value, inline.size, &mut block);
+            apply_box(doc, *key, *value, em, &mut block);
         }
         block
     }
@@ -3209,6 +5859,13 @@ fn tag_style(tag: Tag, parent: Inline) -> Inline {
         // spec's own defaults table; its
         // tinted background is a box
         // property, resolved as one.
+        // Yomitan writes the weight on
+        // `thead` as well as on `th`, so
+        // a plain `td` in a header row
+        // inherits it - which is the
+        // whole of why `thead` is here,
+        // since a `thead` has no text of
+        // its own.
         //
         // A `summary` is its `details`'
         // heading and takes the same
@@ -3219,7 +5876,9 @@ fn tag_style(tag: Tag, parent: Inline) -> Inline {
         // of Scope), so the weight is
         // what tells a reader which of
         // the two blocks is the label.
-        Tag::B | Tag::Strong | Tag::Th | Tag::Summary => style.weight = BOLD_WEIGHT,
+        Tag::B | Tag::Strong | Tag::Th | Tag::Thead | Tag::Summary => {
+            style.weight = BOLD_WEIGHT;
+        }
         Tag::I | Tag::Em => style.italic = true,
         Tag::Sup => {
             style.size = parent.size / FONT_STEP;
@@ -3241,11 +5900,13 @@ fn tag_style(tag: Tag, parent: Inline) -> Inline {
 ///
 /// The properties a styled span can
 /// carry, and no others: the box
-/// properties are ticket 08's, the
-/// list and table ones are 09's and
-/// 10's, and a value this build
-/// cannot read leaves the inherited
-/// one standing rather than guessing.
+/// properties are ticket 08's,
+/// `listStyleType` is a list's own and
+/// [`marker_of`] reads it straight off
+/// the same record, and a value this
+/// build cannot read leaves the
+/// inherited one standing rather than
+/// guessing.
 fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut Inline) {
     match key {
         StyleKey::FontSize => {
@@ -3287,8 +5948,9 @@ fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: f32, out: &mut 
 /// (`docs/research/dict-shapes.md`):
 /// `color` is a span's and
 /// [`apply_style`] already resolved
-/// it, the list and table properties
-/// are 09's and 10's, and a value
+/// it, `listStyleType` is resolved by
+/// [`marker_of`] and is no part of a
+/// box, and a value
 /// this build cannot read leaves the
 /// box as it was rather than taking
 /// half a declaration.
@@ -3945,7 +6607,17 @@ fn build_elements(
                 // plain-text field and the collapsed summary still need,
                 // and a third view of one tree is the bug class this spec
                 // set out to close.
-                let mut flows = paragraphs(&entry.doc, Inline::body(theme), LINE_GAP);
+                // `true` is the stacked list
+                // layout: the parameter ticket
+                // 14 wires its compact setting
+                // to, and today's only value
+                // for it.
+                let assets = Assets { dict_id: block.dict_id, sizes: &entry.media };
+                let mut pieces =
+                    paragraphs(&entry.doc, theme, LINE_GAP, true, assets);
+                if pieces.is_empty() {
+                    continue;
+                }
                 // The row behind every
                 // paragraph of it, which the
                 // tree itself cannot know.
@@ -3955,15 +6627,39 @@ fn build_elements(
                 // the text" into "select sense
                 // 3 of 大辞林" (stories 45
                 // and 46).
-                for flow in &mut flows {
-                    flow.dict_id = block.dict_id;
-                    flow.entry_id = entry.entry_id;
+                for piece in &mut pieces {
+                    piece.stamp(block.dict_id, entry.entry_id);
                 }
-                let Some(first) = flows.first_mut() else { continue };
                 if numbered {
-                    first.number(i + 1, Inline::body(theme));
+                    // Yomitan's number is the
+                    // `<li>` marker, outside the
+                    // content, so a row that opens
+                    // with a table takes its
+                    // number on the line above
+                    // rather than losing it. Every
+                    // other row prefixes the
+                    // paragraph it already has,
+                    // which is what the geometry
+                    // goldens hold.
+                    if !matches!(pieces.first(), Some(Piece::Flow(_))) {
+                        pieces.insert(
+                            0,
+                            Piece::Flow(Flow {
+                                top_gap: LINE_GAP,
+                                dict_id: block.dict_id,
+                                entry_id: entry.entry_id,
+                                ..Flow::default()
+                            }),
+                        );
+                    }
+                    if let Some(Piece::Flow(flow)) = pieces.first_mut() {
+                        flow.number(i + 1, Inline::body(theme));
+                    }
                 }
-                out.extend(flows.into_iter().map(Elem::Gloss));
+                out.extend(pieces.into_iter().map(|piece| match piece {
+                    Piece::Flow(flow) => Elem::Gloss(flow),
+                    Piece::Table(grid) => Elem::Table(grid),
+                }));
             }
         }
     }

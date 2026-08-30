@@ -22,8 +22,10 @@ use crate::controller::HitAction;
 use crate::present::Presentation;
 use crate::ui::layout::{
     self, Align, ElemKind, GlyphBox, HitTarget, LineBox, MeasureError, MeasureRun, Measured,
-    Metrics, PopupScene, SceneElem, SceneRequest, SpanBox, StyledSpan, TextMeasure,
+    Metrics, PopupScene, SceneElem, SceneImage, SceneRect, SceneRequest, SpanBox, StyledSpan,
+    TextMeasure,
 };
+use crate::ui::media::MediaSurfaces;
 use crate::ui::theme::{Theme, SCROLLBAR_W};
 use anyhow::{Context, Result};
 use std::cell::RefCell;
@@ -484,20 +486,52 @@ pub struct Renderer {
     /// From the last paint pass, in
     /// DIPs, as the scene reported it.
     hits: RefCell<Vec<HitTarget>>,
+    /// The painter's decoded-asset
+    /// cache, or `None` when this build
+    /// cannot open the dictionary
+    /// database.
+    ///
+    /// `RefCell` for the same reason
+    /// `hits` and the format cache are:
+    /// `paint_once` takes `&self`, and
+    /// this window is single-threaded
+    /// by construction. `None` is a real
+    /// state and not a failure - the
+    /// popup still paints, with every
+    /// image on the `alt`-text rung.
+    media: RefCell<Option<MediaSurfaces>>,
 }
 
 impl Renderer {
     /// Factories only, no target.
-    pub fn new(hwnd: HWND) -> Result<Renderer> {
+    ///
+    /// `db` is the dictionary database, which the painter opens its own
+    /// read-only connection onto: the worker owns the dictionary on
+    /// another thread and a `rusqlite::Connection` is not `Sync`.
+    pub fn new(hwnd: HWND, db: &std::path::Path) -> Result<Renderer> {
         let d2d_factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
                 .context("D2D1CreateFactory")?;
+        // A database this build cannot open costs the panel its images and
+        // never its frame: an image node then renders its `alt` text,
+        // which is the character it stood for.
+        let media = match MediaSurfaces::open(db) {
+            Ok(cache) => Some(cache),
+            Err(e) => {
+                eprintln!(
+                    "chibipop: no dictionary media - {e:#}; image nodes will render \
+                     their alt text"
+                );
+                None
+            }
+        };
         Ok(Renderer {
             hwnd,
             d2d_factory,
             text: Text::new()?,
             target: None,
             hits: RefCell::new(Vec::new()),
+            media: RefCell::new(media),
         })
     }
 
@@ -785,6 +819,25 @@ impl Renderer {
             self.draw_box(target, b, dy)?;
         }
 
+        // An image, and its ladder: the asset if this build can decode
+        // it, then the `alt` run the element already carries, then an
+        // outlined box. Never nothing, because nothing is a hole in a
+        // word.
+        if let Some(img) = &elem.image {
+            if self.draw_asset(target, elem, img, pen.1, theme)? {
+                return Ok(());
+            }
+            if elem.spans.is_empty() {
+                self.draw_placeholder(target, image_rect(elem, pen.1), elem.color)?;
+                return Ok(());
+            }
+        }
+        // Nothing to shape: an empty table cell draws its border and no
+        // text, and the seam takes no empty run.
+        if elem.spans.is_empty() {
+            return Ok(());
+        }
+
         // One layout for the whole
         // element, however many styles
         // it holds: its spans wrap as
@@ -898,6 +951,120 @@ impl Renderer {
         Ok(())
     }
 
+    /// One asset, composited into its resolved box. `false` means the
+    /// ladder has to fall through.
+    ///
+    /// The backing fill first, and only when the node asked for it:
+    /// Yomitan draws one behind a transparent asset, and every image node
+    /// in the census's samples turns it off. The panel's own background is
+    /// the honest backing here - a light grey behind a gaiji would be the
+    /// one opaque patch on a dark theme.
+    ///
+    /// The `ID2D1Bitmap` is created per paint rather than cached, which is
+    /// what `ui::media`'s own header reserves: a device bitmap belongs to
+    /// a render target and dies with it on device loss, while the bytes
+    /// behind it outlive that. A hover shows a handful of gaiji, so this
+    /// is a handful of uploads per damage and no re-decode.
+    fn draw_asset(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        elem: &SceneElem,
+        img: &SceneImage,
+        pen_y: f32,
+        theme: &Theme,
+    ) -> windows::core::Result<bool> {
+        let rect = image_rect(elem, pen_y);
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return Ok(false);
+        }
+        let Some(key) = img.key.as_ref() else { return Ok(false) };
+        let mut held = self.media.borrow_mut();
+        let Some(cache) = held.as_mut() else { return Ok(false) };
+        // The tint is core's decision, so both bins take the expensive
+        // path on exactly the same assets (`SceneImage::tint`).
+        let tint = img.tint(elem.rect, elem.font_size, self.dpi_scale());
+        let Ok(bitmap) = cache.bitmap(key, tint, elem.color) else {
+            return Ok(false);
+        };
+        let size = D2D_SIZE_U { width: bitmap.w, height: bitmap.h };
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        // SAFETY: `bitmap.bgra` is `w * h * 4` bytes with no row padding,
+        // which is what `stride` reports and what `size` describes.
+        let uploaded = unsafe {
+            target.CreateBitmap(size, Some(bitmap.bgra.as_ptr().cast()), bitmap.stride(), &props)
+        }?;
+        if img.background {
+            let brush = unsafe { target.CreateSolidColorBrush(&color_f(theme.background), None) }?;
+            let box_ = D2D_RECT_F {
+                left: rect.x,
+                top: rect.y,
+                right: rect.x + rect.w,
+                bottom: rect.y + rect.h,
+            };
+            unsafe { target.FillRectangle(&box_, &brush) };
+        }
+        let box_ = D2D_RECT_F {
+            left: rect.x,
+            top: rect.y,
+            right: rect.x + rect.w,
+            bottom: rect.y + rect.h,
+        };
+        unsafe {
+            target.DrawBitmap(
+                &uploaded,
+                Some(&box_),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            )
+        };
+        Ok(true)
+    }
+
+    /// The last rung: an outlined box where the character should be.
+    ///
+    /// Outlined and not filled, because a solid block reads as a censored
+    /// glyph while an empty frame reads as a missing one - and because the
+    /// asset it stands in for is usually a character drawn in this very
+    /// colour.
+    fn draw_placeholder(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        rect: SceneRect,
+        color: layout::Rgb,
+    ) -> windows::core::Result<()> {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return Ok(());
+        }
+        let brush = unsafe { target.CreateSolidColorBrush(&color_f(color), None) }?;
+        let edge = D2D_RECT_F {
+            left: rect.x + PLACEHOLDER_EDGE / 2.0,
+            top: rect.y + PLACEHOLDER_EDGE / 2.0,
+            right: rect.x + rect.w - PLACEHOLDER_EDGE / 2.0,
+            bottom: rect.y + rect.h - PLACEHOLDER_EDGE / 2.0,
+        };
+        if edge.right <= edge.left || edge.bottom <= edge.top {
+            // Too small to outline: a filled speck is still visibly ink.
+            let box_ = D2D_RECT_F {
+                left: rect.x,
+                top: rect.y,
+                right: rect.x + rect.w,
+                bottom: rect.y + rect.h,
+            };
+            unsafe { target.FillRectangle(&box_, &brush) };
+            return Ok(());
+        }
+        unsafe { target.DrawRectangle(&edge, &brush, PLACEHOLDER_EDGE, None) };
+        Ok(())
+    }
+
     /// Draws one run's spans, each in
     /// its own colour and at its own
     /// baseline.
@@ -995,6 +1162,22 @@ impl Renderer {
 /// baseline.
 fn shift_at(shifts: &[f32], i: usize) -> f32 {
     shifts.get(i).copied().unwrap_or(0.0)
+}
+
+/// The stroke a placeholder box is outlined with, in DIPs.
+///
+/// One DIP, which is the hairline this target strokes everything else at:
+/// the panel's own edge, a table cell's rule, and the spec's `1em / 14`
+/// cell border at base size.
+const PLACEHOLDER_EDGE: f32 = 1.0;
+
+/// One image element's box, at the scroll it is being drawn at.
+///
+/// The scene's rects are in unscrolled panel space, like every other rect
+/// it reports, and an image element's `pen` is its own top-left - so the
+/// whole box moves by the same offset the pen did.
+fn image_rect(elem: &SceneElem, pen_y: f32) -> SceneRect {
+    SceneRect { y: pen_y, ..elem.rect }
 }
 
 /// A brush that paints nothing, for a

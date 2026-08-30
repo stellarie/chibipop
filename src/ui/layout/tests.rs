@@ -293,12 +293,26 @@ fn tree(dict: &str, glossary: &str) -> GlossBlock {
 
 /// One matched row, from the raw glossary JSON the record stores.
 fn row_of(glossary: &str, tags: &[&str]) -> GlossEntry {
+    row_media(glossary, tags, Vec::new())
+}
+
+/// One matched row whose dictionary shipped `media`.
+///
+/// The sizing pass reads what the build recorded rather than the bytes
+/// (`present::GlossEntry::media`), so an image fixture is a path and four
+/// numbers - no archive, no decoder, no database.
+fn row_media(
+    glossary: &str,
+    tags: &[&str],
+    media: Vec<(String, Intrinsic)>,
+) -> GlossEntry {
     let doc = std::sync::Arc::new(crate::dict::gloss::GlossDoc::parse(glossary));
     GlossEntry {
         entry_id: crate::present::NO_ROW,
         glosses: crate::dict::gloss::plain_items(&doc),
         tags: tags.iter().map(|s| s.to_string()).collect(),
         doc,
+        media,
     }
 }
 
@@ -1650,22 +1664,28 @@ fn a_styled_span_carries_its_own_colour_and_weight() {
     assert_eq!(((255, 0, 0), 700, true), (spans[1].color, spans[1].weight, spans[1].italic));
 }
 
-/// A header cell is bold beside its row's data cells, per the spec's
+/// A header cell is bold beside its row's data cell, per the spec's
 /// defaults table - the shape a real conjugation table has.
+///
+/// Ticket 07 wrote this when a row was one paragraph. Ticket 10 grids it,
+/// so the two cells are now two paragraphs side by side on one row; the
+/// weight is what the test is about, and it survived the grid.
 #[test]
-fn a_header_cell_is_bold_on_the_same_line_as_its_data_cells() {
+fn a_header_cell_is_bold_beside_its_data_cell() {
     let p = rich(&sc(
         r#"[{"tag":"table","content":{"tag":"tr","content":[{"tag":"th","content":"past"},{"tag":"td","content":"\u98f2\u3093\u3060"}]}}]"#,
     ));
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     let gloss = bodies(&s);
 
-    assert_eq!(1, gloss.len(), "a row is one paragraph until ticket 10 grids it");
-    assert_eq!(1, gloss[0].lines);
+    assert_eq!(2, gloss.len(), "a row is a grid: one paragraph per cell");
+    assert!(gloss.iter().all(|e| e.lines == 1));
     assert_eq!(
         vec![700, Theme::dark().body_weight],
-        gloss[0].spans.iter().map(|s| s.weight).collect::<Vec<_>>()
+        gloss.iter().map(|e| e.spans[0].weight).collect::<Vec<_>>()
     );
+    assert_eq!(gloss[0].pen.1, gloss[1].pen.1, "both cells start at their row's top");
+    assert!(gloss[0].pen.0 < gloss[1].pen.0, "and the header cell leads");
 }
 
 /// A pathological tree terminates and its outer levels reach the panel.
@@ -2009,6 +2029,939 @@ fn a_details_summary_pair_is_two_distinguishable_elements() {
     );
     assert_eq!(BOLD_WEIGHT, gloss[0].spans[0].weight, "the summary is the heading");
     assert_eq!(theme.body_weight, gloss[1].spans[0].weight, "the body is not");
+}
+
+// ---- lists ----
+
+/// One list level, in the panel's own pixels: Yomitan's `1.4em` against
+/// the body size every fixture here is measured at.
+const LEVEL: f32 = LIST_INDENT_EM * BOX_EM;
+
+/// `disc`, as the walk writes it beside an item.
+fn bullet() -> String {
+    format!("{DISC_MARKER}{MARKER_GAP}")
+}
+
+/// One list of plain-text items, as a rich card.
+///
+/// `style` is the list's own inline style, comma and all, so a test
+/// declares `listStyleType` on exactly the node CSS declares it on.
+fn list_card(tag: &str, style: &str, items: &[&str]) -> Presentation {
+    let items: Vec<String> = items
+        .iter()
+        .map(|text| format!(r#"{{"tag":"li","content":"{text}"}}"#))
+        .collect();
+    rich(&sc(&format!(
+        r#"{{"tag":"{tag}"{style},"content":[{}]}}"#,
+        items.join(",")
+    )))
+}
+
+/// The acceptance shape (story 5): one element per item, each carrying
+/// its own marker at the same indent. The marker text and the offset are
+/// what is asserted, not that the words arrived.
+#[test]
+fn an_unordered_list_marks_every_item_and_indents_them_alike() {
+    let s = laid_out(&list_card("ul", "", &["a", "b", "c"]), 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    assert_eq!(3, items.len(), "one element per item");
+    for (i, text) in ["a", "b", "c"].iter().enumerate() {
+        assert_eq!(format!("{}{text}", bullet()), items[i].text);
+        assert_eq!(s.origin + LEVEL, items[i].pen.0, "item {i} sits one level in");
+    }
+    // The indent comes off the wrap width as well as the pen, so an
+    // indented item still stops at the column's own right edge.
+    assert_eq!(s.content_w - LEVEL, items[0].wrap_w);
+    // An indent is not a box: nothing is drawn around an item that only
+    // sits further in.
+    assert_eq!(None, items[0].block_box);
+}
+
+/// Story 5 again, and the numbering ticket 16 does *not* do: an ordinal
+/// per item of this list, which is a marker rather than a Sense number.
+#[test]
+fn an_ordered_list_numbers_its_items_from_one() {
+    let s = laid_out(&list_card("ol", "", &["a", "b", "c"]), 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    assert_eq!(
+        vec!["1. a", "2. b", "3. c"],
+        items.iter().map(|e| e.text.as_str()).collect::<Vec<_>>()
+    );
+    for item in &items {
+        assert_eq!(s.origin + LEVEL, item.pen.0);
+    }
+}
+
+/// Story 6: the nesting is shown by the indentation, one level per level,
+/// and the marker is resolved again at the inner level.
+#[test]
+fn a_nested_list_indents_its_inner_items_past_its_outer_ones() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","content":["outer","#,
+        r#"{"tag":"ol","content":{"tag":"li","content":"inner"}}]}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    assert_eq!(
+        vec![format!("{}outer", bullet()), "1. inner".to_string()],
+        items.iter().map(|e| e.text.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(s.origin + LEVEL, items[0].pen.0);
+    assert_eq!(s.origin + 2.0 * LEVEL, items[1].pen.0);
+    assert_eq!(LEVEL, items[1].pen.0 - items[0].pen.0, "one level, reused");
+    // And the inner level takes its own width off the wrap, so the
+    // deeper item is the narrower one.
+    assert_eq!(items[0].wrap_w - LEVEL, items[1].wrap_w);
+}
+
+/// Story 7: a dictionary's own counter, prepended as written. No counter
+/// algorithm runs over it and no suffix is added to it.
+#[test]
+fn a_literal_string_marker_is_prepended_verbatim() {
+    // Both quote characters, because CSS takes either and the census
+    // holds both.
+    let quoted: &[&str] = &[r#"'\u2460'"#, r#"\"\u2460\""#];
+    for value in quoted {
+        let style = format!(r#","style":{{"listStyleType":"{value}"}}"#);
+        let s = laid_out(&list_card("ul", &style, &["a"]), 224.0, 4000.0, false, false);
+        assert_eq!(format!("\u{2460}{MARKER_GAP}a"), one_body(&s).text, "{value}");
+    }
+}
+
+/// `list-style-type` is inherited and the marker is drawn by the item, so
+/// an item's own declaration wins over its list's.
+///
+/// This is Jitendex's real shape, not a corner case: it declares
+/// `listStyleType` on the `li` in all 38 381 entries that carry one -
+/// 97 150 nodes, every one of them an `li` - and its ①②③ sense numbering
+/// is nothing but that. Resolved at the list alone, the whole dictionary
+/// would draw bullets.
+#[test]
+fn an_items_own_list_style_wins_over_its_lists() {
+    // `ol > li[listStyleType]`, as Jitendex writes a sense group.
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ol","content":[{"tag":"li","style":{"listStyleType":"\"\u2460\""},"#,
+        r#""content":"first"},{"tag":"li","style":{"listStyleType":"\"\u2461\""},"#,
+        r#""content":"second"},{"tag":"li","content":"third"}]}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    assert_eq!(
+        vec!["\u{2460} first", "\u{2461} second", "3. third"],
+        bodies(&s).iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        "the declaring items take their own counter, the silent one inherits"
+    );
+
+    // And the inheritance runs the other way too: a list's own
+    // declaration reaches an item that declares nothing, which is where
+    // ticket 17 will put a `styles.css` rule.
+    let inherited = laid_out(
+        &list_card("ul", r#","style":{"listStyleType":"circle"}"#, &["a", "b"]),
+        224.0,
+        4000.0,
+        false,
+        false,
+    );
+    for item in bodies(&inherited) {
+        assert!(item.text.starts_with(CIRCLE_MARKER), "{:?}", item.text);
+    }
+}
+
+/// An unreadable `listStyleType` falls back to the initial value for the
+/// list's own tag, which is a marker of the wrong shape rather than a
+/// missing one - and a keyword this build *can* read wins over the tag.
+#[test]
+fn an_unreadable_list_style_falls_back_to_each_tags_initial_value() {
+    // (tag, keyword, marker without its gap)
+    let cases: &[(&str, &str, &str)] = &[
+        ("ul", "", DISC_MARKER),
+        ("ul", "disc", DISC_MARKER),
+        ("ul", "circle", CIRCLE_MARKER),
+        ("ul", "square", SQUARE_MARKER),
+        ("ul", "decimal", "1."),
+        ("ol", "", "1."),
+        ("ol", "decimal", "1."),
+        ("ol", "disc", DISC_MARKER),
+        // Locale counter algorithms are out of scope by the spec, so
+        // each tag's own initial value stands.
+        ("ul", "katakana", DISC_MARKER),
+        ("ul", "lower-roman", DISC_MARKER),
+        ("ol", "cjk-ideographic", "1."),
+        ("ol", "hiragana-iroha", "1."),
+        // And so does an outright unreadable one.
+        ("ul", "not-a-keyword", DISC_MARKER),
+        ("ol", "not-a-keyword", "1."),
+    ];
+    for (tag, keyword, marker) in cases {
+        let style = if keyword.is_empty() {
+            String::new()
+        } else {
+            format!(r#","style":{{"listStyleType":"{keyword}"}}"#)
+        };
+        let s = laid_out(&list_card(tag, &style, &["a"]), 224.0, 4000.0, false, false);
+        assert_eq!(
+            format!("{marker}{MARKER_GAP}a"),
+            one_body(&s).text,
+            "{tag} declaring {keyword:?}"
+        );
+    }
+}
+
+/// The one keyword whose fallback would *add* ink: an author writing
+/// `none` removed the marker, and `disc` would hand it back. An empty
+/// string counter is CSS's other way of saying it.
+#[test]
+fn list_style_type_none_draws_no_marker_and_still_indents() {
+    for value in ["none", r#"\"\""#] {
+        let style = format!(r#","style":{{"listStyleType":"{value}"}}"#);
+        let s = laid_out(&list_card("ul", &style, &["a"]), 224.0, 4000.0, false, false);
+        let item = one_body(&s);
+        assert_eq!("a", item.text, "{value} asked for no marker");
+        assert_eq!(s.origin + LEVEL, item.pen.0, "and still for the indent");
+    }
+}
+
+/// `::marker` inherits from the item, not from the markup inside it, and
+/// it is its own span at both ends so that it cannot be drawn in a
+/// neighbour's style.
+#[test]
+fn a_marker_takes_the_items_own_style_and_not_its_contents() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","content":"#,
+        r#"{"tag":"b","content":"bold"}}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let item = one_body(&s);
+    assert_eq!(format!("{}bold", bullet()), item.text);
+    assert_eq!(2, item.spans.len(), "the marker never joins the run it precedes");
+    assert_eq!(bullet().len() as u32, item.spans[0].len);
+    assert_ne!(BOLD_WEIGHT, item.spans[0].weight, "the `b` is not the item");
+    assert_eq!(BOLD_WEIGHT, item.spans[1].weight);
+}
+
+/// A marker beside a ruby base must stay out of the base's slot, or the
+/// reading would centre over the bullet as well as over the base.
+#[test]
+fn a_marker_does_not_join_the_ruby_base_it_precedes() {
+    let unit = BOX_EM * ADVANCE;
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","content":"#,
+        r#"{"tag":"ruby","content":["b",{"tag":"rt","content":"c"}]}}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let item = one_body(&s);
+
+    assert_eq!(format!("{}b\u{2060}", bullet()), item.text);
+    // The base is one unit two units in - past the marker - and the
+    // reading is a half-size unit centred on it.
+    let read = &item.ruby[0];
+    assert_eq!(2.0 * unit + (unit - unit * RUBY_RATIO) / 2.0, read.x);
+    assert_eq!(unit * RUBY_RATIO, read.w);
+}
+
+/// The marker belongs to the item's first *line*, which for an item
+/// whose content is a block is that block's paragraph. Pushing it where
+/// it is resolved would flush an element holding nothing but a bullet.
+#[test]
+fn an_item_wrapping_its_content_in_a_block_still_marks_one_element() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","content":"#,
+        r#"{"tag":"div","content":"body"}}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    assert_eq!(1, items.len(), "no bullet-only element");
+    assert_eq!(format!("{}body", bullet()), items[0].text);
+    assert_eq!(s.origin + LEVEL, items[0].pen.0, "the block inherits the indent");
+}
+
+/// An item with nothing to mark draws no marker, and the counter still
+/// counted it - which is what a browser's counter does.
+#[test]
+fn an_empty_item_draws_no_marker_and_still_takes_its_ordinal() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ol","content":[{"tag":"li","content":""},"#,
+        r#"{"tag":"li","content":"second"}]}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    assert_eq!(1, items.len());
+    assert_eq!("2. second", items[0].text);
+}
+
+/// A list whose items are not items is laid out as any other block: a
+/// marker follows `display: list-item`, which only an `li` has.
+#[test]
+fn a_list_without_items_is_indented_and_unmarked() {
+    let p = rich(&sc(r#"{"tag":"ul","content":["one","two"]}"#));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    assert_eq!(
+        vec!["one", "two"],
+        items.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        "the bare-string rule still splits them"
+    );
+    for item in &items {
+        assert_eq!(s.origin + LEVEL, item.pen.0, "a list indents whatever it holds");
+    }
+}
+
+/// A declared `paddingLeft` on an item composes with the level indent
+/// rather than replacing it, which is what a browser does: the padding
+/// is the item's and the indent is its list's.
+#[test]
+fn an_items_own_padding_adds_to_the_level_indent() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","style":{"paddingLeft":0.4},"#,
+        r#""content":"a"}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let item = one_body(&s);
+    let padding = 0.4 * BOX_EM;
+    assert_eq!(s.origin + LEVEL + padding, item.pen.0);
+    assert_eq!(s.content_w - LEVEL - padding, item.wrap_w);
+    // The indent is the list's, so it shifts the item's border box; the
+    // padding is the item's, so it insets the text inside that box.
+    assert_eq!(s.origin + LEVEL, block_box(item).rect.x);
+    assert_eq!(s.content_w - LEVEL, block_box(item).rect.w);
+}
+
+/// A marker and its body are one paragraph, so a long item wraps at the
+/// item's own narrowed width rather than at the column's.
+///
+/// Every line of it sits at the item's indent, beside the marker rather
+/// than past it - CSS's `list-style-position: inside`, which is what one
+/// run at one wrap width can express (ADR-0013). Hanging the marker in
+/// the gutter needs a per-line origin the measurement seam does not
+/// report and neither platform adapter can draw.
+#[test]
+fn a_wrapped_item_wraps_inside_its_own_indent() {
+    let long = "a".repeat(30);
+    let s = laid_out(&list_card("ul", "", &[&long]), 224.0, 4000.0, false, false);
+    let item = one_body(&s);
+    // 200 wide less one 21px level is 179, which takes 23 of the fake's
+    // 7.5px units; the marker and the body are 32.
+    assert_eq!(s.content_w - LEVEL, item.wrap_w);
+    assert_eq!(2, item.lines);
+    assert_eq!(s.origin + LEVEL, item.pen.0);
+}
+
+/// The parameter ticket 14 wires, exercised at both its values.
+///
+/// Below `layout::scene`, because nothing above it can ask for the
+/// compact layout until ticket 14's setting exists. What is asserted is
+/// the contract between the two tickets: the *marker* logic is shared -
+/// `marker_of` and `Marker::label` never see this flag - and only the
+/// stacking changes. Ticket 14 owns the setting, its plumbing, and the
+/// scene-level assertion the spec asks it for.
+#[test]
+fn stack_items_false_joins_a_list_into_one_separated_paragraph() {
+    let theme = Theme::dark();
+    let doc = crate::dict::gloss::GlossDoc::parse(&sc(concat!(
+        r#"{"tag":"ol","content":[{"tag":"li","style":{"listStyleType":"\"\u2460\""},"#,
+        r#""content":"first"},{"tag":"li","content":"second"}]}"#
+    )));
+    let assets = Assets { dict_id: 1, sizes: &[] };
+    let text_of = |stack_items| -> Vec<String> {
+        paragraphs(&doc, &theme, LINE_GAP, stack_items, assets)
+            .into_iter()
+            .filter_map(|piece| match piece {
+                Piece::Flow(flow) => Some(flow.text),
+                Piece::Table(_) => None,
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        vec![format!("\u{2460} first{ITEM_SEPARATOR}2. second")],
+        text_of(false),
+        "one paragraph, the separator between the items, the same markers"
+    );
+    assert_eq!(
+        vec!["\u{2460} first".to_string(), "2. second".to_string()],
+        text_of(true),
+        "and stacked, one paragraph per item"
+    );
+}
+
+// ---- tables ----
+
+/// Yomitan's own base font size, which the grid fixtures measure at.
+///
+/// The spec writes a cell border `1em / 14`, so at fourteen pixels a rule
+/// is exactly one pixel, the `0.25em` padding is exactly 3.5, and
+/// `FakeMeasure` charges exactly 7 per UTF-16 unit over a 28-pixel line.
+/// Every number below is then arithmetic a reader can redo by hand.
+const GRID_EM: f32 = YOMITAN_BASE_PX;
+/// One cell rule, at [`GRID_EM`].
+const RULE: f32 = 1.0;
+/// One cell's padding per edge, at [`GRID_EM`].
+const CELL_PAD: f32 = 3.5;
+/// One line of cell text, at [`GRID_EM`].
+const CELL_LINE: f32 = GRID_EM * LINE_H;
+/// One UTF-16 unit of cell text, at [`GRID_EM`].
+const CELL_UNIT: f32 = GRID_EM * ADVANCE;
+
+/// A scene over `p`, at [`GRID_EM`].
+fn grid_scene(p: &Presentation, max_w: f32, side: bool) -> PopupScene {
+    let theme = Theme { body_size: GRID_EM, ..Theme::dark() };
+    let mut m = FakeMeasure::default();
+    scene(
+        &SceneRequest {
+            presentation: p,
+            theme: &theme,
+            max_w,
+            max_h: 4000.0,
+            show_back: false,
+            side_panel: side,
+            anki: None,
+        },
+        &mut m,
+    )
+    .expect("FakeMeasure never refuses a run")
+}
+
+/// A scene over one structured-content `glossary`, at [`GRID_EM`].
+fn gridded(glossary: &str, max_w: f32) -> PopupScene {
+    grid_scene(&rich(&sc(glossary)), max_w, false)
+}
+
+/// One `tr` of cells, each `tag:content`.
+fn mixed_row(cells: &[(&str, &str)]) -> String {
+    let body: Vec<String> = cells
+        .iter()
+        .map(|(tag, content)| format!(r#"{{"tag":"{tag}","content":"{content}"}}"#))
+        .collect();
+    format!(r#"{{"tag":"tr","content":[{}]}}"#, body.join(","))
+}
+
+/// One `tr` of `td`s holding `cells`.
+fn tr(cells: &[&str]) -> String {
+    let body: Vec<(&str, &str)> = cells.iter().map(|c| ("td", *c)).collect();
+    mixed_row(&body)
+}
+
+/// A `table` of `rows`.
+fn table(rows: &[String]) -> String {
+    format!(r#"{{"tag":"table","content":[{}]}}"#, rows.join(","))
+}
+
+/// Every cell box in a scene, in document order.
+fn grid_cells(s: &PopupScene) -> Vec<&SceneElem> {
+    s.elems.iter().filter(|e| e.kind == ElemKind::Cell).collect()
+}
+
+/// Every gloss-body run of a grid scene, in draw order.
+///
+/// [`bodies`] filters at the default theme's body size; these fixtures
+/// measure at [`GRID_EM`], which no other role in the theme shares.
+fn grid_text(s: &PopupScene) -> Vec<&SceneElem> {
+    s.elems
+        .iter()
+        .filter(|e| e.kind == ElemKind::Text && e.font_size == GRID_EM)
+        .collect()
+}
+
+/// The one table element of a scene.
+fn grid(s: &PopupScene) -> &SceneElem {
+    find(s, ElemKind::Table)
+}
+
+/// Every cell's border box, as `(x, y, w, h)` relative to the table's own
+/// top-left - so an expectation reads as grid arithmetic rather than as an
+/// offset from whatever chrome the panel drew above it.
+fn boxes(s: &PopupScene) -> Vec<(f32, f32, f32, f32)> {
+    let at = grid(s).rect;
+    grid_cells(s)
+        .iter()
+        .map(|e| (e.rect.x - at.x, e.rect.y - at.y, e.rect.w, e.rect.h))
+        .collect()
+}
+
+/// The acceptance geometry, in full. Nine one-character cells on a three
+/// by three grid, with `border-collapse` resolved: every cell owns the
+/// rule on its left and its top, and only the cells against the grid's
+/// right and bottom edges own the closing ones - so two neighbours abut
+/// exactly and the rule between them is drawn once.
+///
+/// A column is `3.5 + 7 + 3.5 = 14` wide and a row `3.5 + 28 + 3.5 = 35`
+/// tall, so an interior cell's border box is `1 + 14` by `1 + 35`.
+#[test]
+fn a_three_by_three_table_places_nine_cells_on_a_grid() {
+    let s = gridded(&table(&[tr(&["a", "b", "c"]), tr(&["d", "e", "f"]), tr(&["g", "h", "i"])]), 424.0);
+
+    let col = CELL_PAD + CELL_UNIT + CELL_PAD;
+    let row = CELL_PAD + CELL_LINE + CELL_PAD;
+    let want: Vec<(f32, f32, f32, f32)> = (0..3)
+        .flat_map(|r| {
+            (0..3).map(move |c| {
+                (
+                    c as f32 * (RULE + col),
+                    r as f32 * (RULE + row),
+                    RULE + col + if c == 2 { RULE } else { 0.0 },
+                    RULE + row + if r == 2 { RULE } else { 0.0 },
+                )
+            })
+        })
+        .collect();
+    assert_eq!(want, boxes(&s));
+
+    let g = grid(&s);
+    assert_eq!(4.0 * RULE + 3.0 * col, g.rect.w, "four rules down, three columns");
+    assert_eq!(4.0 * RULE + 3.0 * row, g.rect.h);
+    assert_eq!(g.rect.h, g.advance, "and the walk advances by the grid");
+}
+
+/// The acceptance: a `colSpan` cell is as wide as the columns it covers
+/// plus the rule between them - asserted against the cells underneath it,
+/// which is the same statement without any arithmetic to get wrong - and
+/// the cell after it starts where those columns end.
+#[test]
+fn a_col_span_cell_is_as_wide_as_the_columns_it_covers() {
+    let spanned = concat!(
+        r#"{"tag":"tr","content":["#,
+        r#"{"tag":"td","colSpan":2,"content":"ab"},"#,
+        r#"{"tag":"td","content":"c"}]}"#
+    );
+    let s = gridded(&table(&[spanned.to_string(), tr(&["d", "e", "f"])]), 424.0);
+    let cells = boxes(&s);
+
+    assert_eq!(5, cells.len());
+    let (span, after) = (cells[0], cells[1]);
+    let (under_a, under_b) = (cells[2], cells[3]);
+    assert_eq!(under_a.2 + under_b.2, span.2, "the two columns it covers, rule included");
+    assert_eq!(0.0, span.0, "starting where the first of them does");
+    assert_eq!(span.0 + span.2, after.0, "and the next cell starts after it");
+    assert_eq!(under_b.0 + under_b.2, after.0, "in the third column");
+}
+
+/// The acceptance: a `rowSpan` cell covers both its rows, and the next
+/// row's cells shift past it into the column it left free.
+#[test]
+fn a_row_span_cell_covers_both_rows_and_the_next_row_shifts_past_it() {
+    let spanned = concat!(
+        r#"{"tag":"tr","content":["#,
+        r#"{"tag":"td","rowSpan":2,"content":"a"},"#,
+        r#"{"tag":"td","content":"b"}]}"#
+    );
+    let s = gridded(&table(&[spanned.to_string(), tr(&["c"])]), 424.0);
+    let cells = boxes(&s);
+
+    assert_eq!(3, cells.len());
+    let (span, first, second) = (cells[0], cells[1], cells[2]);
+    assert_eq!(0.0, span.1);
+    assert_eq!(grid(&s).rect.h, span.3, "the spanning cell covers the whole grid");
+    assert_eq!(first.0, second.0, "the displaced cell sits in the second column");
+    assert_eq!(span.0 + span.2, second.0, "past the cell that claimed the first");
+    assert_eq!(first.1 + first.3, second.1, "and on the row below its neighbour");
+}
+
+/// Both spans on one cell. It claims two columns and two rows, so the
+/// only free slot left in the second row is the third column - and the
+/// two columns it swallowed were sized by it alone, sharing its shortfall
+/// evenly because no single-column cell ever asked for them.
+#[test]
+fn a_cell_spanning_a_row_and_a_column_at_once_lands_on_the_slot_it_claims() {
+    let spanned = concat!(
+        r#"{"tag":"tr","content":["#,
+        r#"{"tag":"td","rowSpan":2,"colSpan":2,"content":"a"},"#,
+        r#"{"tag":"td","content":"b"}]}"#
+    );
+    let s = gridded(&table(&[spanned.to_string(), tr(&["c"])]), 424.0);
+    let cells = boxes(&s);
+
+    assert_eq!(3, cells.len());
+    let (span, first, second) = (cells[0], cells[1], cells[2]);
+    // Its own ask is 14; the two columns hold 0 plus the rule between
+    // them, so 6.5 goes to each.
+    let col = CELL_PAD + CELL_UNIT + CELL_PAD;
+    assert_eq!((0.0, 0.0, RULE + col, grid(&s).rect.h), span);
+    assert_eq!(span.0 + span.2, first.0, "the third column starts after both");
+    assert_eq!(first.0, second.0, "and the second row's only cell lands in it");
+    assert_eq!(first.1 + first.3, second.1);
+}
+
+/// The acceptance: a cell with no declared style still reads as a grid.
+/// Yomitan's own defaults - a solid `1em / 14` border in the panel's rule
+/// colour and `0.25em` of padding - and the text inset by both.
+#[test]
+fn a_cell_draws_yomitans_border_and_insets_its_text_by_the_padding() {
+    let s = gridded(&table(&[tr(&["ab"])]), 424.0);
+    let cell = grid_cells(&s)[0];
+    let style = cell.block_box.expect("a cell is a box").style;
+
+    assert_eq!(Edges::all(RULE), style.border, "one rule on every edge of a lone cell");
+    assert_eq!(Edges::all(BorderStyle::Solid), style.border_style);
+    assert_eq!(Theme::dark().collapsed_text, style.border_color);
+    assert_eq!(Some(RULE), style.even_border(), "so a painter strokes it once");
+    assert_eq!(Edges::all(CELL_PAD), style.padding);
+
+    let text = grid_text(&s)[0];
+    assert_eq!(cell.rect.x + RULE + CELL_PAD, text.pen.0, "the text clears both");
+    assert_eq!(cell.rect.y + RULE + CELL_PAD, text.pen.1);
+    assert_eq!(cell.rect.w - 2.0 * RULE - 2.0 * CELL_PAD, text.wrap_w);
+}
+
+/// `1em / 14` is one pixel at the base font size *and scales with the
+/// panel*, which is the whole reason the spec states it as a ratio: the
+/// same table at twice the size draws a two-pixel rule and twice the
+/// padding.
+#[test]
+fn a_cell_rule_scales_with_the_font_size() {
+    let theme = Theme { body_size: 2.0 * GRID_EM, ..Theme::dark() };
+    let mut m = FakeMeasure::default();
+    let s = scene(
+        &SceneRequest {
+            presentation: &rich(&sc(&table(&[tr(&["ab"])]))),
+            theme: &theme,
+            max_w: 424.0,
+            max_h: 4000.0,
+            show_back: false,
+            side_panel: false,
+            anki: None,
+        },
+        &mut m,
+    )
+    .expect("FakeMeasure never refuses a run");
+    let style = grid_cells(&s)[0].block_box.expect("a cell is a box").style;
+
+    assert_eq!(Edges::all(2.0 * RULE), style.border);
+    assert_eq!(Edges::all(2.0 * CELL_PAD), style.padding);
+}
+
+/// `border-collapse`, as a box record: an interior cell owns the rule on
+/// its left and its top and nothing else, so the rule it shares with the
+/// neighbour on its right is drawn once, by that neighbour.
+#[test]
+fn an_interior_cell_owns_only_its_left_and_top_rule() {
+    let s = gridded(&table(&[tr(&["a", "b"]), tr(&["c", "d"])]), 424.0);
+    let cells = grid_cells(&s);
+    let edges = |e: &SceneElem| e.block_box.expect("a cell is a box").style.border;
+
+    assert_eq!(Edges { top: RULE, right: 0.0, bottom: 0.0, left: RULE }, edges(cells[0]));
+    assert_eq!(Edges { top: RULE, right: RULE, bottom: 0.0, left: RULE }, edges(cells[1]));
+    assert_eq!(Edges { top: RULE, right: 0.0, bottom: RULE, left: RULE }, edges(cells[2]));
+    assert_eq!(Edges::all(RULE), edges(cells[3]), "the far corner closes both");
+
+    let boxes = boxes(&s);
+    assert_eq!(boxes[0].0 + boxes[0].2, boxes[1].0, "and neighbours abut exactly");
+    assert_eq!(boxes[0].1 + boxes[0].3, boxes[2].1);
+}
+
+/// The acceptance: a header cell is bold with a tinted background, as
+/// Yomitan draws it. The weight comes from `tag_style`'s HTML-default
+/// table, which already knew `th`; the tint is the box property this
+/// ticket added.
+#[test]
+fn a_header_cell_is_bold_and_tinted() {
+    let s = gridded(&table(&[mixed_row(&[("th", "a"), ("td", "b")])]), 424.0);
+    let cells = grid_cells(&s);
+    let fill = |e: &SceneElem| e.block_box.expect("a cell is a box").style.background;
+
+    assert_eq!(Some(Theme::dark().separator), fill(cells[0]));
+    assert_eq!(None, fill(cells[1]), "a data cell is not tinted");
+
+    let text = grid_text(&s);
+    assert_eq!(700, text[0].spans[0].weight);
+    assert_eq!(Theme::dark().body_weight, text[1].spans[0].weight);
+}
+
+/// Yomitan writes the same rule on `thead`, so a plain `td` in a header
+/// row is a header cell too - which is how a real conjugation table's
+/// first row comes out bold without every cell in it being a `th`.
+#[test]
+fn a_thead_makes_its_data_cells_header_cells() {
+    let head = format!(r#"{{"tag":"thead","content":[{}]}}"#, tr(&["a"]));
+    let body = format!(r#"{{"tag":"tbody","content":[{}]}}"#, tr(&["b"]));
+    let s = gridded(&table(&[head, body]), 424.0);
+    let cells = grid_cells(&s);
+    let fill = |e: &SceneElem| e.block_box.expect("a cell is a box").style.background;
+
+    assert_eq!(2, cells.len(), "a row group contributes rows and nothing else");
+    assert_eq!(Some(Theme::dark().separator), fill(cells[0]));
+    assert_eq!(None, fill(cells[1]));
+
+    let text = grid_text(&s);
+    assert_eq!(700, text[0].spans[0].weight, "bold is inherited from the thead");
+    assert_eq!(Theme::dark().body_weight, text[1].spans[0].weight);
+}
+
+/// The acceptance: a table wider than the panel is clipped to it rather
+/// than allowed to widen it. The columns are scaled by the one factor
+/// that makes them fit and their content rewraps inside the narrower
+/// column, so the grid ends exactly on the panel's own content edge.
+///
+/// At 108 pixels of content the three rules leave 105 to share. Each of
+/// the two cells measures 30 units to a 98-pixel block and asks for 105
+/// with its padding, so the two together ask for exactly twice what there
+/// is: every column is halved to 52.5.
+#[test]
+fn a_table_wider_than_the_panel_is_scaled_to_fit_inside_it() {
+    let long = "a".repeat(30);
+    let s = gridded(&table(&[tr(&[&long, &long])]), 132.0);
+    let g = grid(&s);
+
+    assert_eq!(108.0, s.content_w);
+    assert_eq!(108.0, g.rect.w, "the grid ends on the panel's own content edge");
+    assert_eq!(s.origin + s.content_w, g.rect.x + g.rect.w);
+
+    let cells = grid_cells(&s);
+    for cell in &cells {
+        assert!(
+            cell.rect.x + cell.rect.w <= g.rect.x + g.rect.w,
+            "every cell is inside the grid: {:?}",
+            cell.rect
+        );
+    }
+    let text = grid_text(&s);
+    assert_eq!(52.5 - 2.0 * CELL_PAD, text[0].wrap_w, "the column shrank");
+    assert_eq!(5, text[0].lines, "and the content rewrapped inside it");
+    assert!(text[0].rect.w <= text[0].wrap_w, "no ink escapes the column");
+}
+
+/// The same acceptance, stated about the panel itself: the width the
+/// panel asks for is the width it was offered, whatever the table inside
+/// it wanted. Nothing in the walk derives a panel width from an element's
+/// extent, and the grid is what keeps that safe to rely on.
+#[test]
+fn a_table_wider_than_the_panel_never_widens_the_panel() {
+    let long = "a".repeat(30);
+    let wide = |glossary: String| {
+        let card = Card {
+            written: None,
+            reading: Some("\u{3055}\u{3064}\u{3060}\u{3093}".into()),
+            pos: vec![],
+            freq: None,
+            blocks: vec![tree("Jitendex", &sc(&glossary))],
+            match_len: 4,
+        };
+        Presentation {
+            top: Some(card.clone()),
+            collapsed: vec![CollapsedRow {
+                written: Some("\u{96d1}\u{97f3}".into()),
+                reading: None,
+                summary: "noise".into(),
+            }],
+            all_cards: vec![card],
+            sentence: None,
+        }
+    };
+    let plain = grid_scene(&wide(table(&[tr(&["a", "b"])])), 300.0, true);
+    let huge = grid_scene(&wide(table(&[tr(&[&long, &long])])), 300.0, true);
+
+    assert!(plain.panel_w.is_some(), "a side column makes the panel state a width");
+    assert_eq!(plain.panel_w, huge.panel_w);
+    assert_eq!(plain.content_w, huge.content_w);
+}
+
+/// The acceptance: a malformed table with more cells than columns does
+/// not panic and renders what it can. The longer row decides the grid's
+/// width and the short one simply ends early, leaving the slots it never
+/// filled empty rather than inventing cells for them.
+#[test]
+fn a_row_with_more_cells_than_its_neighbour_widens_the_grid() {
+    let s = gridded(&table(&[tr(&["a", "b"]), tr(&["c", "d", "e", "f"])]), 424.0);
+    let cells = boxes(&s);
+
+    assert_eq!(6, cells.len(), "every written cell is drawn");
+    let col = CELL_PAD + CELL_UNIT + CELL_PAD;
+    assert_eq!(5.0 * RULE + 4.0 * col, grid(&s).rect.w, "four columns, from the long row");
+    assert_eq!(cells[0].0, cells[2].0, "the short row starts at the same column");
+    assert_eq!(cells[1].0, cells[3].0);
+    assert_eq!(
+        cells[1].0 + cells[1].2,
+        cells[4].0,
+        "and ends where the third column starts, leaving two slots empty"
+    );
+    assert_eq!(grid(&s).rect.w, cells[5].0 + cells[5].2, "the long row closes the grid");
+}
+
+/// A blank in a paradigm is a cell: it takes its slot and draws its
+/// border, because a grid missing one box reads as a broken grid rather
+/// than as an empty value. It carries no text and no spans, so a painter
+/// draws the box and asks the shaper for nothing.
+#[test]
+fn an_empty_cell_still_draws_its_border() {
+    let row = r#"{"tag":"tr","content":[{"tag":"td"},{"tag":"td","content":"b"}]}"#;
+    let s = gridded(&table(&[row.to_string()]), 424.0);
+    let cells = grid_cells(&s);
+
+    assert_eq!(2, cells.len());
+    assert!(cells[0].spans.is_empty(), "nothing to shape");
+    assert!(cells[0].text.is_empty());
+    let border = cells[0].block_box.expect("still a box").style.border;
+    // The last row, but not the last column: the rule on its right
+    // belongs to the cell beside it.
+    assert_eq!(Edges { top: RULE, right: 0.0, bottom: RULE, left: RULE }, border);
+    // An empty column is its padding and no ink.
+    assert_eq!(RULE + 2.0 * CELL_PAD, cells[0].rect.w);
+    assert_eq!(cells[0].rect.x + cells[0].rect.w, cells[1].rect.x);
+}
+
+/// Every cell names the node it came from, so a hit inside a conjugation
+/// table resolves to that cell's subtree and ticket 04's renderer
+/// reproduces exactly it.
+#[test]
+fn every_cell_names_the_node_it_came_from() {
+    let p = rich(&sc(&table(&[mixed_row(&[("th", "past"), ("td", "ate")])])));
+    let s = grid_scene(&p, 424.0, false);
+    let doc = &p.top.as_ref().unwrap().blocks[0].entries[0].doc;
+
+    let tags: Vec<Tag> = grid_cells(&s)
+        .iter()
+        .map(|cell| {
+            let path = cell.origin.expect("a cell names its row").path.expect("and its node");
+            doc.node(path.resolve(doc).expect("which must exist")).tag
+        })
+        .collect();
+    assert_eq!(vec![Tag::Th, Tag::Td], tags);
+
+    let path = grid_cells(&s)[1].origin.unwrap().path.unwrap();
+    assert_eq!(
+        vec!["<td>ate</td>".to_string()],
+        render_html(doc, Selection::Nodes(&[path]), RoleFilter::CARD)
+    );
+}
+
+/// A row is as tall as its tallest cell, and a shorter cell beside it
+/// sits at the row's top - Yomitan's own `vertical-align: top`. Nothing
+/// stretches: the short cell's own line boxes are the ones the measurer
+/// reported, which is what a bin's re-measure reproduces.
+#[test]
+fn a_row_is_as_tall_as_its_tallest_cell_and_the_short_one_stays_at_the_top() {
+    let tall = concat!(
+        r#"{"tag":"td","content":["#,
+        r#"{"tag":"div","content":"a"},{"tag":"div","content":"b"}]}"#
+    );
+    let row = format!(r#"{{"tag":"tr","content":[{tall},{{"tag":"td","content":"c"}}]}}"#);
+    let s = gridded(&table(&[row]), 424.0);
+    let text = grid_text(&s);
+
+    // Two lines a `LINE_GAP` apart, padded above and below.
+    let want = 2.0 * CELL_PAD + 2.0 * CELL_LINE + LINE_GAP;
+    assert_eq!(2.0 * RULE + want, grid(&s).rect.h);
+    assert_eq!(3, text.len());
+    assert_eq!(text[0].pen.1, text[2].pen.1, "both cells start at the row's top");
+    assert_eq!(CELL_LINE, text[2].rect.h, "and the short one is still one line");
+}
+
+/// A cell taller than the rows it spans grows them, evenly, so that its
+/// own box ends exactly where its last row does. The rows grow; the text
+/// inside them does not.
+#[test]
+fn a_row_span_cell_taller_than_its_rows_grows_them_evenly() {
+    let tall = concat!(
+        r#"{"tag":"td","rowSpan":2,"content":["#,
+        r#"{"tag":"div","content":"a"},{"tag":"div","content":"b"},"#,
+        r#"{"tag":"div","content":"c"}]}"#
+    );
+    let first = format!(r#"{{"tag":"tr","content":[{tall},{{"tag":"td","content":"d"}}]}}"#);
+    let s = gridded(&table(&[first, tr(&["e"])]), 424.0);
+    let cells = boxes(&s);
+
+    // Three lines is 92; two 35-tall rows and the rule between them hold
+    // 71, so each row takes half the 28-pixel shortfall.
+    let row = CELL_PAD + CELL_LINE + CELL_PAD + 14.0;
+    assert_eq!(3.0 * RULE + 2.0 * row, grid(&s).rect.h);
+    assert_eq!(grid(&s).rect.h, cells[0].3, "the spanning cell covers both rows");
+    assert_eq!(RULE + row, cells[1].3, "and each row grew by half the shortfall");
+    assert_eq!(RULE + row, cells[2].1, "the second row starts after the first");
+
+    let text = grid_text(&s);
+    assert!(text.iter().all(|e| e.rect.h == CELL_LINE), "no line was stretched");
+}
+
+/// A link inside a cell is clickable where the cell landed, not where the
+/// cell was measured: the grid lays a cell out at the table's top and
+/// drops it into its row afterwards, and the targets it earned move with
+/// it.
+#[test]
+fn a_link_inside_a_cell_is_clickable_where_the_cell_landed() {
+    let linked = concat!(
+        r#"{"tag":"tr","content":[{"tag":"td","content":"#,
+        r#"{"tag":"a","href":"?query=x","content":"go"}}]}"#
+    );
+    let s = gridded(&table(&[tr(&["a"]), linked.to_string()]), 424.0);
+    let cell = grid_cells(&s)[1];
+    let hit = s
+        .hits
+        .iter()
+        .find(|h| h.action == HitAction::DrillDown("x".into()))
+        .expect("the cross-reference earns a target");
+
+    assert_eq!(cell.pen.1, hit.y, "on the second row, where the cell ended up");
+    assert_eq!(Some(cell.pen.0), hit.x);
+    assert!(hit.y > grid(&s).rect.y, "and not at the table's own top");
+}
+
+/// A table of nothing draws nothing, rather than a stray rule.
+#[test]
+fn a_table_with_no_cells_draws_nothing() {
+    let s = gridded(r#"[{"tag":"table"},"after"]"#, 424.0);
+
+    assert!(grid_cells(&s).is_empty());
+    assert!(!s.elems.iter().any(|e| e.kind == ElemKind::Table));
+    assert!(texts(&s).contains(&"after"), "and the text beside it still renders");
+}
+
+/// A table is a block: it closes the paragraph before it, opens none of
+/// its own, and the walk stacks whatever follows under the whole grid.
+#[test]
+fn a_table_advances_the_walk_by_its_own_height() {
+    let s = gridded(
+        &format!(r#"["before",{},"after"]"#, table(&[tr(&["a"]), tr(&["b"])])),
+        424.0,
+    );
+    let text = grid_text(&s);
+    let g = grid(&s);
+
+    assert_eq!(
+        vec!["before", "a", "b", "after"],
+        text.iter().map(|e| e.text.as_str()).collect::<Vec<_>>()
+    );
+    let after = text[3];
+    assert_eq!(g.pen.1 + g.rect.h + LINE_GAP, after.pen.1, "stacked under the whole grid");
+}
+
+/// A table inside a list item is indented once, by the table, and its
+/// cells do not pay the indent a second time. `Block::inherited` carries
+/// the indent down to every child, which is exactly why the grid has to
+/// clear it for the cells inside it.
+#[test]
+fn a_table_inside_a_list_item_pays_the_indent_once() {
+    let item = format!(r#"{{"tag":"li","content":[{}]}}"#, table(&[tr(&["a", "b"])]));
+    let s = gridded(&format!(r#"{{"tag":"ul","content":[{item}]}}"#), 424.0);
+    let level = LIST_INDENT_EM * GRID_EM;
+    let cells = grid_cells(&s);
+
+    assert_eq!(s.origin + level, grid(&s).rect.x, "one level, on the table");
+    assert_eq!(grid(&s).rect.x, cells[0].rect.x, "and not again on its cells");
+    assert_eq!(cells[0].rect.x + cells[0].rect.w, cells[1].rect.x);
+}
+
+/// A table inside a cell is a grid of its own. A cell holds pieces, not
+/// paragraphs, so the block pass lays a nested table out through the same
+/// two methods the outer one used - and the inner grid's cells are placed
+/// inside the outer cell's content box.
+#[test]
+fn a_table_inside_a_cell_is_a_grid_of_its_own() {
+    let inner = table(&[tr(&["a", "b"])]);
+    let outer = format!(
+        r#"{{"tag":"table","content":{{"tag":"tr","content":{{"tag":"td","content":[{inner}]}}}}}}"#
+    );
+    let s = gridded(&outer, 424.0);
+    let tables: Vec<&SceneElem> =
+        s.elems.iter().filter(|e| e.kind == ElemKind::Table).collect();
+    let cells = grid_cells(&s);
+
+    assert_eq!(2, tables.len(), "two grids");
+    assert_eq!(3, cells.len(), "the outer cell and the inner row's two");
+    let (outer_cell, first, second) = (cells[0], cells[1], cells[2]);
+    assert_eq!(outer_cell.pen, (first.rect.x, first.rect.y), "the inner grid starts at the content box");
+    assert_eq!(first.rect.x + first.rect.w, second.rect.x);
+    assert!(
+        second.rect.x + second.rect.w <= outer_cell.rect.x + outer_cell.rect.w,
+        "and stays inside it"
+    );
 }
 
 // ---- sense identity ----
@@ -2713,4 +3666,535 @@ fn a_track_shorter_than_the_floor_still_fits() {
     let (top, h) = scrollbar_thumb(10, 600, 300, 0).unwrap();
     assert!(h <= 10, "thumb {h} in a 10px track");
     assert!(top + h <= 10);
+}
+
+// ---- inline images ----
+
+/// `FakeMeasure`'s answers for one [`IMAGE_SPACER`], which is what the
+/// image pass probes for and every expectation below is arithmetic over:
+/// one no-break space advances half its size, and a line hangs its
+/// baseline a whole size down from its own top.
+const SPACER_ADVANCE: f32 = ADVANCE;
+const SPACER_ASCENT: f32 = LINE_H / 2.0;
+
+/// One recorded media row, as `dict::media::probe` writes it.
+fn recorded(format: MediaFormat, w: f32, h: f32) -> Intrinsic {
+    Intrinsic { format, width: w, height: h, aspect: w / h }
+}
+
+/// A card holding one structured-content row, from the dictionary whose
+/// build recorded `media`.
+///
+/// `dict_id` is 7 rather than `NO_ROW`, so a test can assert the whole
+/// media key an element carries and not just its path.
+fn imaged(content: &str, media: &[(&str, Intrinsic)]) -> Presentation {
+    card_with(vec![GlossBlock {
+        dict_name: "\u{5b57}\u{901a}".to_string(),
+        dict_id: 7,
+        entries: vec![row_media(
+            &sc(content),
+            &[],
+            media.iter().map(|(p, i)| ((*p).to_string(), *i)).collect(),
+        )],
+    }])
+}
+
+/// Every image element, in draw order.
+fn images(s: &PopupScene) -> Vec<&SceneElem> {
+    s.elems.iter().filter(|e| e.kind == ElemKind::Image).collect()
+}
+
+/// The one image element of a scene with exactly one.
+fn one_image(s: &PopupScene) -> &SceneElem {
+    let found = images(s);
+    assert_eq!(1, found.len(), "expected one image element, got {}", found.len());
+    found[0]
+}
+
+/// The paragraph an image sits inside: the one gloss element that is not
+/// the image.
+fn image_host(s: &PopupScene) -> &SceneElem {
+    s.elems
+        .iter()
+        .find(|e| e.kind == ElemKind::Text && e.text.contains(IMAGE_RISER))
+        .expect("the paragraph that reserved the image's room")
+}
+
+/// Rung one of the sizing ladder, and story 16: a `height: 1em` gaiji is
+/// the size of the text it sits in, and its bottom is on that line's
+/// baseline - not floating above it, not hanging below it.
+///
+/// The declared size wins over the recorded one, which is deliberately
+/// nothing like it here (20x10 against 15x15).
+#[test]
+fn a_declared_em_size_beats_the_recorded_one_and_sits_on_the_baseline() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/x.png","width":1.0,"height":1.0,"sizeUnits":"em"}"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 20.0, 10.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+    let host = image_host(&s);
+
+    assert_eq!((BOX_EM, BOX_EM), (img.rect.w, img.rect.h), "one em on each axis");
+    // Its bottom on the baseline: the line is one whole em tall above it
+    // (`SPACER_ASCENT` of the riser's size), so a `1em` box exactly fills
+    // that space and its top is the line's top.
+    assert_eq!(host.pen.1, img.rect.y, "top of the first line");
+    assert_eq!(host.pen.0, img.rect.x, "and at the paragraph's own pen");
+    assert_eq!(0.0, img.advance, "the paragraph already stacked its line");
+}
+
+/// Rung two, and story 18: no declared size at all takes the size the
+/// build recorded, so an undeclared gaiji neither collapses nor overflows.
+/// 99 807 census image nodes are this shape.
+#[test]
+fn an_image_with_no_declared_size_takes_its_recorded_dimensions() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/x.png"}"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 20.0, 10.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+
+    assert_eq!((20.0, 10.0), (img.rect.w, img.rect.h));
+}
+
+/// The middle of the ladder, and the whole reason the media row carries
+/// `aspect` as its own column: `height: 1em` and no width is what 字通 and
+/// 三省堂 both write, and one length plus a ratio is the other length.
+#[test]
+fn one_declared_length_takes_the_other_from_the_recorded_aspect() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/x.png","height":1.0,"sizeUnits":"em"}"#,
+        &[("g/x.png", recorded(MediaFormat::Svg, 40.0, 20.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+
+    assert_eq!((2.0 * BOX_EM, BOX_EM), (img.rect.w, img.rect.h), "aspect 2:1");
+}
+
+/// `sizeUnits: px` is a scene pixel, where the absent field and `em` are
+/// multiples of the text's own size.
+#[test]
+fn size_units_px_is_taken_as_scene_pixels() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/x.png","width":12.0,"height":9.0,"sizeUnits":"px"}"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 20.0, 10.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+
+    assert_eq!((12.0, 9.0), (img.rect.w, img.rect.h));
+}
+
+/// Rung three: neither declared nor recorded is a one-em square. Reachable
+/// only when the store has no row, which means no bytes either - so what
+/// this sizes is the placeholder box, and the element carries no key for a
+/// bin to go looking with.
+#[test]
+fn an_image_with_neither_size_nor_bytes_is_a_one_em_placeholder_box() {
+    let p = imaged(r#"{"tag":"img","path":"g/x.png"}"#, &[]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+
+    assert_eq!((BOX_EM, BOX_EM), (img.rect.w, img.rect.h));
+    let scene_image = img.image.as_ref().expect("an image element names its asset");
+    assert_eq!(None, scene_image.key, "no row, so nothing to fetch");
+    assert_eq!(None, scene_image.format);
+    assert!(img.text.is_empty(), "and no alt to draw instead");
+    assert!(img.rect.w > 0.0 && img.rect.h > 0.0, "never a gap");
+}
+
+/// Story 19: a missing asset shows what it stood for. The `alt` goes into
+/// the flow as ordinary text rather than onto an image element, because
+/// that is the *better* rung - real text wraps with the sentence around it
+/// - and Jitendex writes its gaiji's alt in `data`, not as an attribute.
+#[test]
+fn missing_media_renders_its_alt_text_in_the_flow() {
+    let p = imaged(
+        concat!(
+            r#"[{"tag":"img","path":"g/x.svg","data":{"gaiji":"","alt":"[\u5bfe]"}},"#,
+            r#"{"tag":"span","content":"\u3080\u304b\u3046"}]"#
+        ),
+        &[],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    assert!(images(&s).is_empty(), "no asset, so no image element");
+    let body = bodies(&s);
+    assert_eq!(1, body.len(), "the alt joins the sentence, it does not break it");
+    assert_eq!("[\u{5bfe}]\u{3080}\u{304b}\u{3046}", body[0].text);
+}
+
+/// A `title` is the next best label, and an attribute is read as well as a
+/// `data` entry: 三省堂 writes `title` beside `sizeUnits`.
+#[test]
+fn a_title_stands_in_for_a_missing_alt() {
+    let p = imaged(r#"{"tag":"img","path":"g/x.svg","title":"\u77ed"}"#, &[]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    assert!(images(&s).is_empty());
+    assert_eq!("\u{77ed}", bodies(&s)[0].text);
+}
+
+/// The undecodable rung, which is the one real data takes on this machine:
+/// the row exists, so the rect is right and the key is there, and the
+/// element still carries its `alt` as one ordinary span - so a bin that
+/// cannot rasterise the format draws that instead of nothing, with no
+/// second text path.
+#[test]
+fn a_stored_asset_carries_both_its_key_and_its_alt_fallback() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/\u5bfe.svg","height":1.0,"sizeUnits":"em","data":{"alt":"[\u5bfe]"}}"#,
+        &[("g/\u{5bfe}.svg", recorded(MediaFormat::Svg, 30.0, 30.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+
+    let scene_image = img.image.as_ref().expect("a stored asset names itself");
+    assert_eq!(Some(MediaKey::new(7, "g/\u{5bfe}.svg")), scene_image.key);
+    assert_eq!(Some(MediaFormat::Svg), scene_image.format);
+    assert_eq!("[\u{5bfe}]", img.text, "the fallback a painter draws");
+    assert_eq!(1, img.spans.len());
+    assert_eq!(BOX_EM, img.spans[0].size, "at the text size it stands in for");
+}
+
+/// The measurement rule, and the thing that would break silently: an image
+/// occupies inline space because a *span* asks the measurer for it, never
+/// because a pass edited the line boxes after the wrap. Both bins
+/// re-measure an element's own spans to paint it, so this asserts the run
+/// the walk handed the seam - the reservation is exactly the image's width,
+/// and the line is exactly as tall as the image needs.
+#[test]
+fn an_image_buys_its_room_from_the_measurer_and_not_after_the_wrap() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/x.png","width":1.0,"height":1.0,"sizeUnits":"em"}"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 15.0, 15.0))],
+    );
+    let (s, asked) = measured(&Theme::dark(), &p, false);
+    let host = image_host(&s);
+
+    // `ceil(4 * 15/15)` spacers, sized so their advance is the image's
+    // width exactly: 4 units at half their size each.
+    let spacers = 4;
+    let spacer = host
+        .spans
+        .iter()
+        .find(|sp| host.text[sp.at as usize..(sp.at + sp.len) as usize].contains(IMAGE_SPACER))
+        .expect("the spacer run is a span of the paragraph");
+    assert_eq!(spacers, (spacer.len as usize) / IMAGE_SPACER.len());
+    assert_eq!(
+        BOX_EM,
+        spacers as f32 * SPACER_ADVANCE * spacer.size,
+        "the reservation is the image's own width"
+    );
+    // And the riser, whose ascent share is the room above the baseline.
+    let riser = host
+        .spans
+        .iter()
+        .find(|sp| host.text[sp.at as usize..(sp.at + sp.len) as usize] == *IMAGE_RISER)
+        .expect("the riser is a span too");
+    assert_eq!(BOX_EM, SPACER_ASCENT * riser.size, "and the height, above the baseline");
+    // The probe is a real request through the seam, because only a
+    // measurer knows either ratio (ADR-0013).
+    assert!(
+        asked.iter().any(|a| a.text == IMAGE_SPACER && a.size == BOX_EM),
+        "the pass probes one spacer at the image's own em"
+    );
+    // The paragraph's own height counts the line the riser grew, with
+    // nothing after the wrap touching it.
+    assert_eq!(BOX_EM * LINE_H, host.rect.h);
+    assert_eq!(1, host.lines, "and it is one line");
+}
+
+/// An image mid-sentence stays mid-sentence: one paragraph, one line, the
+/// image between the two words rather than on a line of its own. The
+/// spacers are non-breaking glue, so no wrap can split the reservation or
+/// separate it from the word beside it.
+#[test]
+fn an_image_mid_sentence_wraps_with_the_text_and_forces_no_break() {
+    let p = imaged(
+        concat!(
+            r#"["ab",{"tag":"img","path":"g/x.png","height":1.0,"sizeUnits":"em"},"#,
+            r#""cd"]"#
+        ),
+        &[("g/x.png", recorded(MediaFormat::Png, 15.0, 15.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let host = image_host(&s);
+    let img = one_image(&s);
+
+    assert_eq!(1, host.lines, "one line, not three");
+    assert_eq!(1, images(&s).len());
+    // `ab` is two units at the body size, so the image starts after them
+    // and `cd` after the image.
+    let ab = 2.0 * BOX_EM * ADVANCE;
+    assert_eq!(host.pen.0 + ab, img.rect.x);
+    assert_eq!(ab + BOX_EM + 2.0 * BOX_EM * ADVANCE, host.rect.w, "text, image, text");
+}
+
+/// `verticalAlign` is ticket 07's machinery, reused rather than rebuilt: a
+/// raised image is raised off the same baseline a raised span is, and the
+/// pass reserves the rise as well as the height so the line above is not
+/// overlapped.
+#[test]
+fn a_raised_image_clears_the_baseline_by_its_own_vertical_align() {
+    let p = imaged(
+        concat!(
+            r#"{"tag":"img","path":"g/x.png","height":1.0,"sizeUnits":"em","#,
+            r#""style":{"verticalAlign":"super"}}"#
+        ),
+        &[("g/x.png", recorded(MediaFormat::Png, 15.0, 15.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+    let host = image_host(&s);
+
+    let rise = BOX_EM * SUPER_RISE;
+    // The line grew by the rise, and the image sits that far above where a
+    // baseline-aligned one would.
+    assert_eq!((BOX_EM + rise) * LINE_H, host.rect.h, "the rise is reserved");
+    assert_eq!(host.pen.1, img.rect.y, "so the raised box still starts at the top");
+    let baseline = BOX_EM + rise;
+    assert_eq!(baseline - rise - BOX_EM, img.rect.y - host.pen.1);
+}
+
+/// A wide short banner must not make its line as tall as it is wide. The
+/// spacer count rides the aspect ratio for exactly this reason, and the
+/// spacer's size is capped at the riser's so the image, never the
+/// reservation, decides the line's height.
+#[test]
+fn a_wide_image_reserves_its_width_without_growing_its_line() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/wide.png"}"#,
+        &[("g/wide.png", recorded(MediaFormat::Png, 160.0, 10.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let host = image_host(&s);
+    let img = one_image(&s);
+
+    assert_eq!((160.0, 10.0), (img.rect.w, img.rect.h));
+    assert_eq!(10.0 * LINE_H, host.rect.h, "as tall as the image, not as wide");
+    assert_eq!(160.0, host.rect.w, "and as wide as it");
+}
+
+/// An image is content: it earns a paragraph of its own rather than being
+/// dropped as whitespace, which is what the riser is for - the spacer run
+/// alone is whitespace and `flush` would have thrown the paragraph away.
+#[test]
+fn a_paragraph_holding_only_an_image_survives() {
+    let p = imaged(
+        r#"{"tag":"div","content":{"tag":"img","path":"g/x.png"}}"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 12.0, 12.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    assert_eq!(1, images(&s).len(), "the image is still there");
+    assert_eq!((12.0, 12.0), (one_image(&s).rect.w, one_image(&s).rect.h));
+}
+
+/// A `type: image` glossary item is the same replaced element as an `img`
+/// tag, and the plain-text renderer's own drop of it is unchanged.
+#[test]
+fn an_image_item_is_an_image_too() {
+    let entry = row_media(
+        r#"[{"type":"image","path":"g/x.png"}]"#,
+        &[],
+        vec![("g/x.png".to_string(), recorded(MediaFormat::Png, 9.0, 9.0))],
+    );
+    let p = card_with(vec![GlossBlock {
+        dict_name: "\u{5b57}\u{901a}".to_string(),
+        dict_id: 7,
+        entries: vec![entry],
+    }]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    assert_eq!((9.0, 9.0), (one_image(&s).rect.w, one_image(&s).rect.h));
+}
+
+/// Story 45/46: an image is addressable as the node it is, not as the
+/// paragraph around it.
+#[test]
+fn an_image_element_names_the_node_it_came_from() {
+    let p = imaged(
+        r#"["a",{"tag":"img","path":"g/x.png"}]"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 9.0, 9.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let origin = one_image(&s).origin.expect("an image from a tree has an address");
+
+    assert_eq!(7, origin.dict_id);
+    assert!(origin.path.is_some(), "and names its own node");
+}
+
+/// Read and carried, acted on by nothing: the spec builds no
+/// hover-to-reveal affordance, and 26 dictionaries declare `collapsed`
+/// over 243 264 nodes - so a later ticket must not have to re-derive them.
+#[test]
+fn collapsed_and_collapsible_are_carried_and_change_nothing() {
+    let p = imaged(
+        concat!(
+            r#"{"tag":"img","path":"g/x.png","appearance":"monochrome","#,
+            r#""background":false,"collapsed":true,"collapsible":true}"#
+        ),
+        &[("g/x.png", recorded(MediaFormat::Png, 15.0, 15.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+    let scene_image = img.image.as_ref().unwrap();
+
+    assert!(scene_image.collapsed && scene_image.collapsible);
+    assert!(!scene_image.background, "and `background: false` paints no fill");
+    assert_eq!(Appearance::Monochrome, scene_image.appearance);
+    assert_eq!((15.0, 15.0), (img.rect.w, img.rect.h), "still rendered inline");
+}
+
+/// Yomitan's default is to draw the backing, so an absent field is `true`.
+/// Every image node in the census's samples turns it off.
+#[test]
+fn an_undeclared_background_is_drawn() {
+    let p = imaged(
+        r#"{"tag":"img","path":"g/x.png"}"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 9.0, 9.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+
+    assert!(one_image(&s).image.as_ref().unwrap().background);
+}
+
+/// One row of the bound's table: the asset's format and appearance, the box
+/// it resolved to, the device pixel ratio, and what a painter must do.
+type TintCase = (MediaFormat, Appearance, (f32, f32), f32, Tint);
+
+/// The rasterise-and-tint bound, which is the expensive path: taken only
+/// for a gaiji-sized vector, at twice the device pixel ratio, clamped on
+/// the longest edge. A larger monochrome asset composites untinted, and a
+/// raster mask tints without rasterising because it already has pixels.
+#[test]
+fn the_tint_bound_admits_a_gaiji_sized_vector_and_refuses_an_illustration() {
+    let of = |format, appearance| SceneImage {
+        key: Some(MediaKey::new(7, "g/x")),
+        format: Some(format),
+        appearance,
+        background: false,
+        collapsed: false,
+        collapsible: false,
+    };
+    let box_of = |w: f32, h: f32| SceneRect { x: 0.0, y: 0.0, w, h };
+    let em = 15.0;
+    let cases: &[TintCase] = &[
+        // Not a mask: nothing to do, whatever the format.
+        (MediaFormat::Svg, Appearance::Auto, (15.0, 15.0), 1.0, Tint::None),
+        (MediaFormat::Png, Appearance::Auto, (15.0, 15.0), 1.0, Tint::None),
+        // A raster mask has pixels already.
+        (MediaFormat::Png, Appearance::Monochrome, (15.0, 15.0), 1.0, Tint::Alpha),
+        (MediaFormat::Avif, Appearance::Monochrome, (900.0, 900.0), 1.0, Tint::Alpha),
+        // A gaiji-sized vector: twice the ratio, both axes.
+        (
+            MediaFormat::Svg,
+            Appearance::Monochrome,
+            (15.0, 15.0),
+            1.0,
+            Tint::Raster(30, 30),
+        ),
+        (
+            MediaFormat::Svg,
+            Appearance::Monochrome,
+            (15.0, 15.0),
+            2.0,
+            Tint::Raster(60, 60),
+        ),
+        // Exactly on the 4em bound, and clamped on the longest edge:
+        // 60x30 at 2x on a 2.0 ratio is 240x120, under the clamp.
+        (
+            MediaFormat::Svg,
+            Appearance::Monochrome,
+            (4.0 * em, 2.0 * em),
+            2.0,
+            Tint::Raster(240, 120),
+        ),
+        // Past the clamp: 4em square at 3x is 360, so both axes scale to
+        // fit 256.
+        (
+            MediaFormat::Svg,
+            Appearance::Monochrome,
+            (4.0 * em, 4.0 * em),
+            3.0,
+            Tint::Raster(256, 256),
+        ),
+        // Past the 4em bound on one axis: an illustration, not a mask.
+        (
+            MediaFormat::Svg,
+            Appearance::Monochrome,
+            (4.0 * em + 0.5, 15.0),
+            1.0,
+            Tint::None,
+        ),
+        // A degenerate box has nothing to rasterise into.
+        (MediaFormat::Svg, Appearance::Monochrome, (0.0, 15.0), 1.0, Tint::None),
+    ];
+    for &(format, appearance, (w, h), dpr, want) in cases {
+        assert_eq!(
+            want,
+            of(format, appearance).tint(box_of(w, h), em, dpr),
+            "{format} {appearance:?} {w}x{h} at {dpr}x"
+        );
+    }
+}
+
+/// Two paragraphs, two images, and each reads its own row back: the walk's
+/// image list is renumbered per paragraph exactly as its links and its
+/// readings are, so neither paragraph names an index the other owns.
+#[test]
+fn two_paragraphs_each_place_their_own_image() {
+    let p = imaged(
+        concat!(
+            r#"[{"tag":"div","content":["one",{"tag":"img","path":"g/a.png"}]},"#,
+            r#"{"tag":"div","content":["two",{"tag":"img","path":"g/b.png"}]}]"#
+        ),
+        &[
+            ("g/a.png", recorded(MediaFormat::Png, 10.0, 10.0)),
+            ("g/b.png", recorded(MediaFormat::Png, 20.0, 20.0)),
+        ],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let found = images(&s);
+
+    assert_eq!(2, found.len());
+    assert_eq!((10.0, 10.0), (found[0].rect.w, found[0].rect.h));
+    assert_eq!((20.0, 20.0), (found[1].rect.w, found[1].rect.h));
+    let keys: Vec<Option<&MediaKey>> =
+        found.iter().map(|e| e.image.as_ref().unwrap().key.as_ref()).collect();
+    assert_eq!(
+        vec![Some(&MediaKey::new(7, "g/a.png")), Some(&MediaKey::new(7, "g/b.png"))],
+        keys
+    );
+    assert!(found[1].rect.y > found[0].rect.y, "and the second is below the first");
+}
+
+/// An image inside a cross-reference is as clickable as the word beside
+/// it: the spacers carry the link, so the hit target covers the asset.
+#[test]
+fn an_image_inside_a_link_is_part_of_its_hit_target() {
+    let p = imaged(
+        concat!(
+            r#"{"tag":"a","href":"?query=\u732b","content":["#,
+            r#"{"tag":"img","path":"g/x.png"}]}"#
+        ),
+        &[("g/x.png", recorded(MediaFormat::Png, 16.0, 16.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+    // The headword drills down per character too, so name the target the
+    // cross-reference itself asked for.
+    let hit = s
+        .hits
+        .iter()
+        .find(|h| h.action == HitAction::DrillDown("\u{732b}".to_string()))
+        .expect("a cross-reference earns a target");
+
+    assert_eq!(Some(img.rect.x), hit.x);
+    assert_eq!(Some(img.rect.w), hit.w, "the whole asset, not a sliver");
 }

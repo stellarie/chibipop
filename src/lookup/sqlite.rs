@@ -1,6 +1,6 @@
 //! Read-only mmap'd SQLite.
 
-use crate::dict::gloss::GlossDoc;
+use crate::dict::gloss::{GlossDoc, Kind, NodeId};
 use crate::dict::media::{self, Intrinsic, MediaFormat, MediaKey, Missing, Surface};
 use crate::lookup::model::{Dictionary, Entry, TermRow};
 use crate::present::DictInfo;
@@ -78,6 +78,42 @@ impl SqliteDictionary {
     /// and it is what makes the `alt`-text fallback fire.
     pub fn media_size(&self, key: &MediaKey) -> Result<Option<Intrinsic>> {
         read_media_size(&self.conn, key)
+    }
+
+    /// Every image asset one parsed tree names, sized.
+    ///
+    /// A flat sweep of the arena rather than a tree descent
+    /// (`GlossDoc::all_nodes`), because an image node's depth is irrelevant
+    /// here and a sweep cannot recurse. Distinct paths only: 三省堂 repeats
+    /// one gaiji several times in a row, and a duplicate would be a second
+    /// query for an answer already in hand.
+    ///
+    /// Total: a store fault sizes no image rather than failing the lookup.
+    /// That is the same ladder a missing row takes - `alt` text, then a
+    /// placeholder box - and losing a hover over one unreadable asset would
+    /// be the worse answer.
+    fn media_sizes(&self, dict_id: i64, doc: &GlossDoc) -> Vec<(String, Intrinsic)> {
+        let mut out: Vec<(String, Intrinsic)> = Vec::new();
+        for (id, node) in doc.all_nodes().iter().enumerate() {
+            if node.kind != Kind::Image {
+                continue;
+            }
+            let Some(path) = doc
+                .attr_of(id as NodeId, "path")
+                .and_then(|v| doc.scalar_str(v))
+                .filter(|p| !p.is_empty())
+            else {
+                continue;
+            };
+            if out.iter().any(|(seen, _)| seen == path) {
+                continue;
+            }
+            let key = MediaKey::new(dict_id, path);
+            if let Ok(Some(size)) = read_media_size(&self.conn, &key) {
+                out.push((path.to_string(), size));
+            }
+        }
+        out
     }
 }
 
@@ -232,7 +268,8 @@ impl Dictionary for SqliteDictionary {
             .prepare_cached("SELECT dict_id, glossary FROM entry WHERE entry_id = ?1")?;
         for &id in ids {
             if let Some((dict_id, doc)) = self.gloss.borrow().get(id) {
-                out.push(Entry::new(id, dict_id, doc));
+                let media = self.media_sizes(dict_id, &doc);
+                out.push(Entry::new(id, dict_id, doc, media));
                 continue;
             }
             let mut rows = stmt.query([id])?;
@@ -244,7 +281,8 @@ impl Dictionary for SqliteDictionary {
                     .with_context(|| format!("reading the glossary of entry {id}"))?;
                 let doc = Arc::new(GlossDoc::parse(raw));
                 self.gloss.borrow_mut().put(id, dict_id, Arc::clone(&doc));
-                out.push(Entry::new(id, dict_id, doc));
+                let media = self.media_sizes(dict_id, &doc);
+                out.push(Entry::new(id, dict_id, doc, media));
             }
         }
         Ok(out)

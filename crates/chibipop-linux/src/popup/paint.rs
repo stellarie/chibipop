@@ -28,11 +28,18 @@
 //! same factor.
 
 use crate::popup::{DrawRun, PanelText, PANEL_ALPHA};
+use chibipop::ui::layout::StyledSpan;
 use chibipop::ui::layout::{self, Align, ElemBox, ElemKind, Measured, MeasureRun};
-use chibipop::ui::layout::{PopupScene, Rgb, StyledSpan};
+use chibipop::ui::layout::{PopupScene, Rgb, SceneElem, SceneImage, SceneRect};
 use chibipop::ui::theme::{Theme, SCROLLBAR_W};
-use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut};
-use tiny_skia::{Rect, Shader, Stroke, Transform};
+// The decoded-surface cache lives beside the rest of the popup on disk and
+// is declared by the lib face rather than by `popup/mod.rs`, so that its
+// own tests can link against a real built database. Reaching it by the
+// package's library name is what keeps it compiled - and its tests run -
+// exactly once.
+use chibipop_linux::media::MediaSurfaces;
+use tiny_skia::{Color, FillRule, FilterQuality, Paint, Path, PathBuilder, Pattern};
+use tiny_skia::{Pixmap, PixmapMut, Rect, Shader, SpreadMode, Stroke, Transform};
 
 /// Everything one frame needs.
 pub struct Panel<'a> {
@@ -46,10 +53,20 @@ pub struct Panel<'a> {
 }
 
 /// Paint one frame into `target` (whose size IS the surface size).
-pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>) {
+///
+/// `media` is the painter's own decoded-asset cache, and `None` is a real
+/// state: a session whose dictionary database this build cannot open still
+/// paints, with every image on the `alt`-text rung of its ladder.
+pub fn panel(
+    p: &Panel<'_>,
+    text: &mut dyn PanelText,
+    media: Option<&mut MediaSurfaces>,
+    target: &mut PixmapMut<'_>,
+) {
     let (w, h) = (target.width() as f32, target.height() as f32);
     let scene = p.scene;
     let theme = p.theme;
+    let mut media = media;
 
     // 1. Transparent, not `Clear(background)`: outside the rounded
     // rect there is no window region to hide the overdraw.
@@ -93,6 +110,24 @@ pub fn panel(p: &Panel<'_>, text: &mut dyn PanelText, target: &mut PixmapMut<'_>
         let dy = painted.pen.1 - elem.pen.1;
         for b in elem.boxes() {
             box_of(target, b, dy);
+        }
+        // An image, and its ladder: the asset if this build can decode
+        // it, then the `alt` run the element already carries, then an
+        // outlined box. Never nothing, because nothing is a hole in a
+        // word.
+        if let Some(img) = &elem.image {
+            if asset(target, elem, img, painted.pen.1, media.as_deref_mut(), theme) {
+                continue;
+            }
+            if elem.spans.is_empty() {
+                placeholder(target, image_rect(elem, painted.pen.1), elem.color, p.scale);
+                continue;
+            }
+        }
+        // Nothing to shape: an empty table cell draws its border and no
+        // text, and the seam takes no empty run.
+        if elem.spans.is_empty() {
+            continue;
         }
         // `Trailing` is the frequency corner, and a `textAlign` on a
         // gloss. DirectWrite gets the whole wrap box plus an
@@ -380,12 +415,106 @@ fn box_of(target: &mut PixmapMut<'_>, b: &ElemBox, dy: f32) {
     fill(target, x + w - e.right, y, e.right, h, color);
 }
 
+/// One image element's box, at the scroll it is being drawn at.
+///
+/// The scene's rects are in unscrolled panel space, like every other rect
+/// it reports, and an image element's `pen` is its own top-left - so the
+/// whole box moves by the same offset the pen did.
+fn image_rect(elem: &SceneElem, pen_y: f32) -> SceneRect {
+    SceneRect { y: pen_y, ..elem.rect }
+}
+
+/// One asset, composited into its resolved box. `false` means the ladder
+/// has to fall through.
+///
+/// The backing fill first, and only when the node asked for it: Yomitan
+/// draws one behind a transparent asset and every image node in the
+/// census's samples turns it off, so this is nearly always skipped. The
+/// panel's own background is the honest backing here - a light grey behind
+/// a gaiji would be the one opaque patch on a dark theme.
+///
+/// Scaled with a pattern rather than `draw_pixmap`, because the resolved
+/// box is fractional: `draw_pixmap` translates by whole pixels, and a gaiji
+/// half a pixel off its baseline is visible next to the text it stands in
+/// for.
+fn asset(
+    target: &mut PixmapMut<'_>,
+    elem: &SceneElem,
+    img: &SceneImage,
+    pen_y: f32,
+    media: Option<&mut MediaSurfaces>,
+    theme: &Theme,
+) -> bool {
+    let rect = image_rect(elem, pen_y);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return false;
+    }
+    let (Some(key), Some(cache)) = (img.key.as_ref(), media) else {
+        return false;
+    };
+    // The tint is core's decision, so both bins take the expensive path
+    // on exactly the same assets (`SceneImage::tint`).
+    let tint = img.tint(elem.rect, elem.font_size, 1.0);
+    let Ok(pixmap) = cache.surface(key, tint, elem.color) else {
+        return false;
+    };
+    if img.background {
+        fill(target, rect.x, rect.y, rect.w, rect.h, theme.background);
+    }
+    composite(target, pixmap, rect);
+    true
+}
+
+/// One decoded pixmap into one box, scaled to fill it.
+fn composite(target: &mut PixmapMut<'_>, pixmap: &Pixmap, rect: SceneRect) {
+    let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let Some(box_) = Rect::from_xywh(rect.x, rect.y, rect.w, rect.h) else { return };
+    let place = Transform::from_scale(rect.w / w, rect.h / h).post_translate(rect.x, rect.y);
+    // `Pad` rather than `Repeat`: a bilinear sample at the box's own edge
+    // reaches half a texel past it, and wrapping would fetch the far side
+    // of the asset - a bright seam down one edge of every gaiji.
+    let paint = Paint {
+        shader: Pattern::new(
+            pixmap.as_ref(),
+            SpreadMode::Pad,
+            FilterQuality::Bilinear,
+            1.0,
+            place,
+        ),
+        anti_alias: true,
+        ..Paint::default()
+    };
+    target.fill_rect(box_, &paint, Transform::identity(), None);
+}
+
+/// The last rung: an outlined box where the character should be.
+///
+/// Outlined and not filled, because a solid block reads as a censored
+/// glyph while an empty frame reads as a missing one - and because the
+/// asset it stands in for is usually a character drawn in this very
+/// colour.
+fn placeholder(target: &mut PixmapMut<'_>, rect: SceneRect, color: Rgb, scale: f32) {
+    let edge = hairline(scale);
+    if rect.w <= 2.0 * edge || rect.h <= 2.0 * edge {
+        // Too small to outline: a filled speck is still visibly ink.
+        fill(target, rect.x, rect.y, rect.w, rect.h, color);
+        return;
+    }
+    fill(target, rect.x, rect.y, rect.w, edge, color);
+    fill(target, rect.x, rect.y + rect.h - edge, rect.w, edge, color);
+    fill(target, rect.x, rect.y, edge, rect.h, color);
+    fill(target, rect.x + rect.w - edge, rect.y, edge, rect.h, color);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chibipop::ui::layout::{AnkiSlot, BorderStyle, BoxStyle, Edges};
+    use chibipop::dict::media::{MediaFormat, MediaKey};
+    use chibipop::ui::layout::{AnkiSlot, Appearance, BorderStyle, BoxStyle, Edges};
     use chibipop::ui::layout::{ElemSpan, GlyphBox, LineBox, RubyRun};
-    use chibipop::ui::layout::{SceneElem, SceneRect};
     use chibipop::ui::layout::{MeasureError, Metrics, SidePanel, SideRow, SpanBox, TextMeasure};
     use tiny_skia::Pixmap;
 
@@ -581,6 +710,7 @@ mod tests {
             block_box: None,
             inline_boxes: Vec::new(),
             origin: None,
+            image: None,
         }
     }
 
@@ -610,7 +740,7 @@ mod tests {
         let scene = plain_scene();
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let centre = pix.pixel(100, 50).unwrap();
         assert_eq!(PANEL_ALPHA, centre.alpha(), "the panel fades, it is never opaque");
@@ -651,7 +781,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let run = text.runs.first().expect("the corner run must be drawn");
         assert_eq!(150.0, run.origin.0, "the scene already right-aligned this box");
@@ -685,7 +815,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         // Inside the border, away from every corner: the fill.
         let inside = pix.pixel(60, 50).unwrap();
@@ -715,7 +845,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         assert_eq!(faded_red((255, 0, 0)), pix.pixel(60, 50).unwrap().red(), "the middle fills");
         assert_eq!(
@@ -750,7 +880,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         assert_eq!(faded(255), pix.pixel(31, 50).unwrap().green(), "the left rule");
         let right = pix.pixel(88, 50).unwrap();
@@ -774,7 +904,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 40.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 40.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let run = text.runs.first().expect("the run is drawn scrolled");
         assert_eq!(20.0, run.origin.1, "the text moved up by the scroll");
@@ -828,7 +958,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let gloss = text.runs.first().expect("the gloss must be drawn");
         assert_eq!(700, gloss.one().weight);
@@ -861,7 +991,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         assert_eq!(1, text.runs.len(), "one run, not one per span");
         let run = &text.runs[0];
@@ -901,7 +1031,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         assert_eq!(2, text.runs.len(), "the base, then its reading");
         assert_eq!("猫", text.runs[0].text());
@@ -930,7 +1060,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 100).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let colors: Vec<Rgb> = text.runs[0].spans.iter().map(|s| s.color).collect();
         assert_eq!(vec![(210, 212, 218), (255, 0, 0)], colors);
@@ -946,19 +1076,19 @@ mod tests {
         let mut short = plain_scene();
         short.used_h = 40.0;
         let mut pix = Pixmap::new(200, 100).unwrap();
-        panel(&painter(&short, &theme, 0.0, 1.0), &mut Fake::default(), &mut pix.as_mut());
+        panel(&painter(&short, &theme, 0.0, 1.0), &mut Fake::default(), None, &mut pix.as_mut());
         assert_eq!(bg, pix.pixel(192, 20).unwrap().red(), "content that fits gets no thumb");
 
         let mut tall = plain_scene();
         tall.used_h = 300.0;
         let mut pix = Pixmap::new(200, 100).unwrap();
-        panel(&painter(&tall, &theme, 0.0, 1.0), &mut Fake::default(), &mut pix.as_mut());
+        panel(&painter(&tall, &theme, 0.0, 1.0), &mut Fake::default(), None, &mut pix.as_mut());
         // 4px wide, right edge at 200 - padding/2.
         assert_eq!(thumb, pix.pixel(192, 20).unwrap().red());
         assert_eq!(bg, pix.pixel(187, 20).unwrap().red(), "a 1x bar is four pixels wide");
 
         let mut pix = Pixmap::new(200, 100).unwrap();
-        panel(&painter(&tall, &theme, 0.0, 2.0), &mut Fake::default(), &mut pix.as_mut());
+        panel(&painter(&tall, &theme, 0.0, 2.0), &mut Fake::default(), None, &mut pix.as_mut());
         assert_eq!(thumb, pix.pixel(187, 20).unwrap().red(), "at 2x it is eight");
     }
 
@@ -974,7 +1104,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 128).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let label = text.runs.last().expect("the label must be drawn");
         assert_eq!("Add to Anki", label.text());
@@ -1000,7 +1130,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 128).unwrap();
         let mut text = Fake { broken: true, ..Fake::default() };
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let label = text.runs.last().expect("the label is still drawn");
         assert_eq!(6.0, label.origin.0, "left-aligned, not half-centred on a zero width");
@@ -1038,7 +1168,7 @@ mod tests {
 
         let mut pix = Pixmap::new(200, 128).unwrap();
         let mut text = Fake::default();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
 
         let sep = faded_red(theme.separator);
         assert_eq!(sep, pix.pixel(140, 80).unwrap().red(), "the rule runs the panel's height");
@@ -1054,16 +1184,243 @@ mod tests {
         let theme = Theme::dark();
         let scene = plain_scene();
         let mut pix = Pixmap::new(1, 1).unwrap();
-        panel(&painter(&scene, &theme, 0.0, 1.0), &mut Fake::default(), &mut pix.as_mut());
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut Fake::default(), None, &mut pix.as_mut());
 
         let mut tall = plain_scene();
         tall.used_h = 900.0;
         let mut pix = Pixmap::new(200, 100).unwrap();
-        panel(&painter(&tall, &theme, 9_000.0, 1.5), &mut Fake::default(), &mut pix.as_mut());
+        panel(&painter(&tall, &theme, 9_000.0, 1.5), &mut Fake::default(), None, &mut pix.as_mut());
         assert_eq!(
             faded_red(theme.background),
             pix.pixel(100, 50).unwrap().red(),
             "an overscrolled scene is an empty panel, not a missing one"
+        );
+    }
+
+    // ---- inline images ----
+
+    /// An image element carrying `key` and, optionally, an `alt` run.
+    fn image_elem(pen: (f32, f32), w: f32, h: f32, alt: &str, img: SceneImage) -> SceneElem {
+        let mut elem = styled_elem(pen, Align::Leading, &[(alt, 15.0, 400, false, 0.0)]);
+        elem.kind = ElemKind::Image;
+        elem.rect = SceneRect { x: pen.0, y: pen.1, w, h };
+        elem.wrap_w = w.max(1.0);
+        elem.advance = 0.0;
+        elem.image = Some(img);
+        if alt.is_empty() {
+            elem.text.clear();
+            elem.spans.clear();
+        }
+        elem
+    }
+
+    /// One asset, as the scene names it.
+    fn scene_image(path: Option<&str>, format: Option<MediaFormat>) -> SceneImage {
+        SceneImage {
+            key: path.map(|p| MediaKey::new(1, p)),
+            format,
+            appearance: Appearance::Auto,
+            background: false,
+            collapsed: false,
+            collapsible: false,
+        }
+    }
+
+    /// A scene holding exactly one image element.
+    fn image_scene(elem: SceneElem) -> PopupScene {
+        PopupScene { elems: vec![elem], ..plain_scene() }
+    }
+
+    /// A database built from the committed media fixture archive, so the
+    /// painter's composite is asserted against pixels a real build wrote.
+    fn built_media(test_name: &str) -> (std::path::PathBuf, MediaDbGuard) {
+        let dir = std::env::temp_dir().join("chibipop_linux_paint_media");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join(format!("t_{}_{test_name}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let guard = MediaDbGuard(out.clone());
+        let archive = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/media/media.zip");
+        chibipop::dict::build::build(&[archive], &[], &out, &|_| {})
+            .expect("the fixture builds");
+        (out, guard)
+    }
+
+    struct MediaDbGuard(std::path::PathBuf);
+
+    impl Drop for MediaDbGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The first rung: a stored, decodable asset composites into the box
+    /// the scene resolved, and it is the asset's own pixels rather than
+    /// the panel's background.
+    ///
+    /// The fixture is half-alpha pure blue, so the assertion is also the
+    /// channel order: a bin that swapped red for blue would paint every
+    /// gaiji in the wrong hue and still pass a "something was drawn" test.
+    #[test]
+    fn a_stored_asset_composites_into_its_resolved_box() {
+        let theme = Theme::dark();
+        let (db, _guard) = built_media("composite");
+        let mut media = MediaSurfaces::open(&db).expect("the store opens");
+        let scene = image_scene(image_elem(
+            (40.0, 40.0),
+            20.0,
+            20.0,
+            "",
+            scene_image(Some("gaiji/one.png"), Some(MediaFormat::Png)),
+        ));
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        panel(
+            &painter(&scene, &theme, 0.0, 1.0),
+            &mut Fake::default(),
+            Some(&mut media),
+            &mut pix.as_mut(),
+        );
+
+        // Inside the box: the asset, blended over the panel and then
+        // faded once with the frame. Half-alpha blue over the dark
+        // background leaves a blue channel well above the background's.
+        let inside = pix.pixel(50, 50).unwrap();
+        let outside = pix.pixel(100, 50).unwrap();
+        assert!(
+            inside.blue() > outside.blue() + 20,
+            "the asset's own blue must reach the buffer: {inside:?} against {outside:?}"
+        );
+        assert!(inside.red() <= outside.red(), "and not as red: {inside:?}");
+    }
+
+    /// The second rung, and the one real data takes on this machine: the
+    /// asset is stored and sized, this build carries no decoder for its
+    /// format, so the element's own `alt` run is drawn instead. Jitendex
+    /// ships 201 AVIF and 35 SVG assets and no PNG.
+    #[test]
+    fn an_undecodable_asset_falls_back_to_its_alt_run() {
+        let theme = Theme::dark();
+        let (db, _guard) = built_media("no_decoder");
+        let mut media = MediaSurfaces::open(&db).expect("the store opens");
+        let scene = image_scene(image_elem(
+            (40.0, 40.0),
+            20.0,
+            20.0,
+            "\u{5bfe}",
+            scene_image(Some("gaiji/five.avif"), Some(MediaFormat::Avif)),
+        ));
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(
+            &painter(&scene, &theme, 0.0, 1.0),
+            &mut text,
+            Some(&mut media),
+            &mut pix.as_mut(),
+        );
+
+        let run = text.runs.first().expect("the alt run must be drawn");
+        assert_eq!("\u{5bfe}", run.text());
+        assert_eq!((40.0, 40.0), run.origin, "at the image's own box");
+    }
+
+    /// The last rung: nothing stored and no `alt` is an outlined box, not
+    /// a gap. A hole in a word is the failure this ladder exists to
+    /// prevent.
+    #[test]
+    fn a_missing_asset_with_no_alt_is_an_outlined_box_and_never_a_gap() {
+        let theme = Theme::dark();
+        let scene = image_scene(image_elem((40.0, 40.0), 20.0, 20.0, "", scene_image(None, None)));
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
+
+        assert!(text.runs.is_empty(), "no text to draw, and no empty run through the seam");
+        let ink = faded_red((210, 212, 218));
+        let bg = faded_red(theme.background);
+        assert_eq!(ink, pix.pixel(45, 40).unwrap().red(), "the top edge is ink");
+        assert_eq!(ink, pix.pixel(45, 59).unwrap().red(), "and the bottom edge");
+        assert_eq!(ink, pix.pixel(40, 50).unwrap().red(), "and the left");
+        assert_eq!(ink, pix.pixel(59, 50).unwrap().red(), "and the right");
+        assert_eq!(bg, pix.pixel(50, 50).unwrap().red(), "outlined, not filled");
+    }
+
+    /// A session with no readable dictionary database still paints, with
+    /// every image on the `alt` rung: `None` is a state, not a failure.
+    #[test]
+    fn no_media_store_still_paints_the_alt_text() {
+        let theme = Theme::dark();
+        let scene = image_scene(image_elem(
+            (40.0, 40.0),
+            20.0,
+            20.0,
+            "[\u{5bfe}]",
+            scene_image(Some("gaiji/one.png"), Some(MediaFormat::Png)),
+        ));
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
+
+        assert_eq!("[\u{5bfe}]", text.runs.first().expect("the alt run").text());
+    }
+
+    /// Story 17 through the painter: a monochrome asset reaches the buffer
+    /// in the element's own colour, which is the theme's body text - so a
+    /// gaiji authored as black ink is visible on a dark panel.
+    #[test]
+    fn a_monochrome_asset_paints_in_the_elements_own_colour() {
+        let theme = Theme::dark();
+        let (db, _guard) = built_media("tinted_paint");
+        let mut media = MediaSurfaces::open(&db).expect("the store opens");
+        let mut elem = image_elem(
+            (40.0, 40.0),
+            20.0,
+            20.0,
+            "",
+            scene_image(Some("gaiji/one.png"), Some(MediaFormat::Png)),
+        );
+        // A mask, in a colour nothing like the asset's own blue.
+        elem.color = (255, 0, 0);
+        elem.image.as_mut().unwrap().appearance = Appearance::Monochrome;
+        let scene = image_scene(elem);
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        panel(
+            &painter(&scene, &theme, 0.0, 1.0),
+            &mut Fake::default(),
+            Some(&mut media),
+            &mut pix.as_mut(),
+        );
+
+        let inside = pix.pixel(50, 50).unwrap();
+        let outside = pix.pixel(100, 50).unwrap();
+        assert!(
+            inside.red() > outside.red() + 20,
+            "the tint colour must reach the buffer: {inside:?} against {outside:?}"
+        );
+        assert!(
+            inside.blue() <= outside.blue(),
+            "and the asset's own blue must be gone: {inside:?}"
+        );
+    }
+
+    /// The scene's rects are unscrolled, so an image moves with its
+    /// paragraph - the same rule every other rect the scene reports
+    /// follows.
+    #[test]
+    fn an_image_moves_by_the_scroll_like_every_other_rect() {
+        let theme = Theme::dark();
+        let mut scene =
+            image_scene(image_elem((40.0, 60.0), 20.0, 20.0, "", scene_image(None, None)));
+        scene.used_h = 400.0;
+        scene.content_h = 400.0;
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        panel(&painter(&scene, &theme, 30.0, 1.0), &mut Fake::default(), None, &mut pix.as_mut());
+
+        let ink = faded_red((210, 212, 218));
+        assert_eq!(ink, pix.pixel(45, 30).unwrap().red(), "the box moved up by the scroll");
+        assert_eq!(
+            faded_red(theme.background),
+            pix.pixel(45, 60).unwrap().red(),
+            "and is no longer where it was"
         );
     }
 }

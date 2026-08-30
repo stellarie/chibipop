@@ -26,6 +26,7 @@
 
 use chibipop::dict::media::{MediaKey, Missing, Surface};
 use chibipop::lookup::sqlite::MediaStore;
+use chibipop::ui::layout::{Rgb, Tint};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
@@ -56,6 +57,14 @@ impl Bitmap {
     }
 }
 
+/// One cache slot: the asset, and the colour it was tinted with.
+///
+/// The colour is part of the key because a monochrome asset is a *mask*:
+/// two nodes can share one blob and want two different bitmaps, and a theme
+/// change wants a third. `None` is the untinted asset, which is what all
+/// but 15 of the census's 72 dictionaries ask for.
+type Slot = (MediaKey, Option<Rgb>);
+
 /// Decoded assets, keyed by media key.
 ///
 /// Insertion order, not recency, for the same reason as the parsed-tree
@@ -64,8 +73,8 @@ impl Bitmap {
 /// miss instead of a touch per hit.
 pub struct MediaSurfaces {
     store: MediaStore,
-    slots: HashMap<MediaKey, Result<Bitmap, Missing>>,
-    order: VecDeque<MediaKey>,
+    slots: HashMap<Slot, Result<Bitmap, Missing>>,
+    order: VecDeque<Slot>,
     bytes: usize,
     budget: usize,
     notes: Vec<String>,
@@ -92,17 +101,30 @@ impl MediaSurfaces {
         })
     }
 
-    /// The bitmap for one asset, decoding it on the first ask.
+    /// The bitmap for one asset, tinted as the scene asked.
     ///
     /// `Err` is not a failure to handle - it is the `alt`-text fallback's
     /// cue, and it says which of the three reasons applies so a diagnostic
     /// can be honest.
-    pub fn bitmap(&mut self, key: &MediaKey) -> Result<&Bitmap, Missing> {
-        if !self.slots.contains_key(key) {
-            let slot = self.store.surface(key).map(to_bgra);
-            self.admit(key.clone(), slot);
+    ///
+    /// The tint is applied once, on the way into the cache, rather than per
+    /// frame: `paint_once` runs on every damage and a mask's whole bitmap
+    /// would be rewritten each time.
+    pub fn bitmap(
+        &mut self,
+        key: &MediaKey,
+        tint: Tint,
+        color: Rgb,
+    ) -> Result<&Bitmap, Missing> {
+        let slot: Slot = (key.clone(), (tint != Tint::None).then_some(color));
+        if !self.slots.contains_key(&slot) {
+            let mut pixels = self.store.surface(key).map(to_bgra);
+            if let (Ok(bitmap), true) = (&mut pixels, tint != Tint::None) {
+                tint_alpha(&mut bitmap.bgra, color);
+            }
+            self.admit(slot.clone(), pixels);
         }
-        match self.slots.get(key) {
+        match self.slots.get(&slot) {
             Some(Ok(bitmap)) => Ok(bitmap),
             Some(Err(why)) => Err(why.clone()),
             // Unreachable: `admit` never evicts the entry it just added.
@@ -124,15 +146,15 @@ impl MediaSurfaces {
         self.bytes
     }
 
-    fn admit(&mut self, key: MediaKey, slot: Result<Bitmap, Missing>) {
+    fn admit(&mut self, slot: Slot, pixels: Result<Bitmap, Missing>) {
         // Only a real store fault is worth a line. A dictionary shipping
         // an AVIF is not, and it would repeat per key per session.
-        if let Err(Missing::Unavailable(why)) = &slot {
+        if let Err(Missing::Unavailable(why)) = &pixels {
             self.notes.push(why.clone());
         }
-        self.bytes += weight(&slot);
-        self.order.push_back(key.clone());
-        self.slots.insert(key, slot);
+        self.bytes += weight(&pixels);
+        self.order.push_back(slot.clone());
+        self.slots.insert(slot, pixels);
         // `len() > 1` keeps a single oversized asset: evicting the entry
         // just admitted would report an asset the user can see as absent,
         // and decode it again on the next frame.
@@ -155,6 +177,35 @@ fn to_bgra(mut surface: Surface) -> Bitmap {
         px.swap(0, 2);
     }
     Bitmap { w: surface.w, h: surface.h, bgra: surface.rgba }
+}
+
+/// A mask's pixels, in the colour it stands in for.
+///
+/// Premultiplied BGRA8 in and out: the asset's own colour is discarded and
+/// its alpha becomes the coverage of `color`, which is what a monochrome
+/// asset *is* - black ink authored for a light page, and invisible on a
+/// dark panel if composited as it was drawn.
+///
+/// Multiplying rather than filtering, because chibipop has no filter stack:
+/// Yomitan's and Hoshi Reader's `brightness(0) invert(1)` shortcut needs
+/// one, and it also cannot reach a colour that is neither black nor white -
+/// which the theme's body text usually is.
+///
+/// The Linux twin is `chibipop_linux::media::tint_alpha` and differs in
+/// exactly the two channel indices, for the reason this module's header
+/// gives: core hands out RGBA and `CreateBitmap` takes BGRA.
+fn tint_alpha(bgra: &mut [u8], color: Rgb) {
+    let (r, g, b) = (u32::from(color.0), u32::from(color.1), u32::from(color.2));
+    for px in bgra.as_chunks_mut::<4>().0 {
+        // Premultiplied, so every channel is already scaled by the alpha
+        // and the new ones have to be scaled the same way - which is also
+        // what keeps `b <= a`, the invariant
+        // `D2D1_ALPHA_MODE_PREMULTIPLIED` blends under.
+        let a = u32::from(px[3]);
+        px[0] = ((b * a + 127) / 255) as u8;
+        px[1] = ((g * a + 127) / 255) as u8;
+        px[2] = ((r * a + 127) / 255) as u8;
+    }
 }
 
 /// A slot's retained pixels. A refusal holds none.
@@ -194,6 +245,10 @@ mod tests {
         (out, guard)
     }
 
+    /// The asset as it was drawn, which is what all but 15 of the census's
+    /// 72 dictionaries ask for.
+    const AS_DRAWN: (Tint, Rgb) = (Tint::None, (0, 0, 0));
+
     #[test]
     fn a_stored_png_arrives_as_premultiplied_bgra() {
         // The fixture is 12x7 of pure blue at half alpha. Premultiplied it
@@ -202,7 +257,9 @@ mod tests {
         // wrong hue.
         let (db, _guard) = built("bgra");
         let mut cache = MediaSurfaces::open(&db).expect("the store opens");
-        let bitmap = cache.bitmap(&MediaKey::new(1, "gaiji/one.png")).expect("it paints");
+        let bitmap = cache
+            .bitmap(&MediaKey::new(1, "gaiji/one.png"), AS_DRAWN.0, AS_DRAWN.1)
+            .expect("it paints");
 
         assert_eq!((12, 7), (bitmap.w, bitmap.h));
         assert_eq!(48, bitmap.stride());
@@ -218,10 +275,10 @@ mod tests {
         let mut cache = MediaSurfaces::open(&db).expect("the store opens");
         let key = MediaKey::new(1, "gaiji/one.png");
 
-        let first = cache.bitmap(&key).expect("it paints").clone();
+        let first = cache.bitmap(&key, AS_DRAWN.0, AS_DRAWN.1).expect("it paints").clone();
         let held = cache.footprint();
         assert_eq!(12 * 7 * 4, held, "the budget counts decoded pixels");
-        assert_eq!(&first, cache.bitmap(&key).expect("still paints"));
+        assert_eq!(&first, cache.bitmap(&key, AS_DRAWN.0, AS_DRAWN.1).expect("still paints"));
         assert_eq!(held, cache.footprint(), "a hit admits nothing");
     }
 
@@ -233,11 +290,11 @@ mod tests {
         let avif = MediaKey::new(1, "gaiji/five.avif");
         assert_eq!(
             Err(Missing::Undecodable(Undecodable::NoDecoder(MediaFormat::Avif))),
-            cache.bitmap(&avif).map(|_| ()),
+            cache.bitmap(&avif, AS_DRAWN.0, AS_DRAWN.1).map(|_| ()),
             "the ladder needs to know it is the format and not the asset",
         );
         assert_eq!(0, cache.footprint(), "a refusal costs no pixels");
-        assert!(cache.bitmap(&avif).is_err(), "and it is remembered");
+        assert!(cache.bitmap(&avif, AS_DRAWN.0, AS_DRAWN.1).is_err(), "and it is remembered");
     }
 
     #[test]
@@ -246,7 +303,11 @@ mod tests {
         let mut cache = MediaSurfaces::open(&db).expect("the store opens");
         for path in ["gaiji/missing.png", "gaiji/broken.png", "gaiji/unused.png"] {
             let key = MediaKey::new(1, path);
-            assert_eq!(Err(Missing::NotStored), cache.bitmap(&key).map(|_| ()), "{path}");
+            assert_eq!(
+                Err(Missing::NotStored),
+                cache.bitmap(&key, AS_DRAWN.0, AS_DRAWN.1).map(|_| ()),
+                "{path}"
+            );
         }
     }
 
@@ -261,13 +322,60 @@ mod tests {
         let one = MediaKey::new(1, "gaiji/one.png");
         let copy = MediaKey::new(1, "gaiji/copy.png");
 
-        assert!(cache.bitmap(&one).is_ok());
-        assert!(cache.bitmap(&copy).is_ok());
+        assert!(cache.bitmap(&one, AS_DRAWN.0, AS_DRAWN.1).is_ok());
+        assert!(cache.bitmap(&copy, AS_DRAWN.0, AS_DRAWN.1).is_ok());
         assert_eq!(12 * 7 * 4, cache.footprint(), "the budget is honoured");
-        assert!(!cache.slots.contains_key(&one), "the oldest went");
-        assert!(cache.slots.contains_key(&copy), "the newest stayed");
+        assert!(!cache.slots.contains_key(&(one.clone(), None)), "the oldest went");
+        assert!(cache.slots.contains_key(&(copy, None)), "the newest stayed");
 
         let mut tight = MediaSurfaces::with_budget(&db, 1).expect("the store opens");
-        assert!(tight.bitmap(&one).is_ok(), "an oversized asset is still served");
+        assert!(
+            tight.bitmap(&one, AS_DRAWN.0, AS_DRAWN.1).is_ok(),
+            "an oversized asset is still served"
+        );
+    }
+
+    /// Story 17, at the level the tint is reachable: a monochrome asset's
+    /// alpha becomes the coverage of the body text colour, so a gaiji
+    /// authored as black ink is legible on a dark theme and on a light one.
+    ///
+    /// The fixture is half-alpha blue, so the assertion is also the channel
+    /// order: a tint that forgot the swap would put the red channel where
+    /// `CreateBitmap` reads blue.
+    #[test]
+    fn a_monochrome_asset_is_tinted_to_the_text_colour_in_bgra_order() {
+        let (db, _guard) = built("tint");
+        let mut cache = MediaSurfaces::open(&db).expect("the store opens");
+        let key = MediaKey::new(1, "gaiji/one.png");
+
+        // Distinct in all three channels, so a swapped one is visible.
+        let ink = (200u8, 100u8, 50u8);
+        let tinted = cache.bitmap(&key, Tint::Alpha, ink).expect("it paints").clone();
+        // Alpha 128, so each channel is `channel * 128 / 255` rounded.
+        let at = |c: u8| ((u32::from(c) * 128 + 127) / 255) as u8;
+        for px in tinted.bgra.as_chunks::<4>().0 {
+            assert_eq!(&[at(ink.2), at(ink.1), at(ink.0), 128], px, "b, g, r, a");
+            assert!(px[0] <= px[3] && px[1] <= px[3] && px[2] <= px[3], "premultiplied");
+        }
+        // Two slots: the asset as drawn is not what a mask wants, and a
+        // theme change must not silently keep the old ink.
+        assert!(cache.bitmap(&key, Tint::None, (0, 0, 0)).is_ok());
+        assert_eq!(2 * 12 * 7 * 4, cache.footprint());
+    }
+
+    /// `Tint::Raster` means the same thing to this cache as `Tint::Alpha`
+    /// until an SVG rasterizer exists: `dict::media::decode` answers
+    /// `NoDecoder` for every vector, so the `alt` ladder takes over.
+    #[test]
+    fn a_vector_has_no_pixels_to_tint_in_this_build() {
+        let (db, _guard) = built("vector");
+        let mut cache = MediaSurfaces::open(&db).expect("the store opens");
+        let svg = MediaKey::new(1, "gaiji/two.svg");
+
+        assert_eq!(
+            Err(Missing::Undecodable(Undecodable::NoDecoder(MediaFormat::Svg))),
+            cache.bitmap(&svg, Tint::Raster(30, 30), (230, 230, 230)).map(|_| ()),
+        );
+        assert_eq!(0, cache.footprint());
     }
 }

@@ -2767,7 +2767,11 @@ pub fn run(paths: Paths) -> Result<()> {
     // on a layer-shell-less session). So the popup is always built, and
     // a bind error here is the fatal kind the report already called
     // fatal.
-    let mut popup = Popup::bind(&globals_list, &queue.handle(), &config)
+    // The database path is the painter's too: it opens its own read-only
+    // connection onto the media store, because the worker owns the
+    // dictionary on another thread.
+    let db = paths.data_dir.join("chibipop.sqlite");
+    let mut popup = Popup::bind(&globals_list, &queue.handle(), &config, &db)
         .context("binding the popup's Wayland globals")?;
     for line in popup.drain_notes() {
         log.diag(&line);
@@ -2884,7 +2888,7 @@ pub fn run(paths: Paths) -> Result<()> {
         worker_setup: worker::Setup {
             globals: globals.clone(),
             backend: capture_selection.backend(),
-            db: paths.data_dir.join("chibipop.sqlite"),
+            db: db.clone(),
         },
         worker_ping,
         anki_tx,

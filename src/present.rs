@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::dict::gloss::GlossDoc;
+use crate::dict::media::Intrinsic;
 
 use crate::geom::PhysRect;
 use crate::lookup::model::Hit;
@@ -77,6 +78,15 @@ pub struct GlossEntry {
     /// it - the Anki HTML field today, the popup scene once ticket 08 lands -
     /// so the card and the panel cannot drift apart again.
     pub doc: Arc<GlossDoc>,
+    /// The recorded size of every image asset this row's tree names and the
+    /// media store has bytes for, by the `path` the node declared.
+    ///
+    /// Carried rather than looked up while the panel is laid out:
+    /// `layout::scene` runs with a measurer and no database (ADR-0004), and
+    /// this is what lets it resolve an image's rect without decoding a pixel
+    /// (`lookup::model::Entry::media`). An absent path is what makes the
+    /// `alt`-text fallback fire.
+    pub media: Vec<(String, Intrinsic)>,
 }
 
 /// The id content with no database row behind it carries.
@@ -106,6 +116,10 @@ impl GlossBlock {
                 glosses: crate::dict::gloss::plain_items(&doc),
                 tags: Vec::new(),
                 doc,
+                // No store behind a tree parsed from a string, so its
+                // images size from what they declare and fall back to
+                // their `alt` text.
+                media: Vec::new(),
             }],
         }
     }
@@ -307,6 +321,7 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
             entry_id: hit.entry.entry_id,
             glosses: hit.entry.glosses(),
             tags: definition_tags(&hit.entry.pos),
+            media: hit.entry.media.clone(),
             doc: Arc::clone(&hit.entry.gloss),
         };
         match ranked.iter_mut().find(|(_, id, _)| *id == dict_id) {

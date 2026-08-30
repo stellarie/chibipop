@@ -1,6 +1,7 @@
 //! Core data types and the `Dictionary` abstraction.
 
 use crate::dict::gloss::{plain_items, pos_labels, GlossDoc};
+use crate::dict::media::Intrinsic;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,19 +46,42 @@ pub struct Entry {
     /// Part-of-speech labels lifted out of the tree, which the popup renders
     /// as the card's own field rather than inline.
     pub pos: Vec<String>,
+    /// The recorded size of every image asset this row's tree names and the
+    /// media store has bytes for, by the `path` the node declared.
+    ///
+    /// Resolved here, beside the parse, rather than looked up while the
+    /// panel is laid out: `layout::scene` is a measure-and-arithmetic pass
+    /// with no database behind it (ADR-0004), and a size query per image
+    /// per frame would put SQLite on the paint path. A row names a handful
+    /// of assets - 字通 averages more than four - so this is a short
+    /// association list a linear scan answers.
+    ///
+    /// An absent path means the build stored no bytes or could read no
+    /// intrinsic size, which is exactly the state the `alt`-text fallback
+    /// acts on (`dict::media`).
+    pub media: Vec<(String, Intrinsic)>,
 }
 
 impl Entry {
     /// Wraps an already-parsed tree, lifting its labels out.
-    pub fn new(entry_id: i64, dict_id: i64, gloss: Arc<GlossDoc>) -> Entry {
+    pub fn new(
+        entry_id: i64,
+        dict_id: i64,
+        gloss: Arc<GlossDoc>,
+        media: Vec<(String, Intrinsic)>,
+    ) -> Entry {
         let pos = pos_labels(&gloss);
-        Entry { entry_id, dict_id, gloss, pos }
+        Entry { entry_id, dict_id, gloss, pos, media }
     }
 
     /// Parses a raw glossary payload. The hover path goes through
     /// `SqliteDictionary`'s cache instead; this is the fixture path.
+    ///
+    /// No media, and that is the truth about it: there is no store behind a
+    /// tree parsed from a string, so its images size from what they declare
+    /// and fall back to their `alt` text.
     pub fn parse(entry_id: i64, dict_id: i64, glossary: &str) -> Entry {
-        Entry::new(entry_id, dict_id, Arc::new(GlossDoc::parse(glossary)))
+        Entry::new(entry_id, dict_id, Arc::new(GlossDoc::parse(glossary)), Vec::new())
     }
 
     /// The plain-text glosses, one per glossary item.
