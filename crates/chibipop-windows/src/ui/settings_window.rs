@@ -3,7 +3,7 @@
 //! Modeless - see D9.
 //! Numbers are combos, not spins.
 
-use crate::config::{SentenceMode, FIELD_SOURCES};
+use crate::config::{LayoutMode, SentenceMode, FIELD_SOURCES};
 use crate::library::Kind;
 use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
 use crate::text::ocr::tag_matches;
@@ -135,6 +135,18 @@ const ID_STATIC_CAPTURE_HINT: i32 = 160;
 const ID_FIRST_DICT_ONLY: i32 = 161;
 /// OCR clipboard key button.
 const ID_OCR_CLIPBOARD_KEY: i32 = 162;
+/// Layout-mode combo, General tab.
+const ID_LAYOUT_MODE: i32 = 163;
+/// Dictionary-styling checkbox.
+const ID_DICT_STYLING: i32 = 164;
+/// Show-examples checkbox.
+const ID_SHOW_EXAMPLES: i32 = 165;
+/// Show-attributions checkbox.
+const ID_SHOW_ATTRIBUTIONS: i32 = 166;
+/// Show-images checkbox.
+const ID_SHOW_IMAGES: i32 = 167;
+/// Show-part-of-speech checkbox.
+const ID_SHOW_POS: i32 = 168;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -183,6 +195,29 @@ fn sentence_mode_at(selection: isize) -> SentenceMode {
         .ok()
         .and_then(|i| SENTENCE_MODES.get(i))
         .map_or(SentenceMode::Line, |&(mode, _)| mode)
+}
+
+/// The layout-mode combo, in the order it is filled.
+///
+/// The same one-table-per-edge rule as [`SENTENCE_MODES`], and for the
+/// same reason: a Win32 combo answers with the index it was filled at,
+/// so a second list that merely agreed today would read the wrong mode
+/// the day either gained an entry. The Linux window's `LAYOUT_MODES`
+/// carries the same two labels.
+const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
+    (LayoutMode::Roomy, "Roomy \u{2014} one item per line"),
+    (LayoutMode::Compact, "Compact \u{2014} one line per dictionary"),
+];
+
+/// The layout mode a combo selection names.
+///
+/// No selection (`-1`, a combo that lost it) reads as the default, which
+/// is the item `build` selects when it finds none.
+fn layout_mode_at(selection: isize) -> LayoutMode {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| LAYOUT_MODES.get(i))
+        .map_or(LayoutMode::Roomy, |&(mode, _)| mode)
 }
 
 /// First plugin-enable id.
@@ -2867,6 +2902,46 @@ impl SettingsWindow {
             gen.push(check("Hide the popup from screen capture", ID_EXCLUDE,
                   form.exclude_from_capture, y)?);
             y += ROW_H + 18;
+
+            // ---- Entry content ----
+            // The render settings' own group rather than four more rows
+            // under Popup, and the Linux window groups them the same
+            // way: these six decide what an entry *contains*, where the
+            // rows above decide how big the panel is. Every one is a
+            // portable field, so neither window may drop one.
+            y += 12;
+            gen.push(group("Entry content", y, ROW_H + ROW_GAP + 5 * ROW_H + 30)?);
+            y += 20;
+            gen.push(label("Layout", y)?);
+            let layout_combo = child(page, w!("COMBOBOX"), "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X, y, FIELD_W, 220, ID_LAYOUT_MODE, f)?;
+            gen.push(layout_combo);
+            for (i, (mode, text)) in LAYOUT_MODES.iter().enumerate() {
+                SendMessageW(layout_combo, CB_ADDSTRING, None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)));
+                if form.layout_mode == *mode {
+                    SendMessageW(layout_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(layout_combo, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(layout_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            y += ROW_H + ROW_GAP;
+            gen.push(check("Use the dictionary's own fonts and colours", ID_DICT_STYLING,
+                  form.dictionary_styling, y)?);
+            y += ROW_H;
+            gen.push(check("Show example sentences", ID_SHOW_EXAMPLES,
+                  form.show_examples, y)?);
+            y += ROW_H;
+            gen.push(check("Show attributions and footnotes", ID_SHOW_ATTRIBUTIONS,
+                  form.show_attributions, y)?);
+            y += ROW_H;
+            gen.push(check("Show images", ID_SHOW_IMAGES, form.show_images, y)?);
+            y += ROW_H;
+            gen.push(check("Show part-of-speech labels inside the entry", ID_SHOW_POS,
+                  form.show_part_of_speech, y)?);
+            y += ROW_H + 18;
             y += 12;
             gen.push(group("Actions", y, ROW_H + 38)?);
             y += 20;
@@ -3433,6 +3508,12 @@ impl SettingsWindow {
                 highlight_match: checked(ID_HIGHLIGHT),
                 scroll_popup: checked(ID_SCROLL),
                 side_panel: checked(ID_SIDE_PANEL),
+                layout_mode: layout_mode_at(combo_index(ID_LAYOUT_MODE)),
+                dictionary_styling: checked(ID_DICT_STYLING),
+                show_examples: checked(ID_SHOW_EXAMPLES),
+                show_attributions: checked(ID_SHOW_ATTRIBUTIONS),
+                show_images: checked(ID_SHOW_IMAGES),
+                show_part_of_speech: checked(ID_SHOW_POS),
                 exclude_from_capture: checked(ID_EXCLUDE),
                 dict_names,
                 dict_excluded,

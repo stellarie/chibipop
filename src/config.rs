@@ -177,6 +177,38 @@ pub struct PopupConfig {
     /// Which layer the popup sits on, on Linux.
     #[serde(default)]
     pub layer: PopupLayer,
+    /// Compact or roomy.
+    #[serde(default)]
+    pub layout_mode: LayoutMode,
+    /// Apply a dictionary's own styling.
+    ///
+    /// Off draws every entry in the theme's own font and colours,
+    /// ignoring both the inline `style` object and a dictionary's own
+    /// `styles.css`.
+    #[serde(default = "default_dictionary_styling")]
+    pub dictionary_styling: bool,
+    /// Show example sentences.
+    #[serde(default = "default_show_examples")]
+    pub show_examples: bool,
+    /// Show attributions and footnotes.
+    ///
+    /// Independent of `show_examples`: keeping sources without keeping
+    /// three sentences per sense is its own choice.
+    #[serde(default = "default_show_attributions")]
+    pub show_attributions: bool,
+    /// Show a dictionary's images.
+    ///
+    /// Off leaves an image's `alt` text behind, because a gaiji is a
+    /// character and dropping it would leave a hole in a word.
+    #[serde(default = "default_show_images")]
+    pub show_images: bool,
+    /// Show part-of-speech labels inline.
+    ///
+    /// Off, and not for density: the labels are already the card's own
+    /// `pos` field, drawn above the glosses, so inline they read twice.
+    /// `gloss::RoleFilter::CARD` drops them for the same reason.
+    #[serde(default)]
+    pub show_part_of_speech: bool,
 }
 
 /// 25% of the monitor.
@@ -194,6 +226,34 @@ fn default_scroll_popup() -> bool {
     true
 }
 
+/// On by default: a dictionary that
+/// styled its entry meant it.
+fn default_dictionary_styling() -> bool {
+    true
+}
+
+/// On by default. A sentence showing
+/// the word in use is the reason a
+/// learner hovers it.
+fn default_show_examples() -> bool {
+    true
+}
+
+/// On by default: a licence line is
+/// what makes an entry quotable.
+fn default_show_attributions() -> bool {
+    true
+}
+
+/// On by default. An image node is a
+/// *character* far more often than an
+/// illustration - 427 786 census
+/// nodes carry a gaiji marker
+/// (`docs/research/dict-shapes.md`).
+fn default_show_images() -> bool {
+    true
+}
+
 /// `popup.layer`: which wlr layer the Linux popup sits on.
 ///
 /// `overlay` clears everything including fullscreen clients; `top` sits
@@ -206,6 +266,53 @@ pub enum PopupLayer {
     Overlay,
     /// Below fullscreen clients.
     Top,
+}
+
+/// `popup.layout_mode`: how much room an entry's own structure gets.
+///
+/// Yomitan's configurability is a small fixed set of root attributes
+/// driving a CSS decision table, and this mirrors the one attribute
+/// that changes the most: whether a glossary list stacks or reads as a
+/// single line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutMode {
+    /// One item per line, marked and indented, as a browser draws a
+    /// list. The default, because rendering an entry's structure is the
+    /// whole point of having parsed it.
+    #[default]
+    Roomy,
+    /// One paragraph, items joined by a separator - the terse popup
+    /// chibipop drew before it could do better, kept as a choice rather
+    /// than as the only option. Yomitan and Hoshi Reader both implement
+    /// compact the same way: `li { display: inline }` plus a separator
+    /// on every item after the first.
+    Compact,
+}
+
+impl PopupConfig {
+    /// The popup's render settings, as the scene builder spends them.
+    ///
+    /// The same shape as [`Config::present_config`] and for the same
+    /// reason: handing back the finished record leaves no half-way state
+    /// for a bin to forget to apply, and the six knobs are then read in
+    /// exactly one place, `ui::layout::build_elements`.
+    ///
+    /// Deliberately not the Anki card's filter. The card renderer takes
+    /// `RoleFilter::CARD` and no setting reaches it, so hiding examples
+    /// on screen leaves them on a mined card.
+    pub fn render_settings(&self) -> crate::ui::layout::RenderSettings {
+        crate::ui::layout::RenderSettings {
+            stack_items: self.layout_mode == LayoutMode::Roomy,
+            styling: self.dictionary_styling,
+            images: self.show_images,
+            roles: crate::dict::gloss::RoleFilter {
+                examples: self.show_examples,
+                attributions: self.show_attributions,
+                part_of_speech: self.show_part_of_speech,
+            },
+        }
+    }
 }
 
 /// Which platform a field is being read for.
@@ -708,6 +815,12 @@ impl Default for Config {
                 scroll_popup: default_scroll_popup(),
                 side_panel: false,
                 layer: PopupLayer::default(),
+                layout_mode: LayoutMode::default(),
+                dictionary_styling: default_dictionary_styling(),
+                show_examples: default_show_examples(),
+                show_attributions: default_show_attributions(),
+                show_images: default_show_images(),
+                show_part_of_speech: false,
             },
             dictionaries: DictionariesConfig {
                 display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
@@ -1902,6 +2015,12 @@ mod tests {
         c.popup.scroll_popup = false;
         c.popup.side_panel = true;
         c.popup.layer = PopupLayer::Top;
+        c.popup.layout_mode = LayoutMode::Compact;
+        c.popup.dictionary_styling = false;
+        c.popup.show_examples = false;
+        c.popup.show_attributions = false;
+        c.popup.show_images = false;
+        c.popup.show_part_of_speech = true;
         c.dictionaries.per_language.insert("ja".to_string(), vec!["大辞林".to_string()]);
         c.ocr.max_ocr_passes = 3;
         c.ocr.prefer_vertical = true;
@@ -2033,6 +2152,103 @@ mod tests {
         assert_eq!(PopupLayer::Overlay, c.popup_layer());
         c.popup.layer = PopupLayer::Top;
         assert_eq!(PopupLayer::Top, c.popup_layer());
+    }
+
+    /// `popup.layout_mode` accepts exactly `roomy` and `compact`.
+    ///
+    /// The same shape as [`PopupLayer`]'s test, and the same posture: an
+    /// unreadable enum is a parse error rather than a silent fallback,
+    /// because a config naming a mode this build has never heard of is a
+    /// file from a build that knew something this one does not.
+    #[test]
+    fn layout_mode_parses_roomy_and_compact_and_rejects_garbage() {
+        let base = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"X\"\n",
+        );
+        let parse = |line: &str| toml::from_str::<Config>(&format!("{base}{line}"));
+        let mode = |line: &str| parse(line).unwrap().popup.layout_mode;
+        assert_eq!(LayoutMode::Roomy, mode("layout_mode = \"roomy\"\n"));
+        assert_eq!(LayoutMode::Compact, mode("layout_mode = \"compact\"\n"));
+        assert_eq!(LayoutMode::Roomy, mode(""), "absent takes the default");
+        assert!(parse("layout_mode = \"terse\"\n").is_err(), "garbage modes are a parse error");
+    }
+
+    /// A file predating the render settings loads at the documented
+    /// defaults, and a save writes them.
+    ///
+    /// The whole of story 34 on this side: a config from the other
+    /// platform - or from a build before this ticket - is read back
+    /// unchanged, gains the six keys, and is not corrupted by either.
+    #[test]
+    fn a_file_without_render_settings_takes_the_documented_defaults() {
+        let p = tmp("render_defaults");
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"light\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Meiryo\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n",
+        )).unwrap();
+        let c = load_or_create(&p).unwrap();
+        assert_eq!(LayoutMode::Roomy, c.popup.layout_mode);
+        assert!(c.popup.dictionary_styling);
+        assert!(c.popup.show_examples);
+        assert!(c.popup.show_attributions);
+        assert!(c.popup.show_images);
+        assert!(!c.popup.show_part_of_speech, "the card's own pos field already prints them");
+        assert_eq!("Meiryo", c.popup.font, "the stored values are untouched");
+        c.save(&p).unwrap();
+        let saved = std::fs::read_to_string(&p).unwrap();
+        assert!(saved.contains("layout_mode = \"roomy\""));
+        assert!(saved.contains("dictionary_styling = true"));
+        assert!(saved.contains("show_examples = true"));
+        assert!(saved.contains("show_attributions = true"));
+        assert!(saved.contains("show_images = true"));
+        assert!(saved.contains("show_part_of_speech = false"));
+        assert_eq!(c, load_or_create(&p).unwrap());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The shipped defaults resolve to the scene builder's own defaults.
+    ///
+    /// The bind that keeps a geometry fixture and a fresh install drawing
+    /// the same panel: the fixtures ask for `RenderSettings::default()`,
+    /// a fresh install asks for the config's, and a golden would move the
+    /// day those two disagreed.
+    #[test]
+    fn the_shipped_popup_resolves_to_the_default_render_settings() {
+        assert_eq!(
+            crate::ui::layout::RenderSettings::default(),
+            Config::default().popup.render_settings(),
+        );
+    }
+
+    /// Every knob reaches its slot in the resolved record, and the enum
+    /// resolves the right way round.
+    #[test]
+    fn every_render_knob_reaches_the_resolved_record() {
+        type Edit = fn(&mut PopupConfig);
+        type Want = fn(&crate::ui::layout::RenderSettings) -> bool;
+        let resolve = |edit: Edit| {
+            let mut c = Config::default();
+            edit(&mut c.popup);
+            c.popup.render_settings()
+        };
+        let cases: [(&str, Edit, Want); 7] = [
+            ("roomy stacks", |p| p.layout_mode = LayoutMode::Roomy, |r| r.stack_items),
+            ("compact joins", |p| p.layout_mode = LayoutMode::Compact, |r| !r.stack_items),
+            ("styling off", |p| p.dictionary_styling = false, |r| !r.styling),
+            ("images off", |p| p.show_images = false, |r| !r.images),
+            ("examples off", |p| p.show_examples = false, |r| !r.roles.examples),
+            ("attributions off", |p| p.show_attributions = false, |r| !r.roles.attributions),
+            ("pos on", |p| p.show_part_of_speech = true, |r| r.roles.part_of_speech),
+        ];
+        for (what, edit, want) in cases {
+            assert!(want(&resolve(edit)), "{what} did not reach the record");
+        }
     }
 
     /// Each bin reads only its own key fields.

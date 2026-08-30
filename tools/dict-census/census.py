@@ -32,7 +32,13 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-GLOSSARY_RS = REPO / "src" / "dict" / "glossary.rs"
+# Support columns come out of these three, never out of a copy here, so the
+# report always scores against the current build. Ticket 02 moved the tag and
+# style tables out of the old `glossary.rs` into the arena parser, and ticket
+# 17 added the stylesheet grammar and property table beside them.
+PARSE_RS = REPO / "src" / "dict" / "gloss" / "parse.rs"
+GLOSS_RS = REPO / "src" / "dict" / "gloss" / "mod.rs"
+SHEET_RS = REPO / "src" / "dict" / "sheet" / "mod.rs"
 
 # Yomitan attributes worth counting separately from `style`; see
 # dictionary-term-bank-v3-schema.json.
@@ -47,31 +53,47 @@ IMG_FIELDS = (
 # ---- chibipop's current support, parsed from the Rust source ----
 
 
-def _rust_str_array(src: str, name: str) -> set[str]:
+def _rust_str_array(src: str, name: str, where_: Path) -> set[str]:
     """The string literals in a `const NAME: [&str; N] = [...]` array."""
     m = re.search(rf"const {name}\s*:\s*\[&str;\s*\d+\]\s*=\s*\[(.*?)\];", src, re.S)
     if not m:
-        raise SystemExit(f"census: could not parse {name} out of {GLOSSARY_RS}")
+        raise SystemExit(f"census: could not parse {name} out of {where_}")
     return set(re.findall(r'"([^"]+)"', m.group(1)))
 
 
-def _rust_str_pair_array(src: str, name: str) -> set[str]:
-    """The first element of each tuple in a `[(&str, &str); N]` array."""
-    m = re.search(
-        rf"const {name}\s*:\s*\[\(&str,\s*&str\);\s*\d+\]\s*=\s*\[(.*?)\];", src, re.S
-    )
+def _rust_match_keys(src: str, fn: str, where_: Path) -> set[str]:
+    """The string patterns of a `fn NAME(...) -> Option<T> { Some(match s {`
+    table: one `"key" => Variant,` arm per line."""
+    m = re.search(rf"fn {fn}\b.*?\{{(.*?)\n\}}", src, re.S)
     if not m:
-        raise SystemExit(f"census: could not parse {name} out of {GLOSSARY_RS}")
-    return {pair[0] for pair in re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', m.group(1))}
+        raise SystemExit(f"census: could not find {fn} in {where_}")
+    keys = set(re.findall(r'"([^"]+)"\s*=>', m.group(1)))
+    if not keys:
+        raise SystemExit(f"census: {fn} in {where_} parsed to no keys")
+    return keys
 
 
 def read_support() -> dict[str, set[str]]:
-    src = GLOSSARY_RS.read_text(encoding="utf-8")
+    parse_src = PARSE_RS.read_text(encoding="utf-8")
+    sheet_src = SHEET_RS.read_text(encoding="utf-8")
     return {
-        "tags": _rust_str_array(src, "ALLOWED_HTML_TAGS"),
-        "styles": _rust_str_pair_array(src, "STYLE_KEYS"),
-        "drop_content": _rust_str_array(src, "DROP_CONTENT"),
-        "drop_tags": _rust_str_array(src, "DROP_TAGS"),
+        # The tags the arena parser resolves to its own `Tag` enum. Anything
+        # else parses as `Tag::Other`, keeping its name as an attribute.
+        "tags": _rust_match_keys(parse_src, "tag_for", PARSE_RS),
+        # Inline `style` keys, camelCase as the schema spells them.
+        "styles": _rust_match_keys(parse_src, "style_key_for", PARSE_RS),
+        "drop_content": _rust_str_array(
+            GLOSS_RS.read_text(encoding="utf-8"), "DROP_CONTENT", GLOSS_RS
+        ),
+        # The `styles.css` half: the CSS spelling of the same properties, and
+        # the selector grammar the matcher compiles.
+        "css_props": _rust_match_keys(sheet_src, "css_key", SHEET_RS),
+        "css_kinds": _rust_str_array(
+            sheet_src, "SUPPORTED_SELECTOR_KINDS", SHEET_RS
+        ),
+        "css_pseudos": _rust_str_array(
+            sheet_src, "SUPPORTED_PSEUDO_CLASSES", SHEET_RS
+        ),
     }
 
 
@@ -214,6 +236,18 @@ def new_css_stats(parse_error: str | None = None) -> dict:
         "box_props": collections.Counter(),
         "box_rules": 0,
         "at_rules": collections.Counter(),
+        # ---- scored against the live grammar (ticket 17) ----
+        # These four partition `rules`, exactly as `dict::sheet::SheetCounts`
+        # does, so the census and the matcher report the same arithmetic.
+        "rules_kept": 0,
+        "rules_dropped_selector": 0,
+        "rules_dropped_at_rule": 0,
+        "rules_no_props": 0,
+        # Of `box_rules`: how many the matcher would actually draw.
+        "box_rules_kept": 0,
+        # Why a rule was dropped, so the gap is diagnosable and not just
+        # countable.
+        "drop_reasons": collections.Counter(),
         "parse_error": parse_error,
     }
 
@@ -279,18 +313,18 @@ def _at_name(prelude: str) -> str:
     return "@" + m.group(1).lower() if m else "@"
 
 
-def _block_kind(prelude: str, open_blocks: list, at_rules: collections.Counter) -> str:
+def _block_kind(prelude: str, open_blocks: list[dict], at_rules: collections.Counter) -> str:
     if prelude.startswith("@"):
         at_rules[_at_name(prelude)] += 1
         return "at"
     for prev in open_blocks:
-        if prev[1] == "at" and _at_name(prev[0]) in KEYFRAMES_AT_RULES:
+        if prev["kind"] == "at" and _at_name(prev["prelude"]) in KEYFRAMES_AT_RULES:
             return "keyframe"
     return "rule"
 
 
 def _flush_statement(
-    buf: list[str], decls: list[str] | None, at_rules: collections.Counter
+    buf: list[str], decls: list[tuple[str, str]] | None, at_rules: collections.Counter
 ) -> None:
     """One `;`-terminated statement: a declaration, or an at-statement such as
     `@import url(...)`."""
@@ -300,28 +334,49 @@ def _flush_statement(
     if text.startswith("@"):
         at_rules[_at_name(text)] += 1
         return
-    head, sep, _ = text.partition(":")
+    head, sep, value = text.partition(":")
     if not sep or decls is None:
         return
     name = head.strip().lower()
     if PROP_NAME_RE.fullmatch(name):
-        decls.append(name)
+        # The value comes along because support is not a property question
+        # alone: the matcher drops a `var()` value it cannot substitute,
+        # whatever property carries it.
+        decls.append((name, value.strip()))
 
 
-def scan_css(text: str) -> tuple[list[tuple[str, str, list[str]]], collections.Counter, str | None]:
-    """Character-level scan into `(prelude, kind, declarations)` blocks.
+def _resolve_nesting(prelude: str, parent: list[str] | None) -> list[str]:
+    """A nested prelude flattened against the rule it sits in.
+
+    Native CSS nesting, which real files use: Jitendex writes its
+    marker-suppression rule as `li[...] { & ul[...] { ... } }`, and a scan
+    that only reported the inner prelude would score `& ul[...]` as an
+    unreadable selector. Mirrors `Sheet::compile`'s own resolution so that
+    the two agree on what is supported."""
+    own = split_selectors(prelude)
+    if parent is None:
+        return own
+    return [
+        s.replace("&", p) if "&" in s else f"{p} {s}" for p in parent for s in own
+    ]
+
+
+def scan_css(text: str) -> tuple[list[dict], collections.Counter, str | None]:
+    """Character-level scan into style-rule blocks.
 
     Hand-rolled because no regex sees block structure: nested at-rules, native
     `&` nesting, and braces inside strings or `url(...)` all defeat a pattern
     that counts braces. Malformed input records an error and keeps whatever was
     scanned up to that point.
 
-    `kind` is `rule` for a style rule, `at` for an at-rule block, `keyframe`
-    for an animation step inside `@keyframes`.
+    Each block is `{prelude, kind, decls, sels, in_at}`. `kind` is `rule` for
+    a style rule, `at` for an at-rule block, `keyframe` for an animation step
+    inside `@keyframes`. `sels` is the selector list with `&` resolved, and
+    `in_at` says the rule sits inside an at-rule body.
     """
-    blocks: list[tuple[str, str, list[str]]] = []
+    blocks: list[dict] = []
     at_rules: collections.Counter = collections.Counter()
-    open_blocks: list[tuple[str, str, list[str]]] = []
+    open_blocks: list[dict] = []
     buf: list[str] = []
     error: str | None = None
     parens = 0
@@ -355,23 +410,35 @@ def scan_css(text: str) -> tuple[list[tuple[str, str, list[str]]], collections.C
         elif ch == "{":
             prelude = "".join(buf).strip()
             buf = []
-            open_blocks.append((prelude, _block_kind(prelude, open_blocks, at_rules), []))
+            kind = _block_kind(prelude, open_blocks, at_rules)
+            parent = next(
+                (b["sels"] for b in reversed(open_blocks) if b["kind"] == "rule"), None
+            )
+            open_blocks.append({
+                "prelude": prelude,
+                "kind": kind,
+                "decls": [],
+                "sels": [] if kind == "at" else _resolve_nesting(prelude, parent),
+                "in_at": kind == "at" or any(b["in_at"] for b in open_blocks),
+            })
             i += 1
         elif ch == "}":
             if open_blocks:
-                _flush_statement(buf, open_blocks[-1][2], at_rules)
+                _flush_statement(buf, open_blocks[-1]["decls"], at_rules)
                 blocks.append(open_blocks.pop())
             else:
                 error = error or "unbalanced '}'"
             buf = []
             i += 1
         else:  # ';'
-            _flush_statement(buf, open_blocks[-1][2] if open_blocks else None, at_rules)
+            _flush_statement(
+                buf, open_blocks[-1]["decls"] if open_blocks else None, at_rules
+            )
             buf = []
             i += 1
     if open_blocks:
         error = error or f"{len(open_blocks)} unclosed block(s)"
-        _flush_statement(buf, open_blocks[-1][2], at_rules)
+        _flush_statement(buf, open_blocks[-1]["decls"], at_rules)
         while open_blocks:
             blocks.append(open_blocks.pop())
     return blocks, at_rules, error
@@ -502,7 +569,117 @@ def classify_selector(
         kinds[kind] += 1
 
 
-def css_stats(raw: bytes) -> dict:
+# An attribute operator other than a bare `=`: the matcher reads only `=`.
+ATTR_OP_RE = re.compile(r"\[[^\]]*?([~|^$*])=")
+
+
+def _outside_brackets(sel: str) -> str:
+    """The selector with every `[...]` and `(...)` blanked, so a scan for a
+    combinator cannot trip over one inside an attribute value."""
+    out, depth = [], 0
+    for ch in sel:
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def _tag_names(sel: str) -> set[str]:
+    """Every tag name in one selector, pseudo arguments included."""
+    out: set[str] = set()
+    i, n = 0, len(sel)
+    while i < n:
+        ch = sel[i]
+        if ch in "\"'":
+            i, _ = _skip_string(sel, i)
+        elif ch == "[":
+            i = _skip_nested(sel, i, "[", "]")
+        elif ch == ":":
+            head = i + (2 if sel.startswith("::", i) else 1)
+            end = _skip_ident(sel, head)
+            name = sel[head:end].lower()
+            if end < len(sel) and sel[end] == "(":
+                close = _skip_nested(sel, end, "(", ")")
+                if name in SELECTOR_LIST_PSEUDOS:
+                    out |= _tag_names(sel[end + 1 : max(end + 1, close - 1)])
+                i = close
+            else:
+                i = end
+        elif ch in ".#":
+            i = max(_skip_ident(sel, i + 1), i + 1)
+        elif _is_ident_start(ch):
+            end = _skip_ident(sel, i)
+            out.add(sel[i:end].lower())
+            i = end
+        else:
+            i += 1
+    return out
+
+
+def _pseudo_names(sel: str) -> set[str]:
+    """Every pseudo-class name in one selector. A pseudo-*element* is already
+    an unsupported kind, so it is not repeated here."""
+    out: set[str] = set()
+    i, n = 0, len(sel)
+    while i < n:
+        ch = sel[i]
+        if ch in "\"'":
+            i, _ = _skip_string(sel, i)
+        elif ch == "[":
+            i = _skip_nested(sel, i, "[", "]")
+        elif ch == ":":
+            double = sel.startswith("::", i)
+            head = i + (2 if double else 1)
+            end = _skip_ident(sel, head)
+            name = sel[head:end].lower()
+            if not double and name not in LEGACY_PSEUDO_ELEMENTS and name:
+                out.add(name)
+            if end < len(sel) and sel[end] == "(":
+                close = _skip_nested(sel, end, "(", ")")
+                if name in SELECTOR_LIST_PSEUDOS:
+                    out |= _pseudo_names(sel[end + 1 : max(end + 1, close - 1)])
+                i = close
+            else:
+                i = end
+        else:
+            i += 1
+    return out
+
+
+def selector_support(sel: str, support: dict[str, set[str]]) -> set[str]:
+    """Why one complex selector leaves the matcher's grammar, or an empty set
+    when it does not.
+
+    A deliberately literal reading of `src/dict/sheet/select.rs`: the kinds
+    and the pseudo-classes come out of that source, so this scores the build
+    rather than a copy of it. Reasons are named rather than counted alone,
+    because "70 dropped" and "70 dropped, all chrome classes" are different
+    findings."""
+    bad: set[str] = set()
+    kinds: set[str] = set()
+    _classify(sel, kinds, collections.Counter())
+    for kind in kinds:
+        if kind not in support["css_kinds"]:
+            bad.add(kind)
+    # `_classify` reports `tag` and `pseudo-class` as kinds without saying
+    # which; both need their own names checked.
+    for name in _tag_names(sel):
+        if name not in support["tags"]:
+            bad.add(f"tag:{name}")
+    for name in _pseudo_names(sel):
+        if name not in support["css_pseudos"]:
+            bad.add(f"pseudo:{name}")
+    if re.search(r"[+~]", _outside_brackets(sel)):
+        bad.add("sibling-combinator")
+    for inner in ATTR_OP_RE.findall(sel):
+        bad.add(f"attr-op:{inner}")
+    return bad
+
+
+def css_stats(raw: bytes, support: dict[str, set[str]]) -> dict:
     st = new_css_stats()
     st["bytes"] = len(raw)
     try:
@@ -517,23 +694,66 @@ def css_stats(raw: bytes) -> dict:
         return st
     st["parse_error"] = st["parse_error"] or error
     st["at_rules"] = at_rules
-    for prelude, kind, decls in blocks:
+    for block in blocks:
+        decls = block["decls"]
         st["declarations"] += len(decls)
-        if kind != "rule":
+        if block["kind"] != "rule":
             continue  # @font-face descriptors and animation steps draw no pill
         st["rules"] += 1
-        box = [prop for prop in decls if is_box_prop(prop)]
+        box = [prop for prop, _ in decls if is_box_prop(prop)]
         for prop in box:
             st["box_props"][prop] += 1
         if box:
             st["box_rules"] += 1
-        for sel in split_selectors(prelude):
+        # The published counters read the prelude as written; the support
+        # scoring reads it with `&` resolved, because that is what the
+        # matcher compiles.
+        for sel in split_selectors(block["prelude"]):
             st["selectors"] += 1
             classify_selector(sel, st["selector_kinds"], st["data_attrs"])
+        score_rule(st, block, decls, bool(box), support)
     return st
 
 
-def read_styles_css(z: zipfile.ZipFile, names: list[str]) -> dict | None:
+def score_rule(
+    st: dict,
+    block: dict,
+    decls: list[tuple[str, str]],
+    is_box: bool,
+    support: dict[str, set[str]],
+) -> None:
+    """One rule into exactly one of the four support buckets.
+
+    The order matters and mirrors `Sheet::compile`: an at-rule body never
+    reaches selector compilation, a selector list is atomic so one unreadable
+    member drops the whole rule, and a rule whose every property is unmapped
+    is its own bucket rather than a grammar gap."""
+    if block["in_at"]:
+        st["rules_dropped_at_rule"] += 1
+        st["drop_reasons"]["at-rule body"] += 1
+        return
+    sels = block["sels"]
+    reasons: set[str] = set()
+    for sel in sels:
+        reasons |= selector_support(sel, support)
+    if not sels or reasons:
+        st["rules_dropped_selector"] += 1
+        for reason in reasons or {"empty selector"}:
+            st["drop_reasons"][reason] += 1
+        return
+    if not any(
+        prop in support["css_props"] and "var(" not in value for prop, value in decls
+    ):
+        st["rules_no_props"] += 1
+        return
+    st["rules_kept"] += 1
+    if is_box:
+        st["box_rules_kept"] += 1
+
+
+def read_styles_css(
+    z: zipfile.ZipFile, names: list[str], support: dict[str, set[str]]
+) -> dict | None:
     """The archive's own stylesheet, or `None` when it ships none. Independent
     of `--rows`: a stylesheet is read whole or not at all."""
     name = find_styles_css(names)
@@ -543,12 +763,13 @@ def read_styles_css(z: zipfile.ZipFile, names: list[str]) -> dict | None:
         raw = z.read(name)
     except Exception as exc:  # a bad member must not lose the term-bank walk
         return new_css_stats(f"{type(exc).__name__}: {exc}")
-    return css_stats(raw)
+    return css_stats(raw, support)
 
 
-def census(job: tuple[str, int, list[str]]) -> dict:
-    path, row_cap, drop_content_list = job
-    drop_content = set(drop_content_list)
+def census(job: tuple[str, int, dict[str, list[str]]]) -> dict:
+    path, row_cap, support_lists = job
+    support = {k: set(v) for k, v in support_lists.items()}
+    drop_content = support["drop_content"]
     st = new_stats(path)
     try:
         with zipfile.ZipFile(path) as z:
@@ -558,7 +779,7 @@ def census(job: tuple[str, int, list[str]]) -> dict:
                 st["title"] = index.get("title")
                 st["revision"] = index.get("revision")
                 st["format"] = index.get("format", index.get("version"))
-            st["styles_css"] = read_styles_css(z, names)
+            st["styles_css"] = read_styles_css(z, names, support)
             banks = sorted(
                 n for n in names
                 if re.fullmatch(r"term_bank_\d+\.json", os.path.basename(n))
@@ -595,7 +816,9 @@ def census(job: tuple[str, int, list[str]]) -> dict:
     for key in ("kinds", "tags", "style", "data", "attrs", "img_fields", "img_exts"):
         st[key] = dict(st[key])
     if st["styles_css"] is not None:
-        for key in ("selector_kinds", "data_attrs", "box_props", "at_rules"):
+        for key in (
+            "selector_kinds", "data_attrs", "box_props", "at_rules", "drop_reasons",
+        ):
             st["styles_css"][key] = dict(st["styles_css"][key])
     return st
 
@@ -619,8 +842,8 @@ def main() -> int:
         return 1
 
     support = read_support()
-    drop_content = sorted(support["drop_content"])
-    jobs = [(path, args.rows, drop_content) for path in archives]
+    support_lists = {k: sorted(v) for k, v in support.items()}
+    jobs = [(path, args.rows, support_lists) for path in archives]
 
     started = time.time()
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:

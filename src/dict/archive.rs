@@ -20,6 +20,12 @@ const MAX_BANK: usize = 256 << 20;
 /// content.
 const MAX_ASSET: u64 = 16 << 20;
 
+/// The largest stylesheet the build will store.
+///
+/// Same reasoning as [`MAX_ASSET`], and a much wider margin: the corpus's
+/// largest `styles.css` is 37 048 bytes, so 4 MiB refuses only corruption.
+const MAX_STYLESHEET: u64 = 4 << 20;
+
 /// One row from a term bank.
 pub struct TermEntry {
     pub term: String,
@@ -53,6 +59,70 @@ pub fn for_each_term(zip: &Path, mut on_term: impl FnMut(TermEntry) -> Result<()
 /// Streams frequency bank rows.
 pub fn for_each_freq_row(zip: &Path, on_row: impl FnMut(Value) -> Result<()>) -> Result<()> {
     for_each_bank_row(zip, "term_meta_bank_", on_row)
+}
+
+/// The dictionary's own `styles.css`, or `None` when it ships none.
+///
+/// Yomitan scopes such a stylesheet to that dictionary's own entries, and it
+/// is the second place a dictionary draws a box - the only place, for the 13
+/// `css-only` dictionaries the census found
+/// (`docs/research/dict-shapes.md`).
+///
+/// Root, or one directory deep: the census found it in both places, because
+/// some archives are zipped with a wrapper folder. The shallowest wins, so a
+/// root stylesheet is never shadowed by one inside a subdirectory.
+///
+/// Read whole or not at all, and never streamed: the whole corpus carries
+/// 174 KB of CSS across 14 dictionaries, and 173 964 of those bytes are what
+/// [`MAX_STYLESHEET`] is a hundredfold above.
+pub fn read_styles_css(zip: &Path) -> Result<Option<String>> {
+    let mut archive = open_archive(zip)?;
+    let names = archive_names(&archive);
+    let Some(name) = shallowest(&names, "styles.css") else { return Ok(None) };
+    let entry = archive
+        .by_name(name)
+        .with_context(|| format!("reading {name} from {}", zip.display()))?;
+    if entry.size() > MAX_STYLESHEET {
+        return Ok(None);
+    }
+    let mut raw = Vec::new();
+    entry
+        .take(MAX_STYLESHEET + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("reading {name} from {}", zip.display()))?;
+    // A lying declared size is the zip-bomb shape, so the cap is enforced
+    // against what was actually read as well.
+    if raw.len() as u64 > MAX_STYLESHEET {
+        return Ok(None);
+    }
+    // Lossy, and deliberately: a stylesheet that is not clean UTF-8 still
+    // holds readable rules, and the compiler drops what it cannot read. A
+    // decode error here would cost a whole dictionary its boxes.
+    let mut text = String::from_utf8_lossy(&raw).into_owned();
+    if text.starts_with('\u{feff}') {
+        text.remove(0);
+    }
+    Ok(Some(text))
+}
+
+/// The shallowest archive entry with this file name, at most one directory
+/// deep.
+fn shallowest<'a>(names: &'a [String], want: &str) -> Option<&'a str> {
+    let mut best: Option<(usize, &'a str)> = None;
+    for name in names {
+        let flat = name.replace('\\', "/");
+        if flat.rsplit('/').next() != Some(want) {
+            continue;
+        }
+        let depth = flat.trim_matches('/').matches('/').count();
+        if depth > 1 {
+            continue;
+        }
+        if best.is_none_or(|(d, _)| depth < d) {
+            best = Some((depth, name.as_str()));
+        }
+    }
+    best.map(|(_, name)| name)
 }
 
 /// Reads the referenced assets out of an archive, in archive order.
@@ -578,5 +648,71 @@ mod tests {
 
         assert!(seen.is_empty(), "17 MiB must never reach the caller: {seen:?}");
         assert_eq!(vec!["gaiji/huge.png"], missing);
+    }
+
+    // ---- a dictionary's own styles.css (ticket 17) ----
+
+    /// The census found `styles.css` at the archive root and one directory
+    /// deep, because some archives are zipped with a wrapper folder. Two
+    /// directories deep is not a dictionary's stylesheet, and the shallowest
+    /// of two candidates is the real one.
+    #[test]
+    fn the_stylesheet_is_found_at_the_root_or_one_directory_deep() {
+        let cases: [(&[&str], Option<&str>); 7] = [
+            (&["index.json", "styles.css"], Some("styles.css")),
+            (&["dict/index.json", "dict/styles.css"], Some("dict/styles.css")),
+            // The shallowest wins, whichever order the entries arrive in.
+            (&["dict/styles.css", "styles.css"], Some("styles.css")),
+            (&["styles.css", "dict/styles.css"], Some("styles.css")),
+            (&["a/b/styles.css"], None),
+            (&["index.json"], None),
+            // A zip written on Windows separates with a backslash.
+            (&["dict\\styles.css"], Some("dict\\styles.css")),
+        ];
+        for (names, want) in cases {
+            let owned: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+            assert_eq!(want, shallowest(&owned, "styles.css"), "{names:?}");
+        }
+    }
+
+    /// A name that merely ends in the same letters is not the file.
+    #[test]
+    fn a_lookalike_name_is_not_the_stylesheet() {
+        let names = vec!["mystyles.css".to_string(), "styles.css.bak".to_string()];
+        assert_eq!(None, shallowest(&names, "styles.css"));
+    }
+
+    /// One zip, written here, read back through the real reader. A BOM and
+    /// CRLF because a hand-authored stylesheet has both, and neither may
+    /// reach the compiler.
+    #[test]
+    fn a_stylesheet_reads_back_with_its_bom_stripped() {
+        let dir = std::env::temp_dir().join("chibipop_styles_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("styled_{}.zip", std::process::id()));
+        write_zip(&path, &[("wrap/index.json", b"{\"title\":\"X\"}")], "\u{feff}span { color: red }\r\n");
+        let css = read_styles_css(&path).unwrap().expect("the archive ships one");
+        assert_eq!("span { color: red }\r\n", css);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An archive with none reports none, rather than failing the build.
+    #[test]
+    fn an_archive_without_a_stylesheet_reports_none() {
+        assert_eq!(None, read_styles_css(&fixture("terms.zip")).unwrap());
+    }
+
+    fn write_zip(path: &Path, members: &[(&str, &[u8])], css: &str) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for (name, bytes) in members {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.start_file("wrap/styles.css", opts).unwrap();
+        zip.write_all(css.as_bytes()).unwrap();
+        zip.finish().unwrap();
     }
 }

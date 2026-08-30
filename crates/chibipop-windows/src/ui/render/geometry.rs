@@ -109,14 +109,22 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
     // has no HWND to ask anyway.
     let scale = 1.0f32;
 
+    // The shipped render settings, so
+    // a golden pins what a fresh
+    // install draws. A fixture is not
+    // where a knob is exercised: the
+    // render settings are asserted
+    // through `layout::scene` with the
+    // layout fake, which needs no font
+    // stack (`src/ui/layout/tests.rs`).
     let scene = scene_of(
         &text,
         &spec.p,
         &spec.theme,
-        spec.max_w as f32 / scale,
-        spec.max_h as f32 / scale,
+        (spec.max_w as f32 / scale, spec.max_h as f32 / scale),
         spec.show_back,
         spec.side_panel,
+        RenderSettings::default(),
     )?;
     let (total_w, view_h, content_h) = popup_size(&scene, scale, spec.max_w);
 

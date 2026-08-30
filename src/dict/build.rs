@@ -1,6 +1,8 @@
 //! The schema and the writer.
 
-use crate::dict::archive::{for_each_freq_row, for_each_media, for_each_term, read_index};
+use crate::dict::archive::{
+    for_each_freq_row, for_each_media, for_each_term, read_index, read_styles_css,
+};
 use crate::dict::frequency::{lookup_freq, merge_freq_row, FreqTable};
 use crate::dict::gloss::{renders_text, GlossDoc, Kind, NodeId};
 use crate::dict::media::{self, Intrinsic};
@@ -60,6 +62,19 @@ CREATE TABLE meta (
     v TEXT NOT NULL
 );
 
+CREATE TABLE dict_style (        -- one row per dictionary that ships a styles.css
+    dict_id INTEGER PRIMARY KEY REFERENCES dict(dict_id),
+    -- The archive's own `styles.css`, verbatim, exactly as `entry.glossary`
+    -- keeps its tree verbatim and for the same reason: the matcher compiles
+    -- it once per process on first use, so a matcher fix ships as a patch
+    -- and never as a rebuild. 14 of 72 corpus dictionaries ship one, 174 KB
+    -- between them, which is not worth caching in a compiled form.
+    --
+    -- Its own table rather than a column on `dict`, so the dictionary list's
+    -- own query never pages a 37 KB text through.
+    css     TEXT NOT NULL
+);
+
 CREATE TABLE media_blob (        -- content-addressed asset bytes
     blob_id INTEGER PRIMARY KEY,
     -- SHA-256 of `bytes`, raw. The dedup key, and a database invariant
@@ -102,6 +117,52 @@ pub struct BuildCounts {
     pub entries: i64,
     pub terms: i64,
     pub media: MediaCounts,
+    pub styles: StyleCounts,
+}
+
+/// What one build made of the dictionaries' own stylesheets.
+///
+/// The build stores the text and compiles it once, here, only to record
+/// these numbers - it persists no compiled form, so first use still
+/// compiles. `dropped` is the gauge `tools/dict-census` reports against the
+/// live grammar: it is the count of rules whose selectors this build cannot
+/// read, and it shrinks as the grammar grows.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct StyleCounts {
+    /// Dictionaries that shipped a `styles.css`.
+    pub sheets: usize,
+    /// Bytes of CSS stored.
+    pub bytes: usize,
+    /// Rules compiled into a rule table.
+    pub kept: usize,
+    /// Rules dropped whole: an unsupported selector, or an at-rule body.
+    pub dropped: usize,
+    /// Selectors compiled, after expanding selector lists and `&` nesting.
+    pub selectors: usize,
+    /// Stylesheets that did not scan cleanly. Every rule the scanner did
+    /// recover is still compiled; this counts the sheets, not the losses.
+    pub malformed: usize,
+}
+
+impl StyleCounts {
+    fn add(&mut self, other: StyleCounts) {
+        self.sheets += other.sheets;
+        self.bytes += other.bytes;
+        self.kept += other.kept;
+        self.dropped += other.dropped;
+        self.selectors += other.selectors;
+        self.malformed += other.malformed;
+    }
+
+    /// The one-line diagnostic, in the progress stream's own shape.
+    fn line(&self, what: &str) -> String {
+        let kib = self.bytes.div_ceil(1024);
+        format!(
+            "styles    {what}: {} sheets, {kib} KiB, {} rules kept, \
+             {} dropped, {} selectors; {} malformed",
+            self.sheets, self.kept, self.dropped, self.selectors, self.malformed,
+        )
+    }
 }
 
 /// What extracting one corpus's - or one archive's - media produced.
@@ -244,6 +305,7 @@ fn build_into(
     let mut entries: i64 = 0;
     let mut term_rows: i64 = 0;
     let mut media = MediaCounts::default();
+    let mut styles = StyleCounts::default();
     let mut batches = Batches::new();
 
     let tx = conn.transaction()?;
@@ -254,6 +316,7 @@ fn build_into(
         entries += one.entries;
         term_rows += one.terms;
         media.add(one.media);
+        styles.add(one.styles);
     }
     batches.flush(&tx)?;
 
@@ -266,7 +329,10 @@ fn build_into(
     if media.referenced > 0 {
         on_progress(&media.line("all dictionaries"));
     }
-    Ok(BuildCounts { entries, terms: term_rows, media })
+    if styles.sheets > 0 {
+        on_progress(&styles.line("all dictionaries"));
+    }
+    Ok(BuildCounts { entries, terms: term_rows, media, styles })
 }
 
 /// Merges the freq archives.
@@ -297,6 +363,7 @@ pub(crate) struct Loaded {
     pub(crate) entries: i64,
     pub(crate) terms: i64,
     pub(crate) media: MediaCounts,
+    pub(crate) styles: StyleCounts,
 }
 
 /// Buffers shared by archives.
@@ -342,6 +409,7 @@ pub(crate) fn insert_archive(
         "INSERT INTO dict (dict_id, name, priority) VALUES (?1, ?2, ?3)",
         params![dict_id, name, slot.priority],
     )?;
+    let styles = insert_style(tx, archive, dict_id, &name, on_progress)?;
 
     let mut entry_id = slot.first_entry_id - 1;
     let mut term_rows: i64 = 0;
@@ -422,7 +490,48 @@ pub(crate) fn insert_archive(
         entries: entry_id + 1 - slot.first_entry_id,
         terms: term_rows,
         media,
+        styles,
     })
+}
+
+/// One dictionary's own `styles.css`, stored verbatim and counted once.
+///
+/// Stored, not compiled: the row holds the text and the matcher compiles it
+/// on first use of the dictionary, so a matcher fix ships as a patch exactly
+/// as a parser fix does. The compile here throws its result away and exists
+/// only to fill the build report - the dropped-rule count is the gauge the
+/// census reports against, and a number nobody records is a number that
+/// silently rots.
+///
+/// Total: an archive whose stylesheet cannot be read stores none and the
+/// build carries on. A dictionary's boxes are worth less than its entries.
+fn insert_style(
+    tx: &rusqlite::Transaction,
+    archive: &Path,
+    dict_id: i64,
+    name: &str,
+    on_progress: &dyn Fn(&str),
+) -> Result<StyleCounts> {
+    let Some(css) = read_styles_css(archive)? else { return Ok(StyleCounts::default()) };
+    tx.execute(
+        "INSERT INTO dict_style (dict_id, css) VALUES (?1, ?2)",
+        params![dict_id, css],
+    )
+    .with_context(|| format!("storing the stylesheet of {name}"))?;
+    let counts = crate::dict::sheet::Sheet::compile(&css).counts().clone();
+    let one = StyleCounts {
+        sheets: 1,
+        bytes: css.len(),
+        kept: counts.kept,
+        dropped: counts.dropped(),
+        selectors: counts.selectors,
+        malformed: usize::from(counts.error.is_some()),
+    };
+    on_progress(&one.line(name));
+    if let Some(error) = counts.error {
+        on_progress(&format!("styles    {name}: did not scan cleanly - {error}"));
+    }
+    Ok(one)
 }
 
 /// Every asset path this document's image nodes name.
@@ -1459,5 +1568,108 @@ mod tests {
         let rows: i64 =
             conn.query_row("SELECT COUNT(*) FROM media", [], |r| r.get(0)).unwrap();
         assert_eq!(0, rows);
+    }
+
+    // ---- a dictionary's own styles.css (ticket 17) ----
+
+    /// One archive, written here, built by the real builder.
+    ///
+    /// `index.json` at the root because `read_index` requires it there, and
+    /// the stylesheet one directory deep, which is the other of the two
+    /// places the census found one.
+    fn styled_archive(name: &str, css: &str) -> PathBuf {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join("chibipop_build_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("a_{}_{name}.zip", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file("index.json", opts).unwrap();
+        zip.write_all(br#"{"title":"Styled","format":3,"revision":"1"}"#).unwrap();
+        zip.start_file("term_bank_1.json", opts).unwrap();
+        zip.write_all(
+            br#"[["\u66f8\u304f","\u304b\u304f","","v5k",0,
+                 [{"type":"structured-content","content":
+                   {"tag":"span","data":{"fbox":"1"},"content":"to write"}}],
+                 0,""]]"#,
+        )
+        .unwrap();
+        zip.start_file("assets/styles.css", opts).unwrap();
+        zip.write_all(css.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        path
+    }
+
+    /// The build stores the text and reports what compiling it kept and
+    /// dropped. Stores the *text*: nothing compiled is persisted, because the
+    /// matcher runs on first use so that a matcher fix ships as a patch
+    /// rather than as a rebuild. The compile here exists only to fill this
+    /// report, and the dropped count is what `tools/dict-census` scores
+    /// against.
+    #[test]
+    fn a_build_stores_the_stylesheet_and_reports_what_it_dropped() {
+        let css = "span[data-sc-fbox] { padding: 0.1em }\n\
+                   .gloss-image { border: 1px }\n\
+                   @media (max-width: 500px) { span { color: red } }\n";
+        let archive = styled_archive("stores_styles", css);
+        let out = out_path("stores_styles");
+        let guard = TempDbGuard(out.clone());
+        let lines = std::cell::RefCell::new(Vec::new());
+        let counts = build(std::slice::from_ref(&archive), &[], &out, &|line| {
+            lines.borrow_mut().push(line.to_string());
+        })
+        .expect("the styled fixture builds");
+
+        let conn = Connection::open(&out).unwrap();
+        let stored: String = conn
+            .query_row("SELECT css FROM dict_style WHERE dict_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(css, stored, "the text is stored verbatim");
+
+        assert_eq!(1, counts.styles.sheets);
+        assert_eq!(css.len(), counts.styles.bytes);
+        assert_eq!(1, counts.styles.kept, "the fbox rule");
+        assert_eq!(2, counts.styles.dropped, "a chrome class, and an at-rule body");
+        assert_eq!(1, counts.styles.selectors);
+        assert_eq!(0, counts.styles.malformed);
+        let emitted = lines.into_inner();
+        assert!(
+            emitted
+                .iter()
+                .any(|l| l.starts_with("styles") && l.contains("Styled") && l.contains("2 dropped")),
+            "the per-dictionary line reports the gap: {emitted:?}",
+        );
+        drop(guard);
+        let _ = std::fs::remove_file(&archive);
+    }
+
+    /// A dictionary that ships none writes no row and reports nothing, and a
+    /// build over such a corpus is unchanged.
+    #[test]
+    fn an_archive_without_a_stylesheet_writes_no_row() {
+        let (conn, _guard) = build_fixture_db("no_stylesheet_row");
+        let rows: i64 =
+            conn.query_row("SELECT COUNT(*) FROM dict_style", [], |r| r.get(0)).unwrap();
+        assert_eq!(0, rows);
+    }
+
+    /// Malformed CSS is stored, counted, and never fails the build: the
+    /// scanner keeps every rule it did recover.
+    #[test]
+    fn a_malformed_stylesheet_still_builds() {
+        let archive = styled_archive(
+            "malformed_styles",
+            "span[data-sc-fbox] { padding: 0.1em } div { color: red /* unterminated",
+        );
+        let out = out_path("malformed_styles");
+        let guard = TempDbGuard(out.clone());
+        let counts = build(std::slice::from_ref(&archive), &[], &out, &|_| {})
+            .expect("a broken stylesheet must not fail a build");
+        assert_eq!(1, counts.styles.sheets);
+        assert_eq!(1, counts.styles.kept, "the rule before the break survives");
+        assert_eq!(1, counts.styles.malformed);
+        drop(guard);
+        let _ = std::fs::remove_file(&archive);
     }
 }

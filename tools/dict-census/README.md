@@ -45,12 +45,21 @@ archives.
 
 ## The support columns re-score themselves
 
-`census.py` parses `ALLOWED_HTML_TAGS`, `STYLE_KEYS`, `DROP_CONTENT`, and
-`DROP_TAGS` out of `src/dict/glossary.rs` instead of duplicating them. So the
-`chibipop` column in the report is always measured against the current build,
-and the count of `**unsupported**` rows is a live progress gauge: it shrinks as
-the renderer grows. A parse failure is a hard error rather than a silent
-fallback, because a stale column would quietly overstate support.
+`census.py` parses its support columns out of the Rust source instead of
+duplicating them:
+
+- `tag_for` and `style_key_for` from `src/dict/gloss/parse.rs` — the tags and
+  the inline `style` keys the arena parser resolves.
+- `DROP_CONTENT` from `src/dict/gloss/mod.rs`.
+- `css_key`, `SUPPORTED_SELECTOR_KINDS` and `SUPPORTED_PSEUDO_CLASSES` from
+  `src/dict/sheet/mod.rs` — the `styles.css` property table and the selector
+  grammar the matcher compiles.
+
+So the `chibipop` column in the report is always measured against the current
+build, and two counts are live progress gauges that shrink as the renderer
+grows: the `**unsupported**` rows, and the stylesheet rules the matcher drops.
+A parse failure is a hard error rather than a silent fallback, because a stale
+column would quietly overstate support.
 
 ## Layout
 

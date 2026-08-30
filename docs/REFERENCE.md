@@ -222,6 +222,12 @@ summary_chars = 40      # 10-200; collapsed-row summary length
 font = "Yu Gothic UI"
 highlight_match = true  # box the characters the popup is defining
 scroll_popup = true     # let the wheel scroll a popup that overflows
+layout_mode = "roomy"       # "roomy" | "compact"; how much room an entry gets
+dictionary_styling = true   # apply a dictionary's own fonts, colours and boxes
+show_examples = true        # example sentences
+show_attributions = true    # attributions and footnotes, independent of examples
+show_images = true          # a dictionary's images; off leaves their alt text
+show_part_of_speech = false # part-of-speech labels inside the entry
 
 [dictionaries]
 display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in priority order
@@ -314,6 +320,47 @@ window underneath does not scroll at the same time. It takes it **only** then
 wheel behaves normally. Setting `scroll_popup = false` stops chibipop
 touching the wheel at all while still drawing the scrollbar, so you can see
 there is more even though you cannot reach it.
+
+### The render settings
+
+Six keys under `[popup]` decide how much of an entry you see. They are a
+fixed decision table, not a style engine: the popup reads them in exactly
+one place and there is deliberately no per-dictionary styling
+configuration. All six are portable — both settings windows render them,
+and neither drops the other platform's value.
+
+`layout_mode` is `"roomy"` (the default) or `"compact"`. Roomy gives each
+glossary item its own line, marked and indented, as a browser draws a
+list. Compact joins the items into one paragraph with `"; "` between them,
+which is the terse one-line-per-dictionary popup chibipop drew before it
+could render structure — kept as a choice.
+
+`dictionary_styling` is on by default. Off draws every entry in your
+theme's own font, size, weight and colours, and draws no boxes: it
+switches off both a node's inline `style` and the dictionary's own
+`styles.css`. Markup still means what it says — a `<b>` stays bold —
+because that is what the entry *says* rather than how the dictionary chose
+to draw it. A dictionary whose sense numbering is a `list-style-type`
+declaration (Jitendex's ①②③) falls back to the browser's own counter.
+
+`show_examples` and `show_attributions` are separate knobs on purpose, so
+you can keep a source line without keeping three sentences per sense. Both
+are on by default. They filter on a node's classified editorial role;
+until that classifier ships, the popup still hides the editorial matter it
+always hid and these two knobs change nothing you can see.
+
+`show_images` is on by default. An image node in a Japanese dictionary is
+usually a *character* rather than an illustration, so off leaves the
+image's `alt` text in place rather than a hole in the word, and removes
+the picture and the space it took.
+
+`show_part_of_speech` is **off** by default, and not for density: the
+labels are already the popup's own field, drawn above the glosses, so
+inline they would read twice. Turn it on to see a dictionary's own labels
+where it put them.
+
+Changing any of these applies on reload — the settings window's Apply — and
+lands on a popup already on screen. No restart.
 
 ### `display_order`
 

@@ -50,6 +50,7 @@ mod plain;
 mod tests;
 
 pub use html::{render_html, RoleFilter};
+pub(crate) use parse::tag_for;
 pub use path::{NodePath, Selection};
 pub use plain::{plain_items, pos_labels, renders_text};
 
@@ -318,9 +319,17 @@ pub struct Node {
     data: Span,
     /// Into the document's `attr_kv`.
     attrs: Span,
-    /// Into the document's `style_kv` - the *resolved* style record. Inline
-    /// `style` is its only source today; ticket 17 folds a dictionary's own
-    /// `styles.css` in underneath it, and no renderer learns that CSS exists.
+    /// Into the document's `style_kv` - the *resolved* style record.
+    ///
+    /// Two sources, merged by
+    /// [`fold_declarations`](GlossDoc::fold_declarations): the dictionary's
+    /// own `styles.css`, cascaded by `dict::sheet`, then the node's inline
+    /// `style` verbatim. The two halves never name one property, because the
+    /// fold drops every stylesheet declaration the inline record already
+    /// sets - so inline `style` has the last word by construction, and this
+    /// record reads the same whether a consumer takes the first occurrence
+    /// of a property or the last. No renderer over this tree learns that CSS
+    /// exists.
     style: Span,
 }
 
@@ -418,6 +427,23 @@ impl GlossDoc {
         &self.nodes
     }
 
+    /// Marks every node carrying `tag` with `role`.
+    ///
+    /// Test-only, and `#[cfg(test)]` rather than `pub` for that reason:
+    /// ticket 15 owns the classifier, and until it lands the parser
+    /// writes [`Role::Unclassified`] on every node, so a role filter has
+    /// nothing to bite on unless a fixture sets one. Two renderers filter
+    /// on [`Role`] - the Anki card's and the popup's - and both need to
+    /// be able to say "suppose this subtree were an example", so the
+    /// mutator lives here once rather than once per test module. It
+    /// cannot reach a shipped build.
+    #[cfg(test)]
+    pub(crate) fn classify(&mut self, tag: Tag, role: Role) {
+        for node in self.nodes.iter_mut().filter(|n| n.tag == tag) {
+            node.role = role;
+        }
+    }
+
     /// The top-level glossary items, in order.
     pub fn items(&self) -> Siblings<'_> {
         Siblings { doc: self, next: self.first_item }
@@ -480,6 +506,16 @@ impl GlossDoc {
     /// point of interning.
     pub fn key_id(&self, name: &str) -> Option<KeyId> {
         (0..self.keys.len() as KeyId).find(|&k| self.key(k) == name)
+    }
+
+    /// How many keys this document interned.
+    ///
+    /// The bound on a [`KeyId`], so a caller that resolves a whole probe set
+    /// against a document - `dict::sheet` maps every interned key to the
+    /// `data-*` attribute name it derives from, once - can size its table
+    /// without walking the nodes.
+    pub fn key_count(&self) -> usize {
+        self.keys.len()
     }
 
     /// One `data` entry by name.
@@ -599,6 +635,53 @@ impl GlossDoc {
             + self.attr_kv.capacity() * std::mem::size_of::<(KeyId, Scalar)>()
             + self.style_kv.capacity() * std::mem::size_of::<(StyleKey, Scalar)>()
             + self.keys.capacity() * std::mem::size_of::<Span>()
+    }
+
+    /// Folds a dictionary's own `styles.css` into the resolved style
+    /// records.
+    ///
+    /// `wins` is `(node, property, value)` in ascending node order, already
+    /// cascaded by `dict::sheet`: one entry per property per node, and never
+    /// a property the node's inline `style` already sets. Each node's new
+    /// record is its stylesheet winners followed by its inline record
+    /// verbatim, which is what makes inline `style` the last word - a record
+    /// is read first-occurrence-wins, so priority runs left to right, and
+    /// the two halves cannot collide anyway.
+    ///
+    /// One rebuild of the pool rather than a splice per node, because a
+    /// record is a span into one shared vector and inserting in the middle
+    /// of it would move every span after the insertion.
+    pub(crate) fn fold_declarations(&mut self, wins: &[(NodeId, StyleKey, &str)]) {
+        let mut kv: Vec<(StyleKey, Scalar)> =
+            Vec::with_capacity(self.style_kv.len() + wins.len());
+        let mut next = 0usize;
+        for id in 0..self.nodes.len() {
+            let at = kv.len() as u32;
+            while let Some((node, key, value)) = wins.get(next) {
+                if *node as usize != id {
+                    break;
+                }
+                let span = self.push_text(value);
+                kv.push((*key, Scalar::Text(span)));
+                next += 1;
+            }
+            let inline = self.nodes[id].style;
+            let from = inline.at as usize;
+            kv.extend_from_slice(&self.style_kv[from..from + inline.len as usize]);
+            self.nodes[id].style = Span { at, len: kv.len() as u32 - at };
+        }
+        self.style_kv = kv;
+    }
+
+    /// One string into the document's text buffer.
+    ///
+    /// No deduplication: a stylesheet value is a handful of bytes, the nodes
+    /// one sheet reaches are tens rather than thousands, and a scan of the
+    /// buffer would cost more than the bytes it saved.
+    fn push_text(&mut self, text: &str) -> Span {
+        let at = self.text.len() as u32;
+        self.text.push_str(text);
+        Span { at, len: text.len() as u32 }
     }
 }
 

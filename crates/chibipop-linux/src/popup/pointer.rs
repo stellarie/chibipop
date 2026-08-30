@@ -740,6 +740,7 @@ mod tests {
                 max_h,
                 show_back: true,
                 side_panel: false,
+                render: Default::default(),
                 anki: Some(&chibipop::present::AnkiPopupState {
                     enabled: true,
                     connected: true,

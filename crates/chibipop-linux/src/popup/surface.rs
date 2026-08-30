@@ -186,6 +186,10 @@ pub struct Popup {
     /// Width and height caps, percent of the output.
     caps: (u8, u8),
     side_panel: bool,
+    /// How much of an entry the panel draws, re-read on every reload
+    /// (`reconfigure`) so a settings change lands on the popup already
+    /// on screen.
+    render: chibipop::ui::layout::RenderSettings,
     vis: Visibility,
     /// What is on screen, kept for a re-render at a new scale.
     current: Option<ShowRequest>,
@@ -321,6 +325,7 @@ impl Popup {
             layer: layer_of(config.popup_layer()),
             caps: (config.popup.max_width_percent, config.popup.max_height_percent),
             side_panel: config.popup.side_panel,
+            render: config.popup.render_settings(),
             vis: Visibility::Hidden,
             current: None,
             pointer,
@@ -719,6 +724,7 @@ impl Popup {
         }
         self.caps = (config.popup.max_width_percent, config.popup.max_height_percent);
         self.side_panel = config.popup.side_panel;
+        self.render = config.popup.render_settings();
         // Windows arms its wheel hook per dispatch tick from the same
         // setting; the popup's own region has nothing to arm, so the
         // gate lives on the pointer.
@@ -779,6 +785,7 @@ impl Popup {
                 max_h: max_h as f32,
                 show_back: req.show_back,
                 side_panel: self.side_panel,
+                render: self.render,
                 anki,
             },
             &mut self.text,

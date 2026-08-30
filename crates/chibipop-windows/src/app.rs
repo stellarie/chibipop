@@ -1573,6 +1573,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             v.scroll,
                             v.show_back,
                             live.side_panel,
+                            live.popup.render_settings(),
                         );
                     }
                 }
@@ -2010,6 +2011,7 @@ fn show_presentation(
     scroll: i32,
     show_back: bool,
     side_panel: bool,
+    render: chibipop::ui::layout::RenderSettings,
 ) -> Result<(PhysRect, i32, i32)> {
     let monitor = monitor_rect_for(anchor);
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
@@ -2017,13 +2019,13 @@ fn show_presentation(
 
     // view_h, not content_h, below.
     let (w, view_h, content_h) = renderer
-        .measure(presentation, theme, max_w, max_h, show_back, side_panel)
+        .measure(presentation, theme, (max_w, max_h), show_back, side_panel, render)
         .context("measuring popup content")?;
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
     renderer
-        .paint(presentation, theme, scroll, show_back, side_panel)
+        .paint(presentation, theme, scroll, show_back, side_panel, render)
         .context("painting the popup")?;
     Ok((rect, content_h, view_h))
 }
@@ -2275,6 +2277,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 scroll,
                 show_back,
                 x.live.side_panel,
+                x.live.popup.render_settings(),
             ) {
                 Ok((rect, content_h, view_h)) => {
                     Some(Event::PopupPlaced { rect, content_h, view_h })
@@ -2293,6 +2296,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                     scroll,
                     show_back,
                     x.live.side_panel,
+                    x.live.popup.render_settings(),
                 );
                 if let Err(e) = painted {
                     eprintln!("chibipop: repainting the popup failed: {e:#}");
@@ -2813,18 +2817,14 @@ mod tests {
         assert!(cached_any);
     }
 
+    /// The shipped popup section with the two fields these tests are
+    /// about replaced, so a new field in core cannot silently give this
+    /// helper a value core does not ship.
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
         PopupConfig {
             theme: theme.to_string(),
-            exclude_from_capture: false,
-            max_width_percent: 25,
-            max_height_percent: 45,
-            summary_chars: 40,
             font: font.to_string(),
-            highlight_match: true,
-            scroll_popup: true,
-            side_panel: false,
-            layer: Default::default(),
+            ..Config::default().popup
         }
     }
 

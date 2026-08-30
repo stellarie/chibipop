@@ -1,6 +1,8 @@
 //! The settings window's model.
 
-use crate::config::{Config, FieldMapping, OcrClipboardConfig, SentenceMode, TriggerMode};
+use crate::config::{
+    Config, FieldMapping, LayoutMode, OcrClipboardConfig, SentenceMode, TriggerMode,
+};
 use crate::library::{kind_of, Kind, Library, Pending};
 use crate::present::{dict_order_rank, DictInfo};
 use anyhow::{Context, Result};
@@ -26,6 +28,13 @@ pub struct SettingsForm {
     pub highlight_match: bool,
     pub scroll_popup: bool,
     pub side_panel: bool,
+    /// Compact or roomy.
+    pub layout_mode: LayoutMode,
+    pub dictionary_styling: bool,
+    pub show_examples: bool,
+    pub show_attributions: bool,
+    pub show_images: bool,
+    pub show_part_of_speech: bool,
     pub exclude_from_capture: bool,
     /// Live names, not substrings.
     pub dict_names: Vec<String>,
@@ -318,6 +327,12 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         highlight_match: cfg.popup.highlight_match,
         scroll_popup: cfg.popup.scroll_popup,
         side_panel: cfg.popup.side_panel,
+        layout_mode: cfg.popup.layout_mode,
+        dictionary_styling: cfg.popup.dictionary_styling,
+        show_examples: cfg.popup.show_examples,
+        show_attributions: cfg.popup.show_attributions,
+        show_images: cfg.popup.show_images,
+        show_part_of_speech: cfg.popup.show_part_of_speech,
         exclude_from_capture: cfg.popup.exclude_from_capture,
         dict_names,
         dict_excluded,
@@ -394,6 +409,12 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup.highlight_match = form.highlight_match;
     out.popup.scroll_popup = form.scroll_popup;
     out.popup.side_panel = form.side_panel;
+    out.popup.layout_mode = form.layout_mode;
+    out.popup.dictionary_styling = form.dictionary_styling;
+    out.popup.show_examples = form.show_examples;
+    out.popup.show_attributions = form.show_attributions;
+    out.popup.show_images = form.show_images;
+    out.popup.show_part_of_speech = form.show_part_of_speech;
     out.popup.exclude_from_capture = form.exclude_from_capture;
     out.ocr.max_ocr_passes = form.max_ocr_passes.clamp(PASSES_RANGE.0, PASSES_RANGE.1);
     out.ocr.prefer_vertical = form.prefer_vertical;
@@ -774,6 +795,12 @@ mod tests {
         cfg.popup.scroll_popup = false;
         cfg.popup.side_panel = true;
         cfg.popup.exclude_from_capture = true;
+        cfg.popup.layout_mode = LayoutMode::Compact;
+        cfg.popup.dictionary_styling = false;
+        cfg.popup.show_examples = false;
+        cfg.popup.show_attributions = false;
+        cfg.popup.show_images = false;
+        cfg.popup.show_part_of_speech = true;
         cfg.ocr.max_ocr_passes = 3;
         cfg.ocr.prefer_vertical = true;
         cfg.ocr.capture_width = 640;
@@ -790,6 +817,64 @@ mod tests {
         cfg.anki.notify_on_add = false;
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
+    }
+
+    /// Each render knob reaches the form and comes back, one at a time.
+    ///
+    /// One at a time rather than all six at once, because the failure
+    /// this guards against is a field wired into `from_config` and
+    /// forgotten in `apply_to` - which a single all-flipped case would
+    /// catch only if every field were wrong the same way.
+    #[test]
+    fn every_render_knob_round_trips_through_the_form() {
+        type Edit = fn(&mut Config);
+        type Read = fn(&SettingsForm) -> bool;
+        type Back = fn(&Config) -> bool;
+        let cases: [(&str, Edit, Read, Back); 6] = [
+            (
+                "layout_mode",
+                |c| c.popup.layout_mode = LayoutMode::Compact,
+                |f| f.layout_mode == LayoutMode::Compact,
+                |c| c.popup.layout_mode == LayoutMode::Compact,
+            ),
+            (
+                "dictionary_styling",
+                |c| c.popup.dictionary_styling = false,
+                |f| !f.dictionary_styling,
+                |c| !c.popup.dictionary_styling,
+            ),
+            (
+                "show_examples",
+                |c| c.popup.show_examples = false,
+                |f| !f.show_examples,
+                |c| !c.popup.show_examples,
+            ),
+            (
+                "show_attributions",
+                |c| c.popup.show_attributions = false,
+                |f| !f.show_attributions,
+                |c| !c.popup.show_attributions,
+            ),
+            (
+                "show_images",
+                |c| c.popup.show_images = false,
+                |f| !f.show_images,
+                |c| !c.popup.show_images,
+            ),
+            (
+                "show_part_of_speech",
+                |c| c.popup.show_part_of_speech = true,
+                |f| f.show_part_of_speech,
+                |c| c.popup.show_part_of_speech,
+            ),
+        ];
+        for (field, edit, read, back) in cases {
+            let mut cfg = cfg_with(&["大辞林"]);
+            edit(&mut cfg);
+            let form = from_config(&cfg, &dicts());
+            assert!(read(&form), "{field} did not reach the form");
+            assert!(back(&apply_to(&form, &cfg)), "{field} did not come back from the form");
+        }
     }
 
     #[test]

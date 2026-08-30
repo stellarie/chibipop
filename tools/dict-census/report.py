@@ -129,6 +129,43 @@ def styles_css_section(with_terms: list[dict], sc: list[dict]) -> list[str]:
     rows = [f"| `{k}` | {n} | {v:,} |" for k, n, v in rank_css(shipped, "selector_kinds")]
     out += table(rows, "| selector kind | #dicts | #selectors |", "|---|---:|---:|")
 
+    out.append("### What the matcher compiles, and what it drops")
+    out.append("")
+    out.append("Scored against the live grammar in `src/dict/sheet/select.rs` and the "
+               "property table in `src/dict/sheet/mod.rs`, so these columns move when "
+               "the matcher does. A rule with an unreadable selector is dropped whole, "
+               "as CSS itself drops one; `no props` is a rule whose selector compiles "
+               "and whose every declaration names a property this build does not map.")
+    out.append("")
+    rows = []
+    tot = collections.Counter()
+    for d in sorted(shipped, key=lambda d: -d["styles_css"]["box_rules"]):
+        css = d["styles_css"]
+        rows.append(
+            f"| {d['title'] or '?'} | {css['rules']} | {css['rules_kept']} | "
+            f"{css['rules_dropped_selector'] + css['rules_dropped_at_rule']} | "
+            f"{css['rules_no_props']} | {css['box_rules']} | {css['box_rules_kept']} |"
+        )
+        for k in ("rules", "rules_kept", "rules_dropped_selector",
+                  "rules_dropped_at_rule", "rules_no_props", "box_rules",
+                  "box_rules_kept"):
+            tot[k] += css[k]
+    rows.append(
+        f"| **all {len(shipped)}** | **{tot['rules']}** | **{tot['rules_kept']}** | "
+        f"**{tot['rules_dropped_selector'] + tot['rules_dropped_at_rule']}** | "
+        f"**{tot['rules_no_props']}** | **{tot['box_rules']}** | "
+        f"**{tot['box_rules_kept']}** |"
+    )
+    out += table(
+        rows,
+        "| dictionary | rules | kept | dropped | no props | box rules | box rules kept |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    )
+    out.append("Why a rule is dropped:")
+    out.append("")
+    rows = [f"| `{k}` | {n} | {v:,} |" for k, n, v in rank_css(shipped, "drop_reasons")]
+    out += table(rows, "| reason | #dicts | #rules |", "|---|---:|---:|")
+
     out.append("### Box-model properties declared there")
     out.append("")
     rows = [f"| `{k}` | {n} | {v:,} |" for k, n, v in rank_css(shipped, "box_props")]
@@ -217,7 +254,6 @@ def render(run: dict) -> str:
     support = run["support"]
     ok_tags = set(support["tags"])
     ok_styles = set(support["styles"])
-    drop_tags = set(support["drop_tags"])
 
     with_terms = [d for d in dicts if d["rows"] > 0]
     no_terms = [d for d in dicts if d["rows"] == 0 and not d["error"]]
@@ -240,12 +276,7 @@ def render(run: dict) -> str:
     out.append("")
     rows = []
     for tag, ndicts, nnodes in rank(sc, "tags"):
-        if tag in drop_tags:
-            state = "dropped"
-        elif tag in ok_tags:
-            state = "kept"
-        else:
-            state = "**unsupported**"
+        state = "kept" if tag in ok_tags else "**unsupported**"
         rows.append(f"| `{tag}` | {ndicts} | {nnodes:,} | {state} |")
     out += table(rows, "| tag | #dicts | #nodes | chibipop |", "|---|---:|---:|---|")
 

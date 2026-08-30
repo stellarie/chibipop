@@ -5,7 +5,7 @@
 //! font, no platform: these run in both CI jobs, forever.
 
 use super::*;
-use crate::dict::gloss::{render_html, RoleFilter, Selection, Tag};
+use crate::dict::gloss::{render_html, Role, RoleFilter, Selection, Tag};
 use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
 
 /// Advance per UTF-16 unit, as a
@@ -373,6 +373,7 @@ fn laid_out(p: &Presentation, max_w: f32, max_h: f32, show_back: bool, side: boo
             max_h,
             show_back,
             side_panel: side,
+            render: RenderSettings::default(),
             anki: None,
         },
         &mut m,
@@ -427,6 +428,7 @@ fn measured(theme: &Theme, p: &Presentation, side: bool) -> (PopupScene, Vec<Ask
             max_h: 4000.0,
             show_back: true,
             side_panel: side,
+            render: RenderSettings::default(),
             anki: None,
         },
         &mut m,
@@ -867,6 +869,7 @@ fn a_connected_anki_reserves_a_strip_under_the_panel() {
             max_h: 4000.0,
             show_back: false,
             side_panel: false,
+            render: RenderSettings::default(),
             anki: Some(&anki),
         },
         &mut m,
@@ -895,6 +898,7 @@ fn a_disabled_anki_reserves_no_slot() {
             max_h: 4000.0,
             show_back: false,
             side_panel: false,
+            render: RenderSettings::default(),
             anki: Some(&anki),
         },
         &mut m,
@@ -918,6 +922,7 @@ fn the_anki_strip_matches_the_panel_the_side_column_widened() {
             max_h: 4000.0,
             show_back: false,
             side_panel: true,
+            render: RenderSettings::default(),
             anki: Some(&anki),
         },
         &mut m,
@@ -943,6 +948,7 @@ fn layout_measures_each_run_at_the_width_it_reports() {
             max_h: 4000.0,
             show_back: false,
             side_panel: false,
+            render: RenderSettings::default(),
             anki: None,
         },
         &mut m,
@@ -975,6 +981,7 @@ fn a_refused_run_abandons_the_walk() {
             max_h: 4000.0,
             show_back: false,
             side_panel: false,
+            render: RenderSettings::default(),
             anki: None,
         },
         &mut BrokenMeasure,
@@ -1639,6 +1646,7 @@ fn rich_content_leaves_the_existing_hit_targets_alone() {
                 max_h: 4000.0,
                 show_back: false,
                 side_panel: false,
+                render: RenderSettings::default(),
                 anki: Some(&anki),
             },
             &mut FakeMeasure::default(),
@@ -2042,6 +2050,44 @@ fn bullet() -> String {
     format!("{DISC_MARKER}{MARKER_GAP}")
 }
 
+/// A marker's own width, as `FakeMeasure` measures it.
+///
+/// One unit per UTF-16 unit of the label, its [`MARKER_GAP`] included -
+/// the gap is inside the marker box, so it is what holds the glyph off
+/// the text the box hangs beside.
+fn marker_w(label: &str) -> f32 {
+    label.encode_utf16().count() as f32 * BOX_EM * ADVANCE
+}
+
+/// The one marker an item carries.
+fn one_marker(e: &SceneElem) -> &MarkerRun {
+    assert_eq!(1, e.marker.len(), "expected one marker, got {:?}", e.marker);
+    &e.marker[0]
+}
+
+/// A marker's leading edge in panel space: what a bin draws it at.
+fn marker_x(e: &SceneElem) -> f32 {
+    e.pen.0 + one_marker(e).x
+}
+
+/// Where each line of an element's own run starts, in panel space.
+///
+/// Exactly the arithmetic a bin does: it re-measures the element's spans
+/// at the element's wrap width and draws the whole run from one origin
+/// (ADR-0013), so a line's x is that origin plus the leftmost span box
+/// the seam put on it. This is the number that says whether a wrapped
+/// item's second line sits under its marker or under its text.
+fn line_x(e: &SceneElem) -> Vec<f32> {
+    let spans: Vec<StyledSpan<'_>> = e.styled_spans("").collect();
+    let measured = fake_measure(&spans, e.wrap_w);
+    let mut out = vec![f32::MAX; measured.lines.len()];
+    for b in &measured.spans {
+        let slot = &mut out[b.line as usize];
+        *slot = slot.min(e.pen.0 + b.x);
+    }
+    out
+}
+
 /// One list of plain-text items, as a rich card.
 ///
 /// `style` is the list's own inline style, comma and all, so a test
@@ -2058,19 +2104,27 @@ fn list_card(tag: &str, style: &str, items: &[&str]) -> Presentation {
 }
 
 /// The acceptance shape (story 5): one element per item, each carrying
-/// its own marker at the same indent. The marker text and the offset are
-/// what is asserted, not that the words arrived.
+/// its own marker at the same indent. The marker text and the offsets
+/// are what is asserted, not that the words arrived.
 #[test]
 fn an_unordered_list_marks_every_item_and_indents_them_alike() {
     let s = laid_out(&list_card("ul", "", &["a", "b", "c"]), 224.0, 4000.0, false, false);
     let items = bodies(&s);
     assert_eq!(3, items.len(), "one element per item");
     for (i, text) in ["a", "b", "c"].iter().enumerate() {
-        assert_eq!(format!("{}{text}", bullet()), items[i].text);
+        assert_eq!(*text, items[i].text, "the marker is no part of the item's text");
+        assert_eq!(bullet(), one_marker(items[i]).text, "item {i}");
         assert_eq!(s.origin + LEVEL, items[i].pen.0, "item {i} sits one level in");
+        // `list-style-position: outside`: the marker box's right edge
+        // sits on the item's content edge, inside the gutter the level
+        // indent opened, and the gap that separates the two is the
+        // marker's own trailing one.
+        assert_eq!(items[i].pen.0 - marker_w(&bullet()), marker_x(items[i]));
+        assert!(marker_x(items[i]) >= s.origin, "and inside the panel's column");
     }
     // The indent comes off the wrap width as well as the pen, so an
-    // indented item still stops at the column's own right edge.
+    // indented item still stops at the column's own right edge. The
+    // marker takes nothing more: it is in the gutter, not on the line.
     assert_eq!(s.content_w - LEVEL, items[0].wrap_w);
     // An indent is not a box: nothing is drawn around an item that only
     // sits further in.
@@ -2084,11 +2138,16 @@ fn an_ordered_list_numbers_its_items_from_one() {
     let s = laid_out(&list_card("ol", "", &["a", "b", "c"]), 224.0, 4000.0, false, false);
     let items = bodies(&s);
     assert_eq!(
-        vec!["1. a", "2. b", "3. c"],
+        vec!["a", "b", "c"],
         items.iter().map(|e| e.text.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vec!["1. ", "2. ", "3. "],
+        items.iter().map(|e| one_marker(e).text.as_str()).collect::<Vec<_>>()
     );
     for item in &items {
         assert_eq!(s.origin + LEVEL, item.pen.0);
+        assert_eq!(item.pen.0 - marker_w("1. "), marker_x(item));
     }
 }
 
@@ -2103,9 +2162,11 @@ fn a_nested_list_indents_its_inner_items_past_its_outer_ones() {
     let s = laid_out(&p, 224.0, 4000.0, false, false);
     let items = bodies(&s);
     assert_eq!(
-        vec![format!("{}outer", bullet()), "1. inner".to_string()],
-        items.iter().map(|e| e.text.clone()).collect::<Vec<_>>()
+        vec!["outer", "inner"],
+        items.iter().map(|e| e.text.as_str()).collect::<Vec<_>>()
     );
+    assert_eq!(bullet(), one_marker(items[0]).text);
+    assert_eq!("1. ", one_marker(items[1]).text);
     assert_eq!(s.origin + LEVEL, items[0].pen.0);
     assert_eq!(s.origin + 2.0 * LEVEL, items[1].pen.0);
     assert_eq!(LEVEL, items[1].pen.0 - items[0].pen.0, "one level, reused");
@@ -2114,17 +2175,81 @@ fn a_nested_list_indents_its_inner_items_past_its_outer_ones() {
     assert_eq!(items[0].wrap_w - LEVEL, items[1].wrap_w);
 }
 
-/// Story 7: a dictionary's own counter, prepended as written. No counter
+/// The acceptance bullet ticket 09 first shipped `inside` for: a nested
+/// list's inner marker hangs in the *inner* gutter, one level past the
+/// outer one, because a marker box is placed against the content edge of
+/// the list that owed it and each level opens its own.
+///
+/// Two unordered levels, so both markers are one bullet and both fit
+/// their 21px gutter with room to spare - the geometry under test is
+/// which gutter, not how a wide counter overhangs a narrow one.
+#[test]
+fn a_nested_lists_inner_marker_hangs_in_the_inner_gutter() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","content":["outer","#,
+        r#"{"tag":"ul","content":{"tag":"li","content":"inner"}}]}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    let (outer, inner) = (items[0], items[1]);
+
+    assert_eq!(LEVEL, marker_x(inner) - marker_x(outer), "one level apart");
+    // Each inside its own gutter: past its list's own content edge, and
+    // left of the text it marks.
+    for item in [outer, inner] {
+        assert!(marker_x(item) >= item.pen.0 - LEVEL, "{:?}", item.text);
+        assert!(marker_x(item) + one_marker(item).w <= item.pen.0, "{:?}", item.text);
+    }
+    // And the inner marker is past the outer item's own text, which is
+    // what "not the outer gutter" means.
+    assert!(marker_x(inner) >= outer.pen.0);
+}
+
+/// An item whose whole content is a nested list shares one line with its
+/// inner item, so both levels' markers land on that one element - and
+/// each hangs in its own gutter, which is what a browser draws.
+///
+/// Jitendex's real shape: `ul[sense-groups] > li > ol > li > ul > li`
+/// gave `"\u{2022} \u{2460} \u{2022} to eat"` as one run before this,
+/// three markers deep on one line.
+#[test]
+fn an_items_marker_and_its_nested_items_marker_hang_in_their_own_gutters() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","content":"#,
+        r#"{"tag":"ul","content":{"tag":"li","content":"to eat"}}}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let item = one_body(&s);
+
+    assert_eq!("to eat", item.text, "one line, and no marker in it");
+    assert_eq!(s.origin + 2.0 * LEVEL, item.pen.0, "two levels in");
+    assert_eq!(2, item.marker.len(), "outermost list first");
+    let (outer, inner) = (&item.marker[0], &item.marker[1]);
+    assert_eq!(bullet(), outer.text);
+    assert_eq!(bullet(), inner.text);
+    // The outer list's content edge is one level in, the inner list's is
+    // two, and each marker's right edge sits on its own.
+    assert_eq!(s.origin + LEVEL - marker_w(&bullet()), item.pen.0 + outer.x);
+    assert_eq!(s.origin + 2.0 * LEVEL - marker_w(&bullet()), item.pen.0 + inner.x);
+    // Both on the item's own first baseline, which is the line they
+    // share. `FakeMeasure` puts a body line's baseline halfway down it.
+    assert_eq!(0.0, outer.y);
+    assert_eq!(0.0, inner.y);
+}
+
+/// Story 7: a dictionary's own counter, rendered as written. No counter
 /// algorithm runs over it and no suffix is added to it.
 #[test]
-fn a_literal_string_marker_is_prepended_verbatim() {
+fn a_literal_string_marker_renders_verbatim() {
     // Both quote characters, because CSS takes either and the census
     // holds both.
     let quoted: &[&str] = &[r#"'\u2460'"#, r#"\"\u2460\""#];
     for value in quoted {
         let style = format!(r#","style":{{"listStyleType":"{value}"}}"#);
         let s = laid_out(&list_card("ul", &style, &["a"]), 224.0, 4000.0, false, false);
-        assert_eq!(format!("\u{2460}{MARKER_GAP}a"), one_body(&s).text, "{value}");
+        let item = one_body(&s);
+        assert_eq!(format!("\u{2460}{MARKER_GAP}"), one_marker(item).text, "{value}");
+        assert_eq!("a", item.text, "{value}");
     }
 }
 
@@ -2146,9 +2271,13 @@ fn an_items_own_list_style_wins_over_its_lists() {
     )));
     let s = laid_out(&p, 224.0, 4000.0, false, false);
     assert_eq!(
-        vec!["\u{2460} first", "\u{2461} second", "3. third"],
-        bodies(&s).iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        vec!["\u{2460} ", "\u{2461} ", "3. "],
+        bodies(&s).iter().map(|e| one_marker(e).text.as_str()).collect::<Vec<_>>(),
         "the declaring items take their own counter, the silent one inherits"
+    );
+    assert_eq!(
+        vec!["first", "second", "third"],
+        bodies(&s).iter().map(|e| e.text.as_str()).collect::<Vec<_>>()
     );
 
     // And the inheritance runs the other way too: a list's own
@@ -2162,7 +2291,8 @@ fn an_items_own_list_style_wins_over_its_lists() {
         false,
     );
     for item in bodies(&inherited) {
-        assert!(item.text.starts_with(CIRCLE_MARKER), "{:?}", item.text);
+        let mark = &one_marker(item).text;
+        assert!(mark.starts_with(CIRCLE_MARKER), "{mark:?}");
     }
 }
 
@@ -2198,11 +2328,13 @@ fn an_unreadable_list_style_falls_back_to_each_tags_initial_value() {
             format!(r#","style":{{"listStyleType":"{keyword}"}}"#)
         };
         let s = laid_out(&list_card(tag, &style, &["a"]), 224.0, 4000.0, false, false);
+        let item = one_body(&s);
         assert_eq!(
-            format!("{marker}{MARKER_GAP}a"),
-            one_body(&s).text,
+            format!("{marker}{MARKER_GAP}"),
+            one_marker(item).text,
             "{tag} declaring {keyword:?}"
         );
+        assert_eq!("a", item.text, "{tag} declaring {keyword:?}");
     }
 }
 
@@ -2216,13 +2348,19 @@ fn list_style_type_none_draws_no_marker_and_still_indents() {
         let s = laid_out(&list_card("ul", &style, &["a"]), 224.0, 4000.0, false, false);
         let item = one_body(&s);
         assert_eq!("a", item.text, "{value} asked for no marker");
+        assert!(item.marker.is_empty(), "{value} asked for no marker");
         assert_eq!(s.origin + LEVEL, item.pen.0, "and still for the indent");
     }
 }
 
-/// `::marker` inherits from the item, not from the markup inside it, and
-/// it is its own span at both ends so that it cannot be drawn in a
-/// neighbour's style.
+/// `::marker` inherits from the item, not from the markup inside it.
+///
+/// The mechanism moved: the marker used to be the item paragraph's first
+/// span, and what this asserted was that it stayed its own span at both
+/// ends. It is now no span at all - it is a positioned run of its own
+/// beside the element ([`MarkerRun`]) - so a neighbour's style cannot
+/// reach it by construction, and what is asserted is the style the run
+/// itself carries.
 #[test]
 fn a_marker_takes_the_items_own_style_and_not_its_contents() {
     let p = rich(&sc(concat!(
@@ -2231,15 +2369,23 @@ fn a_marker_takes_the_items_own_style_and_not_its_contents() {
     )));
     let s = laid_out(&p, 224.0, 4000.0, false, false);
     let item = one_body(&s);
-    assert_eq!(format!("{}bold", bullet()), item.text);
-    assert_eq!(2, item.spans.len(), "the marker never joins the run it precedes");
-    assert_eq!(bullet().len() as u32, item.spans[0].len);
-    assert_ne!(BOLD_WEIGHT, item.spans[0].weight, "the `b` is not the item");
-    assert_eq!(BOLD_WEIGHT, item.spans[1].weight);
+    assert_eq!("bold", item.text);
+    assert_eq!(1, item.spans.len(), "the marker is no span of the run");
+    assert_eq!(BOLD_WEIGHT, item.spans[0].weight);
+
+    let mark = one_marker(item);
+    assert_eq!(bullet(), mark.text);
+    assert_ne!(BOLD_WEIGHT, mark.weight, "the `b` is not the item");
+    assert_eq!(item.font_size, mark.size, "and the item's em is the marker's");
 }
 
 /// A marker beside a ruby base must stay out of the base's slot, or the
 /// reading would centre over the bullet as well as over the base.
+///
+/// It cannot reach the slot any more: the marker left the run. The
+/// reading's x moved with it, from two units in - past the marker the
+/// run used to carry - to centred over a base at the item's own left
+/// edge. That move is the proof the marker hangs.
 #[test]
 fn a_marker_does_not_join_the_ruby_base_it_precedes() {
     let unit = BOX_EM * ADVANCE;
@@ -2250,12 +2396,15 @@ fn a_marker_does_not_join_the_ruby_base_it_precedes() {
     let s = laid_out(&p, 224.0, 4000.0, false, false);
     let item = one_body(&s);
 
-    assert_eq!(format!("{}b\u{2060}", bullet()), item.text);
-    // The base is one unit two units in - past the marker - and the
-    // reading is a half-size unit centred on it.
+    assert_eq!("b\u{2060}", item.text, "the base and its filler, and nothing else");
+    // The base is one unit at the item's own left edge, and the reading
+    // is a half-size unit centred on it.
     let read = &item.ruby[0];
-    assert_eq!(2.0 * unit + (unit - unit * RUBY_RATIO) / 2.0, read.x);
+    assert_eq!((unit - unit * RUBY_RATIO) / 2.0, read.x);
     assert_eq!(unit * RUBY_RATIO, read.w);
+    // And the marker is left of the base rather than before it.
+    assert_eq!(bullet(), one_marker(item).text);
+    assert!(one_marker(item).x < 0.0);
 }
 
 /// The marker belongs to the item's first *line*, which for an item
@@ -2270,8 +2419,12 @@ fn an_item_wrapping_its_content_in_a_block_still_marks_one_element() {
     let s = laid_out(&p, 224.0, 4000.0, false, false);
     let items = bodies(&s);
     assert_eq!(1, items.len(), "no bullet-only element");
-    assert_eq!(format!("{}body", bullet()), items[0].text);
+    assert_eq!("body", items[0].text);
+    assert_eq!(bullet(), one_marker(items[0]).text);
     assert_eq!(s.origin + LEVEL, items[0].pen.0, "the block inherits the indent");
+    // The gutter is the *list's*, so the marker hangs beside the block's
+    // line at the level the list opened.
+    assert_eq!(items[0].pen.0 - marker_w(&bullet()), marker_x(items[0]));
 }
 
 /// An item with nothing to mark draws no marker, and the counter still
@@ -2285,7 +2438,31 @@ fn an_empty_item_draws_no_marker_and_still_takes_its_ordinal() {
     let s = laid_out(&p, 224.0, 4000.0, false, false);
     let items = bodies(&s);
     assert_eq!(1, items.len());
-    assert_eq!("2. second", items[0].text);
+    assert_eq!("second", items[0].text);
+    assert_eq!("2. ", one_marker(items[0]).text);
+}
+
+/// An item whose only content is a table has no line inside the grid to
+/// hang a marker beside, so the marker takes the line above - written
+/// *inline*, as its own one-line paragraph. A gutter with no line beside
+/// it would simply drop the bullet.
+#[test]
+fn an_item_whose_only_content_is_a_table_writes_its_marker_on_the_line_above() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":{"tag":"li","content":{"tag":"table","content":"#,
+        r#"{"tag":"tr","content":{"tag":"td","content":"a"}}}}}"#
+    )));
+    let s = laid_out(&p, 224.0, 4000.0, false, false);
+    let items = bodies(&s);
+    assert_eq!(
+        vec![DISC_MARKER, "a"],
+        items.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        "the marker's own line - its trailing gap trimmed, nothing following it - \
+         then the cell inside the grid"
+    );
+    assert!(items[0].marker.is_empty(), "inline: it has no line to hang beside");
+    let grid = find(&s, ElemKind::Table);
+    assert!(items[0].pen.1 < grid.rect.y, "and above the grid");
 }
 
 /// A list whose items are not items is laid out as any other block: a
@@ -2302,6 +2479,7 @@ fn a_list_without_items_is_indented_and_unmarked() {
     );
     for item in &items {
         assert_eq!(s.origin + LEVEL, item.pen.0, "a list indents whatever it holds");
+        assert!(item.marker.is_empty(), "and marks nothing");
     }
 }
 
@@ -2323,36 +2501,48 @@ fn an_items_own_padding_adds_to_the_level_indent() {
     // padding is the item's, so it insets the text inside that box.
     assert_eq!(s.origin + LEVEL, block_box(item).rect.x);
     assert_eq!(s.content_w - LEVEL, block_box(item).rect.w);
+    // And the marker hangs off the *list's* content edge, so the item's
+    // own padding moves its text and leaves its bullet where the list
+    // drew it - a browser's `outside` marker to the pixel.
+    assert_eq!(s.origin + LEVEL - marker_w(&bullet()), marker_x(item));
 }
 
-/// A marker and its body are one paragraph, so a long item wraps at the
-/// item's own narrowed width rather than at the column's.
+/// The acceptance bullet ticket 09 shipped `inside` for, now pinned the
+/// other way round.
 ///
-/// Every line of it sits at the item's indent, beside the marker rather
-/// than past it - CSS's `list-style-position: inside`, which is what one
-/// run at one wrap width can express (ADR-0013). Hanging the marker in
-/// the gutter needs a per-line origin the measurement seam does not
-/// report and neither platform adapter can draw.
+/// What this used to assert was that every line of a wrapped item sat at
+/// the item's own indent *beside* the marker, because the marker was the
+/// paragraph's first span - CSS's `list-style-position: inside`. The
+/// marker is now out of the run, so the first line starts where every
+/// continuation line starts, which is what Yomitan draws: the browser
+/// default, `outside`.
 #[test]
-fn a_wrapped_item_wraps_inside_its_own_indent() {
+fn a_wrapped_items_continuation_lines_align_to_its_text_not_its_marker() {
     let long = "a".repeat(30);
     let s = laid_out(&list_card("ul", "", &[&long]), 224.0, 4000.0, false, false);
     let item = one_body(&s);
     // 200 wide less one 21px level is 179, which takes 23 of the fake's
-    // 7.5px units; the marker and the body are 32.
+    // 7.5px units, so 30 units of body text is two lines.
     assert_eq!(s.content_w - LEVEL, item.wrap_w);
     assert_eq!(2, item.lines);
-    assert_eq!(s.origin + LEVEL, item.pen.0);
+    // Every line of it, first and continuation alike, at the item's text.
+    assert_eq!(vec![s.origin + LEVEL, s.origin + LEVEL], line_x(item));
+    // And the marker left of all of them, in the gutter.
+    assert_eq!(s.origin + LEVEL - marker_w(&bullet()), marker_x(item));
+    assert!(marker_x(item) < line_x(item)[1], "the second line is not under it");
 }
 
 /// The parameter ticket 14 wires, exercised at both its values.
 ///
 /// Below `layout::scene`, because nothing above it can ask for the
 /// compact layout until ticket 14's setting exists. What is asserted is
-/// the contract between the two tickets: the *marker* logic is shared -
-/// `marker_of` and `Marker::label` never see this flag - and only the
-/// stacking changes. Ticket 14 owns the setting, its plumbing, and the
-/// scene-level assertion the spec asks it for.
+/// the contract between the two tickets: what a marker *says* is shared -
+/// `marker_of` and `Marker::label` never see this flag - and where it
+/// *goes* is the one thing the flag decides. A compact list has no
+/// gutter and gives an item no line of its own, so its marker is written
+/// inline as the joined paragraph's spans; a stacked list hangs it.
+/// Ticket 14 owns the setting, its plumbing, and the scene-level
+/// assertion the spec asks it for.
 #[test]
 fn stack_items_false_joins_a_list_into_one_separated_paragraph() {
     let theme = Theme::dark();
@@ -2361,25 +2551,35 @@ fn stack_items_false_joins_a_list_into_one_separated_paragraph() {
         r#""content":"first"},{"tag":"li","content":"second"}]}"#
     )));
     let assets = Assets { dict_id: 1, sizes: &[] };
-    let text_of = |stack_items| -> Vec<String> {
-        paragraphs(&doc, &theme, LINE_GAP, stack_items, assets)
+    let flows = |stack_items| -> Vec<Flow> {
+        let render = Render { roles: RoleFilter::CARD, styling: true, images: true };
+        paragraphs(&doc, &theme, LINE_GAP, stack_items, assets, render)
             .into_iter()
             .filter_map(|piece| match piece {
-                Piece::Flow(flow) => Some(flow.text),
+                Piece::Flow(flow) => Some(flow),
                 Piece::Table(_) => None,
             })
             .collect()
     };
 
+    let compact = flows(false);
     assert_eq!(
         vec![format!("\u{2460} first{ITEM_SEPARATOR}2. second")],
-        text_of(false),
+        compact.iter().map(|f| f.text.clone()).collect::<Vec<_>>(),
         "one paragraph, the separator between the items, the same markers"
     );
+    assert!(compact[0].marker.is_empty(), "and no gutter to hang either in");
+
+    let stacked = flows(true);
     assert_eq!(
-        vec!["\u{2460} first".to_string(), "2. second".to_string()],
-        text_of(true),
+        vec!["first".to_string(), "second".to_string()],
+        stacked.iter().map(|f| f.text.clone()).collect::<Vec<_>>(),
         "and stacked, one paragraph per item"
+    );
+    assert_eq!(
+        vec!["\u{2460} ", "2. "],
+        stacked.iter().map(|f| f.marker[0].text.as_str()).collect::<Vec<_>>(),
+        "with the identical labels, hanging"
     );
 }
 
@@ -2413,6 +2613,7 @@ fn grid_scene(p: &Presentation, max_w: f32, side: bool) -> PopupScene {
             max_h: 4000.0,
             show_back: false,
             side_panel: side,
+            render: RenderSettings::default(),
             anki: None,
         },
         &mut m,
@@ -2617,6 +2818,7 @@ fn a_cell_rule_scales_with_the_font_size() {
             max_h: 4000.0,
             show_back: false,
             side_panel: false,
+            render: RenderSettings::default(),
             anki: None,
         },
         &mut m,
@@ -3073,6 +3275,7 @@ fn the_box_model_leaves_the_panels_own_hit_targets_alone() {
                 max_h: 4000.0,
                 show_back: true,
                 side_panel: false,
+                render: RenderSettings::default(),
                 anki: Some(&anki),
             },
             &mut FakeMeasure::default(),
@@ -3147,7 +3350,7 @@ fn an_even_border_strokes_once_and_an_uneven_one_fills_each_edge() {
 #[test]
 fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
     let theme = Theme::dark();
-    let (elems, _) = build_elements(&one_card(&[], Some(7671)), &theme, false, false);
+    let (elems, _) = build_elements(&one_card(&[], Some(7671)), &theme, false, false, RenderSettings::default());
     match &elems[0] {
         Elem::Corner(line) => {
             assert_eq!("freq 7671", line.text);
@@ -3159,14 +3362,14 @@ fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
 
 #[test]
 fn an_unranked_entry_draws_no_corner() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
     assert!(!elems.iter().any(|e| matches!(e, Elem::Corner(_))));
 }
 
 #[test]
 fn part_of_speech_is_dimmed_metadata_not_body_text() {
     let theme = Theme::dark();
-    let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, false, false);
+    let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, false, false, RenderSettings::default());
     let pos = elems
         .iter()
         .find_map(|e| match e {
@@ -3191,7 +3394,7 @@ fn part_of_speech_is_dimmed_metadata_not_body_text() {
 #[test]
 fn each_role_takes_its_own_size() {
     let theme = roled_theme();
-    let (elems, _) = build_elements(&one_card(&["noun"], Some(7671)), &theme, true, false);
+    let (elems, _) = build_elements(&one_card(&["noun"], Some(7671)), &theme, true, false, RenderSettings::default());
     let size_of = |want: &str| -> f32 {
         elems
             .iter()
@@ -3335,7 +3538,7 @@ fn the_theme_sets_the_separator_height_but_not_the_side_rule() {
 /// 大辞林 has no POS markup.
 #[test]
 fn an_entry_without_part_of_speech_draws_no_pos_line() {
-    let (elems, _) = build_elements(&one_card(&[], Some(1)), &Theme::dark(), false, false);
+    let (elems, _) = build_elements(&one_card(&[], Some(1)), &Theme::dark(), false, false, RenderSettings::default());
     assert!(!elems
         .iter()
         .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
@@ -3343,7 +3546,7 @@ fn an_entry_without_part_of_speech_draws_no_pos_line() {
 
 #[test]
 fn the_headword_is_a_headword_element_not_text() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
     assert!(
         elems.iter().any(|e| matches!(e, Elem::Headword { .. })),
         "expected a Headword element for the headword"
@@ -3352,7 +3555,7 @@ fn the_headword_is_a_headword_element_not_text() {
 
 #[test]
 fn headword_prefix_u16_is_zero_without_anki_marks() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
     let hw = elems.iter().find_map(|e| match e {
         Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
         _ => None,
@@ -3362,13 +3565,13 @@ fn headword_prefix_u16_is_zero_without_anki_marks() {
 
 #[test]
 fn show_back_adds_a_back_button_element() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), true, false);
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), true, false, RenderSettings::default());
     assert!(matches!(&elems[0], Elem::BackButton(_)));
 }
 
 #[test]
 fn no_back_button_without_show_back() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false);
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
     assert!(!elems.iter().any(|e| matches!(e, Elem::BackButton(_))));
 }
 
@@ -3384,7 +3587,7 @@ fn is_kanji_covers_cjk_unified() {
 /// No marks on collapsed rows.
 #[test]
 fn collapsed_rows_carry_no_dupe_marks() {
-    let (elems, _) = build_elements(&with_collapsed(), &Theme::dark(), false, false);
+    let (elems, _) = build_elements(&with_collapsed(), &Theme::dark(), false, false, RenderSettings::default());
     for e in &elems {
         if let Elem::Collapsed(_, line) = e {
             assert!(!line.text.starts_with('\u{2713}'), "no check marks on collapsed rows");
@@ -3394,14 +3597,14 @@ fn collapsed_rows_carry_no_dupe_marks() {
 
 #[test]
 fn side_panel_false_keeps_collapsed_rows_inline() {
-    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, false);
+    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, false, RenderSettings::default());
     assert!(side.is_empty());
     assert!(elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
 }
 
 #[test]
 fn side_panel_true_moves_collapsed_rows_to_side() {
-    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true);
+    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default());
     assert!(!elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
     assert_eq!(2, side.len());
     assert!(side[0].text.contains('\u{96D1}'));
@@ -3409,14 +3612,14 @@ fn side_panel_true_moves_collapsed_rows_to_side() {
 
 #[test]
 fn side_entries_carry_expand_indices() {
-    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true);
+    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default());
     assert_eq!(0, side[0].idx);
     assert_eq!(1, side[1].idx);
 }
 
 #[test]
 fn side_entries_show_headword_only() {
-    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true);
+    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default());
     assert!(!side[0].text.contains("noise"));
     assert!(!side[1].text.contains("magazine"));
 }
@@ -3477,7 +3680,7 @@ fn a_rows_tags_draw_a_dimmed_line_and_an_empty_set_draws_none() {
         dict_id: crate::present::NO_ROW,
         entries: vec![entry(&["ある"], &["noun", "suru"]), entry(&["いる"], &[])],
     }]);
-    let (elems, _) = build_elements(&p, &theme, false, false);
+    let (elems, _) = build_elements(&p, &theme, false, false, RenderSettings::default());
     let tag = elems
         .iter()
         .find_map(|e| match e {
@@ -4197,4 +4400,692 @@ fn an_image_inside_a_link_is_part_of_its_hit_target() {
 
     assert_eq!(Some(img.rect.x), hit.x);
     assert_eq!(Some(img.rect.w), hit.w, "the whole asset, not a sliver");
+}
+
+// ---- render settings ----
+
+/// A scene over `p` at chosen render settings, in the box every fixture
+/// above uses.
+///
+/// Through `layout::scene` deliberately: the settings are a decision
+/// table consumed in the scene builder, so what a knob is worth is what
+/// the finished scene holds, not what an inner pass was handed.
+fn shown(p: &Presentation, render: RenderSettings) -> PopupScene {
+    let theme = Theme::dark();
+    let mut m = FakeMeasure::default();
+    scene(
+        &SceneRequest {
+            presentation: p,
+            theme: &theme,
+            max_w: 424.0,
+            max_h: 4000.0,
+            show_back: false,
+            side_panel: false,
+            render,
+            anki: None,
+        },
+        &mut m,
+    )
+    .expect("FakeMeasure never refuses a run")
+}
+
+/// The shipped settings with one knob flipped.
+fn without(edit: fn(&mut RenderSettings)) -> RenderSettings {
+    let mut render = RenderSettings::default();
+    edit(&mut render);
+    render
+}
+
+/// The gloss element carrying exactly `text`.
+///
+/// Not [`bodies`], which selects on the body font size - and a
+/// `fontSize` declaration is precisely what a styling test has to be
+/// able to change.
+fn gloss_of<'a>(s: &'a PopupScene, text: &str) -> &'a SceneElem {
+    s.elems
+        .iter()
+        .find(|e| e.kind == ElemKind::Text && e.text == text)
+        .unwrap_or_else(|| panic!("no gloss element says {text:?} in {:?}", texts(s)))
+}
+
+/// A card whose one row's tree has every `tag` node classified `role`.
+///
+/// Ticket 15 owns the classifier, so a fixture is the only place a role
+/// exists today (`GlossDoc::classify`). Everything the popup filters on
+/// is the card renderer's own vocabulary, so this fixture serves the same
+/// purpose here as `gloss::html`'s does there.
+fn roled(content: &str, tag: Tag, role: Role) -> Presentation {
+    let mut doc = crate::dict::gloss::GlossDoc::parse(&sc(content));
+    doc.classify(tag, role);
+    card_with(vec![GlossBlock {
+        dict_name: "Jitendex".to_string(),
+        dict_id: crate::present::NO_ROW,
+        entries: vec![GlossEntry {
+            entry_id: crate::present::NO_ROW,
+            glosses: crate::dict::gloss::plain_items(&doc),
+            tags: vec![],
+            doc: std::sync::Arc::new(doc),
+            media: Vec::new(),
+        }],
+    }])
+}
+
+/// A gloss whose sense carries an example sentence and an attribution,
+/// each in its own tag so a fixture can classify them apart.
+const EDITORIAL: &str = concat!(
+    r#"[{"tag":"span","content":"to eat"},"#,
+    r#"{"tag":"div","content":"\u3054\u98ef\u3092\u98df\u3079\u308b"},"#,
+    r#"{"tag":"ul","content":[{"tag":"li","content":"JMdict"}]}]"#
+);
+
+/// A glossary list, the shape compact mode is defined over.
+const GLOSSARY_LIST: &str = concat!(
+    r#"{"tag":"ul","content":[{"tag":"li","content":"chatting"},"#,
+    r#"{"tag":"li","content":"a chat"},{"tag":"li","content":"idle talk"}]}"#
+);
+
+/// The layout-mode acceptance bullet, at the seam the spec names.
+///
+/// Compact is an inline transform and not a different tree: the same
+/// three items, the same three markers, one element instead of three,
+/// and [`ITEM_SEPARATOR`] between them - which is exactly how Yomitan
+/// and Hoshi Reader implement it (`li { display: inline }` plus a
+/// separator on every item after the first). The separator is asserted
+/// as itself, because "one element" would also be true of a mode that
+/// silently dropped two items.
+#[test]
+fn compact_joins_a_glossary_list_into_one_separated_element_and_roomy_stacks_it() {
+    let p = rich(&sc(GLOSSARY_LIST));
+
+    let stacked = shown(&p, RenderSettings::default());
+    assert_eq!(
+        vec!["chatting", "a chat", "idle talk"],
+        bodies(&stacked).iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        "roomy is the default, and it stacks"
+    );
+
+    let joined = shown(&p, without(|r| r.stack_items = false));
+    let one = one_body(&joined);
+    let dot = bullet();
+    assert_eq!(
+        format!("{dot}chatting{ITEM_SEPARATOR}{dot}a chat{ITEM_SEPARATOR}{dot}idle talk"),
+        one.text,
+        "one element, the same markers, the separator between the items"
+    );
+    assert_eq!(
+        2,
+        one.text.matches(ITEM_SEPARATOR).count(),
+        "one separator per pair, never a trailing one"
+    );
+    assert!(one.marker.is_empty(), "no gutter in a compact list, so nothing hangs");
+}
+
+/// Story 28, concretely: a user who wants the terse one-line popup
+/// chibipop used to draw can have it by choosing compact.
+///
+/// Two dictionaries, four glosses between them, and one line each -
+/// which is the whole of what "one line per dictionary" means. Roomy
+/// draws the same content on four.
+#[test]
+fn compact_gives_the_terse_one_line_per_dictionary_popup_back() {
+    let p = card_with(vec![
+        GlossBlock {
+            dict_name: "\u{5927}\u{8f9e}\u{6797}".to_string(),
+            dict_id: crate::present::NO_ROW,
+            entries: vec![row_of(
+                &sc(concat!(
+                    r#"{"tag":"ul","content":[{"tag":"li","content":"chatting"},"#,
+                    r#"{"tag":"li","content":"a chat"}]}"#
+                )),
+                &[],
+            )],
+        },
+        GlossBlock {
+            dict_name: "Jitendex".to_string(),
+            dict_id: crate::present::NO_ROW,
+            entries: vec![row_of(
+                &sc(concat!(
+                    r#"{"tag":"ul","content":[{"tag":"li","content":"idle talk"},"#,
+                    r#"{"tag":"li","content":"chit-chat"}]}"#
+                )),
+                &[],
+            )],
+        },
+    ]);
+
+    let terse = shown(&p, without(|r| r.stack_items = false));
+    let dot = bullet();
+    assert_eq!(
+        vec![
+            format!("{dot}chatting{ITEM_SEPARATOR}{dot}a chat"),
+            format!("{dot}idle talk{ITEM_SEPARATOR}{dot}chit-chat"),
+        ],
+        bodies(&terse).iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
+        "one body element per dictionary, each carrying that dictionary's whole gloss"
+    );
+    assert_eq!(4, bodies(&shown(&p, RenderSettings::default())).len(), "roomy draws four");
+}
+
+/// Examples on and off, at the element count the spec asks for.
+///
+/// The knob filters on [`Role`], which is where ticket 15's classifier
+/// will write, so the fixture classifies and the setting is exercised
+/// end to end. Today's real data reaches neither branch: every node
+/// parses as `Role::Unclassified`, which every filter keeps, and
+/// Jitendex's own examples are still dropped by the name-matched list
+/// this ticket deliberately left standing.
+#[test]
+fn examples_off_drops_the_example_and_leaves_the_gloss() {
+    let p = roled(EDITORIAL, Tag::Div, Role::Example);
+
+    let all = shown(&p, RenderSettings::default());
+    let with = bodies(&all);
+    assert_eq!(3, with.len(), "the gloss, the example, and the attribution");
+    assert!(with.iter().any(|e| e.text.contains('\u{98df}')), "the example is one of them");
+
+    let without_examples = shown(&p, without(|r| r.roles.examples = false));
+    let kept = bodies(&without_examples);
+    assert_eq!(2, kept.len(), "one element fewer");
+    assert!(
+        !kept.iter().any(|e| e.text.contains('\u{98df}')),
+        "and it is the example that went: {kept:?}"
+    );
+    assert!(kept.iter().any(|e| e.text == "to eat"), "the gloss stays");
+    assert!(kept.iter().any(|e| e.text == "JMdict"), "and so does the attribution");
+}
+
+/// Story 27: attributions are a separate knob, so a user can keep
+/// sources without keeping three sentences per sense.
+#[test]
+fn attributions_are_hidden_independently_of_examples() {
+    let mut doc = crate::dict::gloss::GlossDoc::parse(&sc(EDITORIAL));
+    doc.classify(Tag::Div, Role::Example);
+    doc.classify(Tag::Ul, Role::Attribution);
+    doc.classify(Tag::Li, Role::Attribution);
+    let p = card_with(vec![GlossBlock {
+        dict_name: "Jitendex".to_string(),
+        dict_id: crate::present::NO_ROW,
+        entries: vec![GlossEntry {
+            entry_id: crate::present::NO_ROW,
+            glosses: crate::dict::gloss::plain_items(&doc),
+            tags: vec![],
+            doc: std::sync::Arc::new(doc),
+            media: Vec::new(),
+        }],
+    }]);
+
+    let count = |render: RenderSettings| {
+        bodies(&shown(&p, render)).iter().map(|e| e.text.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(3, count(RenderSettings::default()).len());
+    assert_eq!(
+        vec!["to eat".to_string(), "\u{3054}\u{98ef}\u{3092}\u{98df}\u{3079}\u{308b}".to_string()],
+        count(without(|r| r.roles.attributions = false)),
+        "the sources go and the example stays"
+    );
+    assert_eq!(
+        vec!["to eat".to_string(), "JMdict".to_string()],
+        count(without(|r| r.roles.examples = false)),
+        "and the other way round"
+    );
+    assert_eq!(
+        vec!["to eat".to_string()],
+        count(without(|r| {
+            r.roles.examples = false;
+            r.roles.attributions = false;
+        })),
+        "both off leaves the gloss alone"
+    );
+}
+
+/// Story 32, on the one path real data reaches today.
+///
+/// A part-of-speech label is name-matched until ticket 15 classifies -
+/// `data.content = "part-of-speech-info"`, which Jitendex writes over
+/// 48 776 nodes - and the popup has always dropped it because the card's
+/// own `pos` field prints it above the glosses. The setting is what makes
+/// that a choice.
+#[test]
+fn part_of_speech_labels_render_only_when_the_setting_asks_for_them() {
+    let p = rich(&sc(concat!(
+        r#"[{"tag":"span","data":{"content":"part-of-speech-info"},"content":"noun"},"#,
+        r#"{"tag":"span","content":"chatting"}]"#
+    )));
+
+    let default = shown(&p, RenderSettings::default());
+    let hidden = bodies(&default);
+    assert_eq!(1, hidden.len(), "off by default, as the panel has always drawn it");
+    assert_eq!("chatting", hidden[0].text);
+
+    let asked = shown(&p, without(|r| r.roles.part_of_speech = true));
+    let shown_labels = bodies(&asked);
+    assert_eq!(1, shown_labels.len(), "still one paragraph: a label is inline content");
+    assert_eq!("nounchatting", shown_labels[0].text, "the label joins the line before it");
+}
+
+/// Images off removes the image element and leaves no rect behind, and
+/// takes the `alt` text instead of a hole in the word.
+#[test]
+fn images_off_removes_the_image_element_and_keeps_its_alt_text() {
+    let p = imaged(
+        r#"[{"tag":"img","path":"g/x.png","alt":"\u5b57"},{"tag":"span","content":"tsu"}]"#,
+        &[("g/x.png", recorded(MediaFormat::Png, 16.0, 16.0))],
+    );
+
+    let with = shown(&p, RenderSettings::default());
+    assert_eq!(1, images(&with).len(), "on by default: one asset, one element");
+
+    let off = shown(&p, without(|r| r.images = false));
+    assert!(images(&off).is_empty(), "no image element");
+    assert!(
+        off.elems.iter().all(|e| e.image.is_none()),
+        "and no rect left behind on any other element"
+    );
+    assert_eq!(
+        vec!["\u{5b57}tsu"],
+        bodies(&off).iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        "the `alt` text stands in, because a gaiji is a character"
+    );
+}
+
+/// Story 30: styling off draws the entry in the theme's own font and
+/// colours. A node declaring a colour and a box produces neither.
+#[test]
+fn styling_off_renders_in_the_themes_own_colours_and_draws_no_box() {
+    let theme = Theme::dark();
+    let p = rich(&sc(concat!(
+        r##"{"tag":"span","style":{"color":"#ff0000","padding":"0.4em","##,
+        r##""backgroundColor":"#003366","fontSize":"2em","fontWeight":"bold"},"##,
+        r#""content":"chatting"}"#
+    )));
+
+    let styled_scene = shown(&p, RenderSettings::default());
+    let styled = gloss_of(&styled_scene, "chatting");
+    assert_eq!((255, 0, 0), styled.spans[0].color, "the dictionary's colour, honoured");
+    assert_eq!(2.0 * theme.body_size, styled.spans[0].size, "its size too");
+    assert!(!styled.inline_boxes.is_empty(), "and its pill, drawn");
+
+    let plain_scene = shown(&p, without(|r| r.styling = false));
+    let plain = gloss_of(&plain_scene, "chatting");
+    assert_eq!("chatting", plain.text, "the same text");
+    assert_eq!(
+        vec![theme.body_text],
+        plain.spans.iter().map(|s| s.color).collect::<Vec<_>>(),
+        "in the theme's own colour"
+    );
+    assert_eq!(vec![theme.body_size], plain.spans.iter().map(|s| s.size).collect::<Vec<_>>());
+    assert_eq!(
+        vec![theme.body_weight],
+        plain.spans.iter().map(|s| s.weight).collect::<Vec<_>>(),
+    );
+    assert!(plain.inline_boxes.is_empty(), "and no box at all");
+    assert_eq!(None, plain.block_box, "inside or outside the line");
+}
+
+/// The same gate, on the third reader of a resolved style record.
+///
+/// `listStyleType` is a declaration like any other, and Jitendex's ①②③
+/// sense numbering is nothing but that, so styling off has to fall back
+/// to the browser's own marker - otherwise a styled dictionary would not
+/// render identically to an unstyled one.
+#[test]
+fn styling_off_falls_back_to_the_browsers_own_list_marker() {
+    let p = rich(&sc(concat!(
+        r#"{"tag":"ul","content":[{"tag":"li","style":{"listStyleType":"\"\u2460\""},"#,
+        r#""content":"chatting"}]}"#
+    )));
+
+    let honoured_scene = shown(&p, RenderSettings::default());
+    let honoured = one_body(&honoured_scene);
+    assert_eq!(format!("\u{2460}{MARKER_GAP}"), one_marker(honoured).text);
+
+    let plain_scene = shown(&p, without(|r| r.styling = false));
+    let plain = one_body(&plain_scene);
+    assert_eq!(bullet(), one_marker(plain).text, "a `ul`'s own initial value, as CSS has it");
+}
+
+/// Story 35: the height cap and the scrollbar keep working when a
+/// setting makes an entry taller.
+///
+/// Roomy over the same tree is three lines where compact is one, so the
+/// two settings put different content heights against one cap. What must
+/// hold either way is the panel's own rule - the view is the content or
+/// the cap, whichever is smaller - and that the taller of the two is the
+/// one with more to scroll. `max_scroll` and the scrollbar are computed
+/// from exactly those two numbers.
+#[test]
+fn a_taller_entry_still_clamps_to_the_height_cap_and_scrolls() {
+    let p = rich(&sc(GLOSSARY_LIST));
+    let short = |render| {
+        let theme = Theme::dark();
+        let mut m = FakeMeasure::default();
+        scene(
+            &SceneRequest {
+                presentation: &p,
+                theme: &theme,
+                max_w: 424.0,
+                max_h: 120.0,
+                show_back: false,
+                side_panel: false,
+                render,
+                anki: None,
+            },
+            &mut m,
+        )
+        .expect("FakeMeasure never refuses a run")
+    };
+
+    let cap = 120.0f32;
+    let scroll_of = |s: &PopupScene| max_scroll(s.content_h.ceil() as i32, s.view_h.ceil() as i32);
+
+    let roomy = short(RenderSettings::default());
+    let compact = short(without(|r| r.stack_items = false));
+
+    assert_eq!(roomy.content_h.min(cap), roomy.view_h, "the view is the content or the cap");
+    assert_eq!(compact.content_h.min(cap), compact.view_h, "and that holds at either setting");
+    assert!(roomy.content_h > cap, "roomy overflows this box");
+    assert!(
+        compact.content_h < roomy.content_h,
+        "and compact is the shorter of the two: {} against {}",
+        compact.content_h,
+        roomy.content_h
+    );
+    assert!(scroll_of(&roomy) > scroll_of(&compact), "so the taller one has more to scroll");
+    assert!(scroll_of(&roomy) > 0, "and it does scroll rather than overflow");
+}
+
+// ---- a dictionary's own styles.css ----
+
+/// One dictionary's block, from a raw glossary and that dictionary's own
+/// stylesheet.
+///
+/// The fold is `dict::sheet`'s and the hover path runs it between the parse
+/// and the tree cache (`SqliteDictionary::entries`), so a fixture reproduces
+/// it by calling the same two functions. Everything below this line is the
+/// renderer's own, and it has no idea that CSS was involved: a stylesheet
+/// declaration reaches it as a resolved style record and nothing else.
+fn css_tree(dict: &str, glossary: &str, css: &str) -> GlossBlock {
+    let sheet = crate::dict::sheet::Sheet::compile(css);
+    let mut doc = crate::dict::gloss::GlossDoc::parse(glossary);
+    crate::dict::sheet::apply(&mut doc, &sheet);
+    let doc = std::sync::Arc::new(doc);
+    GlossBlock {
+        dict_name: dict.to_string(),
+        dict_id: crate::present::NO_ROW,
+        entries: vec![GlossEntry {
+            entry_id: crate::present::NO_ROW,
+            glosses: crate::dict::gloss::plain_items(&doc),
+            tags: Vec::new(),
+            doc,
+            media: Vec::new(),
+        }],
+    }
+}
+
+/// Every box the scene drew, block and inline, in draw order.
+fn drawn_boxes(s: &PopupScene) -> Vec<(&str, BoxStyle)> {
+    s.elems
+        .iter()
+        .flat_map(|e| {
+            e.block_box
+                .into_iter()
+                .chain(e.inline_boxes.iter().copied())
+                .map(move |b| (e.text.as_str(), b.style))
+        })
+        .collect()
+}
+
+/// 明鏡国語辞典 第三版, whose box properties live **only** in its stylesheet.
+/// The CSS is that dictionary's own `span[data-sc-fbox]` rule verbatim, and
+/// the glossary carries not one inline `style` anywhere - which is the state
+/// the census puts 13 of 52 structured-content dictionaries in, and for
+/// which tickets 07 and 08 drew nothing at all before this.
+///
+/// The arithmetic, so a reader can redo it: `body_size` is 15, the rule's
+/// own `font-size: 0.8em` makes the element 12, and every box length is a
+/// fraction of the element's *own* size - `padding: 0.1em` is 1.2,
+/// `border-width: 0.05em` is 0.6, `border-radius: 0.2em` is 2.4.
+#[test]
+fn a_css_only_dictionary_draws_its_boxes_through_the_scene() {
+    let p = card_with(vec![css_tree(
+        "明鏡国語辞典 第三版",
+        &sc(r#"[{"tag":"span","data":{"fbox":"1"},"content":"書き方"},"のこと"]"#),
+        "span[data-sc-fbox] {
+             margin-inline-end: 0.25em;
+             padding: 0.1em;
+             font-size: 0.8em;
+             font-weight: normal;
+             border-style: solid;
+             border-width: 0.05em;
+             border-color: var(--text-color);
+             border-radius: 0.2em;
+             word-break: keep-all;
+         }",
+    )]);
+    let s = laid_out(&p, 400.0, 4000.0, false, false);
+    let boxes = drawn_boxes(&s);
+    assert_eq!(1, boxes.len(), "one box, on the fbox span: {boxes:?}");
+    let (text, style) = boxes[0];
+    assert!(text.contains("書き方"), "on the span's own run: {text:?}");
+    assert_eq!(Edges::all(1.2), style.padding, "padding: 0.1em of a 12px element");
+    assert_eq!(Edges::all(0.6), style.border, "border-width: 0.05em");
+    assert_eq!(Edges::all(BorderStyle::Solid), style.border_style);
+    assert_eq!(2.4, style.radius, "border-radius: 0.2em");
+    // `margin-inline-end` is a logical property this build does not map, and
+    // `border-color: var(--text-color)` is a custom property it cannot
+    // substitute. Both are dropped and counted; the border still draws,
+    // because CSS's initial `border-color` is `currentColor` and ticket 08
+    // seeds it from the element's own resolved colour.
+    assert_eq!(Edges::all(0.0), style.margin, "a logical margin is dropped");
+    assert_eq!(Theme::dark().body_text, style.border_color, "currentColor stands");
+    assert_eq!(None, style.background);
+}
+
+/// 字通, the other dictionary the ticket names, and a *descendant* selector
+/// on a CJK `data` key: `[data-sc-h3] span[data-sc筆画]`, its own rule
+/// verbatim. Two assertions in one, because the interesting failure is the
+/// ancestor constraint rather than the box: the same span outside a
+/// `data-sc-h3` must draw nothing.
+#[test]
+fn a_descendant_rule_draws_a_box_only_where_its_ancestor_holds() {
+    let css = "[data-sc-h3] span[data-sc筆画] {
+                   color: #a96e36;
+                   background: #fff9f6;
+                   border-radius: 4px;
+                   border-style: solid;
+                   border-width: 0.1em;
+                   padding: 1px 2px;
+                   font-size: 0.8em;
+               }";
+    let under = laid_out(
+        &card_with(vec![css_tree(
+            "字通",
+            &sc(concat!(
+                r#"{"tag":"div","data":{"h3":"1"},"content":["#,
+                r#"{"tag":"span","data":{"筆画":"7"},"content":"七"}]}"#,
+            )),
+            css,
+        )]),
+        400.0,
+        4000.0,
+        false,
+        false,
+    );
+    let boxes = drawn_boxes(&under);
+    assert_eq!(1, boxes.len(), "{boxes:?}");
+    let style = boxes[0].1;
+    // An absolute `px` is scaled against Yomitan's own 14px base, so a
+    // dictionary's pixel grows with the panel instead of shrinking on a
+    // dense screen (ticket 07's [`css_len`]). The element is 12px, so
+    // `4px` is 12 * 4 / 14.
+    assert_eq!(12.0 * 4.0 / YOMITAN_BASE_PX, style.radius, "border-radius: 4px");
+    assert_eq!(Edges::all(1.2), style.border, "border-width: 0.1em of a 12px element");
+    assert_eq!(
+        Edges {
+            top: 12.0 / YOMITAN_BASE_PX,
+            right: 24.0 / YOMITAN_BASE_PX,
+            bottom: 12.0 / YOMITAN_BASE_PX,
+            left: 24.0 / YOMITAN_BASE_PX,
+        },
+        style.padding,
+        "the two-value shorthand, split top/bottom then right/left",
+    );
+    // `background` is the multi-property shorthand, which this build does not
+    // map - only `background-color`. Dropped and counted.
+    assert_eq!(None, style.background);
+
+    let outside = laid_out(
+        &card_with(vec![css_tree(
+            "字通",
+            &sc(r#"{"tag":"span","data":{"筆画":"7"},"content":"七"}"#),
+            css,
+        )]),
+        400.0,
+        4000.0,
+        false,
+        false,
+    );
+    assert!(
+        drawn_boxes(&outside).is_empty(),
+        "no `data-sc-h3` ancestor, so no box: {:?}",
+        drawn_boxes(&outside),
+    );
+}
+
+/// Jitendex's pill, the one the census counts over 48 776 nodes and which is
+/// CSS-only: the rule is `span[data-sc-class="tag"]` verbatim, and the entry
+/// declares no inline box property at all.
+///
+/// `misc-info` rather than `part-of-speech-info`, and not arbitrarily: a
+/// part-of-speech pill is lifted out of the flow into the card's own labels
+/// (`GlossDoc::is_part_of_speech`), so the pill that actually draws inline is
+/// one of the other five Jitendex tags - `misc-info`, `field-info`,
+/// `dialect-info`, `lang-source-wasei`, `forms-label`. Both carry the same
+/// `data-sc-class="tag"`, so this is the same rule either way.
+#[test]
+fn the_jitendex_pill_reaches_the_scene_as_a_box() {
+    let p = card_with(vec![css_tree(
+        "Jitendex.org",
+        &sc(concat!(
+            r#"[{"tag":"span","data":{"class":"tag","content":"misc-info"},"#,
+            r#""content":"abbr."},"a thing"]"#,
+        )),
+        "span[data-sc-class=\"tag\"] {
+             border-radius: 0.3em;
+             font-size: 0.8em;
+             font-weight: bold;
+             margin-right: 0.5em;
+             padding: 0.2em 0.3em;
+             vertical-align: text-bottom;
+             word-break: keep-all;
+         }
+         span[data-sc-content=\"misc-info\"] {
+             background-color: #565656;
+             color: white;
+         }",
+    )]);
+    let s = laid_out(&p, 400.0, 4000.0, false, false);
+    let boxes = drawn_boxes(&s);
+    // Two entries, one style. `data.content` present makes a node a block
+    // however inline its tag is (`GlossDoc::has_marker`), so this span both
+    // heads its own paragraph - a `block_box` - and is a run inside it - an
+    // `inline_box`. Ticket 08 owns that shape; what matters here is that the
+    // resolved style reaching both is the stylesheet's.
+    assert_eq!(2, boxes.len(), "{boxes:?}");
+    let (text, style) = boxes[0];
+    assert_eq!(style, boxes[1].1, "one resolved box, drawn at two levels");
+    assert!(text.contains("abbr."), "{text:?}");
+    assert_eq!(12.0 * 0.3, style.radius, "border-radius: 0.3em of a 12px element");
+    assert_eq!(
+        Edges { top: 12.0 * 0.2, right: 12.0 * 0.3, bottom: 12.0 * 0.2, left: 12.0 * 0.3 },
+        style.padding,
+        "padding: 0.2em 0.3em",
+    );
+    assert_eq!(
+        Edges { top: 0.0, right: 6.0, bottom: 0.0, left: 0.0 },
+        style.margin,
+        "margin-right: 0.5em, and no other edge",
+    );
+    assert_eq!(Some((0x56, 0x56, 0x56)), style.background);
+    // And the text half of the same record reached the span, at the same
+    // time and through the same fold.
+    let pill = s.elems.iter().find(|e| e.text.contains("abbr.")).expect("the pill run");
+    assert_eq!(12.0, pill.font_size, "font-size: 0.8em");
+    assert_eq!(BOLD_WEIGHT, pill.weight, "font-weight: bold");
+}
+
+/// The setting from ticket 14 governs a stylesheet declaration exactly as it
+/// governs an inline one, because after the fold there is one record and one
+/// gate over it. This is the assertion that there is no second switch.
+#[test]
+fn styling_off_drops_a_stylesheet_box_as_well_as_an_inline_one() {
+    let p = card_with(vec![css_tree(
+        "明鏡国語辞典 第三版",
+        &sc(concat!(
+            r#"[{"tag":"span","data":{"fbox":"1"},"content":"css"},"#,
+            r##"{"tag":"span","style":{"padding":"4px","backgroundColor":"#333"},"##,
+            r#""content":"inline"}]"#,
+        )),
+        "span[data-sc-fbox] { padding: 0.1em; border-radius: 0.2em; background-color: #eee }",
+    )]);
+    let theme = Theme::dark();
+    let laid = |styling: bool| {
+        let mut m = FakeMeasure::default();
+        scene(
+            &SceneRequest {
+                presentation: &p,
+                theme: &theme,
+                max_w: 400.0,
+                max_h: 4000.0,
+                show_back: false,
+                side_panel: false,
+                render: RenderSettings { styling, ..RenderSettings::default() },
+                anki: None,
+            },
+            &mut m,
+        )
+        .expect("FakeMeasure never refuses a run")
+    };
+    assert_eq!(2, drawn_boxes(&laid(true)).len(), "one box from CSS, one from inline");
+    assert!(drawn_boxes(&laid(false)).is_empty(), "off means neither applies");
+}
+
+/// Jitendex's two list rules, which are the reason its marker is not simply
+/// `•`: the outer sense-group list takes `＊` and the glossary list inside a
+/// sense takes `none`. Both are CSS-only, and the second is written with
+/// native `&` nesting.
+///
+/// The tree is the real one, read out of Jitendex's own record: a
+/// `ul[sense-groups]` of `li[sense-group]`, each holding a bare `ol` of
+/// `li[sense]` whose inline `listStyleType` numbers the sense, each of those
+/// holding a `ul[glossary]` of the gloss text.
+#[test]
+fn a_stylesheet_sets_and_suppresses_a_list_marker() {
+    let p = card_with(vec![css_tree(
+        "Jitendex.org",
+        &sc(concat!(
+            r#"{"tag":"ul","data":{"content":"sense-groups"},"content":["#,
+            r#"{"tag":"li","data":{"content":"sense-group"},"content":["#,
+            r#"{"tag":"ol","content":["#,
+            r#"{"tag":"li","data":{"content":"sense"},"#,
+            r#""style":{"listStyleType":"\"\u2460\""},"content":["#,
+            r#"{"tag":"ul","data":{"content":"glossary"},"#,
+            r#""content":[{"tag":"li","content":"to eat"}]}]}]}]}]}"#,
+        )),
+        "ul[data-sc-content=\"sense-groups\"] { list-style-type: \"＊\" }
+         li[data-sc-content=\"sense\"] {
+             & ul[data-sc-content=\"glossary\"] { list-style-type: none }
+         }",
+    )]);
+    let s = laid_out(&p, 400.0, 4000.0, false, false);
+    let markers: Vec<Vec<&str>> = s
+        .elems
+        .iter()
+        .filter(|e| !e.marker.is_empty())
+        .map(|e| e.marker.iter().map(|m| m.text.as_str()).collect())
+        .collect();
+    // `＊` from the stylesheet on the outer list, `①` from the item's own
+    // inline `listStyleType`, and nothing at all from the glossary list the
+    // stylesheet silenced - where the default would have drawn `•`.
+    assert_eq!(vec![vec!["＊ ", "① "]], markers, "{:?}", texts(&s));
 }

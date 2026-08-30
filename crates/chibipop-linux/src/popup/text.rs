@@ -1166,6 +1166,7 @@ mod tests {
                 max_h: 4000.0,
                 show_back: true,
                 side_panel: true,
+                render: Default::default(),
                 anki: None,
             },
             &mut engine,

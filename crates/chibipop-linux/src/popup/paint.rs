@@ -172,6 +172,28 @@ pub fn panel(
                 target,
             );
         }
+        // The list markers, in the
+        // gutters their lists opened.
+        // Against `painted.pen` and not
+        // against `origin`: a marker box
+        // hangs off the item's *content*
+        // edge, which is the pen,
+        // whatever the text inside the
+        // item aligns to. `textAlign`
+        // moves line boxes, and a marker
+        // box is not one.
+        for run in &elem.marker {
+            let span = run.styled_span(&theme.font_name);
+            text.draw_run(
+                DrawRun {
+                    spans: &[span],
+                    shifts: &[0.0],
+                    max_w: elem.wrap_w,
+                    origin: (painted.pen.0 + run.x, painted.pen.1 + run.y),
+                },
+                target,
+            );
+        }
     }
 
     // 5. The "See also" column. Its rule divides the whole panel, not
@@ -514,7 +536,7 @@ mod tests {
     use super::*;
     use chibipop::dict::media::{MediaFormat, MediaKey};
     use chibipop::ui::layout::{AnkiSlot, Appearance, BorderStyle, BoxStyle, Edges};
-    use chibipop::ui::layout::{ElemSpan, GlyphBox, LineBox, RubyRun};
+    use chibipop::ui::layout::{ElemSpan, GlyphBox, LineBox, MarkerRun, RubyRun};
     use chibipop::ui::layout::{MeasureError, Metrics, SidePanel, SideRow, SpanBox, TextMeasure};
     use tiny_skia::Pixmap;
 
@@ -707,6 +729,7 @@ mod tests {
             advance: 20.0,
             spans,
             ruby: Vec::new(),
+            marker: Vec::new(),
             block_box: None,
             inline_boxes: Vec::new(),
             origin: None,
@@ -1043,6 +1066,47 @@ mod tests {
         assert_eq!((9, 8, 7), read.one().color);
         assert_eq!(0.0, read.one().shift, "a reading is placed, not shifted");
         assert_eq!(176.0, read.max_w, "at the width the scene measured it at");
+    }
+
+    /// The list marker is drawn, and drawn where the scene put it.
+    ///
+    /// A bin that painted only `spans` would draw the item and silently
+    /// lose its bullet. It is a second run and not a span of the first
+    /// for the reason ticket 09 hangs it at all: the marker box sits
+    /// beside the item's principal box, so every line of the item -
+    /// including a continuation - starts at the item's own indent.
+    #[test]
+    fn a_list_marker_is_drawn_in_the_gutter_where_the_scene_placed_it() {
+        let theme = Theme::dark();
+        let mut elem =
+            styled_elem((33.0, 12.0), Align::Leading, &[("to eat", 15.0, 400, false, 0.0)]);
+        elem.marker = vec![MarkerRun {
+            text: "\u{2022} ".into(),
+            x: -15.0,
+            y: 0.0,
+            w: 15.0,
+            h: 30.0,
+            size: 15.0,
+            color: (9, 8, 7),
+            weight: 400,
+            italic: false,
+        }];
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
+
+        assert_eq!(2, text.runs.len(), "the item, then its marker");
+        assert_eq!("to eat", text.runs[0].text());
+        assert_eq!((33.0, 12.0), text.runs[0].origin, "the item's own indent");
+
+        let mark = &text.runs[1];
+        assert_eq!("\u{2022} ", mark.text());
+        assert_eq!((18.0, 12.0), mark.origin, "left of the item, on its first line");
+        assert_eq!((9, 8, 7), mark.one().color);
+        assert_eq!(0.0, mark.one().shift, "a marker is placed, not shifted");
     }
 
     /// Colour is per span, not per element.

@@ -12,7 +12,9 @@
 //! derived).
 
 use crate::controller::HitAction;
-use crate::dict::gloss::{GlossDoc, ItemType, Kind, NodeId, NodePath, Scalar, StyleKey, Tag};
+use crate::dict::gloss::{
+    GlossDoc, ItemType, Kind, NodeId, NodePath, RoleFilter, Scalar, StyleKey, Tag,
+};
 use crate::dict::media::{Intrinsic, MediaFormat, MediaKey};
 use crate::present::{AnkiPopupState, Presentation};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
@@ -464,6 +466,77 @@ impl RubyRun {
     /// panel wraps the same way in
     /// both places and its slot is as
     /// tall as what it wrapped to.
+    pub fn styled_span<'a>(&'a self, font: &'a str) -> StyledSpan<'a> {
+        StyledSpan {
+            text: &self.text,
+            font,
+            size: self.size,
+            weight: self.weight,
+            italic: self.italic,
+            color: self.color,
+        }
+    }
+}
+
+/// One list marker, hanging in its
+/// list's gutter.
+///
+/// Out of the element's flow and out
+/// of its text, for the same reason a
+/// reading is, and it is the whole of
+/// what CSS calls
+/// `list-style-position: outside`: the
+/// marker box sits *beside* the item's
+/// principal box rather than inside
+/// it, so it takes no horizontal room
+/// from any line and every line of the
+/// item - the first and each
+/// continuation - starts at the item's
+/// own indent. A marker kept in the
+/// run would put the second line of a
+/// wrapped item under the bullet,
+/// because a [`SceneElem`] is one run
+/// at one wrap width painted from one
+/// origin (ADR-0013) and every line of
+/// it therefore starts at the same x.
+///
+/// `x` and `y` are run-relative, like
+/// the [`LineBox`] the marker was
+/// placed against, so a bin adds
+/// [`SceneElem::pen`] and draws. `x`
+/// is normally *negative*: the gutter
+/// is left of the content edge the pen
+/// sits at, and the room for it is the
+/// list's own [`LIST_INDENT_EM`],
+/// which the item already paid for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerRun {
+    /// The marker, its own trailing
+    /// gap included.
+    pub text: String,
+    /// Leading edge, run-relative and
+    /// usually negative.
+    pub x: f32,
+    /// Top edge, likewise.
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub size: f32,
+    pub color: Rgb,
+    /// DirectWrite weight, 100-900.
+    pub weight: u16,
+    pub italic: bool,
+}
+
+impl MarkerRun {
+    /// The run a bin draws it from.
+    ///
+    /// One span and one line, at
+    /// [`SceneElem::wrap_w`] - the
+    /// width layout measured it at -
+    /// so a marker too long for the
+    /// panel breaks the same way in
+    /// both places.
     pub fn styled_span<'a>(&'a self, font: &'a str) -> StyledSpan<'a> {
         StyledSpan {
             text: &self.text,
@@ -979,6 +1052,26 @@ pub struct SceneElem {
     /// because it does not flow - see
     /// [`RubyRun`].
     pub ruby: Vec<RubyRun>,
+    /// This element's list markers,
+    /// each already positioned in the
+    /// gutter of the list that owed
+    /// it.
+    ///
+    /// Empty for everything but the
+    /// first paragraph of a list item.
+    /// More than one only when an
+    /// item's whole content is a
+    /// nested list, in which case the
+    /// two levels' markers share the
+    /// one line they have between them
+    /// and hang in two different
+    /// gutters - which is what a
+    /// browser draws, and Jitendex's
+    /// real shape. A marker is not in
+    /// `text` and not in `spans`,
+    /// because it does not flow - see
+    /// [`MarkerRun`].
+    pub marker: Vec<MarkerRun>,
     /// The box this element *is*, or
     /// `None` when it draws none.
     ///
@@ -1237,6 +1330,111 @@ fn on_panel(y: f32, h: f32, slack: f32, view_h: f32) -> bool {
 
 // ---- the walk ----
 
+/// What the popup shows of an entry,
+/// as the scene builder spends it.
+///
+/// The spec's "render settings are a
+/// decision table, not a style
+/// engine": Yomitan's own
+/// configurability is a small fixed
+/// set of root attributes driving
+/// fixed CSS rules, and this is
+/// chibipop's mirror of it -
+/// `popup`'s six knobs resolved to
+/// the four facts the gloss walk
+/// actually spends. Resolved by
+/// `PopupConfig::render_settings`, so
+/// the enum-to-flag mapping lives
+/// once and the walk never sees a
+/// config type.
+///
+/// Read in exactly one place
+/// ([`build_elements`]), which is
+/// what keeps this a table rather
+/// than a cascade: nothing below that
+/// point consults a setting again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderSettings {
+    /// Does a glossary list stack its
+    /// items?
+    ///
+    /// `true` gives each item its own
+    /// line, marked and indented;
+    /// `false` joins them into one
+    /// paragraph with
+    /// [`ITEM_SEPARATOR`] between
+    /// them, which is the terse popup
+    /// chibipop drew before it could
+    /// do better. The same parameter
+    /// the list pass already had
+    /// ([`Paragraphs::stack_items`]) -
+    /// compact mode flips it and
+    /// invents nothing.
+    pub stack_items: bool,
+    /// Do a dictionary's own
+    /// declarations apply?
+    ///
+    /// Off draws every entry in the
+    /// theme's own font and colours.
+    /// One flag for both sources by
+    /// construction: inline `style`
+    /// and a dictionary's own
+    /// `styles.css` land in the same
+    /// resolved record, and
+    /// [`Paragraphs::declarations`] is
+    /// the single gate over it.
+    pub styling: bool,
+    /// Do image assets reach the
+    /// panel?
+    ///
+    /// Off leaves the `alt` text: an
+    /// image node is a *character*
+    /// far more often than an
+    /// illustration, so a node cut out
+    /// whole would leave a hole in a
+    /// word.
+    pub images: bool,
+    /// Which editorial roles reach the
+    /// panel.
+    ///
+    /// The card renderer's own
+    /// vocabulary, and a separate
+    /// *value* of it: the popup's
+    /// answer and the card's are two
+    /// filters over one enum, which is
+    /// what lets a user hide examples
+    /// on screen and keep them on a
+    /// mined card. The card's is
+    /// [`RoleFilter::CARD`] and no
+    /// setting reaches it.
+    pub roles: RoleFilter,
+}
+
+impl Default for RenderSettings {
+    /// What a fresh install draws: a
+    /// stacked list, the dictionary's
+    /// own styling, its images, and
+    /// its editorial matter minus the
+    /// part-of-speech labels the card
+    /// already prints above the
+    /// glosses.
+    ///
+    /// The same values `PopupConfig`'s
+    /// own defaults resolve to - a
+    /// test pins the two together -
+    /// so a geometry fixture and a
+    /// fresh install draw the same
+    /// panel.
+    fn default() -> RenderSettings {
+        RenderSettings {
+            stack_items: true,
+            styling: true,
+            images: true,
+            roles: RoleFilter::CARD,
+        }
+    }
+}
+
 /// One popup's whole layout input.
 pub struct SceneRequest<'a> {
     pub presentation: &'a Presentation,
@@ -1247,6 +1445,8 @@ pub struct SceneRequest<'a> {
     pub max_h: f32,
     pub show_back: bool,
     pub side_panel: bool,
+    /// How much of an entry to show.
+    pub render: RenderSettings,
     /// `Some` reserves the Anki slot.
     pub anki: Option<&'a AnkiPopupState>,
 }
@@ -1261,7 +1461,8 @@ pub fn scene(
     let pad = theme.padding as f32;
     let origin = pad;
 
-    let (elems, entries) = build_elements(req.presentation, theme, req.show_back, req.side_panel);
+    let (elems, entries) =
+        build_elements(req.presentation, theme, req.show_back, req.side_panel, req.render);
     let has_side = !entries.is_empty();
     let side_extra = if has_side {
         SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
@@ -1314,6 +1515,7 @@ pub fn scene(
                     advance: h,
                     spans: Vec::new(),
                     ruby: Vec::new(),
+                    marker: Vec::new(),
                     block_box: None,
                     inline_boxes: Vec::new(),
                     origin: None,
@@ -1349,6 +1551,7 @@ pub fn scene(
                     advance: 0.0,
                     spans: one_span(line),
                     ruby: Vec::new(),
+                    marker: Vec::new(),
                     block_box: None,
                     inline_boxes: Vec::new(),
                     origin: None,
@@ -1635,6 +1838,19 @@ impl<'a> Pass<'a> {
         // measurer is charged for.
         measure_images(m, font, flow, wrap_w, &mut self.run)?;
         m.measure(MeasureRun { spans: &self.run, max_w: wrap_w }, &mut self.measured)?;
+        // The markers last, and after
+        // the paragraph rather than
+        // before it, which is the
+        // difference between a marker
+        // and a reading: a reading
+        // grows the line it sits over
+        // and so has to be priced into
+        // the run, while a marker hangs
+        // in a gutter the list's indent
+        // already reserved and changes
+        // nothing about the wrap. Its
+        // own run, its own width.
+        let marks = measure_markers(m, font, flow, wrap_w)?;
         let met = self.measured.metrics;
         let top = at.1 + flow.top_gap;
         // Margins are in the advance,
@@ -1654,6 +1870,10 @@ impl<'a> Pass<'a> {
         // it belongs to, in the slot
         // the lines already carry.
         let ruby = place_ruby(flow, &read, &self.measured, wrap_w, slack);
+        // Each marker in the gutter of
+        // the list that owed it, beside
+        // the item's first line.
+        let marker = place_markers(flow, &marks, &self.measured, lead.left, pen.0);
         // Each image over the spacer
         // run that bought its room.
         let images = place_images(flow, &self.measured, pen, line_at);
@@ -1769,6 +1989,16 @@ impl<'a> Pass<'a> {
         // [`place_ruby`] clamps the
         // left edge into the box.
         let ink_w = ruby.iter().fold(met.w, |a, r| a.max(r.x + r.w));
+        // A marker adds nothing to it,
+        // although it hangs left of
+        // `pen.0`: the room it sits in
+        // is the list's own
+        // `--list-padding1`, already
+        // counted in `lead.left` and so
+        // already in the width demand
+        // this returns. Charging for it
+        // again would make a table
+        // column ask for two gutters.
         self.out.push(SceneElem {
             kind: ElemKind::Text,
             text: flow.text.clone(),
@@ -1790,6 +2020,7 @@ impl<'a> Pass<'a> {
             advance: h,
             spans,
             ruby,
+            marker,
             block_box: bx.exists().then(|| ElemBox {
                 rect: SceneRect {
                     x: at.0 + indent + margin.left,
@@ -2553,6 +2784,7 @@ fn box_elem(kind: ElemKind, base: Inline, align: Align, origin: GlossOrigin) -> 
         advance: 0.0,
         spans: Vec::new(),
         ruby: Vec::new(),
+        marker: Vec::new(),
         block_box: None,
         inline_boxes: Vec::new(),
         origin: Some(origin),
@@ -2585,6 +2817,7 @@ fn text_elem(
         advance: met.h,
         spans: one_span(line),
         ruby: Vec::new(),
+        marker: Vec::new(),
         block_box: None,
         inline_boxes: Vec::new(),
         // The panel's own chrome: a
@@ -2891,6 +3124,155 @@ fn ruby_span<'a>(font: &'a str, ruby: &'a FlowRuby) -> StyledSpan<'a> {
     }
 }
 
+/// One list marker, measured.
+///
+/// What [`measure_markers`] learns and
+/// [`place_markers`] spends. The
+/// baseline is absolute rather than a
+/// share of the height, because that
+/// is what a marker needs: it is set
+/// on the item's own first baseline,
+/// so the two baselines are subtracted
+/// from each other directly.
+#[derive(Clone, Copy, Default)]
+struct MarkBox {
+    w: f32,
+    h: f32,
+    /// How far below the run's top edge
+    /// the marker's baseline sits.
+    baseline: f32,
+}
+
+/// Every marker of a paragraph,
+/// measured.
+///
+/// One run each, and nothing here
+/// touches the paragraph's own run.
+/// That is the difference between this
+/// and [`measure_readings`], which has
+/// to run first because a reading
+/// grows the line it sits over: a
+/// marker occupies the gutter the
+/// list's [`LIST_INDENT_EM`] already
+/// reserved, takes no horizontal room
+/// from any line, and grows nothing.
+/// So it needs no filler span, no
+/// re-measure, and no edit to a line
+/// box after the wrap - which is the
+/// rule a bin's own re-measure
+/// enforces (ADR-0013).
+///
+/// Measured at the paragraph's wrap
+/// width and not at the gutter's: a
+/// marker is one counter or one
+/// authored string and is free to
+/// overhang the gutter, exactly as a
+/// browser lets `10.` overhang a
+/// narrow one.
+fn measure_markers(
+    m: &mut dyn TextMeasure,
+    font: &str,
+    flow: &Flow,
+    max_w: f32,
+) -> Result<Vec<MarkBox>, MeasureError> {
+    if flow.marker.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Only a paragraph that carries a
+    // marker pays for this buffer,
+    // which is why it is not one of
+    // the walk's.
+    let mut scratch = Measured::default();
+    let mut out = vec![MarkBox::default(); flow.marker.len()];
+    for (slot, mark) in flow.marker.iter().enumerate() {
+        m.measure(
+            MeasureRun { spans: &[marker_span(font, mark)], max_w },
+            &mut scratch,
+        )?;
+        let first = scratch.lines.first().copied().unwrap_or_default();
+        out[slot] =
+            MarkBox { w: scratch.metrics.w, h: scratch.metrics.h, baseline: first.baseline };
+    }
+    Ok(out)
+}
+
+/// The paragraph's markers, placed.
+///
+/// Pure, and it reads exactly two
+/// things the measurer already
+/// reported: the first line's box, for
+/// the baseline the marker shares with
+/// the item's first line, and each
+/// marker's own measured width.
+///
+/// `lead_left` is the paragraph's own
+/// left lead - every list level above
+/// it plus its own margin, border and
+/// padding - and `pen_x` is where that
+/// lead put the pen. A marker's box is
+/// right-aligned against the content
+/// edge of the *list* that owed it,
+/// which is [`FlowMarker::indent`]:
+/// that is where a browser puts an
+/// `outside` marker, and it is why an
+/// item's own `paddingLeft` moves the
+/// item's text and leaves its bullet
+/// where the list drew it. The
+/// marker's trailing [`MARKER_GAP`] is
+/// inside the box, so what separates
+/// the two is the gap it always was -
+/// now spent in the gutter instead of
+/// on the line.
+///
+/// No alignment slack: `textAlign`
+/// moves line boxes, and a marker box
+/// is not one.
+fn place_markers(
+    flow: &Flow,
+    boxes: &[MarkBox],
+    measured: &Measured,
+    lead_left: f32,
+    pen_x: f32,
+) -> Vec<MarkerRun> {
+    let Some(line) = measured.lines.first().copied() else {
+        return Vec::new();
+    };
+    flow.marker
+        .iter()
+        .zip(boxes)
+        .filter(|(_, box_)| box_.h > 0.0)
+        .map(|(mark, box_)| MarkerRun {
+            text: mark.text.clone(),
+            // Never off the panel's own
+            // left edge: a marker wider
+            // than every gutter above it
+            // is drawn against that edge
+            // rather than outside the
+            // surface.
+            x: (mark.indent - lead_left - box_.w).max(-pen_x),
+            y: line.y + line.baseline - box_.baseline,
+            w: box_.w,
+            h: box_.h,
+            size: mark.style.size,
+            color: mark.style.color,
+            weight: mark.style.weight,
+            italic: mark.style.italic,
+        })
+        .collect()
+}
+
+/// One marker, as the seam takes it.
+fn marker_span<'a>(font: &'a str, mark: &'a FlowMarker) -> StyledSpan<'a> {
+    StyledSpan {
+        text: &mark.text,
+        font,
+        size: mark.style.size,
+        weight: mark.style.weight,
+        italic: mark.style.italic,
+        color: mark.style.color,
+    }
+}
+
 /// Every image of a paragraph, given
 /// the room it needs.
 ///
@@ -3092,6 +3474,7 @@ fn place_images(
             advance: 0.0,
             spans,
             ruby: Vec::new(),
+            marker: Vec::new(),
             block_box: None,
             inline_boxes: Vec::new(),
             origin: Some(GlossOrigin {
@@ -3790,16 +4173,23 @@ const SQUARE_MARKER: &str = "\u{25AA}";
 /// What sits between a marker and the
 /// item text after it.
 ///
-/// The marker box's own trailing gap.
-/// A browser puts it in the gutter,
-/// which this renderer has nowhere to
-/// put: the seam takes one run at one
-/// wrap width (ADR-0013), so a marker
-/// is its item paragraph's first span
-/// and the gap is a character. It is
-/// the gap ticket 16's row number
-/// already writes after its `1.`, so
-/// a numbered row and a numbered item
+/// The marker box's own trailing gap,
+/// and it is inside the box wherever
+/// that box goes. A stacked item hangs
+/// its marker in the gutter
+/// ([`MarkerRun`]) with the box's right
+/// edge on the list's content edge, so
+/// the gap is what holds the glyph off
+/// the text; a compact item has no
+/// gutter and writes the same marker
+/// as its paragraph's first span, so
+/// the gap is a character on the line.
+/// One label serves both, which is why
+/// [`Marker::label`] appends it and
+/// neither placement has to. It is the
+/// gap ticket 16's row number already
+/// writes after its `1.`, so a
+/// numbered row and a numbered item
 /// read alike.
 const MARKER_GAP: &str = " ";
 
@@ -4057,6 +4447,44 @@ fn marker_of<'a>(doc: &'a GlossDoc, id: NodeId, fallback: Marker<'a>) -> Marker<
     }
 }
 
+/// One list's or one item's marker,
+/// under the styling gate.
+///
+/// The third and last reader of a
+/// node's resolved style record, and
+/// therefore the third arm of the one
+/// gate ticket 14's "honour dictionary
+/// styling" setting closes - the other
+/// two go through
+/// [`Paragraphs::declarations`].
+/// `listStyleType` is a declaration
+/// like any other, so styling off must
+/// not let it through: a dictionary
+/// whose ①②③ numbering *is* its
+/// `listStyleType` (Jitendex, 97 150
+/// nodes) has to draw a browser's own
+/// bullet instead, or "renders a
+/// styled dictionary identically to an
+/// unstyled one" would not hold.
+///
+/// A wrapper rather than a fourth
+/// parameter on [`marker_of`], which
+/// stays a pure question about a
+/// document and a node and knows
+/// nothing about a setting.
+fn styled_marker<'a>(
+    doc: &'a GlossDoc,
+    id: NodeId,
+    fallback: Marker<'a>,
+    styling: bool,
+) -> Marker<'a> {
+    if styling {
+        marker_of(doc, id, fallback)
+    } else {
+        fallback
+    }
+}
+
 /// A list tag's initial
 /// `list-style-type`.
 ///
@@ -4234,6 +4662,44 @@ struct FlowRuby {
     style: Inline,
 }
 
+/// One list marker, before it is
+/// placed.
+///
+/// Held beside the paragraph rather
+/// than in it, for the reason
+/// [`MarkerRun`] gives: CSS's
+/// `outside` marker box takes no room
+/// on the line, so putting it in the
+/// run would advance the pen past it
+/// and put every continuation line of
+/// a wrapped item under the bullet.
+#[derive(Clone)]
+struct FlowMarker {
+    /// The label, its
+    /// [`MARKER_GAP`] included.
+    text: String,
+    /// The item's own resolved style:
+    /// CSS's `::marker` inherits from
+    /// the element with `display:
+    /// list-item`, not from the markup
+    /// inside it.
+    style: Inline,
+    /// [`Block::indent`] as of the
+    /// list that owed it, which is
+    /// that list's content edge and so
+    /// where the marker box's right
+    /// edge goes.
+    ///
+    /// Carried rather than recomputed
+    /// from the paragraph, because an
+    /// item whose whole content is a
+    /// nested list shares one line
+    /// with its inner item and the two
+    /// markers hang in two different
+    /// gutters.
+    indent: f32,
+}
+
 /// One inline box's run of spans.
 ///
 /// A pill: a `span` carrying padding,
@@ -4281,6 +4747,10 @@ struct Flow {
     /// One per ruby base, indexed by
     /// [`FlowSpan::ruby`].
     ruby: Vec<FlowRuby>,
+    /// One per list marker owed to
+    /// this paragraph's first line,
+    /// outermost list first.
+    marker: Vec<FlowMarker>,
     /// One per image node this
     /// paragraph reached, indexed by
     /// [`FlowSpan::image`].
@@ -4424,6 +4894,54 @@ impl Assets<'_> {
     }
 }
 
+/// What the render settings leave for
+/// the gloss walk to spend.
+///
+/// The decision table's own record,
+/// minus the one knob that was
+/// already a parameter: compact mode
+/// is [`Paragraphs::stack_items`],
+/// which the list pass built and
+/// which the settings only flip.
+/// Bundled because three more
+/// arguments on [`paragraphs`] is
+/// where an argument gets passed in
+/// the wrong slot, and `Copy` because
+/// a table cell's paragraph pass is
+/// handed the same one the panel's
+/// stream got.
+///
+/// Resolved once, in
+/// [`build_elements`]. Nothing here
+/// reads a config type and nothing
+/// below here reads a setting.
+#[derive(Clone, Copy)]
+struct Render {
+    /// Which editorial roles reach the
+    /// panel.
+    ///
+    /// The card renderer's own
+    /// vocabulary and a separate
+    /// *value* of it: hiding examples
+    /// on screen must not strip them
+    /// from a mined card, which takes
+    /// [`RoleFilter::CARD`] and no
+    /// setting at all.
+    roles: RoleFilter,
+    /// Do a dictionary's own
+    /// declarations apply?
+    ///
+    /// Spent by
+    /// [`Paragraphs::declarations`]
+    /// and [`styled_marker`], which
+    /// are the only three places a
+    /// resolved style record is read.
+    styling: bool,
+    /// Do image assets reach the
+    /// panel?
+    images: bool,
+}
+
 /// Turns one term-bank row's parsed
 /// tree into paragraphs.
 ///
@@ -4471,8 +4989,9 @@ struct Paragraphs<'a> {
     /// box would be drawn around its
     /// neighbours too.
     barrier: bool,
-    /// A list marker owed to the next
-    /// run of text worth marking.
+    /// List markers owed to the next
+    /// run of text worth marking,
+    /// outermost list first.
     ///
     /// Owed rather than pushed, because
     /// the paragraph an item's marker
@@ -4484,7 +5003,15 @@ struct Paragraphs<'a> {
     /// resolved would be flushed out as
     /// a paragraph of its own holding
     /// nothing but a bullet.
-    pending_marker: Option<(String, Inline)>,
+    ///
+    /// More than one is owed when an
+    /// item's whole content is a nested
+    /// list: both levels' markers then
+    /// share the one line they have
+    /// between them, at their own two
+    /// gutters, as a browser draws
+    /// them.
+    pending_marker: Vec<FlowMarker>,
     /// Does a list stack its items?
     ///
     /// The one thing ticket 14's
@@ -4498,19 +5025,32 @@ struct Paragraphs<'a> {
     /// with [`ITEM_SEPARATOR`] between
     /// them.
     ///
-    /// Marker resolution sits *above*
+    /// Marker *resolution* sits above
     /// it and is shared by both:
     /// [`marker_of`] reads the list's
     /// own `listStyleType` and
     /// [`Marker::label`] writes the
     /// `n`th label, neither of them
-    /// aware of this flag. Ticket 14
-    /// wires it by passing its own
-    /// compact setting through
-    /// [`paragraphs`]; until then the
-    /// panel asks for the stacked
-    /// layout a browser draws.
+    /// aware of this flag. Marker
+    /// *placement* is the one thing
+    /// that cannot be: `true` hangs the
+    /// marker in the gutter the indent
+    /// made ([`MarkerRun`]), and
+    /// `false` has neither a gutter nor
+    /// a line of its own to hang it
+    /// beside, so a compact item writes
+    /// its marker inline as its
+    /// paragraph's first span. See
+    /// [`Paragraphs::mark`].
+    ///
+    /// Wired from `popup.layout_mode`
+    /// by [`build_elements`]:
+    /// `LayoutMode::Roomy` stacks and
+    /// `LayoutMode::Compact` joins.
     stack_items: bool,
+    /// What else the render settings
+    /// leave for this walk to spend.
+    render: Render,
     /// The media store's answers for
     /// the row being walked.
     assets: Assets<'a>,
@@ -4562,9 +5102,13 @@ struct Paragraphs<'a> {
 /// apart.
 ///
 /// `stack_items` is
-/// [`Paragraphs::stack_items`]: the
-/// parameter ticket 14 wires its
-/// compact list setting to.
+/// [`Paragraphs::stack_items`], the
+/// compact-layout knob, and `render`
+/// is the rest of the render
+/// settings' decision table
+/// ([`Render`]). Both are resolved by
+/// [`build_elements`] and neither is
+/// re-read below this point.
 ///
 /// The theme rather than a resolved
 /// [`Inline`], because a table cell's
@@ -4578,6 +5122,7 @@ fn paragraphs(
     top_gap: f32,
     stack_items: bool,
     assets: Assets<'_>,
+    render: Render,
 ) -> Vec<Piece> {
     let base = Inline::body(theme);
     let mut p = Paragraphs {
@@ -4589,8 +5134,9 @@ fn paragraphs(
         rubies: Vec::new(),
         open_ruby: NO_RUBY,
         barrier: false,
-        pending_marker: None,
+        pending_marker: Vec::new(),
         stack_items,
+        render,
         assets,
         images: Vec::new(),
         rule: theme.collapsed_text,
@@ -4653,11 +5199,48 @@ impl Paragraphs<'_> {
         }
     }
 
+    /// Does this node's editorial role
+    /// reach the panel?
+    ///
+    /// The render settings' role half,
+    /// filtered on the same [`Role`]
+    /// the card renderer filters on -
+    /// with the popup's own answer and
+    /// not the card's, which is what
+    /// lets a user hide examples on
+    /// screen and keep them on a mined
+    /// card.
+    ///
+    /// Two clauses, and the second is
+    /// the temporary one. Ticket 15
+    /// classifies; until it does every
+    /// node parses as
+    /// `Role::Unclassified`, which
+    /// every filter keeps, so the
+    /// name-matched part-of-speech
+    /// marker is the only thing here
+    /// that can tell a label from a
+    /// gloss - and the labels are
+    /// already the card's own `pos`
+    /// field, drawn above the glosses,
+    /// so inline they would read
+    /// twice. `gloss::html` gates its
+    /// own copy of that clause the
+    /// same way, and for the same
+    /// reason.
+    ///
+    /// [`Role`]: crate::dict::gloss::Role
+    fn shows(&self, id: NodeId) -> bool {
+        let roles = self.render.roles;
+        roles.allows(self.doc.node(id).role)
+            && (roles.part_of_speech || !self.doc.is_part_of_speech(id))
+    }
+
     /// One node.
     fn node(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         let node = *doc.node(id);
-        if doc.is_dropped_subtree(id) || doc.is_part_of_speech(id) {
+        if doc.is_dropped_subtree(id) || !self.shows(id) {
             return;
         }
         match node.tag {
@@ -4854,6 +5437,30 @@ impl Paragraphs<'_> {
         let recorded = path.and_then(|p| self.assets.size(p));
         let (w, h) = image_size(doc, id, style.size, recorded);
         let alt = image_alt(doc, id);
+        // "Show images: off" takes the
+        // ladder's own text rung rather
+        // than cutting the node out.
+        // `alt` is the text alternative
+        // HTML defines for exactly this,
+        // and an image node is a
+        // *character* far more often
+        // than an illustration
+        // (427 786 census nodes carry a
+        // gaiji marker), so a node cut
+        // out whole would leave a hole
+        // in a word. With no `alt` there
+        // is nothing to stand in and the
+        // node draws nothing: no
+        // element, no reservation, and
+        // no rect left behind, which is
+        // the whole of what the setting
+        // asks for.
+        if !self.render.images {
+            if !alt.is_empty() {
+                self.text(&alt, style, ctx.link);
+            }
+            return;
+        }
         if recorded.is_none() && !alt.is_empty() {
             return self.text(&alt, style, ctx.link);
         }
@@ -4980,7 +5587,12 @@ impl Paragraphs<'_> {
     /// item inherits its list's indent
     /// ([`Block::indent`]) and a list
     /// inside an item adds another
-    /// [`LIST_INDENT_EM`] to it.
+    /// [`LIST_INDENT_EM`] to it. It is
+    /// also the gutter each marker
+    /// hangs in, which is why the
+    /// resolved value is handed to
+    /// [`Paragraphs::owe`] with the
+    /// label.
     fn list(&mut self, id: NodeId, ctx: Ctx, ordered: bool) {
         let doc = self.doc;
         let ctx = Ctx {
@@ -5006,7 +5618,8 @@ impl Paragraphs<'_> {
         // against this, because the
         // property is inherited and the
         // item is what draws the marker.
-        let inherited = marker_of(doc, id, initial_marker(ordered));
+        let styling = self.render.styling;
+        let inherited = styled_marker(doc, id, initial_marker(ordered), styling);
         let mut n = 0usize;
         for (i, child) in doc.children(id).enumerate() {
             let at = ctx.at(i);
@@ -5015,14 +5628,18 @@ impl Paragraphs<'_> {
                 continue;
             }
             n += 1;
-            if let Some(label) = marker_of(doc, child, inherited).label(n) {
+            if let Some(label) = styled_marker(doc, child, inherited, styling).label(n) {
                 // The item's own resolved
                 // style: CSS's `::marker`
                 // inherits from the item, not
                 // from the `b` the item's text
-                // may sit inside.
+                // may sit inside. The indent
+                // is this list's, because the
+                // gutter the marker hangs in
+                // is this list's padding and
+                // not the item's.
                 let style = self.styled(child, ctx.inline);
-                self.owe(label, style);
+                self.owe(label, style, ctx.block.indent);
             }
             if self.stack_items {
                 self.node(child, at);
@@ -5048,7 +5665,7 @@ impl Paragraphs<'_> {
             // holding no text at all draws
             // none, rather than marking the
             // next item twice.
-            self.pending_marker = None;
+            self.pending_marker.clear();
         }
     }
 
@@ -5075,11 +5692,18 @@ impl Paragraphs<'_> {
         // A marker owed to an item
         // whose only content is a table
         // has no line inside the table
-        // to sit on, so it takes the
-        // line above - which is where a
-        // browser puts a `::marker`
-        // beside a block too.
-        self.mark();
+        // to hang beside, so it takes
+        // the line above - which is
+        // where a browser puts a
+        // `::marker` beside a block too.
+        // Inline, deliberately: a
+        // hanging marker needs a line
+        // box to share a baseline with,
+        // and the paragraph this opens
+        // would have none of its own.
+        // A gutter with no line beside
+        // it would drop the bullet.
+        self.mark_inline();
         self.flush();
         let inline = self.styled(id, ctx.inline);
         let block = self.boxed(id, ctx.block, inline);
@@ -5337,44 +5961,91 @@ impl Paragraphs<'_> {
     }
 
     /// Owes `label` to the next run of
-    /// text, in `style`.
+    /// text, in `style`, hanging in the
+    /// gutter `indent` opened.
     ///
     /// Appended when a marker is
     /// already owed, which is an item
     /// whose only content is a nested
     /// list: both levels' markers then
     /// share the one line they have
-    /// between them, as a browser draws
-    /// them. The outer level's style
-    /// stands, because that line is the
-    /// outer item's.
-    fn owe(&mut self, label: String, style: Inline) {
-        match &mut self.pending_marker {
-            Some((owed, _)) => owed.push_str(&label),
-            None => self.pending_marker = Some((label, style)),
+    /// between them. Each keeps its own
+    /// style and its own gutter, so the
+    /// two hang one level apart, as a
+    /// browser draws them.
+    fn owe(&mut self, label: String, style: Inline, indent: f32) {
+        self.pending_marker.push(FlowMarker { text: label, style, indent });
+    }
+
+    /// Spends the markers owed to the
+    /// run about to be pushed, the way
+    /// the layout mode asks for.
+    ///
+    /// Stacked items have a gutter, so
+    /// the marker hangs in it and the
+    /// item's text - every line of it -
+    /// keeps the item's own indent.
+    /// Compact items have no gutter and
+    /// no line of their own, so the
+    /// marker is written inline. This
+    /// is the one place
+    /// [`Paragraphs::stack_items`]
+    /// reaches a marker: what the
+    /// marker *says* is resolved above
+    /// it and shared.
+    fn mark(&mut self) {
+        if self.stack_items {
+            self.hang();
+        } else {
+            self.mark_inline();
         }
     }
 
-    /// Spends the marker owed to the
-    /// run about to be pushed.
+    /// Hands the owed markers to the
+    /// paragraph, out of its flow.
     ///
-    /// Its own span at both ends, and
-    /// out of both the open reading's
-    /// slot and the link around it: a
-    /// marker joined to a ruby base
-    /// would hand the reading
+    /// Nothing about the run changes,
+    /// which is the whole point: the
+    /// markers are placed against the
+    /// first line box the wrap produces
+    /// ([`place_markers`]) and no line
+    /// box is touched, so a bin
+    /// re-measuring the element's own
+    /// spans gets exactly these lines
+    /// back.
+    fn hang(&mut self) {
+        self.cur.marker.append(&mut self.pending_marker);
+    }
+
+    /// Writes the owed markers as the
+    /// paragraph's leading spans.
+    ///
+    /// `list-style-position: inside`,
+    /// for the two cases with no gutter
+    /// to hang in: a compact list, and
+    /// an item whose only content is a
+    /// table.
+    ///
+    /// Each its own span at both ends,
+    /// and out of both the open
+    /// reading's slot and the link
+    /// around it: a marker joined to a
+    /// ruby base would hand the reading
     /// `\u{2022} 猫` to centre over, a
     /// marker joined to the item's `b`
     /// would come out bold, and
     /// `::marker` is no part of an
     /// `<a>`.
-    fn mark(&mut self) {
-        let Some((label, style)) = self.pending_marker.take() else {
+    fn mark_inline(&mut self) {
+        if self.pending_marker.is_empty() {
             return;
-        };
+        }
+        let owed = std::mem::take(&mut self.pending_marker);
         let slot = std::mem::replace(&mut self.open_ruby, NO_RUBY);
-        self.barrier = true;
-        self.push(&label, style, NO_LINK);
+        for mark in owed {
+            self.barrier = true;
+            self.push(&mark.text, mark.style, NO_LINK);
+        }
         self.barrier = true;
         self.open_ruby = slot;
     }
@@ -5505,6 +6176,14 @@ impl Paragraphs<'_> {
             self.cur.text.clear();
             self.cur.spans.clear();
             self.cur.inline.clear();
+            // A marker needs a line to
+            // hang beside, and a dropped
+            // paragraph has none. Only
+            // reachable through a
+            // paragraph an item opened
+            // and never filled, which
+            // draws no marker either way.
+            self.cur.marker.clear();
             // The dropped paragraph's
             // block goes with it: a
             // `div` holding only
@@ -5690,6 +6369,49 @@ impl Paragraphs<'_> {
         true
     }
 
+    /// A node's resolved style record,
+    /// under the styling gate.
+    ///
+    /// **The one gate the "honour
+    /// dictionary styling" setting
+    /// closes**, and a method rather
+    /// than a check at each reader for
+    /// exactly that reason: off has to
+    /// mean *neither* inline `style`
+    /// nor a dictionary's own
+    /// `styles.css`, and ticket 17
+    /// folds the sheet into this same
+    /// record rather than a second
+    /// one. So a source added there is
+    /// gated by construction, and
+    /// nothing downstream learns that
+    /// a setting exists.
+    ///
+    /// An empty record is every
+    /// property unset, which leaves
+    /// HTML's own stylesheet
+    /// ([`tag_style`]) and the theme's
+    /// own font and colours standing.
+    /// A `b` stays bold with styling
+    /// off: markup is what an entry
+    /// *says*, where a `style` object
+    /// is how a dictionary chose to
+    /// draw it.
+    ///
+    /// [`styled_marker`] is the third
+    /// reader of the same record and
+    /// the same flag - the marker is
+    /// resolved by a free function
+    /// walking a document, so it
+    /// cannot come through here.
+    fn declarations(&self, id: NodeId) -> &[(StyleKey, Scalar)] {
+        if self.render.styling {
+            self.doc.style(id)
+        } else {
+            &[]
+        }
+    }
+
     /// One node's resolved inline
     /// style.
     ///
@@ -5699,13 +6421,16 @@ impl Paragraphs<'_> {
     /// node's resolved style record,
     /// which is the dictionary
     /// author's last word and which
-    /// ticket 17 will also feed from
-    /// the dictionary's own
-    /// `styles.css`.
+    /// ticket 17 also feeds from the
+    /// dictionary's own `styles.css`.
+    /// Both arrive through
+    /// [`Paragraphs::declarations`],
+    /// so the styling setting turns
+    /// off both at once.
     fn styled(&self, id: NodeId, parent: Inline) -> Inline {
         let doc = self.doc;
         let mut style = tag_style(doc.node(id).tag, parent);
-        let record = doc.style(id);
+        let record = self.declarations(id);
         for (i, (key, value)) in record.iter().enumerate() {
             // First occurrence wins,
             // which is the answer
@@ -5767,7 +6492,7 @@ impl Paragraphs<'_> {
     /// box length is a fraction of it.
     fn declared(&self, id: NodeId, mut block: Block, em: f32) -> Block {
         let doc = self.doc;
-        let record = doc.style(id);
+        let record = self.declarations(id);
         for (i, (key, value)) in record.iter().enumerate() {
             // First occurrence wins, as
             // it does for a span.
@@ -6500,11 +7225,26 @@ struct SideEntry {
 }
 
 /// `p`'s content, in draw order.
+///
+/// **The one place the render settings
+/// are read.** [`RenderSettings`]'
+/// four facts resolve here into the
+/// two things the gloss walk takes -
+/// a list's layout and a [`Render`]
+/// record - and nothing below this
+/// point consults a setting again.
+/// That is the spec's "decision
+/// table, not a style engine":
+/// Yomitan drives the same handful of
+/// root attributes into fixed CSS
+/// rules rather than offering a
+/// cascade.
 fn build_elements(
     p: &Presentation,
     theme: &Theme,
     show_back: bool,
     side_panel: bool,
+    render: RenderSettings,
 ) -> (Vec<Elem>, Vec<SideEntry>) {
     let mut out = Vec::new();
 
@@ -6607,14 +7347,19 @@ fn build_elements(
                 // plain-text field and the collapsed summary still need,
                 // and a third view of one tree is the bug class this spec
                 // set out to close.
-                // `true` is the stacked list
-                // layout: the parameter ticket
-                // 14 wires its compact setting
-                // to, and today's only value
-                // for it.
                 let assets = Assets { dict_id: block.dict_id, sizes: &entry.media };
-                let mut pieces =
-                    paragraphs(&entry.doc, theme, LINE_GAP, true, assets);
+                let mut pieces = paragraphs(
+                    &entry.doc,
+                    theme,
+                    LINE_GAP,
+                    render.stack_items,
+                    assets,
+                    Render {
+                        roles: render.roles,
+                        styling: render.styling,
+                        images: render.images,
+                    },
+                );
                 if pieces.is_empty() {
                     continue;
                 }

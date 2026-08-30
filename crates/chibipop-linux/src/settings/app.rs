@@ -24,8 +24,8 @@ use crate::lock::{self, LockError};
 use crate::popup;
 use anyhow::Context;
 use chibipop::config::{
-    FieldMapping, PopupLayer, SentenceMode, TriggerMode, FIELD_SOURCES, MAX_HEIGHT_RANGE,
-    MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
+    FieldMapping, LayoutMode, PopupLayer, SentenceMode, TriggerMode, FIELD_SOURCES,
+    MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
 };
 use chibipop::settings::SettingsForm;
 use iced::widget::{
@@ -429,6 +429,17 @@ enum Message {
     Scroll(bool),
     SidePanel(bool),
     LayerPicked(String),
+    /// The layout-mode picker's label; mapped back through
+    /// [`LAYOUT_MODES`], never by index or by string comparison at the
+    /// call site.
+    LayoutModePicked(String),
+    /// `popup.dictionary_styling`: whether a dictionary's own `style`
+    /// declarations and its `styles.css` reach the panel at all.
+    DictStyling(bool),
+    ShowExamples(bool),
+    ShowAttributions(bool),
+    ShowImages(bool),
+    ShowPartOfSpeech(bool),
     DictSelected(String),
     DictUp,
     DictDown,
@@ -516,6 +527,12 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::LayerPicked(layer) => {
             app.linux.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
         }
+        Message::LayoutModePicked(label) => app.form.layout_mode = layout_mode_of(&label),
+        Message::DictStyling(on) => app.form.dictionary_styling = on,
+        Message::ShowExamples(on) => app.form.show_examples = on,
+        Message::ShowAttributions(on) => app.form.show_attributions = on,
+        Message::ShowImages(on) => app.form.show_images = on,
+        Message::ShowPartOfSpeech(on) => app.form.show_part_of_speech = on,
         Message::DictSelected(name) => app.selected_dict = Some(name),
         Message::DictUp => move_selected(app, -1),
         Message::DictDown => move_selected(app, 1),
@@ -703,6 +720,7 @@ fn view(app: &App) -> Element<'_, Message> {
         text("chibipop 設定 (settings)").size(24),
         trigger_section(app),
         popup_section(app),
+        content_section(app),
         dictionaries_section(app),
         ocr_section(app),
         anki_section(app),
@@ -871,6 +889,75 @@ fn popup_section(app: &App) -> Element<'_, Message> {
                 pick_list(layers, Some(layer_now), Message::LayerPicked),
             ),
             column(capture).spacing(6),
+        ]
+        .spacing(10),
+    )
+}
+
+/// The layout-mode picker, in the order it is offered.
+///
+/// One ordered table for both halves of the UI edge, exactly as
+/// [`SENTENCE_MODES`] is: the labels going out and the mode coming back,
+/// so nothing in between gets to decide the mapping.
+const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
+    (LayoutMode::Roomy, "Roomy — one item per line"),
+    (LayoutMode::Compact, "Compact — one line per dictionary"),
+];
+
+/// The picker's items, in table order.
+fn layout_labels() -> Vec<String> {
+    LAYOUT_MODES.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+/// The label a mode is offered under. Every `LayoutMode` is in the
+/// table, so the fallback is unreachable.
+fn layout_mode_label(mode: LayoutMode) -> &'static str {
+    LAYOUT_MODES.iter().find(|&&(m, _)| m == mode).map_or(LAYOUT_MODES[0].1, |&(_, l)| l)
+}
+
+/// The mode a picked label names. Only labels this table handed out can
+/// come back, so the default is unreachable through the UI.
+fn layout_mode_of(label: &str) -> LayoutMode {
+    LAYOUT_MODES.iter().find(|&&(_, l)| l == label).map_or(LayoutMode::Roomy, |&(m, _)| m)
+}
+
+/// How much of an entry the popup draws: the render settings' decision
+/// table, one control per knob.
+///
+/// Its own group rather than more rows under Popup, and the Windows
+/// window groups them the same way: these six decide what an entry
+/// *contains*, where the rows above decide how big the panel is.
+///
+/// Every one of them is a portable field. Neither platform may drop one,
+/// so a config file shared between a Windows and a Linux machine means
+/// the same thing on both.
+fn content_section(app: &App) -> Element<'_, Message> {
+    section(
+        "Entry content",
+        column![
+            labeled(
+                "Layout",
+                pick_list(
+                    layout_labels(),
+                    Some(layout_mode_label(app.form.layout_mode).to_string()),
+                    Message::LayoutModePicked,
+                ),
+            ),
+            checkbox(app.form.dictionary_styling)
+                .label("Use the dictionary's own fonts and colours")
+                .on_toggle(Message::DictStyling),
+            checkbox(app.form.show_examples)
+                .label("Show example sentences")
+                .on_toggle(Message::ShowExamples),
+            checkbox(app.form.show_attributions)
+                .label("Show attributions and footnotes")
+                .on_toggle(Message::ShowAttributions),
+            checkbox(app.form.show_images)
+                .label("Show images")
+                .on_toggle(Message::ShowImages),
+            checkbox(app.form.show_part_of_speech)
+                .label("Show part-of-speech labels inside the entry")
+                .on_toggle(Message::ShowPartOfSpeech),
         ]
         .spacing(10),
     )

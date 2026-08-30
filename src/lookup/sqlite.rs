@@ -2,6 +2,7 @@
 
 use crate::dict::gloss::{GlossDoc, Kind, NodeId};
 use crate::dict::media::{self, Intrinsic, MediaFormat, MediaKey, Missing, Surface};
+use crate::dict::sheet::{self, Sheet};
 use crate::lookup::model::{Dictionary, Entry, TermRow};
 use crate::present::DictInfo;
 use anyhow::{Context, Result};
@@ -9,11 +10,22 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct SqliteDictionary {
     conn: Connection,
     gloss: RefCell<GlossCache>,
+    /// One dictionary's compiled `styles.css`, compiled on first use.
+    ///
+    /// Per process, not per hover and not on disk. The corpus carries 174 KB
+    /// of CSS across 14 dictionaries, so caching a compiled form in the
+    /// database would buy a millisecond once per process and cost every
+    /// matcher fix a dictionary rebuild - the same trade ticket 02 made for
+    /// the tree itself. `None` records "this dictionary ships none", so a
+    /// dictionary without a stylesheet costs one query for the whole
+    /// process rather than one per hover.
+    sheets: RefCell<HashMap<i64, Option<Rc<Sheet>>>>,
 }
 
 /// Must match `dict::build::SCHEMA_VERSION`.
@@ -61,7 +73,11 @@ impl GlossCache {
 impl SqliteDictionary {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = open_checked(path)?;
-        Ok(SqliteDictionary { conn, gloss: RefCell::new(GlossCache::default()) })
+        Ok(SqliteDictionary {
+            conn,
+            gloss: RefCell::new(GlossCache::default()),
+            sheets: RefCell::new(HashMap::new()),
+        })
     }
 
     /// One asset's recorded intrinsic size, for the sizing pass.
@@ -114,6 +130,33 @@ impl SqliteDictionary {
             }
         }
         out
+    }
+
+    /// Folds the dictionary's own `styles.css` into one freshly parsed tree.
+    ///
+    /// Between the parse and the cache, so a cache hit pays nothing: the
+    /// stored record is the merged one, and every reader downstream - the
+    /// popup's layout pass, the plain-text walk, the HTML renderer - sees one
+    /// style record per node and never learns that CSS exists.
+    ///
+    /// Total. A store fault, or a stylesheet the matcher makes nothing of,
+    /// costs the entry its boxes and never the lookup. That is the same
+    /// ladder a missing asset takes, for the same reason: 13 of 52 corpus
+    /// dictionaries draw every box here, and none of them is worth a lost
+    /// hover.
+    fn style(&self, dict_id: i64, doc: &mut GlossDoc) {
+        let cached = self.sheets.borrow().get(&dict_id).cloned();
+        let sheet = match cached {
+            Some(sheet) => sheet,
+            None => {
+                let compiled = read_sheet(&self.conn, dict_id).map(Rc::new);
+                self.sheets.borrow_mut().insert(dict_id, compiled.clone());
+                compiled
+            }
+        };
+        if let Some(sheet) = sheet {
+            sheet::apply(doc, &sheet);
+        }
     }
 }
 
@@ -179,8 +222,9 @@ impl MediaStore {
 /// Opens read-only and refuses a database this build does not understand.
 ///
 /// The version gate is the whole contract: `schema_version` 3 means the
-/// `entry` record holds raw glossary JSON *and* the media tables exist, so
-/// a store that passes here has both.
+/// `entry` record holds raw glossary JSON, the media tables exist, *and*
+/// `dict_style` holds the `styles.css` of each dictionary that ships one. So
+/// a store that passes here has all three, and no reader below has to ask.
 fn open_checked(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
@@ -234,6 +278,19 @@ fn read_media_size(conn: &Connection, key: &MediaKey) -> Result<Option<Intrinsic
     }))
 }
 
+/// One dictionary's stylesheet, compiled.
+///
+/// `None` for a dictionary that ships none, and also for a store fault:
+/// there is no ladder below "draw no boxes", and the caller caches the
+/// answer either way so a fault costs one query rather than one per hover.
+/// The compile itself is total and cannot fail.
+fn read_sheet(conn: &Connection, dict_id: i64) -> Option<Sheet> {
+    let mut stmt = conn.prepare_cached("SELECT css FROM dict_style WHERE dict_id = ?1").ok()?;
+    let css: Option<String> =
+        stmt.query_row([dict_id], |r| r.get(0)).optional().ok().flatten();
+    Some(Sheet::compile(&css?))
+}
+
 impl Dictionary for SqliteDictionary {
     fn terms_for(&self, surface: &str) -> Result<Vec<TermRow>> {
         let mut stmt = self.conn.prepare_cached(
@@ -279,7 +336,9 @@ impl Dictionary for SqliteDictionary {
                     .get_ref(1)?
                     .as_str()
                     .with_context(|| format!("reading the glossary of entry {id}"))?;
-                let doc = Arc::new(GlossDoc::parse(raw));
+                let mut parsed = GlossDoc::parse(raw);
+                self.style(dict_id, &mut parsed);
+                let doc = Arc::new(parsed);
                 self.gloss.borrow_mut().put(id, dict_id, Arc::clone(&doc));
                 let media = self.media_sizes(dict_id, &doc);
                 out.push(Entry::new(id, dict_id, doc, media));
@@ -331,6 +390,7 @@ mod tests {
              CREATE TABLE term(surface TEXT, written TEXT, reading TEXT, pos TEXT,
                                freq INTEGER, entry_id INTEGER, dict_id INTEGER);
              CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
+             CREATE TABLE dict_style(dict_id INTEGER PRIMARY KEY, css TEXT NOT NULL);
              CREATE INDEX idx_term_surface ON term(surface);",
         )
         .unwrap();
@@ -562,5 +622,112 @@ mod tests {
 
         let err = MediaStore::open(&path).err().expect("a version-2 store must be refused");
         assert!(err.to_string().contains("schema_version is 2"), "got: {err}");
+    }
+
+    // ---- a dictionary's own styles.css (ticket 17) ----
+
+    /// The whole of the hover path for a stylesheet: the text comes out of
+    /// `dict_style`, the matcher compiles it on first use, and the winners
+    /// land in the resolved style record the renderer already reads. This is
+    /// 明鏡国語辞典's own shape - a box in CSS and not one inline `style`
+    /// anywhere - so before this ticket the entry drew no box at all.
+    #[test]
+    fn a_stored_stylesheet_reaches_the_resolved_style_record() {
+        let path = fixture_path("stored_stylesheet_folds");
+        let _guard = TempDbGuard(path.clone());
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'明鏡国語辞典 第三版',0);
+             INSERT INTO entry VALUES (1,1,'[{\"type\":\"structured-content\",\"content\":[\
+                 {\"tag\":\"span\",\"data\":{\"fbox\":\"1\"},\"content\":\"書き方\"}]}]');
+             INSERT INTO term VALUES ('書く','書く','かく','v5k',10,1,1);
+             INSERT INTO dict_style VALUES (1,'span[data-sc-fbox] { \
+                 padding: 0.1em; border-radius: 0.2em; border-style: solid }');
+             INSERT INTO meta VALUES ('schema_version','3');",
+        );
+
+        let d = SqliteDictionary::open(&path).unwrap();
+        let entries = d.entries(&[1]).unwrap();
+        let doc = &entries[0].gloss;
+        let span = (0..doc.all_nodes().len() as NodeId)
+            .find(|id| doc.node(*id).tag == crate::dict::gloss::Tag::Span)
+            .expect("the span parsed");
+        let record: Vec<(String, String)> = doc
+            .style(span)
+            .iter()
+            .map(|(k, v)| (format!("{k:?}"), doc.scalar_str(*v).unwrap_or("?").to_string()))
+            .collect();
+        assert_eq!(
+            vec![
+                ("PaddingTop".to_string(), "0.1em".to_string()),
+                ("PaddingRight".to_string(), "0.1em".to_string()),
+                ("PaddingBottom".to_string(), "0.1em".to_string()),
+                ("PaddingLeft".to_string(), "0.1em".to_string()),
+                ("BorderRadius".to_string(), "0.2em".to_string()),
+                ("BorderStyle".to_string(), "solid".to_string()),
+            ],
+            record,
+            "one entry per property, in the rule's own source order, and the \
+             `padding` shorthand expanded into the four longhands it sets",
+        );
+    }
+
+    /// A dictionary that ships none is untouched, and the tree it hands back
+    /// is byte for byte the one the parser produced.
+    #[test]
+    fn a_dictionary_without_a_stylesheet_folds_nothing() {
+        let path = fixture_path("no_stylesheet_folds_nothing");
+        let _guard = TempDbGuard(path.clone());
+        let glossary = "[{\"type\":\"structured-content\",\"content\":\
+             [{\"tag\":\"span\",\"data\":{\"fbox\":\"1\"},\"content\":\"x\"}]}]";
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'d',0);
+             INSERT INTO entry VALUES (1,1,'[{\"type\":\"structured-content\",\"content\":[\
+                 {\"tag\":\"span\",\"data\":{\"fbox\":\"1\"},\"content\":\"x\"}]}]');
+             INSERT INTO meta VALUES ('schema_version','3');",
+        );
+
+        let d = SqliteDictionary::open(&path).unwrap();
+        let entries = d.entries(&[1]).unwrap();
+        assert_eq!(GlossDoc::parse(glossary), *entries[0].gloss);
+    }
+
+    /// The compile happens once per dictionary per process, which is the
+    /// whole reason the sheet is cached rather than the tree's boxes. A
+    /// second entry off the same dictionary must still be styled, and a
+    /// dictionary the cache has already answered "none" for must not be
+    /// queried again - both of which this asserts by observing that the
+    /// second entry comes out styled after the first has warmed the cache.
+    #[test]
+    fn the_compiled_sheet_is_reused_across_entries() {
+        let path = fixture_path("sheet_cache_reused");
+        let _guard = TempDbGuard(path.clone());
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'d',0);
+             INSERT INTO entry VALUES (1,1,'[{\"type\":\"structured-content\",\
+                 \"content\":{\"tag\":\"span\",\"data\":{\"a\":\"1\"},\"content\":\"one\"}}]');
+             INSERT INTO entry VALUES (2,1,'[{\"type\":\"structured-content\",\
+                 \"content\":{\"tag\":\"span\",\"data\":{\"a\":\"1\"},\"content\":\"two\"}}]');
+             INSERT INTO dict_style VALUES (1,'span[data-sc-a] { margin-top: 3px }');
+             INSERT INTO meta VALUES ('schema_version','3');",
+        );
+
+        let d = SqliteDictionary::open(&path).unwrap();
+        for id in [1i64, 2] {
+            let entries = d.entries(&[id]).unwrap();
+            let doc = &entries[0].gloss;
+            let span = (0..doc.all_nodes().len() as NodeId)
+                .find(|n| doc.node(*n).tag == crate::dict::gloss::Tag::Span)
+                .expect("the span parsed");
+            assert_eq!(
+                Some("3px"),
+                doc.style_of(span, crate::dict::gloss::StyleKey::MarginTop)
+                    .and_then(|v| doc.scalar_str(v)),
+                "entry {id}",
+            );
+        }
+        assert_eq!(1, d.sheets.borrow().len(), "one compile for one dictionary");
     }
 }

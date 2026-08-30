@@ -55,7 +55,7 @@ impl GlossDoc {
 // schema vocabulary
 // ---------------------------------------------------------------------------
 
-fn tag_for(s: &str) -> Option<Tag> {
+pub(crate) fn tag_for(s: &str) -> Option<Tag> {
     Some(match s {
         "a" => Tag::A,
         "b" => Tag::B,

@@ -58,7 +58,14 @@ impl RoleFilter {
     pub const CARD: RoleFilter =
         RoleFilter { examples: true, attributions: true, part_of_speech: false };
 
-    fn allows(self, role: Role) -> bool {
+    /// Does this filter keep a node with `role`?
+    ///
+    /// Public because there are two callers and always were going to be:
+    /// this renderer, and the popup's own filter in `ui::layout`. One
+    /// predicate over one enum is what keeps the card's answer and the
+    /// panel's from drifting into two different ideas of what an example
+    /// is.
+    pub fn allows(self, role: Role) -> bool {
         match role {
             Role::Example => self.examples,
             Role::Attribution => self.attributions,
@@ -426,15 +433,11 @@ mod tests {
 
     /// Marks every node carrying `tag` with `role`.
     ///
-    /// Ticket 15 owns the classifier; until it lands the parser writes
-    /// [`Role::Unclassified`] on everything, so a role filter has nothing to
-    /// bite on unless a fixture sets one. Writing the field directly is
-    /// deliberate: the alternative is a public mutator on [`GlossDoc`] that
-    /// only a test would ever call.
+    /// One line now that `GlossDoc` carries the test-only mutator both
+    /// role-filtering renderers need (`GlossDoc::classify`); kept as a
+    /// local name because every test below reads better for it.
     fn classify(d: &mut GlossDoc, tag: Tag, role: Role) {
-        for node in d.nodes.iter_mut().filter(|n| n.tag == tag) {
-            node.role = role;
-        }
+        d.classify(tag, role);
     }
 
     fn pos_doc(labels: &[&str]) -> Value {

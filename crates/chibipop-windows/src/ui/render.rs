@@ -22,8 +22,8 @@ use crate::controller::HitAction;
 use crate::present::Presentation;
 use crate::ui::layout::{
     self, Align, ElemKind, GlyphBox, HitTarget, LineBox, MeasureError, MeasureRun, Measured,
-    Metrics, PopupScene, SceneElem, SceneImage, SceneRect, SceneRequest, SpanBox, StyledSpan,
-    TextMeasure,
+    Metrics, PopupScene, RenderSettings, SceneElem, SceneImage, SceneRect, SceneRequest, SpanBox,
+    StyledSpan, TextMeasure,
 };
 use crate::ui::media::MediaSurfaces;
 use crate::ui::theme::{Theme, SCROLLBAR_W};
@@ -429,14 +429,20 @@ fn span_heights(spans: &[StyledSpan<'_>], out: &mut Measured) {
 }
 
 /// Lays one popup out, in DIPs.
+///
+/// The box is one argument because its
+/// two halves are always resolved and
+/// passed together, which leaves room
+/// for the render settings without a
+/// seventh loose parameter.
 fn scene_of(
     text: &Text,
     p: &Presentation,
     theme: &Theme,
-    max_w: f32,
-    max_h: f32,
+    box_dip: (f32, f32),
     show_back: bool,
     side_panel: bool,
+    render: RenderSettings,
 ) -> Result<PopupScene> {
     // The Anki affordance is its own
     // window here, sized by its own
@@ -447,10 +453,11 @@ fn scene_of(
         &SceneRequest {
             presentation: p,
             theme,
-            max_w,
-            max_h,
+            max_w: box_dip.0,
+            max_h: box_dip.1,
             show_back,
             side_panel,
+            render,
             anki: None,
         },
         &mut text.measurer(),
@@ -565,25 +572,34 @@ impl Renderer {
 
     /// `(width, view_h, content_h)`.
     ///
-    /// All three in physical pixels.
+    /// All three in physical pixels,
+    /// and `box_phys` likewise - one
+    /// argument for the same reason
+    /// [`scene_of`] takes one: its two
+    /// halves are always resolved
+    /// together, and separating them
+    /// would put this over clippy's
+    /// argument cap for no gain in
+    /// clarity.
     pub fn measure(
         &mut self,
         p: &Presentation,
         theme: &Theme,
-        max_w: i32,
-        max_h: i32,
+        box_phys: (i32, i32),
         show_back: bool,
         side_panel: bool,
+        render: RenderSettings,
     ) -> Result<(i32, i32, i32)> {
+        let (max_w, max_h) = box_phys;
         let scale = self.dpi_scale();
         let scene = scene_of(
             &self.text,
             p,
             theme,
-            max_w as f32 / scale,
-            max_h as f32 / scale,
+            (max_w as f32 / scale, max_h as f32 / scale),
             show_back,
             side_panel,
+            render,
         )?;
         Ok(popup_size(&scene, scale, max_w))
     }
@@ -601,6 +617,7 @@ impl Renderer {
         scroll: i32,
         show_back: bool,
         side_panel: bool,
+        render: RenderSettings,
     ) -> Result<()> {
         let (cw, ch) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(cw, ch).context("preparing the D2D render target")?;
@@ -610,7 +627,8 @@ impl Renderer {
         let h = (ch as f32 / scale) as i32;
         let scroll = (scroll as f32 / scale) as i32;
 
-        let scene = scene_of(&self.text, p, theme, w as f32, h as f32, show_back, side_panel)?;
+        let scene =
+            scene_of(&self.text, p, theme, (w as f32, h as f32), show_back, side_panel, render)?;
         *self.hits.borrow_mut() = scene.hit_targets();
 
         if let Err(e) = self.paint_once(&scene, theme, w, h, scroll) {
@@ -868,6 +886,21 @@ impl Renderer {
         // scene measured it at, which is
         // the element's own.
         for run in &elem.ruby {
+            let at = Vector2 { X: pen.0 + run.x, Y: pen.1 + run.y };
+            let span = [run.styled_span(&theme.font_name)];
+            self.draw_spans(target, &span, &[0.0], elem.wrap_w, at, Align::Leading)?;
+        }
+
+        // The list markers, in the
+        // gutters their lists opened.
+        // Always `Align::Leading` off
+        // the pen: a marker box hangs
+        // off the item's *content* edge,
+        // whatever the text inside the
+        // item aligns to. `textAlign`
+        // moves line boxes, and a marker
+        // box is not one.
+        for run in &elem.marker {
             let at = Vector2 { X: pen.0 + run.x, Y: pen.1 + run.y };
             let span = [run.styled_span(&theme.font_name)];
             self.draw_spans(target, &span, &[0.0], elem.wrap_w, at, Align::Leading)?;
