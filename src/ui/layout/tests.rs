@@ -1967,11 +1967,17 @@ fn a_block_wrapping_several_paragraphs_draws_one_box_around_all_of_them() {
 
 /// The defect ticket 13's author found and did not fix: **a block lost
 /// its own box when its first child opened a line.** A `span` carrying
-/// `data.content` opens a paragraph (ticket 01's sense separator), the
-/// box used to attach to the first paragraph the block emitted, and
-/// there was none - the one the block opened was still empty when the
-/// `span`'s `open` flushed it, and `flush` drops an empty paragraph and
-/// its box with it. So a bordered, filled `div` drew nothing at all.
+/// `data.content` beside another span opens a paragraph (ticket 01's
+/// sense separator), the box used to attach to the first paragraph the
+/// block emitted, and there was none - the one the block opened was
+/// still empty when the `span`'s `open` flushed it, and `flush` drops an
+/// empty paragraph and its box with it. So a bordered, filled `div` drew
+/// nothing at all.
+///
+/// The sibling is a `span` rather than a bare string on purpose: beside
+/// bare sentence text the marker would stay in its line
+/// (`GlossDoc::prose`) and the defect's trigger - the first child
+/// opening a line - would never fire.
 ///
 /// Jitendex's `div[data-sc-class="extra-box"]` over `data.content`
 /// children is exactly this shape, and ticket 17's fold gives it
@@ -1984,7 +1990,7 @@ fn a_block_whose_first_child_opens_a_line_still_draws_its_box() {
         r##""borderStyle":"solid","borderColor":"#7f8c99","borderRadius":0.4,"##,
         r##""backgroundColor":"#1e3a5f"},"content":["##,
         r##"{"tag":"span","data":{"content":"misc-info"},"content":"dated"},"##,
-        r##"" and the body after it"]}"##
+        r##"{"tag":"span","content":" and the body after it"}]}"##
     )));
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     let outer = one_block_box(&s);
@@ -2252,10 +2258,11 @@ fn a_background_pill_draws_without_a_border() {
 /// it twice. Jitendex's `span[data-sc-class="tag"]` is exactly this
 /// shape: a `data.content` key and a CSS pill.
 ///
-/// One rule kept, one rule moved. `has_marker` still opens a line,
-/// because that is ticket 01's sense separator and it predates the tree.
 /// The box follows the tag, and `span` is inline by the spec's own
-/// division, so the box is the pill's and never the paragraph's.
+/// division, so the box is the pill's and never the paragraph's. And
+/// beside bare sentence text the marker opens no line at all
+/// (`GlossDoc::prose`): a marked pill inside a sentence is markup, not a
+/// sense separator, so the whole run is one paragraph.
 #[test]
 fn a_pill_carrying_a_content_marker_draws_one_box_and_not_two() {
     let p = rich(&sc(concat!(
@@ -2267,25 +2274,70 @@ fn a_pill_carrying_a_content_marker_draws_one_box_and_not_two() {
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     let gloss = bodies(&s);
 
-    assert_eq!(2, gloss.len(), "the marker still opens a line of its own");
-    assert_eq!("before", gloss[0].text);
+    assert_eq!(1, gloss.len(), "a marked pill amid prose breaks no line");
     // The pill's 3 of padding a side is now a no-break space at each end
     // of its run, which is what makes the room it paints over room the
     // text after it cleared (`pill::PILL_SPACER`).
-    assert_eq!(
-        "\u{a0}noun\u{a0} a word", gloss[1].text,
-        "and the text after it joins that line"
-    );
+    assert_eq!("before\u{a0}noun\u{a0} a word", gloss[0].text);
 
-    let pill = gloss[1];
+    let pill = gloss[0];
     assert_eq!(1, pill.boxes().count(), "one pill, one box - a bin paints `boxes()`");
     assert_eq!(None, pill.block_box, "an inline tag's box is its own, marker or not");
     assert_eq!(Some((0x56, 0x56, 0x56)), pill.inline_boxes[0].style.background);
-    // And it hugs its own run rather than the paragraph it opened: "noun"
-    // is four units at 7.5, plus the 3 of padding its own two spacers
-    // bought.
+    // And it hugs its own run rather than its paragraph: "noun" is four
+    // units at 7.5, plus the 3 of padding its own two spacers bought.
     assert_eq!(4.0 * BOX_EM * ADVANCE + 6.0, pill.inline_boxes[0].rect.w);
     assert_eq!(BODY_LINE + 6.0, pill.inline_boxes[0].rect.h);
+}
+
+/// The defect a reader of 雑談 saw: Jitendex writes the example keyword
+/// as a marked `span` inside the sentence
+/// (`data.content = "example-keyword"`, 51 062 nodes), and ticket 01's
+/// marker line break cut the sentence after every word before the
+/// keyword - `ぜひ`, then a fresh line for the rest. Beside bare
+/// sentence text a marker separates nothing (`GlossDoc::prose`), so the
+/// sentence is one paragraph and the keyword's readings still ride
+/// above their bases.
+#[test]
+fn an_example_keyword_amid_its_sentence_breaks_no_line() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","data":{"content":"example-sentence-a"},"content":"##,
+        r##"{"tag":"span","content":["ぜひ","##,
+        r##"{"tag":"span","data":{"content":"example-keyword"},"content":["##,
+        r##"{"tag":"ruby","content":["雑",{"tag":"rt","content":"ざつ"}]},"##,
+        r##"{"tag":"ruby","content":["談",{"tag":"rt","content":"だん"}]}]},"##,
+        r##""でもしにいらしてください。"]}}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len(), "the sentence is one paragraph");
+    // The word joiners are the ruby glue every base wears.
+    assert_eq!("ぜひ雑\u{2060}談\u{2060}でもしにいらしてください。", gloss[0].text);
+    assert_eq!(2, gloss[0].ruby.len(), "and both readings survive");
+}
+
+/// The footnote half of the same rule. Jitendex ends an example's
+/// translation with a footnote mark - a marked `span`
+/// (`data.content = "attribution-footnote"`, 9 784 of them trail their
+/// sentence) - and wraps the sentence itself whole (`span lang="en"`), so
+/// no bare string stands beside the mark and `GlossDoc::prose` alone
+/// exempted nothing: the marker break put `[1]` on a line of its own.
+/// Prose the mark trails is prose all the same
+/// (`GlossDoc::inline_prose`), and the shape here is a corpus node
+/// verbatim.
+#[test]
+fn a_trailing_attribution_footnote_stays_on_its_sentences_line() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","data":{"content":"example-sentence-b"},"content":["##,
+        r##"{"tag":"span","lang":"en","content":"He still holds the heavyweight title."},"##,
+        r##"{"tag":"span","data":{"content":"attribution-footnote"},"content":"[1]"}]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let gloss = bodies(&s);
+
+    assert_eq!(1, gloss.len(), "the sentence and its footnote are one paragraph");
+    assert_eq!("He still holds the heavyweight title.[1]", gloss[0].text);
 }
 
 /// Where each of `elem`'s spans landed, as a bin's own re-measure answers

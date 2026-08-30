@@ -390,6 +390,7 @@ impl Paragraphs<'_> {
         let mut fallback: Vec<(String, Inline)> = Vec::new();
         let mut read = false;
         let inner = Ctx { inline: style, link, ..ctx };
+        let mut prose = doc.prose(id);
         for (i, child) in doc.children(id).enumerate() {
             match doc.node(child).tag {
                 Tag::Rt => {
@@ -400,7 +401,10 @@ impl Paragraphs<'_> {
                     self.open_ruby = self.open_slot(style);
                 }
                 Tag::Rp => fallback.push((text_of(doc, child), self.styled(child, style))),
-                _ => self.node(child, inner.at(i)),
+                _ => {
+                    self.node(child, inner.at(i), prose);
+                    prose = prose || doc.inline_prose(child);
+                }
             }
         }
         self.open_ruby = outer;

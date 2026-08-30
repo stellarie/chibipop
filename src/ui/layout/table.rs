@@ -599,7 +599,7 @@ impl Paragraphs<'_> {
         let outer = std::mem::take(&mut self.out);
         self.open(ctx.path, block.inherited());
         if implied {
-            self.node(id, ctx);
+            self.node(id, ctx, false);
         } else {
             self.children(id, inner);
         }

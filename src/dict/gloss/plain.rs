@@ -21,7 +21,10 @@
 //! The line-breaking rules are ticket 01's and are reproduced exactly.
 //! A block tag emits a mark, [`tidy`] turns every mark into a line break and
 //! drops the empty parts, and an inline tag's children cannot break a line
-//! because the schema admits no break there.
+//! because the schema admits no break there. One exemption, shared with the
+//! popup's inline pass: a marked inline node beside bare sentence text is
+//! markup inside a sentence, not a sense separator, and stays in its line
+//! ([`GlossDoc::prose`]).
 
 use super::{GlossDoc, ItemType, Kind, NodeId, Role, RoleFilter, Tag};
 
@@ -49,9 +52,11 @@ const BLOCK_MARK: &str = "\u{0}LI\u{0}";
 /// and not `漢字(かんじ)`.
 fn ruby_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
     let fenced = doc.children(id).any(|c| doc.node(c).tag == Tag::Rp);
+    let mut prose = doc.prose(id);
     for child in doc.children(id) {
         if doc.node(child).tag != Tag::Rt {
-            node_into(doc, child, out);
+            node_into(doc, child, prose, out);
+            prose = prose || doc.inline_prose(child);
             continue;
         }
         let mut reading = String::new();
@@ -130,7 +135,7 @@ fn item_into(doc: &GlossDoc, id: NodeId, buf: &mut String) {
         // nor takes part in the drop rules.
         ItemType::StructuredContent => children_into(doc, id, true, buf),
         _ if doc.is_plain_string(id) => buf.push_str(doc.text(id)),
-        _ => node_into(doc, id, buf),
+        _ => node_into(doc, id, false, buf),
     }
 }
 
@@ -183,18 +188,22 @@ fn collect_pos(doc: &GlossDoc, id: NodeId, out: &mut Vec<String>, buf: &mut Stri
 
 /// One node into the render buffer.
 ///
-/// A node's own rendering never depends on the context it sits in - only its
-/// children's do, and that context comes from this node's own tag. So the
-/// walk carries no inherited state: whether a run of strings becomes lines is
-/// decided in [`children_into`] from the parent tag alone, and whether a
-/// reading is bracketed in [`ruby_into`] from the `ruby` it sits under.
+/// A node's own rendering depends on one thing about the context it sits
+/// in: `prose` says whether a bare string with visible text stands beside
+/// it, or a prose fragment stands before it - either is what exempts a
+/// marked inline node from the marker line break ([`GlossDoc::prose`],
+/// [`GlossDoc::inline_prose`]). Everything else is the children's, and that
+/// context comes from this node's own tag: whether a run of strings becomes
+/// lines is decided in [`children_into`] from the parent tag alone, and
+/// whether a reading is bracketed in [`ruby_into`] from the `ruby` it sits
+/// under.
 ///
 /// An image is the one tag with no plain rendering at all: it is a character
 /// this renderer cannot draw, which is why the tree keeps it for the popup
 /// renderer that can. An `rt` or `rp` reached outside a `ruby` is malformed
 /// and renders as the plain text it holds, which is exactly what the popup's
 /// inline pass does with it.
-fn node_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
+fn node_into(doc: &GlossDoc, id: NodeId, prose: bool, out: &mut String) {
     let n = doc.node(id);
     if !RoleFilter::SUMMARY.allows(doc.role(id)) {
         return;
@@ -214,7 +223,7 @@ fn node_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
         out.push_str(doc.text(id));
         return;
     }
-    if n.tag.is_block() || doc.has_marker(id) {
+    if n.tag.is_block() || (doc.has_marker(id) && !prose) {
         out.push_str(BLOCK_MARK);
     }
     children_into(doc, id, !n.tag.is_inline(), out);
@@ -237,8 +246,10 @@ fn children_into(doc: &GlossDoc, id: NodeId, block_ctx: bool, out: &mut String) 
         }
         return;
     }
+    let mut prose = doc.prose(id);
     for child in doc.children(id) {
-        node_into(doc, child, out);
+        node_into(doc, child, prose, out);
+        prose = prose || doc.inline_prose(child);
     }
 }
 
@@ -331,6 +342,20 @@ mod tests {
             {"tag": "span", "data": {"content": true}, "content": "two"}
         ]}]);
         assert_eq!(vec!["one\ntwo".to_string()], plain(&g));
+    }
+
+    /// Jitendex writes a loanword note as a marked span inside the
+    /// parenthesis (`data.content = "lang-source-wasei"`, 4 114 nodes),
+    /// and the marker break used to cut the note in two. Beside bare
+    /// sentence text a marker separates nothing ([`GlossDoc::prose`]).
+    #[test]
+    fn a_marked_span_amid_bare_text_stays_in_its_line() {
+        let g = json!([{"type": "structured-content", "content": [
+            "（",
+            {"tag": "span", "data": {"content": "lang-source-wasei"}, "content": "wasei"},
+            "： night + er）"
+        ]}]);
+        assert_eq!(vec!["（wasei： night + er）".to_string()], plain(&g));
     }
 
     #[test]

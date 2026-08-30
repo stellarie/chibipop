@@ -511,10 +511,12 @@ impl Paragraphs<'_> {
         let styling = self.render.styling;
         let inherited = styled_marker(doc, id, initial_marker(ordered), styling);
         let mut n = 0usize;
+        let mut prose = doc.prose(id);
         for (i, child) in doc.children(id).enumerate() {
             let at = ctx.at(i);
             if doc.node(child).kind != Kind::ListItem {
-                self.node(child, at);
+                self.node(child, at, prose);
+                prose = prose || doc.inline_prose(child);
                 continue;
             }
             n += 1;
@@ -532,7 +534,7 @@ impl Paragraphs<'_> {
                 self.owe(label, style, ctx.block.indent);
             }
             if self.stack_items {
-                self.node(child, at);
+                self.node(child, at, prose);
             } else {
                 // Ticket 14's compact list:
                 // the item's content joins the

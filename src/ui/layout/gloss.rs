@@ -443,7 +443,7 @@ impl Paragraphs<'_> {
             // drop rules.
             ItemType::StructuredContent => self.children(id, ctx),
             _ if doc.is_plain_string(id) => self.text(doc.text(id), ctx.inline, ctx.link),
-            _ => self.node(id, ctx),
+            _ => self.node(id, ctx, false),
         }
     }
 
@@ -478,7 +478,16 @@ impl Paragraphs<'_> {
     }
 
     /// One node.
-    pub(super) fn node(&mut self, id: NodeId, ctx: Ctx) {
+    ///
+    /// `prose` says whether a bare
+    /// string with visible text stands
+    /// beside this node, or a prose
+    /// fragment stands before it -
+    /// either is what exempts a marked
+    /// inline node from the marker
+    /// line break ([`GlossDoc::prose`],
+    /// [`GlossDoc::inline_prose`]).
+    pub(super) fn node(&mut self, id: NodeId, ctx: Ctx, prose: bool) {
         let doc = self.doc;
         let node = *doc.node(id);
         if !self.shows(id) {
@@ -595,7 +604,20 @@ impl Paragraphs<'_> {
         // twice.
         if node.tag.is_block() {
             self.open(ctx.path, block);
-        } else if doc.has_marker(id) {
+        } else if doc.has_marker(id) && !prose {
+            // The marker separates
+            // senses only where senses
+            // stand side by side: beside
+            // bare sentence text, or
+            // trailing a wrapped run of
+            // it, it is markup inside a
+            // sentence - Jitendex's
+            // `example-keyword` and
+            // `attribution-footnote` -
+            // and a break there cuts the
+            // sentence in two
+            // ([`GlossDoc::prose`],
+            // [`GlossDoc::inline_prose`]).
             self.open(ctx.path, block.inherited());
         }
         let next = Ctx {
@@ -938,8 +960,10 @@ impl Paragraphs<'_> {
             }
             return;
         }
+        let mut prose = doc.prose(id);
         for (i, child) in doc.children(id).enumerate() {
-            self.node(child, ctx.at(i));
+            self.node(child, ctx.at(i), prose);
+            prose = prose || doc.inline_prose(child);
             // A `summary` closes its line
             // as well as opening one, and
             // it is the only tag that

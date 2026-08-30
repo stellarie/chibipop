@@ -599,6 +599,62 @@ impl GlossDoc {
         matches!(self.data_of(id, "content"), Some(v) if v != Scalar::Null)
     }
 
+    /// Does this node's content read as one run of prose - is any child a
+    /// bare string with visible text?
+    ///
+    /// Half of the exemption to the marker line break, shared by the
+    /// plain-text walk and the popup's inline pass; the other half is
+    /// [`inline_prose`](Self::inline_prose). A marker separates *senses*,
+    /// and a sense list is marked nodes side by side; a marked inline node
+    /// beside bare sentence text is markup *inside* a sentence, and
+    /// breaking there cuts the sentence in two. Measured over the live
+    /// database: every mid-prose marked inline node Jitendex writes is
+    /// sentence markup (`example-keyword` 51 062, `lang-source-wasei`
+    /// 4 114, `registered-trademark` 44), and every sense-separating one
+    /// (`part-of-speech-info`, `forms-label`, `misc-info`, ...) has no
+    /// bare-text sibling.
+    ///
+    /// Asked of the *parent*, because the arena links first-child /
+    /// next-sibling and a node cannot see the text before it.
+    pub fn prose(&self, id: NodeId) -> bool {
+        self.children(id)
+            .any(|c| self.is_plain_string(c) && !self.text(c).trim().is_empty())
+    }
+
+    /// Does this node itself read as a prose fragment - no block tag, no
+    /// marker, and visible text somewhere under it?
+    ///
+    /// The other half of the marker exemption. [`prose`](Self::prose) sees
+    /// only *bare* sentence text, and Jitendex wraps an example's
+    /// translation whole (`span lang="en"`), so the footnote mark trailing
+    /// it (`data.content = "attribution-footnote"`) broke onto a line of
+    /// its own. A marked node *after* such a fragment trails a sentence,
+    /// and both walks exempt it exactly as they exempt one amid bare text.
+    ///
+    /// Order is load-bearing where `prose` is symmetric: a sense head is
+    /// marked pills *followed* by a prose fragment (Jitendex's
+    /// forms-restriction `span`), so only prose already seen can be
+    /// evidence - counting a fragment behind the marked node would re-read
+    /// every such sense head as a sentence. Measured over the 97-archive
+    /// corpus: the marked nodes that trail a fragment are
+    /// `attribution-footnote` (9 784) and nothing else, while every sense
+    /// separator leads its parent and keeps its break
+    /// (`part-of-speech-info` 392 375, `forms-label` 146 307, `misc-info`
+    /// 67 862, `reference-label` 56 466, `field-info` 45 143, ...).
+    pub fn inline_prose(&self, id: NodeId) -> bool {
+        !self.nodes[id as usize].tag.is_block()
+            && !self.has_marker(id)
+            && self.has_visible_text(id)
+    }
+
+    /// Any visible text under this node.
+    fn has_visible_text(&self, id: NodeId) -> bool {
+        if self.nodes[id as usize].kind == Kind::Text {
+            return !self.text(id).trim().is_empty();
+        }
+        self.children(id).any(|c| self.has_visible_text(c))
+    }
+
     /// This node's classified editorial purpose.
     ///
     /// The whole of what the old name-matched drop list used to answer, and
