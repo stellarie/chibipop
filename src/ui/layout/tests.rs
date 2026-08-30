@@ -1753,14 +1753,52 @@ fn one_body(s: &PopupScene) -> &SceneElem {
     found[0]
 }
 
-/// The block box a gloss element is, which must exist.
+/// The block box an element is, which must exist.
 fn block_box(e: &SceneElem) -> &ElemBox {
     e.block_box.as_ref().expect("this element must carry a block box")
 }
 
-/// The acceptance geometry: the walk advances by the box's *outer* height,
-/// margins and all, while the element's own ink box stays the height of the
-/// text inside it.
+/// Every block-box element of a scene, in draw order.
+///
+/// A block's box is a container around **every** paragraph the block
+/// emits, so it is a textless element of its own and never a field on
+/// the paragraph inside it (`ElemKind::Block`).
+fn block_boxes(s: &PopupScene) -> Vec<&SceneElem> {
+    s.elems.iter().filter(|e| e.kind == ElemKind::Block).collect()
+}
+
+/// The one block-box element of a scene with exactly one.
+fn one_block_box(s: &PopupScene) -> &SceneElem {
+    let found = block_boxes(s);
+    assert_eq!(1, found.len(), "expected one block box, got {found:?}");
+    found[0]
+}
+
+/// The box drawn around the paragraph holding `text`.
+///
+/// A box leads its own body in draw order, so the box a paragraph sits
+/// in is the nearest one before it - nearest rather than first, because
+/// boxes nest.
+fn box_around<'a>(s: &'a PopupScene, text: &str) -> &'a SceneElem {
+    let at = s
+        .elems
+        .iter()
+        .position(|e| e.kind == ElemKind::Text && e.text == text)
+        .unwrap_or_else(|| panic!("no gloss element holding {text:?}"));
+    s.elems[..at]
+        .iter()
+        .rev()
+        .find(|e| e.kind == ElemKind::Block)
+        .unwrap_or_else(|| panic!("nothing boxes {text:?}"))
+}
+
+/// The acceptance geometry: the walk advances by the box's *outer*
+/// height, margins and all, while the paragraph inside it stays the
+/// height of its own text.
+///
+/// The advance is the **box's**, not the paragraph's, because the box is
+/// the container: it is what the panel stacks, and what it stacks after
+/// it starts below the box's own margin.
 #[test]
 fn a_box_with_margin_and_padding_advances_the_walk_by_its_outer_height() {
     let p = rich(&sc(
@@ -1768,16 +1806,245 @@ fn a_box_with_margin_and_padding_advances_the_walk_by_its_outer_height() {
     ));
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     let gloss = one_body(&s);
+    let outer = one_block_box(&s);
 
     // margin 6, padding 3, on all four edges; one 30px line inside.
     assert_eq!(BODY_LINE, gloss.rect.h, "the ink box is the text, as it always was");
+    assert_eq!(BODY_LINE, gloss.advance, "and the paragraph advances by its own line");
     assert_eq!(
         6.0 + 3.0 + BODY_LINE + 3.0 + 6.0,
-        gloss.advance,
-        "and the advance is the outer height"
+        outer.advance,
+        "the box's advance is the outer height"
     );
     // The border box is the fill and the stroke: padding in, margin out.
-    assert_eq!(3.0 + BODY_LINE + 3.0, block_box(gloss).rect.h);
+    assert_eq!(3.0 + BODY_LINE + 3.0, block_box(outer).rect.h);
+    // And the paragraph sits inside it, at the content edge.
+    assert_eq!(6.0 + 3.0, gloss.pen.0 - s.origin);
+    assert_eq!(3.0, gloss.pen.1 - block_box(outer).rect.y, "padding under the border box's top");
+}
+
+/// The other half of "where a block's box belongs": a block emitting
+/// several paragraphs draws **one** box around all of them, as a browser
+/// does. Not one per paragraph - CSS gives the block one principal box -
+/// and not one around the first, which is what the walk used to do.
+#[test]
+fn a_block_wrapping_several_paragraphs_draws_one_box_around_all_of_them() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","style":{"padding":0.2,"borderWidth":0.2,"##,
+        r##""borderStyle":"solid","backgroundColor":"#1e3a5f"},"content":["##,
+        r##"{"tag":"div","content":"one"},{"tag":"div","content":"two"},"##,
+        r##"{"tag":"div","content":"three"}]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let inner = bodies(&s);
+    let outer = one_block_box(&s);
+
+    assert_eq!(3, inner.len(), "three paragraphs");
+    assert_eq!(1, block_boxes(&s).len(), "and one box, not three and not one of three");
+    // padding 3 and a 3px rule per edge; three 30px lines with the
+    // panel's own gap between them, and none above the first.
+    let body_h = 3.0 * BODY_LINE + 2.0 * LINE_GAP;
+    assert_eq!(3.0 + 3.0 + body_h + 3.0 + 3.0, outer.advance);
+    let rect = block_box(outer).rect;
+    assert_eq!(
+        SceneRect {
+            x: s.origin,
+            // The chrome the panel drew above it decides the y; what
+            // this pins is that the first line sits one border and one
+            // padding inside the box's own top.
+            y: inner[0].pen.1 - 6.0,
+            w: s.content_w,
+            h: 6.0 + body_h + 6.0,
+        },
+        rect,
+        "one border box, around all three lines"
+    );
+    assert_eq!(LINE_GAP, outer.top_gap, "the panel's gap sits outside the border");
+    // Every one of them is inset by the box, and every one of them is
+    // narrowed by it: a box spanning paragraphs insets each.
+    for para in &inner {
+        assert_eq!(s.origin + 6.0, para.pen.0);
+        assert_eq!(s.content_w - 12.0, para.wrap_w);
+        assert_eq!(None, para.block_box, "the box belongs to the block, not to a line");
+    }
+    assert_eq!(BODY_LINE + LINE_GAP, inner[1].pen.1 - inner[0].pen.1);
+    assert_eq!(
+        rect.y + rect.h - 6.0,
+        inner[2].pen.1 + BODY_LINE,
+        "and the last line ends one padding and one border above the box's bottom"
+    );
+}
+
+/// The defect ticket 13's author found and did not fix: **a block lost
+/// its own box when its first child opened a line.** A `span` carrying
+/// `data.content` opens a paragraph (ticket 01's sense separator), the
+/// box used to attach to the first paragraph the block emitted, and
+/// there was none - the one the block opened was still empty when the
+/// `span`'s `open` flushed it, and `flush` drops an empty paragraph and
+/// its box with it. So a bordered, filled `div` drew nothing at all.
+///
+/// Jitendex's `div[data-sc-class="extra-box"]` over `data.content`
+/// children is exactly this shape, and ticket 17's fold gives it
+/// 0.4rem/0.5rem padding - so this is the difference between ticket 08's
+/// goal being met on real data and not.
+#[test]
+fn a_block_whose_first_child_opens_a_line_still_draws_its_box() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","style":{"padding":0.2,"borderWidth":0.2,"##,
+        r##""borderStyle":"solid","borderColor":"#7f8c99","borderRadius":0.4,"##,
+        r##""backgroundColor":"#1e3a5f"},"content":["##,
+        r##"{"tag":"span","data":{"content":"misc-info"},"content":"dated"},"##,
+        r##"" and the body after it"]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let outer = one_block_box(&s);
+    let style = block_box(outer).style;
+
+    // The box the dictionary declared, drawn once.
+    assert_eq!(Edges::all(3.0), style.padding);
+    assert_eq!(Edges::all(3.0), style.border_used());
+    assert_eq!((0x7f, 0x8c, 0x99), style.border_color);
+    assert_eq!(6.0, style.radius);
+    assert_eq!(Some((0x1e, 0x3a, 0x5f)), style.background);
+    // The marker still opens its line, so the `span` and the text after
+    // it are one paragraph and the `div`'s own first paragraph is the
+    // empty one that used to swallow the box.
+    let inner = bodies(&s);
+    assert_eq!(1, inner.len(), "one paragraph, opened by the marker");
+    assert_eq!("dated and the body after it", inner[0].text);
+    assert_eq!(
+        SceneRect {
+            x: s.origin,
+            y: inner[0].pen.1 - 6.0,
+            w: s.content_w,
+            h: 6.0 + BODY_LINE + 6.0,
+        },
+        block_box(outer).rect,
+        "and the box frames that line"
+    );
+    assert_eq!(s.origin + 6.0, inner[0].pen.0, "inset by the border and the padding");
+}
+
+/// The first neighbouring case: **a nested block that has its own box**
+/// gets its own container, inside the one around it. The outer box
+/// narrows the width once and the inner one is measured against what is
+/// left, which is CSS's containing block - so neither pays the other's
+/// lead and neither overflows it.
+#[test]
+fn a_box_inside_a_box_is_inset_and_narrowed_by_the_one_around_it() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"div","style":{"padding":0.4,"backgroundColor":"#111111"},"content":["##,
+        r##"{"tag":"div","style":{"padding":0.2,"backgroundColor":"#222222"},"##,
+        r##""content":"inner"}]}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let found = block_boxes(&s);
+    assert_eq!(2, found.len(), "two blocks declared a box, so two boxes");
+    let (outer, inner) = (found[0], found[1]);
+    let gloss = one_body(&s);
+
+    // Outer padding 6, inner padding 3, one 30px line at the middle.
+    assert_eq!(BODY_LINE + 6.0, inner.advance, "the inner box, padding and all");
+    assert_eq!(BODY_LINE + 6.0 + 12.0, outer.advance, "and the outer around that");
+    assert_eq!(s.origin, block_box(outer).rect.x);
+    assert_eq!(s.content_w, block_box(outer).rect.w);
+    assert_eq!(s.origin + 6.0, block_box(inner).rect.x, "inset by the outer padding");
+    assert_eq!(s.content_w - 12.0, block_box(inner).rect.w, "and narrowed by both edges");
+    assert_eq!(block_box(outer).rect.y + 6.0, block_box(inner).rect.y);
+    assert_eq!(s.origin + 9.0, gloss.pen.0, "the text is inside both");
+    assert_eq!(s.content_w - 18.0, gloss.wrap_w);
+}
+
+/// The second: **a block containing a table.** A table is a
+/// `Piece::Table` and not a `Flow`, and a box's body is a list of pieces
+/// of every kind, so the grid is framed by exactly the same code that
+/// frames a paragraph.
+///
+/// The two boxes size differently, and that is CSS: a `div` is `display:
+/// block` and takes its container's width, while a table with no
+/// declared width shrinks to fit its own grid.
+#[test]
+fn a_box_around_a_table_frames_the_grid_it_holds() {
+    let s = gridded(
+        &format!(
+            r##"{{"tag":"div","style":{{"padding":0.5,"backgroundColor":"#111111"}},"content":[{}]}}"##,
+            table(&[tr(&["a"]), tr(&["b"])])
+        ),
+        424.0,
+    );
+    let outer = block_box(one_block_box(&s));
+    let g = grid(&s);
+    let pad = 0.5 * GRID_EM;
+
+    assert_eq!(pad + g.rect.h + pad, outer.rect.h, "the box wraps the whole grid");
+    assert_eq!(outer.rect.y + pad, g.rect.y, "which starts one padding inside it");
+    assert_eq!(s.origin + pad, g.pen.0, "and the grid is inset by the padding");
+    assert_eq!(s.content_w, outer.rect.w, "the block takes the width it was offered");
+    assert!(g.rect.w < outer.rect.w, "and the grid takes only what its cells need");
+}
+
+/// The third: **a block containing only an image.** An image is inline
+/// content - `Tag::Img` is inline and a gaiji is a character - so it
+/// takes room on a line rather than opening one, and the box frames that
+/// line. The image element itself advances nothing, because the
+/// paragraph it reserved its room in already stacked it.
+#[test]
+fn a_box_around_only_an_image_frames_the_line_it_sits_on() {
+    let p = imaged(
+        concat!(
+            r##"{"tag":"div","style":{"padding":0.2,"backgroundColor":"#111111"},"##,
+            r##""content":{"tag":"img","path":"g/x.png"}}"##
+        ),
+        &[("g/x.png", recorded(MediaFormat::Png, 20.0, 10.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let outer = block_box(one_block_box(&s));
+    let img = one_image(&s);
+    let host = image_host(&s);
+    let pad = 0.2 * BOX_EM;
+
+    assert_eq!(pad + host.rect.h + pad, outer.rect.h, "the box frames the image's line");
+    assert_eq!(s.origin + pad, host.pen.0);
+    assert_eq!(s.origin + pad, img.rect.x, "the asset composites inside the padding");
+    assert_eq!(0.0, img.advance, "and adds nothing to the box's height");
+}
+
+/// A boxed block **closes** its line, and it is the second tag shape
+/// that does; `summary` is the other. A box has to end somewhere: text
+/// written after the `div` is not the `div`'s content and a browser
+/// draws it outside the border.
+///
+/// And a box establishes a coordinate system for its **body** and for
+/// nothing else. The run after it takes the enclosing block's own
+/// context back - the list indent and the inherited alignment - which is
+/// the leak a container introduces if it does not restore what it
+/// borrowed.
+#[test]
+fn a_boxed_block_closes_its_line_and_gives_the_next_run_its_parents_context() {
+    let p = rich(&sc(concat!(
+        r##"{"tag":"ul","content":{"tag":"li","style":{"textAlign":"center"},"content":["##,
+        r##"{"tag":"div","style":{"padding":0.4,"backgroundColor":"#111111"},"##,
+        r##""content":"boxed"}," after"]}}"##
+    )));
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let runs = bodies(&s);
+
+    assert_eq!(
+        vec!["boxed", "after"],
+        runs.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        "the box closed its line, so the run after it is its own paragraph"
+    );
+    // Inside the box: the list's indent plus the box's padding.
+    assert_eq!(s.origin + LEVEL + 6.0, runs[0].pen.0);
+    // After it: the list's indent alone, and the item's own alignment.
+    assert_eq!(s.origin + LEVEL, runs[1].pen.0, "the indent came back");
+    assert_eq!(s.content_w - LEVEL, runs[1].wrap_w);
+    assert_eq!(Align::Center, runs[1].align, "and so did the inherited alignment");
+    assert_eq!(Align::Center, runs[0].align, "which the box's body had too");
+    // The bullet is spent on the box's own first line, at the list's
+    // content edge, and the run after it is not marked twice.
+    assert_eq!(s.origin + LEVEL - marker_w(&bullet()), marker_x(runs[0]));
+    assert!(runs[1].marker.is_empty(), "a marker is owed once");
 }
 
 /// The chosen rule, asserted: **adjacent siblings do not collapse.** A
@@ -1799,10 +2066,14 @@ fn adjacent_block_siblings_do_not_collapse_their_margins() {
     )));
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     let gloss = bodies(&s);
+    // Each margin is its own block's, so each is on that block's own
+    // box: a margin is never a paragraph's.
+    let outer = block_boxes(&s);
 
-    assert_eq!(2, gloss.len(), "two sibling blocks, two elements");
-    assert_eq!(BODY_LINE + 6.0, gloss[0].advance, "its own bottom margin");
-    assert_eq!(6.0 + BODY_LINE, gloss[1].advance, "and its own top margin");
+    assert_eq!(2, gloss.len(), "two sibling blocks, two paragraphs");
+    assert_eq!(2, outer.len(), "and two boxes, one per block that declared one");
+    assert_eq!(BODY_LINE + 6.0, outer[0].advance, "its own bottom margin");
+    assert_eq!(6.0 + BODY_LINE, outer[1].advance, "and its own top margin");
     assert_eq!(
         BODY_LINE + 6.0 + LINE_GAP + 6.0,
         gloss[1].pen.1 - gloss[0].pen.1,
@@ -1938,7 +2209,7 @@ fn a_rem_length_resolves_against_the_panel_and_not_the_nodes_own_em() {
     )));
     let s = laid_out(&p, 424.0, 4000.0, false, false);
 
-    let root = block_box(gloss_of(&s, "root")).style;
+    let root = block_box(box_around(&s, "root")).style;
     assert_eq!(Edges::all(0.4 * BOX_EM), root.padding, "0.4 of the panel's own em");
     assert_eq!(0.5 * BOX_EM, root.margin.right);
 
@@ -1946,7 +2217,7 @@ fn a_rem_length_resolves_against_the_panel_and_not_the_nodes_own_em() {
     assert_eq!(BOX_EM / 2.0, half.font_size, "this node halved its own text");
     assert_eq!(
         Edges::all(0.4 * BOX_EM),
-        block_box(half).style.padding,
+        block_box(box_around(&s, "half")).style.padding,
         "and its `rem` is unmoved by that: a root em is not an em"
     );
 }
@@ -1997,7 +2268,9 @@ fn edge_shorthands_expand_the_way_css_expands_them() {
             r#"{{"tag":"div","style":{{"padding":{decl}}},"content":"x"}}"#
         )));
         let s = laid_out(&p, 424.0, 4000.0, false, false);
-        let got = one_body(&s).block_box.map_or(Edges::default(), |b| b.style.padding);
+        let got = block_boxes(&s)
+            .first()
+            .map_or(Edges::default(), |e| block_box(e).style.padding);
         assert_eq!(Edges { top, right, bottom, left }, got, "padding: {decl}");
     }
 
@@ -2022,8 +2295,9 @@ fn edge_shorthands_expand_the_way_css_expands_them() {
             r#"{{"tag":"div","style":{{"borderWidth":0.2,"borderStyle":"{decl}"}},"content":"x"}}"#
         )));
         let s = laid_out(&p, 424.0, 4000.0, false, false);
-        let gloss = one_body(&s);
-        let got = gloss.block_box.map_or(Edges::default(), |b| b.style.border_style);
+        let got = block_boxes(&s)
+            .first()
+            .map_or(Edges::default(), |e| block_box(e).style.border_style);
         assert_eq!(want, got, "borderStyle: {decl}");
     }
 }
@@ -2039,10 +2313,15 @@ fn a_one_sided_border_takes_space_on_that_side_alone() {
     )));
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     let gloss = one_body(&s);
+    let outer = one_block_box(&s);
 
-    let used = block_box(gloss).style.border_used();
+    let used = block_box(outer).style.border_used();
     assert_eq!(Edges { top: 0.0, right: 0.0, bottom: 0.0, left: 3.0 }, used);
-    assert_eq!(BODY_LINE, gloss.advance, "a vertical border of nothing adds nothing");
+    assert_eq!(
+        BODY_LINE,
+        outer.advance,
+        "a vertical border of nothing adds nothing to the box's own height"
+    );
     assert_eq!(3.0, gloss.pen.0 - s.origin, "and the text starts inside the rule");
 }
 
@@ -2573,8 +2852,9 @@ fn an_items_own_padding_adds_to_the_level_indent() {
     assert_eq!(s.content_w - LEVEL - padding, item.wrap_w);
     // The indent is the list's, so it shifts the item's border box; the
     // padding is the item's, so it insets the text inside that box.
-    assert_eq!(s.origin + LEVEL, block_box(item).rect.x);
-    assert_eq!(s.content_w - LEVEL, block_box(item).rect.w);
+    let outer = one_block_box(&s);
+    assert_eq!(s.origin + LEVEL, block_box(outer).rect.x);
+    assert_eq!(s.content_w - LEVEL, block_box(outer).rect.w);
     // And the marker hangs off the *list's* content edge, so the item's
     // own padding moves its text and leaves its bullet where the list
     // drew it - a browser's `outside` marker to the pixel.
@@ -2631,7 +2911,7 @@ fn stack_items_false_joins_a_list_into_one_separated_paragraph() {
             .into_iter()
             .filter_map(|piece| match piece {
                 Piece::Flow(flow) => Some(flow),
-                Piece::Table(_) => None,
+                Piece::Table(_) | Piece::Boxed(_) => None,
             })
             .collect()
     };
@@ -5126,21 +5406,20 @@ fn the_jitendex_pill_reaches_the_scene_as_a_box() {
 /// `styles.css`, `rem` and unreadable `calc()` and all. 101 360 of the
 /// library's 435 448 entries carry one.
 ///
-/// Two facts a reader should not have to rediscover. The `border-width` is
-/// `calc(3em / var(--font-size-no-units, 14))`, which no part of this build
-/// reads, so the box declares a left `solid` style over a used width of
-/// zero and draws no rule - which leaves margin and padding as the whole of
-/// what it does. And on real data the box is still not *drawn*, because a
-/// real extra-box holds two `div`s and nothing else, so the paragraph it
-/// opens is flushed empty and an ancestor's box over its child blocks needs
-/// the box-tree composition ticket 08 recorded as absent. What this test
-/// pins is the half `rem` owns: the lengths resolve, against the panel.
+/// One fact a reader should not have to rediscover: the `border-width`
+/// is `calc(3em / var(--font-size-no-units, 14))`, which no part of this
+/// build reads, so the box declares a left `solid` style over a used
+/// width of zero and draws no rule - which leaves margin and padding as
+/// the whole of what it does.
+///
+/// The second half of this test is the real shape, and it used to draw
+/// **nothing**: a real extra-box holds two `div`s and nothing else, so
+/// the paragraph it opened was flushed empty and its box went with it. A
+/// block's box is now a container around every paragraph the block
+/// emits, so the box reaches the scene once and frames both children.
 #[test]
 fn jitendexs_extra_box_resolves_its_rem_lengths() {
-    let p = card_with(vec![css_tree(
-        "Jitendex.org",
-        &sc(r#"{"tag":"div","data":{"class":"extra-box","content":"xref"},"content":"See also"}"#),
-        "div[data-sc-class=\"extra-box\"] {
+    let sheet = "div[data-sc-class=\"extra-box\"] {
              border-radius: 0.4rem;
              border-style: none none none solid;
              border-width: calc(3em / var(--font-size-no-units, 14));
@@ -5148,10 +5427,14 @@ fn jitendexs_extra_box_resolves_its_rem_lengths() {
              margin-top: 0.5rem;
              padding: 0.5rem;
              width: fit-content;
-         }",
+         }";
+    let p = card_with(vec![css_tree(
+        "Jitendex.org",
+        &sc(r#"{"tag":"div","data":{"class":"extra-box","content":"xref"},"content":"See also"}"#),
+        sheet,
     )]);
     let s = laid_out(&p, 400.0, 4000.0, false, false);
-    let style = block_box(gloss_of(&s, "See also")).style;
+    let style = block_box(box_around(&s, "See also")).style;
 
     assert_eq!(0.4 * BOX_EM, style.radius, "border-radius: 0.4rem");
     assert_eq!(Edges::all(0.5 * BOX_EM), style.padding, "padding: 0.5rem");
@@ -5167,6 +5450,31 @@ fn jitendexs_extra_box_resolves_its_rem_lengths() {
     );
     assert!(style.spaces(), "margin and padding are the whole of this box");
     assert!(!style.paints(), "and it has no ink at all");
+
+    // The shape the library actually ships: the box holds `div`s and no
+    // text of its own.
+    let real = card_with(vec![css_tree(
+        "Jitendex.org",
+        &sc(concat!(
+            r#"{"tag":"div","data":{"class":"extra-box","content":"xref"},"content":["#,
+            r#"{"tag":"div","content":"See also"},"#,
+            r#"{"tag":"div","content":"猫"}]}"#
+        )),
+        sheet,
+    )]);
+    let s = laid_out(&real, 400.0, 4000.0, false, false);
+    let outer = one_block_box(&s);
+    let pad = 0.5 * BOX_EM;
+
+    assert_eq!(style, block_box(outer).style, "the same resolved box, now reaching the scene");
+    assert_eq!(
+        pad + 2.0 * BODY_LINE + LINE_GAP + pad,
+        block_box(outer).rect.h,
+        "one border box around both children",
+    );
+    for para in bodies(&s) {
+        assert_eq!(s.origin + pad, para.pen.0, "and both are inset by its padding");
+    }
 }
 
 /// The setting from ticket 14 governs a stylesheet declaration exactly as it

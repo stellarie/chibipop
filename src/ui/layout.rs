@@ -338,6 +338,22 @@ pub enum ElemKind {
     /// paragraph it sits inside
     /// already reserved its line.
     Image,
+    /// One block's own box.
+    ///
+    /// Its `rect` and its `block_box`
+    /// are the block's border box, and
+    /// it is textless: the paragraphs
+    /// the block emits are the
+    /// elements that follow it, each
+    /// with its own address. So a
+    /// bordered `div` holding three
+    /// paragraphs is one border around
+    /// three runs, which is what a
+    /// browser draws. It leads them in
+    /// draw order, so a declared
+    /// background sits under every one
+    /// of them.
+    Block,
     /// A table's block container.
     ///
     /// Its `rect` is the whole grid,
@@ -375,6 +391,7 @@ impl ElemKind {
             ElemKind::Headword => "Headword",
             ElemKind::BackButton => "BackButton",
             ElemKind::Image => "Image",
+            ElemKind::Block => "Block",
             ElemKind::Table => "Table",
             ElemKind::Cell => "Cell",
         }
@@ -1633,6 +1650,11 @@ pub fn scene(
                 reserved_w = 0.0;
                 pass.table(m, grid, (origin, origin + y), avail_w)?.1
             }
+            Elem::Boxed(boxed) => {
+                let avail_w = (content_w - reserved_w).max(1.0);
+                reserved_w = 0.0;
+                pass.boxed(m, boxed, (origin, origin + y), avail_w)?.1
+            }
             Elem::BackButton(line) => {
                 let met = measure_line(m, font, line, content_w, &mut pass.measured)?;
                 let h = met.h;
@@ -1755,18 +1777,19 @@ impl<'a> Pass<'a> {
     /// One gloss paragraph, measured,
     /// placed and pushed.
     ///
-    /// `at` is the top-left corner of
-    /// the paragraph's margin box,
-    /// before its own `top_gap`, and
-    /// `avail_w` is what the container
-    /// around it offers. Two answers
+    /// `at` is the paragraph's own
+    /// top-left, before its `top_gap`,
+    /// and `avail_w` is what the
+    /// container around it offers -
+    /// already narrowed by any box
+    /// that container is. Two answers
     /// come back: the width the
-    /// paragraph would like - its ink
-    /// plus everything its box puts
-    /// beside it, which is what a
-    /// table column's demand is built
-    /// from - and the y the walk
-    /// advances by, its gap included.
+    /// paragraph would like, its ink
+    /// plus the gutter its list
+    /// reserved, which is what a table
+    /// column's demand is built from -
+    /// and the y the walk advances by,
+    /// its gap included.
     fn gloss(
         &mut self,
         m: &mut dyn TextMeasure,
@@ -1775,36 +1798,36 @@ impl<'a> Pass<'a> {
         avail_w: f32,
     ) -> Result<(f32, f32), MeasureError> {
         let (font, theme) = (self.font, self.theme);
-        // The box first: its margin,
-        // border and padding decide
-        // the width the paragraph is
-        // measured at, so they cannot
-        // be applied afterwards. A
-        // paragraph carrying no box
-        // gets `avail_w` and the pen
-        // it always got, which is why
-        // no geometry golden moves.
-        let bx = flow.block.style;
-        let (margin, border, padding) = (bx.margin, bx.border_used(), bx.padding);
-        // Every list level above it,
-        // added up and *outside* the
-        // box: the indent is the
-        // list's own padding
-        // (`--list-padding1`), so it
-        // shifts an item's border box
-        // where the item's own padding
-        // insets the text inside that
-        // box. [`Block::indent`] says
-        // why it cannot ride in the
-        // box itself.
+        // A paragraph carries no box.
+        // A block's box wraps *every*
+        // paragraph the block emits
+        // rather than the first one, so
+        // it is a container of its own
+        // ([`Boxed`], placed by
+        // [`Pass::boxed`]) and the
+        // paragraphs inside it are
+        // measured at the width that
+        // container has already
+        // narrowed.
+        //
+        // What is left for a paragraph
+        // to pay is the list indent:
+        // the list's own
+        // `--list-padding1`, inherited
+        // rather than declared
+        // ([`Block::indent`]). It
+        // shifts the pen and narrows
+        // the wrap, because every line
+        // of a wrapped item - the first
+        // and each continuation -
+        // starts at the item's own
+        // indent.
+        debug_assert!(
+            !flow.block.style.exists(),
+            "a block's box belongs to its container, never to one of its paragraphs"
+        );
         let indent = flow.block.indent;
-        let lead = Edges {
-            top: margin.top + border.top + padding.top,
-            right: margin.right + border.right + padding.right,
-            bottom: margin.bottom + border.bottom + padding.bottom,
-            left: indent + margin.left + border.left + padding.left,
-        };
-        let wrap_w = (avail_w - lead.horizontal()).max(1.0);
+        let wrap_w = (avail_w - indent).max(1.0);
 
         // The whole paragraph in one
         // request: its spans wrap
@@ -1853,12 +1876,8 @@ impl<'a> Pass<'a> {
         let marks = measure_markers(m, font, flow, wrap_w)?;
         let met = self.measured.metrics;
         let top = at.1 + flow.top_gap;
-        // Margins are in the advance,
-        // and are *not* collapsed
-        // against a sibling's: see
-        // [`Flow::block`].
-        let h = lead.top + met.h + padding.bottom + border.bottom + margin.bottom;
-        let pen = (at.0 + lead.left, top + lead.top);
+        let h = met.h;
+        let pen = (at.0 + indent, top);
         // One offset per line, so a
         // centred paragraph that
         // wrapped centres each of its
@@ -1873,7 +1892,7 @@ impl<'a> Pass<'a> {
         // Each marker in the gutter of
         // the list that owed it, beside
         // the item's first line.
-        let marker = place_markers(flow, &marks, &self.measured, lead.left, pen.0);
+        let marker = place_markers(flow, &marks, &self.measured, indent, pen.0);
         // Each image over the spacer
         // run that bought its room.
         let images = place_images(flow, &self.measured, pen, line_at);
@@ -2021,15 +2040,7 @@ impl<'a> Pass<'a> {
             spans,
             ruby,
             marker,
-            block_box: bx.exists().then(|| ElemBox {
-                rect: SceneRect {
-                    x: at.0 + indent + margin.left,
-                    y: top + margin.top,
-                    w: (avail_w - indent - margin.horizontal()).max(0.0),
-                    h: border.vertical() + padding.vertical() + met.h,
-                },
-                style: bx,
-            }),
+            block_box: None,
             inline_boxes,
             origin: Some(GlossOrigin {
                 dict_id: flow.dict_id,
@@ -2046,7 +2057,99 @@ impl<'a> Pass<'a> {
         // the riser grew is already
         // in `h`.
         self.out.extend(images);
-        Ok((lead.horizontal() + ink_w, flow.top_gap + h))
+        Ok((indent + ink_w, flow.top_gap + h))
+    }
+
+    /// One block's box, around every
+    /// piece inside it.
+    ///
+    /// `at` is the top-left of the
+    /// box's margin box before its own
+    /// `top_gap` and `avail_w` is what
+    /// the container around it offers -
+    /// the same two arguments a
+    /// paragraph takes, so a box nests
+    /// inside a box without either
+    /// knowing.
+    ///
+    /// Ticket 08's own arithmetic with
+    /// the body's total advance where a
+    /// paragraph's height used to be,
+    /// which is what makes one box
+    /// around three paragraphs the same
+    /// code as one box around one. The
+    /// box element leads its body in
+    /// draw order, so a declared
+    /// background sits under every
+    /// paragraph it frames; its height
+    /// is filled in afterwards, because
+    /// a box is as tall as its content
+    /// and that content is measured at a
+    /// width this box decides.
+    ///
+    /// Full width, and not the
+    /// shrink-to-fit [`Pass::table`]
+    /// gives a grid: `div` is `display:
+    /// block` and a block box takes the
+    /// width its container offers.
+    fn boxed(
+        &mut self,
+        m: &mut dyn TextMeasure,
+        boxed: &'a Boxed,
+        at: (f32, f32),
+        avail_w: f32,
+    ) -> Result<(f32, f32), MeasureError> {
+        let bx = boxed.block.style;
+        let (margin, border, padding) = (bx.margin, bx.border_used(), bx.padding);
+        // Outside the box, as it is for
+        // a paragraph and for a grid:
+        // the indent is the list's own
+        // padding, so it shifts this
+        // box where the box's own
+        // padding insets the content
+        // inside it.
+        let indent = boxed.block.indent;
+        let lead = Edges {
+            top: margin.top + border.top + padding.top,
+            right: margin.right + border.right + padding.right,
+            bottom: margin.bottom + border.bottom + padding.bottom,
+            left: indent + margin.left + border.left + padding.left,
+        };
+        // The box is resolved before
+        // anything in it is measured,
+        // and this is the whole of why
+        // it has to be: a box spanning
+        // several paragraphs must inset
+        // every one of them, so it
+        // narrows the width once, here,
+        // and its body never learns it
+        // is inside one.
+        let avail = (avail_w - lead.horizontal()).max(1.0);
+        let top = at.1 + boxed.top_gap;
+        let (x0, y0) = (at.0 + lead.left, top + lead.top);
+        let box_at = self.out.len();
+        self.out.push(box_elem(ElemKind::Block, boxed.base, boxed.block.align, boxed.origin()));
+        let (want, body_h) = self.block(m, &boxed.body, (x0, y0), avail)?;
+        let h = lead.top + body_h + padding.bottom + border.bottom + margin.bottom;
+        let rect = SceneRect {
+            x: at.0 + indent + margin.left,
+            y: top + margin.top,
+            w: (avail_w - indent - margin.horizontal()).max(0.0),
+            h: border.vertical() + padding.vertical() + body_h,
+        };
+        let elem = &mut self.out[box_at];
+        elem.top_gap = boxed.top_gap;
+        elem.wrap_w = avail;
+        elem.pen = (x0, y0);
+        elem.rect = rect;
+        elem.advance = h;
+        // Unconditional, where a
+        // paragraph's was conditional:
+        // only a block that declared a
+        // box becomes one of these
+        // ([`Boxed::block`]).
+        elem.block_box = Some(ElemBox { rect, style: bx });
+        Ok((lead.horizontal() + want, boxed.top_gap + h))
     }
 
     /// A run of pieces, stacked.
@@ -2069,6 +2172,7 @@ impl<'a> Pass<'a> {
             let (w, advance) = match piece {
                 Piece::Flow(flow) => self.gloss(m, flow, (at.0, at.1 + y), avail_w)?,
                 Piece::Table(grid) => self.table(m, grid, (at.0, at.1 + y), avail_w)?,
+                Piece::Boxed(boxed) => self.boxed(m, boxed, (at.0, at.1 + y), avail_w)?,
             };
             want = want.max(w);
             y += advance;
@@ -2426,24 +2530,42 @@ const MAX_SPAN: usize = 1000;
 
 /// One piece of a row's gloss.
 ///
-/// A table is not a paragraph and
-/// cannot be flattened into one - its
-/// cells are laid out on a grid, and
-/// the grid has to measure each one
-/// separately - so the block half of
-/// the inline pass emits a sum type
-/// rather than a list of paragraphs.
+/// A small tree rather than a flat
+/// list of paragraphs, because two of
+/// the three shapes are containers. A
+/// table's cells sit on a grid and
+/// each has to be measured
+/// separately, and a block's box
+/// wraps *every* paragraph the block
+/// emits rather than its first - so
+/// the block half of the inline pass
+/// emits this sum type and
+/// [`Pass::block`] walks it.
 enum Piece {
     Flow(Flow),
     Table(Grid),
+    /// Several pieces inside one
+    /// block's box.
+    Boxed(Boxed),
 }
 
 impl Piece {
     /// Sets the gap owed above it.
+    ///
+    /// It stops at a box rather than
+    /// descending into one: the gap
+    /// above a box goes *outside* it,
+    /// and [`Paragraphs::wrap`] has
+    /// already spaced the body inside
+    /// it - whose first paragraph is
+    /// separated from the border by
+    /// the box's padding and by
+    /// nothing else.
     fn top_gap(&mut self, gap: f32) {
         match self {
             Piece::Flow(flow) => flow.top_gap = gap,
             Piece::Table(grid) => grid.top_gap = gap,
+            Piece::Boxed(boxed) => boxed.top_gap = gap,
         }
     }
 
@@ -2473,7 +2595,93 @@ impl Piece {
                     }
                 }
             }
+            Piece::Boxed(boxed) => {
+                boxed.dict_id = dict_id;
+                boxed.entry_id = entry_id;
+                for piece in &mut boxed.body {
+                    piece.stamp(dict_id, entry_id);
+                }
+            }
         }
+    }
+}
+
+/// One block's box, and every piece
+/// inside it.
+///
+/// **Where a block's box belongs.** A
+/// box wraps all of its block's
+/// content, exactly as a browser
+/// draws it: a bordered `div` holding
+/// three paragraphs draws one border
+/// around all three - not one around
+/// each, and not one around the
+/// first. So a block that declares a
+/// box becomes a container, and the
+/// paragraphs it emits become the
+/// container's body.
+///
+/// Two invariants make a container
+/// the *only* shape that can hold
+/// such a box. The box has to be
+/// resolved **before** anything
+/// inside it is measured, because its
+/// left and right lead decide the
+/// wrap width (`wrap_w = avail_w -
+/// lead.horizontal()`) - so it cannot
+/// be discovered afterwards from
+/// where its content landed. And
+/// **nothing may edit a line box
+/// after the wrap**, because both
+/// bins re-measure an element's own
+/// spans to paint it - so a box
+/// cannot be grown later by
+/// rewriting the paragraph that first
+/// claimed it. A container satisfies
+/// both: it narrows the width on the
+/// way in and reads only the total
+/// advance on the way out
+/// ([`Pass::boxed`]).
+///
+/// The shape a table already is, for
+/// the same reason: [`Cell::body`] is
+/// a `Vec<Piece>` too, because a cell
+/// is a block container as well.
+struct Boxed {
+    /// Gap owed above it, outside its
+    /// own margin.
+    top_gap: f32,
+    /// Its own box, the list indent
+    /// outside that box, and what its
+    /// body inherits.
+    ///
+    /// `style.exists()` always holds:
+    /// [`Paragraphs::wrap`] builds one
+    /// of these only for a block that
+    /// declared a box, so a gloss
+    /// carrying no box style produces
+    /// no container at all and
+    /// measures byte for byte as it
+    /// did before this pass existed.
+    block: Block,
+    /// What the box wraps, in draw
+    /// order: paragraphs, tables, and
+    /// nested boxes.
+    body: Vec<Piece>,
+    /// The style its own element draws
+    /// in. It carries no text, so only
+    /// the cull slack rides on this.
+    base: Inline,
+    path: Option<NodePath>,
+    dict_id: i64,
+    entry_id: i64,
+}
+
+impl Boxed {
+    /// Where in its dictionary it came
+    /// from.
+    fn origin(&self) -> GlossOrigin {
+        GlossOrigin { dict_id: self.dict_id, entry_id: self.entry_id, path: self.path }
     }
 }
 
@@ -3832,6 +4040,15 @@ enum Elem {
     /// the only element that produces
     /// more than one [`SceneElem`].
     Table(Grid),
+    /// One boxed block of a gloss
+    /// tree.
+    ///
+    /// A container rather than a run:
+    /// its box wraps every paragraph
+    /// inside it, and everything in it
+    /// is measured at the width the
+    /// box left ([`Pass::boxed`]).
+    Boxed(Boxed),
     /// Navigate back in history.
     BackButton(Line),
 }
@@ -5339,31 +5556,68 @@ impl Paragraphs<'_> {
         }
         let inline = self.styled(id, ctx.inline);
         let block = self.boxed(id, ctx.block, inline);
-        // A block *opens* a line and
-        // never closes one, exactly as
-        // the plain-text walk's mark
-        // does: text after a block joins
-        // the block's own paragraph -
-        // and so does the block's own
-        // box, which is why one
-        // paragraph carries one box.
+        // **Where a block's box goes**,
+        // and it is not "the first line
+        // the block opens". A box wraps
+        // all of its block's content, as
+        // a browser draws it: a bordered
+        // `div` holding three paragraphs
+        // draws one border around all
+        // three. So a block that
+        // declares one takes its whole
+        // subtree off to one side and
+        // hands the pieces back inside a
+        // container ([`Boxed`],
+        // [`Paragraphs::wrap`]), which
+        // is the only shape that can
+        // carry a box over more than one
+        // paragraph.
         //
-        // The box follows the **tag**,
-        // though, and not the line
-        // break. `has_marker` is a
-        // line-break rule inherited from
-        // the plain-text walk: ticket 01
-        // gave a `data.content` node a
-        // block mark because that mark
-        // is what separated senses
-        // before a tree existed. What
-        // decides where a box goes is
-        // the schema's own block/inline
-        // division, by tag, and `span`
-        // is inline - so a `span`
-        // carrying `data.content` opens
-        // its line with no box of its
-        // own and draws its box once,
+        // Hanging the box on the
+        // paragraph the block opened
+        // instead lost it outright
+        // whenever the block's *first*
+        // child opened a line of its
+        // own: the paragraph the block
+        // opened was still empty when
+        // that child's `open` flushed
+        // it, and [`Paragraphs::flush`]
+        // drops an empty paragraph and
+        // its box with it, so a
+        // bordered, filled `div` drew
+        // nothing at all. Jitendex's
+        // `div[data-sc-class="extra-box"]`
+        // over `data.content` children
+        // is exactly that shape.
+        if node.tag.is_block() && block.style.exists() {
+            return self.wrap(id, ctx, block, inline);
+        }
+        // A block carrying no box
+        // *opens* a line and never
+        // closes one, exactly as the
+        // plain-text walk's mark does:
+        // text after such a block joins
+        // the block's own paragraph. A
+        // boxed one closes its line, for
+        // the reason [`Paragraphs::wrap`]
+        // gives.
+        //
+        // The line break follows the
+        // **tag** or the marker; the box
+        // follows the tag alone.
+        // `has_marker` is a line-break
+        // rule inherited from the
+        // plain-text walk: ticket 01 gave
+        // a `data.content` node a block
+        // mark because that mark is what
+        // separated senses before a tree
+        // existed. What decides where a
+        // box goes is the schema's own
+        // block/inline division, by tag,
+        // and `span` is inline - so a
+        // `span` carrying `data.content`
+        // opens its line with no box of
+        // its own and draws its box once,
         // below, as the pill it is.
         // Answering both questions with
         // one test gave such a node the
@@ -5409,6 +5663,158 @@ impl Paragraphs<'_> {
             return self.list(id, next, node.tag == Tag::Ol);
         }
         self.children(id, next);
+    }
+
+    /// One block that declared a box:
+    /// its own pieces, inside it.
+    ///
+    /// The box wraps all of them
+    /// ([`Boxed`]), so the block's
+    /// subtree is collected off to one
+    /// side - exactly as a table cell's
+    /// is ([`Paragraphs::cell`]) - and
+    /// handed back as one piece.
+    ///
+    /// **A boxed block closes its own
+    /// line**, and it is the second tag
+    /// shape that does; `summary` is the
+    /// other. Everywhere else a block
+    /// only *opens* a line, the rule the
+    /// plain-text walk shares, and text
+    /// written after one joins the
+    /// block's paragraph. A box has to
+    /// end somewhere: text after the
+    /// `div` is not the `div`'s content
+    /// and a browser draws it outside
+    /// the border, so the paragraph a
+    /// box closes with cannot stay open
+    /// to collect it. The divergence
+    /// from `gloss::plain` is bounded to
+    /// a *boxed* block followed by
+    /// inline text at the same level,
+    /// and there a browser agrees with
+    /// this walk rather than with the
+    /// mark.
+    fn wrap(&mut self, id: NodeId, ctx: Ctx, block: Block, inline: Inline) {
+        let doc = self.doc;
+        let node = *doc.node(id);
+        // The line above the box ends
+        // above it.
+        self.flush();
+        let inner = Ctx {
+            inline,
+            // The box and the list indent
+            // are paid once, by the box:
+            // its body sits inside a
+            // coordinate system the box
+            // established, exactly as a
+            // table cell's body does
+            // ([`Paragraphs::table`]).
+            block: Block { indent: 0.0, ..block.inherited() },
+            link: self.link_of(id, ctx.link),
+            path: ctx.path,
+        };
+        // A marker owed from outside is
+        // owed to a line *inside* this
+        // box - `<li style="paddingLeft">`
+        // is real and Jitendex writes it
+        // - and a marker's indent is
+        // measured from the content edge
+        // of whatever the paragraph it
+        // lands in sits in. That edge has
+        // just moved in by this box's own
+        // lead, so the debt moves with
+        // it: the bullet still hangs off
+        // the *list's* content edge and
+        // not off the item's padding
+        // ([`place_markers`]).
+        let lead_left = block.indent
+            + block.style.margin.left
+            + block.style.border_used().left
+            + block.style.padding.left;
+        for mark in &mut self.pending_marker {
+            mark.indent -= lead_left;
+        }
+        // Off to one side, because these
+        // pieces belong to the box and
+        // not to the stream the panel is
+        // stacking.
+        let outer = std::mem::take(&mut self.out);
+        self.open(ctx.path, inner.block);
+        // The two things `node` would
+        // have done next, done here
+        // instead: a list marks and
+        // indents its own children, so it
+        // takes them over from
+        // `children`.
+        if node.kind == Kind::List {
+            self.list(id, inner, node.tag == Tag::Ol);
+        } else {
+            self.children(id, inner);
+        }
+        self.flush();
+        let mut body = std::mem::replace(&mut self.out, outer);
+        // A debt the box did not spend
+        // goes back to the coordinate
+        // system it was owed in: the
+        // paragraph reopened below
+        // belongs to the block *around*
+        // this box.
+        for mark in &mut self.pending_marker {
+            mark.indent += lead_left;
+        }
+        for (i, piece) in body.iter_mut().enumerate() {
+            // The box's first paragraph
+            // starts at the box's own
+            // padding; the ones under it
+            // are spaced as the panel
+            // spaces every other stacked
+            // paragraph. Charging the
+            // panel's gap above the first
+            // one as well would pay it
+            // twice - once outside the
+            // border and once inside it.
+            piece.top_gap(if i == 0 { 0.0 } else { LINE_GAP });
+        }
+        // A box around nothing draws
+        // nothing, which is what
+        // [`Paragraphs::flush`] already
+        // did with a `div` holding only
+        // whitespace: it pays no margin
+        // and its address belongs to no
+        // element.
+        if !body.is_empty() {
+            self.out.push(Piece::Boxed(Boxed {
+                top_gap: 0.0,
+                block,
+                body,
+                base: inline,
+                path: ctx.path,
+                dict_id: 0,
+                entry_id: 0,
+            }));
+        }
+        // The box closed its line, so a
+        // run written after it opens a
+        // fresh paragraph belonging to
+        // the block *around* the box -
+        // the same restoration
+        // [`Paragraphs::children`] does
+        // after a `summary`. Without it
+        // the next run would inherit the
+        // box's own inner context, which
+        // has no list indent and no
+        // alignment: a box establishes a
+        // coordinate system for its body
+        // and for nothing else.
+        //
+        // `ctx.path` addresses that
+        // paragraph to this block, which
+        // is the address it already had:
+        // before a box was a container,
+        // the run after a block joined
+        // the block's own paragraph.
+        self.open(ctx.path, ctx.block);
     }
 
     /// One inline box's own run, kept
@@ -7531,6 +7937,7 @@ fn build_elements(
                 out.extend(pieces.into_iter().map(|piece| match piece {
                     Piece::Flow(flow) => Elem::Gloss(flow),
                     Piece::Table(grid) => Elem::Table(grid),
+                    Piece::Boxed(boxed) => Elem::Boxed(boxed),
                 }));
             }
         }

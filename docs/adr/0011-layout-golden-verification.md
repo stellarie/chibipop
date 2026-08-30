@@ -109,8 +109,8 @@ something about a dictionary somebody owns:
 9. **Bordered pill** — the box record, both mechanisms. A `css` variant with
    Jitendex's own `span[data-sc-class="tag"]` pill, and an `inline` variant carrying
    a bordered block, a marker-carrying spacing-only inline box that resolves to no
-   box, and the block whose own box reaches nothing because its first child opens a
-   line (see the finding below).
+   box, and the same bordered block with the marker span *first* — the shape that
+   used to lose its box entirely (see the finding below).
 10. **Nested list** — hanging markers, two levels. A `jitendex` variant with the real
     `ul[sense-groups]`/`ol`/`ul[glossary]` tree, its two CSS list rules, its example
     pair and its attribution line; a `plain` variant with the default bullet and
@@ -128,11 +128,18 @@ something about a dictionary somebody owns:
 `fixtures()` and this list grow together, and
 `the_fixture_set_is_the_thirteen_from_adr_0011` pins the names against it.
 
-### One finding this set records rather than fixes
+### One finding this set recorded, and the fix that closed it
 
 In the `bordered_pill` `inline` variant, a block whose **first** child carries a
-`data.content` marker loses its own box: the marker opens a paragraph, the block box
-attaches to the first paragraph the block emits, and there is none. The same block
-with one text node before the marker keeps its box. The goldens pin the current
-answer for both shapes so that a later fix moves a named coordinate instead of
-arriving unnoticed.
+`data.content` marker used to lose its own box: the marker opened a paragraph, the
+block box attached to the first paragraph the block emitted, and there was none. The
+same block with one text node before the marker kept its box. Both shapes sit side by
+side in that one variant, which is what the fixture was authored for.
+
+**Closed.** A block's box is now a container around *every* paragraph the block emits
+(`layout::Boxed`), which is what a browser draws: a bordered `div` holding three
+paragraphs draws one border around all three. So the fixture's two shapes now agree —
+each `div` draws one box — and the variant's element list grew by one textless
+`Block` element per boxed `div`, ahead of the paragraphs it frames. No golden was
+blessed: this variant is one of the thirteen still awaiting the `windows-2025`
+dispatch, so the capture will record the fixed answer the first time it runs.

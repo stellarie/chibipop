@@ -943,6 +943,96 @@ mod tests {
         );
     }
 
+    /// A block's box is a container element that **leads** the
+    /// paragraphs it frames, so its fill has to land under a *later*
+    /// element's text and not only under its own. Built through
+    /// `layout::scene` rather than by hand, because what this proves is
+    /// that the two passes agree about draw order on the shape that
+    /// used to draw no box at all: a bordered, filled `div` whose first
+    /// child carries a `data.content` marker.
+    #[test]
+    fn a_blocks_box_paints_under_the_paragraphs_that_follow_it() {
+        let theme = Theme::dark();
+        let body = concat!(
+            r##"[{"type":"structured-content","content":"##,
+            r##"{"tag":"div","style":{"padding":0.2,"backgroundColor":"#ff0000"},"##,
+            r##""content":[{"tag":"span","data":{"content":"misc-info"},"content":"one"},"##,
+            r##"{"tag":"div","content":"two"}]}}]"##
+        );
+        let p = chibipop::present::Presentation {
+            top: Some(chibipop::present::Card {
+                written: None,
+                reading: None,
+                pos: Vec::new(),
+                freq: None,
+                blocks: vec![chibipop::present::GlossBlock::parse("d", body)],
+                match_len: 1,
+            }),
+            collapsed: Vec::new(),
+            all_cards: Vec::new(),
+            sentence: None,
+        };
+        let mut text = Fake::default();
+        let scene = chibipop::ui::layout::scene(
+            &chibipop::ui::layout::SceneRequest {
+                presentation: &p,
+                theme: &theme,
+                max_w: 200.0,
+                max_h: 400.0,
+                show_back: false,
+                side_panel: false,
+                render: chibipop::ui::layout::RenderSettings::default(),
+                anki: None,
+            },
+            &mut text,
+        )
+        .expect("the fake never refuses a run");
+
+        let boxes: Vec<&SceneElem> =
+            scene.elems.iter().filter(|e| e.kind == ElemKind::Block).collect();
+        assert_eq!(1, boxes.len(), "one boxed block, one container element");
+        let frame = boxes[0].block_box.expect("a container always carries its box");
+        let at = scene
+            .elems
+            .iter()
+            .position(|e| e.kind == ElemKind::Block)
+            .expect("the container is in the scene");
+        let after: Vec<&SceneElem> = scene.elems[at + 1..]
+            .iter()
+            .filter(|e| e.kind == ElemKind::Text)
+            .collect();
+        assert_eq!(2, after.len(), "two paragraphs, both after the box");
+
+        let mut pix = Pixmap::new(200, 400).unwrap();
+        text.runs.clear();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
+
+        // The fill is under both paragraphs' pens, and it is the box's
+        // colour rather than the panel's.
+        for para in &after {
+            let (x, y) = (para.pen.0 as u32 + 1, para.pen.1 as u32 + 1);
+            let px = pix.pixel(x, y).unwrap();
+            assert_eq!(
+                faded_red((255, 0, 0)),
+                px.red(),
+                "the fill covers the paragraph at ({x}, {y})"
+            );
+        }
+        // And it stops where the border box stops.
+        let below = (frame.rect.y + frame.rect.h + 2.0) as u32;
+        assert_eq!(
+            faded_red(theme.background),
+            pix.pixel(frame.rect.x as u32 + 4, below).unwrap().red(),
+            "and nothing under it"
+        );
+        // Each boxed paragraph drawn once, and the box drew none of
+        // them twice: the container is textless.
+        for para in &after {
+            let drawn = text.runs.iter().filter(|r| r.text() == para.text).count();
+            assert_eq!(1, drawn, "{:?} drawn once", para.text);
+        }
+    }
+
     /// The scene decides the weight.
     ///
     /// A run painted in a weight core

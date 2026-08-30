@@ -330,8 +330,9 @@ fn elem_json(i: usize, e: &SceneElem, text: &Text, theme: &Theme, scale: f32) ->
 /// its own hit rects.
 ///
 /// `null` for an element with no spans:
-/// a rule, a table's own box, and a
-/// cell's border have no text to wrap.
+/// a rule, a block's own box, a
+/// table's own box, and a cell's
+/// border have no text to wrap.
 fn measured_json(text: &Text, theme: &Theme, e: &SceneElem, scale: f32) -> Result<Value> {
     if e.spans.is_empty() {
         return Ok(Value::Null);
@@ -926,15 +927,20 @@ fn styled_spans() -> Fixture {
 ///   inline box: a pill keeps its place on its line rather than breaking
 ///   one.
 /// - `inline` is the other half, three answers in one tree. Its first
-///   `div` is a genuine bordered block, and its box lands on the first
-///   paragraph that block emits. The `span` inside it carries a
-///   `data.content` marker *and* a box that only spaces (padding and a
-///   right margin, no fill and no border), so it opens a line - that is
-///   ticket 01's sense separator - and then resolves to **no box at
-///   all**, where before ticket 15's fix a marker-carrying node became a
-///   block box and indented its own line by its padding. The second
-///   `div` is the same block with the marker span *first*, and its own
-///   box then reaches nothing: see the fixture-set note in
+///   `div` is a genuine bordered block, and its box is a container
+///   around **both** paragraphs that block emits - which is what a
+///   browser draws, and which is why the box arrives as a textless
+///   `Block` element ahead of the runs it frames. The `span` inside it
+///   carries a `data.content` marker *and* a box that only spaces
+///   (padding and a right margin, no fill and no border), so it opens a
+///   line - that is ticket 01's sense separator - and then resolves to
+///   **no box at all**, where before ticket 15's fix a marker-carrying
+///   node became a block box and indented its own line by its padding.
+///   The second `div` is the same block with the marker span *first*:
+///   the shape that used to lose its box entirely, because the
+///   paragraph the block opened was flushed empty before it could carry
+///   one. It now draws the same single box as the first. See the
+///   fixture-set note in
 ///   `docs/adr/0011-layout-golden-verification.md`.
 fn bordered_pill() -> Fixture {
     let jitendex = concat!(
@@ -973,7 +979,7 @@ fn bordered_pill() -> Fixture {
         r##""backgroundColor":"#1e3a5f"},"content":["注：","##,
         r##"{"tag":"span","data":{"content":"misc-info"},"##,
         r##""style":{"padding":0.2,"marginRight":0.3},"content":"colloquial"},"##,
-        r##"" a bordered block whose own box draws around its first line"]},"##,
+        r##"" a bordered block whose box wraps both paragraphs it emits"]},"##,
         r##"{"tag":"div","style":{"padding":0.2,"borderWidth":0.2,"borderStyle":"solid","##,
         r##""borderColor":"#7f8c99","backgroundColor":"#24313d"},"content":["##,
         r##"{"tag":"span","data":{"content":"misc-info"},"style":{"padding":0.2},"##,
