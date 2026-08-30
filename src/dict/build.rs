@@ -127,6 +127,13 @@ pub struct BuildCounts {
 /// compiles. `dropped` is the gauge `tools/dict-census` reports against the
 /// live grammar: it is the count of rules whose selectors this build cannot
 /// read, and it shrinks as the grammar grows.
+///
+/// `declarations` and `unmapped` are the second half of that gauge, one
+/// axis in: the census counts a stylesheet's declarations too, so a build
+/// that never stated its own property gap would let the two arithmetics
+/// drift with nobody to notice. A rule can survive the grammar and still
+/// draw nothing this renderer has - `display: grid` is the corpus's
+/// commonest declaration - and that is a property gap, not a selector one.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct StyleCounts {
     /// Dictionaries that shipped a `styles.css`.
@@ -139,6 +146,17 @@ pub struct StyleCounts {
     pub dropped: usize,
     /// Selectors compiled, after expanding selector lists and `&` nesting.
     pub selectors: usize,
+    /// Declarations compiled onto a [`crate::dict::gloss::StyleKey`], after
+    /// expanding every `margin` and `padding` shorthand into its four
+    /// longhands. Only from rules that were kept: a rule whose every
+    /// declaration is unmapped counts none here and is not `dropped`
+    /// either, because it is a property gap rather than a grammar one.
+    pub declarations: usize,
+    /// Declarations this build cannot express: a property outside
+    /// `sheet::css_key`'s table, or a `var()` value naming a custom
+    /// property declared on Yomitan's popup chrome, which this renderer has
+    /// no equivalent of.
+    pub unmapped: usize,
     /// Stylesheets that did not scan cleanly. Every rule the scanner did
     /// recover is still compiled; this counts the sheets, not the losses.
     pub malformed: usize,
@@ -151,6 +169,8 @@ impl StyleCounts {
         self.kept += other.kept;
         self.dropped += other.dropped;
         self.selectors += other.selectors;
+        self.declarations += other.declarations;
+        self.unmapped += other.unmapped;
         self.malformed += other.malformed;
     }
 
@@ -159,8 +179,15 @@ impl StyleCounts {
         let kib = self.bytes.div_ceil(1024);
         format!(
             "styles    {what}: {} sheets, {kib} KiB, {} rules kept, \
-             {} dropped, {} selectors; {} malformed",
-            self.sheets, self.kept, self.dropped, self.selectors, self.malformed,
+             {} dropped, {} selectors, {} declarations ({} unmapped); \
+             {} malformed",
+            self.sheets,
+            self.kept,
+            self.dropped,
+            self.selectors,
+            self.declarations,
+            self.unmapped,
+            self.malformed,
         )
     }
 }
@@ -525,6 +552,8 @@ fn insert_style(
         kept: counts.kept,
         dropped: counts.dropped(),
         selectors: counts.selectors,
+        declarations: counts.declarations,
+        unmapped: counts.dropped_declarations,
         malformed: usize::from(counts.error.is_some()),
     };
     on_progress(&one.line(name));
@@ -1642,6 +1671,46 @@ mod tests {
                 .iter()
                 .any(|l| l.starts_with("styles") && l.contains("Styled") && l.contains("2 dropped")),
             "the per-dictionary line reports the gap: {emitted:?}",
+        );
+        drop(guard);
+        let _ = std::fs::remove_file(&archive);
+    }
+
+    /// The property gap reaches the report, not just the grammar gap. A rule
+    /// can pass the selector grammar whole and still declare things this
+    /// renderer has no box model for, and `tools/dict-census` counts a
+    /// stylesheet's declarations independently - so a build that recorded
+    /// only its kept and dropped *rules* would let the two arithmetics drift
+    /// unnoticed.
+    ///
+    /// The numbers are the expansion's, which is why they are asserted and
+    /// not just non-zero: `padding` is one authored declaration and four
+    /// compiled longhands, `display` and `line-height` are outside
+    /// `sheet::css_key`'s table, and the `var()` border width names a custom
+    /// property declared on Yomitan's chrome.
+    #[test]
+    fn a_build_reports_the_declarations_it_could_not_map() {
+        let css = "span[data-sc-fbox] { padding: 0.1em; display: grid; line-height: 1.4;\n\
+                   border-width: var(--gap) }\n";
+        let archive = styled_archive("declaration_gap", css);
+        let out = out_path("declaration_gap");
+        let guard = TempDbGuard(out.clone());
+        let lines = std::cell::RefCell::new(Vec::new());
+        let counts = build(std::slice::from_ref(&archive), &[], &out, &|line| {
+            lines.borrow_mut().push(line.to_string());
+        })
+        .expect("the styled fixture builds");
+
+        assert_eq!(1, counts.styles.kept, "the selector compiles, so the rule stays");
+        assert_eq!(0, counts.styles.dropped, "no grammar gap here");
+        assert_eq!(4, counts.styles.declarations, "one padding, four longhands");
+        assert_eq!(3, counts.styles.unmapped, "display, line-height, and the var()");
+        let emitted = lines.into_inner();
+        assert!(
+            emitted.iter().any(|l| {
+                l.starts_with("styles") && l.contains("4 declarations (3 unmapped)")
+            }),
+            "the per-dictionary line reports the property gap: {emitted:?}",
         );
         drop(guard);
         let _ = std::fs::remove_file(&archive);

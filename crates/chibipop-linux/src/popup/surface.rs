@@ -292,7 +292,8 @@ impl Popup {
         pointer.set_script(script);
         notes.extend(script_notes);
 
-        // The painter's own media store. A database this build cannot
+        // The painter's own decoded-asset cache, on its own read-only
+        // connection onto the media store. A database this build cannot
         // open is one diagnostic and no images, never a popup that will
         // not draw: an image node then renders its `alt` text, which is
         // the character it stood for.

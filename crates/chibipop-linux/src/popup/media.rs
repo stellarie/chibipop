@@ -22,21 +22,20 @@
 //! pixmap is premultiplied RGBA8, which is core's own surface layout, so
 //! this side stores what core hands it and Direct2D's side swaps two
 //! channels.
+//!
+//! The bookkeeping is not duplicated, then: the budget, the FIFO eviction
+//! and the rounded premultiply live once in core as
+//! [`chibipop::dict::media::ByteBudget`], [`SURFACE_BUDGET`] and
+//! [`chibipop::dict::media::premultiplied`]. None of the three carries a
+//! pixel format, which is what lets them be shared while painting stays
+//! per-platform (ADR-0001). What stays here is the decode, the channel
+//! order, and the diagnostics.
 
-use chibipop::dict::media::{MediaKey, Missing};
+use chibipop::dict::media::{premultiplied, ByteBudget, MediaKey, Missing, SURFACE_BUDGET};
 use chibipop::lookup::sqlite::MediaStore;
 use chibipop::ui::layout::{Rgb, Tint};
-use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use tiny_skia::{IntSize, Pixmap};
-
-/// Decoded pixels the cache holds before it starts evicting, in bytes.
-///
-/// The census's image nodes are gaiji at `height: 1em`, so a decoded asset
-/// is a few kilobytes and this holds thousands of them - every distinct
-/// glyph a session of hovering a kanji dictionary touches. It is a budget
-/// and not a count because one illustration can be worth a thousand gaiji.
-const BUDGET: usize = 8 << 20;
 
 /// One cache slot: the asset, the colour it was tinted with, and the pixel
 /// size a vector was rasterized at.
@@ -52,18 +51,11 @@ const BUDGET: usize = 8 << 20;
 /// raster asset, or a vector at its own intrinsic size.
 type Slot = (MediaKey, Option<Rgb>, Option<(u32, u32)>);
 
-/// Decoded assets, keyed by media key.
-///
-/// Insertion order, not recency, for the same reason as the parsed-tree
-/// cache in `lookup::sqlite`: a hover is a sliding window over recent
-/// content, so the two orders nearly coincide and FIFO costs one push per
-/// miss instead of a touch per hit.
+/// Decoded assets, keyed by media key, under core's own byte budget and its
+/// insertion-order eviction ([`ByteBudget`]).
 pub struct MediaSurfaces {
     store: MediaStore,
-    slots: HashMap<Slot, Result<Pixmap, Missing>>,
-    order: VecDeque<Slot>,
-    bytes: usize,
-    budget: usize,
+    slots: ByteBudget<Slot, Result<Pixmap, Missing>>,
     notes: Vec<String>,
 }
 
@@ -74,16 +66,13 @@ impl MediaSurfaces {
     /// old path and this read-only connection keeps the old inode, so a
     /// reload replaces the whole cache rather than clearing it.
     pub fn open(db: &Path) -> anyhow::Result<MediaSurfaces> {
-        MediaSurfaces::with_budget(db, BUDGET)
+        MediaSurfaces::with_budget(db, SURFACE_BUDGET)
     }
 
     fn with_budget(db: &Path, budget: usize) -> anyhow::Result<MediaSurfaces> {
         Ok(MediaSurfaces {
             store: MediaStore::open(db)?,
-            slots: HashMap::new(),
-            order: VecDeque::new(),
-            bytes: 0,
-            budget,
+            slots: ByteBudget::new(budget),
             notes: Vec::new(),
         })
     }
@@ -137,7 +126,7 @@ impl MediaSurfaces {
 
     /// Decoded pixels currently held.
     pub fn footprint(&self) -> usize {
-        self.bytes
+        self.slots.footprint()
     }
 
     fn load(&self, key: &MediaKey, at: Option<(u32, u32)>) -> Result<Pixmap, Missing> {
@@ -158,18 +147,11 @@ impl MediaSurfaces {
         if let Err(Missing::Unavailable(why)) = &pixels {
             self.notes.push(why.clone());
         }
-        self.bytes += weight(&pixels);
-        self.order.push_back(slot.clone());
-        self.slots.insert(slot, pixels);
-        // `len() > 1` keeps a single oversized asset: evicting the entry
-        // just admitted would report an asset the user can see as absent,
-        // and decode it again on the next frame.
-        while self.bytes > self.budget && self.order.len() > 1 {
-            let Some(evicted) = self.order.pop_front() else { break };
-            if let Some(slot) = self.slots.remove(&evicted) {
-                self.bytes -= weight(&slot);
-            }
-        }
+        // A refusal retains nothing, which is what keeps a dictionary's
+        // broken assets from spending the budget. Core's `admit` does the
+        // eviction, including the rule that never drops what it just took.
+        let bytes = pixels.as_ref().map_or(0, |p| p.data().len());
+        self.slots.admit(slot, pixels, bytes);
     }
 }
 
@@ -185,22 +167,17 @@ impl MediaSurfaces {
 /// one, and it also cannot reach a colour that is neither black nor white -
 /// which the theme's body text usually is.
 fn tint_alpha(rgba: &mut [u8], color: Rgb) {
-    let (r, g, b) = (u32::from(color.0), u32::from(color.1), u32::from(color.2));
     for px in rgba.as_chunks_mut::<4>().0 {
         // Premultiplied, so every channel is already scaled by the alpha
-        // and the new ones have to be scaled the same way - which is also
-        // what keeps `r <= a`, the invariant tiny-skia's own pixel type
-        // enforces.
-        let a = u32::from(px[3]);
-        px[0] = ((r * a + 127) / 255) as u8;
-        px[1] = ((g * a + 127) / 255) as u8;
-        px[2] = ((b * a + 127) / 255) as u8;
+        // and the new ones have to be scaled the same way - which is what
+        // `premultiplied` does and what keeps `r <= a`, the invariant
+        // tiny-skia's own pixel type enforces. RGBA order, because that is
+        // core's own surface layout and tiny-skia's.
+        let a = px[3];
+        px[0] = premultiplied(color.0, a);
+        px[1] = premultiplied(color.1, a);
+        px[2] = premultiplied(color.2, a);
     }
-}
-
-/// A slot's retained pixels. A refusal holds none.
-fn weight(slot: &Result<Pixmap, Missing>) -> usize {
-    slot.as_ref().map_or(0, |p| p.data().len())
 }
 
 #[cfg(test)]

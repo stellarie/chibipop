@@ -20,23 +20,24 @@
 //! own pixmap layout, so the Linux side stores what it is given and this
 //! side swaps two channels into the one format `CreateBitmap` takes.
 //!
+//! The bookkeeping is not duplicated, then: the budget, the FIFO eviction
+//! and the rounded premultiply live once in core as
+//! [`chibipop::dict::media::ByteBudget`], [`SURFACE_BUDGET`] and
+//! [`chibipop::dict::media::premultiplied`]. None of the three carries a
+//! pixel format, which is what lets them be shared while painting stays
+//! per-platform (ADR-0001). What stays here is the channel swap, the
+//! bitmap layout `CreateBitmap` needs, and the diagnostics.
+//!
 //! What this module deliberately does *not* hold is an `ID2D1Bitmap`. A
 //! device bitmap belongs to a render target and dies with it on device
 //! loss; these bytes outlive that, and ticket 12 uploads them.
 
-use chibipop::dict::media::{MediaKey, Missing, Surface};
+use chibipop::dict::media::{
+    premultiplied, ByteBudget, MediaKey, Missing, Surface, SURFACE_BUDGET,
+};
 use chibipop::lookup::sqlite::MediaStore;
 use chibipop::ui::layout::{Rgb, Tint};
-use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-
-/// Decoded pixels the cache holds before it starts evicting, in bytes.
-///
-/// The census's image nodes are gaiji at `height: 1em`, so a decoded asset
-/// is a few kilobytes and this holds thousands of them - every distinct
-/// glyph a session of hovering a kanji dictionary touches. It is a budget
-/// and not a count because one illustration can be worth a thousand gaiji.
-const BUDGET: usize = 8 << 20;
 
 /// One decoded asset in the only pixel layout `ID2D1RenderTarget::
 /// CreateBitmap` takes without a WIC converter:
@@ -71,18 +72,11 @@ impl Bitmap {
 /// raster asset, or a vector at its own intrinsic size.
 type Slot = (MediaKey, Option<Rgb>, Option<(u32, u32)>);
 
-/// Decoded assets, keyed by media key.
-///
-/// Insertion order, not recency, for the same reason as the parsed-tree
-/// cache in `lookup::sqlite`: a hover is a sliding window over recent
-/// content, so the two orders nearly coincide and FIFO costs one push per
-/// miss instead of a touch per hit.
+/// Decoded assets, keyed by media key, under core's own byte budget and its
+/// insertion-order eviction ([`ByteBudget`]).
 pub struct MediaSurfaces {
     store: MediaStore,
-    slots: HashMap<Slot, Result<Bitmap, Missing>>,
-    order: VecDeque<Slot>,
-    bytes: usize,
-    budget: usize,
+    slots: ByteBudget<Slot, Result<Bitmap, Missing>>,
     notes: Vec<String>,
 }
 
@@ -93,16 +87,13 @@ impl MediaSurfaces {
     /// this read-only connection keeps the old one, so a reload replaces
     /// the whole cache rather than clearing it.
     pub fn open(db: &Path) -> anyhow::Result<MediaSurfaces> {
-        MediaSurfaces::with_budget(db, BUDGET)
+        MediaSurfaces::with_budget(db, SURFACE_BUDGET)
     }
 
     fn with_budget(db: &Path, budget: usize) -> anyhow::Result<MediaSurfaces> {
         Ok(MediaSurfaces {
             store: MediaStore::open(db)?,
-            slots: HashMap::new(),
-            order: VecDeque::new(),
-            bytes: 0,
-            budget,
+            slots: ByteBudget::new(budget),
             notes: Vec::new(),
         })
     }
@@ -156,7 +147,7 @@ impl MediaSurfaces {
 
     /// Decoded pixels currently held.
     pub fn footprint(&self) -> usize {
-        self.bytes
+        self.slots.footprint()
     }
 
     fn admit(&mut self, slot: Slot, pixels: Result<Bitmap, Missing>) {
@@ -165,18 +156,11 @@ impl MediaSurfaces {
         if let Err(Missing::Unavailable(why)) = &pixels {
             self.notes.push(why.clone());
         }
-        self.bytes += weight(&pixels);
-        self.order.push_back(slot.clone());
-        self.slots.insert(slot, pixels);
-        // `len() > 1` keeps a single oversized asset: evicting the entry
-        // just admitted would report an asset the user can see as absent,
-        // and decode it again on the next frame.
-        while self.bytes > self.budget && self.order.len() > 1 {
-            let Some(evicted) = self.order.pop_front() else { break };
-            if let Some(slot) = self.slots.remove(&evicted) {
-                self.bytes -= weight(&slot);
-            }
-        }
+        // A refusal retains nothing, which is what keeps a dictionary's
+        // broken assets from spending the budget. Core's `admit` does the
+        // eviction, including the rule that never drops what it just took.
+        let bytes = pixels.as_ref().map_or(0, |b| b.bgra.len());
+        self.slots.admit(slot, pixels, bytes);
     }
 }
 
@@ -204,26 +188,21 @@ fn to_bgra(mut surface: Surface) -> Bitmap {
 /// one, and it also cannot reach a colour that is neither black nor white -
 /// which the theme's body text usually is.
 ///
-/// The Linux twin is `chibipop_linux::media::tint_alpha` and differs in
-/// exactly the two channel indices, for the reason this module's header
-/// gives: core hands out RGBA and `CreateBitmap` takes BGRA.
+/// The Linux twin is `chibipop_linux::media::tint_alpha`. Both spend core's
+/// [`premultiplied`] and differ in exactly the channel order, for the reason
+/// this module's header gives: core hands out RGBA and `CreateBitmap` takes
+/// BGRA.
 fn tint_alpha(bgra: &mut [u8], color: Rgb) {
-    let (r, g, b) = (u32::from(color.0), u32::from(color.1), u32::from(color.2));
     for px in bgra.as_chunks_mut::<4>().0 {
         // Premultiplied, so every channel is already scaled by the alpha
-        // and the new ones have to be scaled the same way - which is also
-        // what keeps `b <= a`, the invariant
+        // and the new ones have to be scaled the same way - which is what
+        // `premultiplied` does and what keeps `b <= a`, the invariant
         // `D2D1_ALPHA_MODE_PREMULTIPLIED` blends under.
-        let a = u32::from(px[3]);
-        px[0] = ((b * a + 127) / 255) as u8;
-        px[1] = ((g * a + 127) / 255) as u8;
-        px[2] = ((r * a + 127) / 255) as u8;
+        let a = px[3];
+        px[0] = premultiplied(color.2, a);
+        px[1] = premultiplied(color.1, a);
+        px[2] = premultiplied(color.0, a);
     }
-}
-
-/// A slot's retained pixels. A refusal holds none.
-fn weight(slot: &Result<Bitmap, Missing>) -> usize {
-    slot.as_ref().map_or(0, |b| b.bgra.len())
 }
 
 #[cfg(test)]

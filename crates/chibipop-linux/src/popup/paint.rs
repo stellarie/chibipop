@@ -29,7 +29,7 @@
 
 use crate::popup::{DrawRun, PanelText, PANEL_ALPHA};
 use chibipop::ui::layout::StyledSpan;
-use chibipop::ui::layout::{self, Align, ElemBox, ElemKind, Measured, MeasureRun};
+use chibipop::ui::layout::{Align, ElemBox, ElemKind, Measured, MeasureRun};
 use chibipop::ui::layout::{PopupScene, Rgb, SceneElem, SceneImage, SceneRect};
 use chibipop::ui::theme::{Theme, SCROLLBAR_W};
 // The decoded-surface cache lives beside the rest of the popup on disk and
@@ -120,7 +120,7 @@ pub fn panel(
                 continue;
             }
             if elem.spans.is_empty() {
-                placeholder(target, image_rect(elem, painted.pen.1), elem.color, p.scale);
+                placeholder(target, elem.rect_at(painted.pen.1), elem.color, p.scale);
                 continue;
             }
         }
@@ -218,14 +218,15 @@ pub fn panel(
         }
     }
 
-    // 6. The thumb, and never a track. Core does this arithmetic in
-    // whole pixels, so the scene's f32 heights round on the way in.
+    // 6. The thumb, and never a track. Core does this arithmetic in whole
+    // pixels, so the scene's f32 heights round on the way in - and core
+    // derives the track and the content height off the scene itself, so
+    // this painter and the Windows one cannot disagree about what the
+    // padding does to either.
     let pad = theme.padding;
     let view = scene.view_h.round() as i32;
-    let track_h = view - 2 * pad;
-    let total = scene.used_h.ceil() as i32 + 2 * pad;
     let at = p.scroll.round() as i32;
-    if let Some((top, thumb_h)) = layout::scrollbar_thumb(track_h, total, view, at) {
+    if let Some((top, thumb_h)) = scene.scrollbar_thumb(pad, view, at) {
         // The one length the painter scales itself: `SCROLLBAR_W` is
         // a logical constant, unlike everything in `theme`.
         let bar_w = (SCROLLBAR_W as f32 * p.scale).round().max(1.0);
@@ -437,15 +438,6 @@ fn box_of(target: &mut PixmapMut<'_>, b: &ElemBox, dy: f32) {
     fill(target, x + w - e.right, y, e.right, h, color);
 }
 
-/// One image element's box, at the scroll it is being drawn at.
-///
-/// The scene's rects are in unscrolled panel space, like every other rect
-/// it reports, and an image element's `pen` is its own top-left - so the
-/// whole box moves by the same offset the pen did.
-fn image_rect(elem: &SceneElem, pen_y: f32) -> SceneRect {
-    SceneRect { y: pen_y, ..elem.rect }
-}
-
 /// One asset, composited into its resolved box. `false` means the ladder
 /// has to fall through.
 ///
@@ -467,7 +459,7 @@ fn asset(
     media: Option<&mut MediaSurfaces>,
     theme: &Theme,
 ) -> bool {
-    let rect = image_rect(elem, pen_y);
+    let rect = elem.rect_at(pen_y);
     if rect.w <= 0.0 || rect.h <= 0.0 {
         return false;
     }
@@ -536,7 +528,7 @@ mod tests {
     use super::*;
     use chibipop::dict::media::{MediaFormat, MediaKey};
     use chibipop::ui::layout::{AnkiSlot, Appearance, BorderStyle, BoxStyle, Edges};
-    use chibipop::ui::layout::{ElemSpan, GlyphBox, LineBox, MarkerRun, RubyRun};
+    use chibipop::ui::layout::{ElemSpan, GlyphBox, LineBox, MarkerBox, RubyBox};
     use chibipop::ui::layout::{MeasureError, Metrics, SidePanel, SideRow, SpanBox, TextMeasure};
     use tiny_skia::Pixmap;
 
@@ -1128,7 +1120,7 @@ mod tests {
         let theme = Theme::dark();
         let mut elem =
             styled_elem((12.0, 12.0), Align::Leading, &[("猫", 15.0, 400, false, 0.0)]);
-        elem.ruby = vec![RubyRun {
+        elem.ruby = vec![RubyBox {
             text: "ねこ".into(),
             x: 1.875,
             y: 0.0,
@@ -1170,7 +1162,7 @@ mod tests {
         let theme = Theme::dark();
         let mut elem =
             styled_elem((33.0, 12.0), Align::Leading, &[("to eat", 15.0, 400, false, 0.0)]);
-        elem.marker = vec![MarkerRun {
+        elem.marker = vec![MarkerBox {
             text: "\u{2022} ".into(),
             x: -15.0,
             y: 0.0,

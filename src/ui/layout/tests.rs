@@ -5,7 +5,13 @@
 //! font, no platform: these run in both CI jobs, forever.
 
 use super::*;
+// Every submodule these tests reach into. They are not a test of the
+// module's face: each asserts what one pass measured against fixed
+// metrics, so they name the private vocabulary the submodules share
+// exactly as they did when all of it was one file.
+use super::{chrome::*, flow::*, gloss::*, image::*, marker::*, pass::*, ruby::*, style::*};
 use crate::dict::gloss::{render_html, RoleFilter, Selection, Tag};
+use crate::dict::media::{Intrinsic, MediaFormat, MediaKey};
 use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
 
 /// Advance per UTF-16 unit, as a
@@ -2413,7 +2419,7 @@ fn marker_w(label: &str) -> f32 {
 }
 
 /// The one marker an item carries.
-fn one_marker(e: &SceneElem) -> &MarkerRun {
+fn one_marker(e: &SceneElem) -> &MarkerBox {
     assert_eq!(1, e.marker.len(), "expected one marker, got {:?}", e.marker);
     &e.marker[0]
 }
@@ -2711,7 +2717,7 @@ fn list_style_type_none_draws_no_marker_and_still_indents() {
 /// The mechanism moved: the marker used to be the item paragraph's first
 /// span, and what this asserted was that it stayed its own span at both
 /// ends. It is now no span at all - it is a positioned run of its own
-/// beside the element ([`MarkerRun`]) - so a neighbour's style cannot
+/// beside the element ([`MarkerBox`]) - so a neighbour's style cannot
 /// reach it by construction, and what is asserted is the style the run
 /// itself carries.
 #[test]

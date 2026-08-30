@@ -375,10 +375,19 @@ fn parse_pseudo(sel: &str, i: &mut usize, pool: &mut Pool) -> Option<(Pseudo, Sp
         _ => (None, end),
     };
     *i = next;
-    // A legacy one-colon pseudo-element is still a pseudo-element.
     // The declared list is the gate, not a copy of one: the array below is
     // what `tools/dict-census` reads to score the corpus, so a name that is
     // not in it must not compile however the match arms are written.
+    //
+    // It is also the whole of the legacy one-colon answer. `:before` and its
+    // three siblings are pseudo-elements even with one colon, and a
+    // pseudo-element is not a node; they are absent from the list, so they
+    // are refused here and need no arm of their own below. Likewise the
+    // `:is` aliases - `:matches`, `:-moz-any`, `:-webkit-any`, `:any` - are
+    // not corpus shapes (`docs/research/dict-shapes.md` measures none of
+    // them; Yomitan's own renderer is Chromium, where `:is` needs no
+    // prefix), so naming them in the arm below would only have written a
+    // branch the gate can never reach.
     if !super::SUPPORTED_PSEUDO_CLASSES.contains(&name.as_str()) {
         return None;
     }
@@ -388,7 +397,6 @@ fn parse_pseudo(sel: &str, i: &mut usize, pool: &mut Pool) -> Option<(Pseudo, Sp
         Some((p(n), Spec { b: 1, c: 0 }))
     };
     match (name.as_str(), arg) {
-        ("before" | "after" | "first-line" | "first-letter", _) => None,
         ("first-child", None) => structural(Pseudo::FirstChild),
         ("last-child", None) => structural(Pseudo::LastChild),
         ("first-of-type", None) => structural(Pseudo::FirstOfType),
@@ -397,7 +405,7 @@ fn parse_pseudo(sel: &str, i: &mut usize, pool: &mut Pool) -> Option<(Pseudo, Sp
         ("nth-last-child", Some(_)) => nth(Pseudo::NthLastChild),
         ("nth-of-type", Some(_)) => nth(Pseudo::NthOfType),
         ("nth-last-of-type", Some(_)) => nth(Pseudo::NthLastOfType),
-        ("is" | "matches" | "-moz-any" | "-webkit-any" | "any", Some(args)) => {
+        ("is", Some(args)) => {
             let (span, spec) = parse_args(args, false, pool)?;
             Some((Pseudo::Is(span), spec))
         }

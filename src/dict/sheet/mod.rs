@@ -171,9 +171,19 @@ pub struct SheetCounts {
     /// Selectors compiled, after expanding selector lists and `&` nesting.
     pub selectors: usize,
     /// Declarations compiled, after expanding `margin` and `padding`.
+    ///
+    /// From kept rules only, so this and `dropped_declarations` do not
+    /// partition anything: a rule whose selector left the grammar loses its
+    /// declarations uncounted, and one that declared nothing mappable is a
+    /// `no_decls` rule whose losses land below.
     pub declarations: usize,
     /// Declarations dropped: a property this build does not map, or a
     /// `var()` value it cannot substitute.
+    ///
+    /// The property gap, where `dropped()` is the grammar gap.
+    /// `dict::build::StyleCounts` carries both into the build report,
+    /// because `tools/dict-census` counts a stylesheet's declarations too
+    /// and two arithmetics nobody compares are two arithmetics that drift.
     pub dropped_declarations: usize,
     /// The scanner's first complaint, when the text was malformed.
     pub error: Option<&'static str>,

@@ -427,3 +427,76 @@ fn the_format_column_round_trips_every_variant() {
     }
     assert_eq!(None, MediaFormat::parse("webp"));
 }
+
+// ---- the bins' decoded-surface cache policy ----
+
+/// The two rules both bins' caches rest on, now that the policy is here and
+/// not in either of them: eviction is by insertion order, and the entry just
+/// admitted is never the one dropped.
+///
+/// The second rule is the one worth a test. Evicting a fresh oversized asset
+/// would tell the painter an image the user can see is absent, and the
+/// painter would decode it again on the very next frame - so `admit` then
+/// `get` must always answer, whatever the budget says.
+#[test]
+fn the_byte_budget_evicts_the_oldest_and_never_what_it_just_took() {
+    let mut held: ByteBudget<&str, ()> = ByteBudget::new(30);
+    held.admit("a", (), 10);
+    held.admit("b", (), 10);
+    held.admit("c", (), 10);
+    assert_eq!(30, held.footprint(), "three tens fit exactly");
+    assert!(held.contains_key(&"a"), "nothing evicted while the budget holds");
+
+    // One byte over, so the oldest goes - and only the oldest.
+    held.admit("d", (), 1);
+    assert_eq!(21, held.footprint(), "b, c and d");
+    assert!(!held.contains_key(&"a"), "the oldest went");
+    for key in ["b", "c", "d"] {
+        assert!(held.contains_key(&key), "{key} stayed");
+    }
+
+    // Larger than the whole budget: it is still served, and it is the only
+    // thing left, because everything older went first.
+    held.admit("huge", (), 500);
+    assert_eq!(Some(&()), held.get(&"huge"), "an oversized asset is still served");
+    assert_eq!(500, held.footprint());
+    for key in ["b", "c", "d"] {
+        assert!(!held.contains_key(&key), "{key} paid for it");
+    }
+}
+
+/// A refusal weighs nothing, which is what keeps a dictionary's broken
+/// assets from spending a budget meant for pixels. The bins state the weight
+/// and a cached `Err` states zero.
+#[test]
+fn a_zero_weight_answer_is_cached_and_costs_no_budget() {
+    let mut held: ByteBudget<&str, Result<(), Missing>> = ByteBudget::new(8);
+    for key in ["one", "two", "three", "four", "five"] {
+        held.admit(key, Err(Missing::NotStored), 0);
+    }
+    assert_eq!(0, held.footprint(), "five refusals cost nothing");
+    for key in ["one", "two", "three", "four", "five"] {
+        assert!(held.contains_key(&key), "{key} is a permanent answer and stays cached");
+    }
+}
+
+/// The rounded premultiply, at the two boundaries that would break the
+/// invariant every caller depends on: a fully opaque channel must come back
+/// unchanged, and no channel may exceed its own alpha.
+///
+/// Truncating instead of rounding is the plausible bug - it puts opaque
+/// white at 254 - and it would land as a per-platform hue if only one bin's
+/// copy had it. That is why there is now only one copy.
+#[test]
+fn premultiplying_rounds_and_never_exceeds_the_alpha() {
+    for channel in 0..=255u8 {
+        assert_eq!(channel, premultiplied(channel, 255), "opaque is untouched");
+        assert_eq!(0, premultiplied(channel, 0), "no alpha is no ink");
+        for alpha in 0..=255u8 {
+            assert!(
+                premultiplied(channel, alpha) <= alpha,
+                "{channel} at alpha {alpha} escaped its own coverage",
+            );
+        }
+    }
+}

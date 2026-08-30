@@ -30,7 +30,9 @@
 //! bounds the decode, refusing a hostile declaration before an AV1 frame is
 //! allocated for it.
 
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::hash::Hash;
 
 /// What names one asset: the dictionary that shipped it and the `path` its
 /// image node declared, **verbatim**.
@@ -726,6 +728,24 @@ fn area(w: u32, h: u32) -> Result<usize, bool> {
     }
 }
 
+/// One channel of a premultiplied pixel: `channel * alpha / 255`, rounded.
+///
+/// The whole of the premultiplied contract, in one place because three
+/// callers need exactly this arithmetic and a rounding that disagreed
+/// between them would be a per-platform hue. [`premultiply`] below scales a
+/// straight sample on the way out of a decoder; each bin's decoded-surface
+/// cache scales a *tint* colour by an existing mask's alpha, in its own
+/// channel order. Same expression, three orderings.
+///
+/// Rounding rather than truncating is what keeps `channel <= alpha`, which
+/// is the invariant tiny-skia's own pixel type enforces and the one
+/// `D2D1_ALPHA_MODE_PREMULTIPLIED` blends under: at `alpha == 255` the
+/// `+ 127` carries the quotient up to `channel` exactly, and truncation
+/// would leave a fully opaque white one short of its own alpha.
+pub fn premultiplied(channel: u8, alpha: u8) -> u8 {
+    ((u32::from(channel) * u32::from(alpha) + 127) / 255) as u8
+}
+
 /// Straight samples to premultiplied RGBA8, `lanes` per input pixel.
 ///
 /// One helper for four decoders, because premultiplying is the whole
@@ -745,8 +765,12 @@ fn premultiply(raw: &[u8], lanes: usize, pixels: usize) -> Result<Vec<u8>, bool>
             2 => (px[0], px[0], px[0], px[1]),
             _ => (px[0], px[0], px[0], 255),
         };
-        let mul = |c: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
-        rgba.extend_from_slice(&[mul(r), mul(g), mul(b), a]);
+        rgba.extend_from_slice(&[
+            premultiplied(r, a),
+            premultiplied(g, a),
+            premultiplied(b, a),
+            a,
+        ]);
     }
     Ok(rgba)
 }
@@ -900,6 +924,100 @@ fn decode_avif(bytes: &[u8]) -> Decoded {
     );
     let pixels = area(w, h)?;
     Ok(Surface { w, h, rgba: premultiply(&image.rgba, 4, pixels)? })
+}
+
+// ---- the bins' decoded-surface caches ----
+
+/// Decoded pixels a bin's decoded-surface cache holds before it starts
+/// evicting, in bytes.
+///
+/// The census's image nodes are gaiji at `height: 1em`, so a decoded asset
+/// is a few kilobytes and this holds thousands of them - every distinct
+/// glyph a session of hovering a kanji dictionary touches. It is a budget
+/// and not a count because one illustration can be worth a thousand gaiji.
+///
+/// Here rather than per bin because it is a policy number about the corpus,
+/// not about a pixel format: the two bins hold the same assets at the same
+/// sizes and only the channel order differs, so a budget that drifted
+/// between them would make one platform re-decode where the other does not.
+pub const SURFACE_BUDGET: usize = 8 << 20;
+
+/// A map bounded by what its values retain, evicting in insertion order.
+///
+/// The admission policy of both bins' decoded-surface caches, once. Nothing
+/// here touches a pixel: the payload is whatever that bin decoded into -
+/// tiny-skia's premultiplied RGBA8 pixmap on Linux, a BGRA byte buffer for
+/// `CreateBitmap` on Windows - and the only thing this type learns about it
+/// is the byte count the caller states on admission. That is why it can be
+/// shared while painting stays per-platform (ADR-0001, as amended by
+/// ADR-0004): the *policy* duplicated visibly, the pixels never did.
+///
+/// Insertion order, not recency, for the same reason as the parsed-tree
+/// cache in `crate::lookup::sqlite`: a hover is a sliding window over
+/// recent content, so the two orders nearly coincide and FIFO costs one
+/// push per miss instead of a touch per hit.
+///
+/// Bounded by retained bytes rather than by entry count, because that cache
+/// holds parsed trees of one rough size and this one holds anything from a
+/// 12x7 gaiji to a 1024x768 illustration.
+pub struct ByteBudget<K, V> {
+    /// Each answer with the byte count admitted for it, so an eviction
+    /// costs no second look at the payload and the running total cannot
+    /// disagree with what was added.
+    slots: HashMap<K, (V, usize)>,
+    order: VecDeque<K>,
+    bytes: usize,
+    budget: usize,
+}
+
+impl<K: Clone + Eq + Hash, V> ByteBudget<K, V> {
+    pub fn new(budget: usize) -> ByteBudget<K, V> {
+        ByteBudget { slots: HashMap::new(), order: VecDeque::new(), bytes: 0, budget }
+    }
+
+    /// Is this key already answered? A cached refusal counts: it is a
+    /// permanent answer, and re-asking SQLite for it once per frame would
+    /// be the same waste with none of the pixels.
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.slots.contains_key(key)
+    }
+
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.slots.get(key).map(|(value, _)| value)
+    }
+
+    /// Bytes currently retained - the sum of every `bytes` admitted and not
+    /// yet evicted, which is what the budget is spent against.
+    pub fn footprint(&self) -> usize {
+        self.bytes
+    }
+
+    /// Admits one answer weighing `bytes`, then evicts until the budget
+    /// holds.
+    ///
+    /// `len() > 1` keeps a single oversized asset: evicting the entry just
+    /// admitted would report an asset the user can see as absent, and
+    /// decode it again on the next frame. So the caller's own answer always
+    /// survives its own admission, and `get` after `admit` never misses.
+    ///
+    /// `bytes` is stated rather than measured because only the bin knows
+    /// what its payload retains, and a refusal retains nothing.
+    pub fn admit(&mut self, key: K, value: V, bytes: usize) {
+        self.bytes += bytes;
+        self.order.push_back(key.clone());
+        // Re-admission is unreachable through either cache - both test
+        // `contains_key` first - but the total has to stay true if one ever
+        // does, and the stale `order` entry then evicts to nothing below.
+        if let Some((_, was)) = self.slots.insert(key, (value, bytes)) {
+            self.bytes -= was;
+        }
+        while self.bytes > self.budget && self.order.len() > 1 {
+            let Some(evicted) = self.order.pop_front() else { break };
+            if let Some((_, was)) = self.slots.remove(&evicted) {
+                self.bytes -= was;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

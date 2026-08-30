@@ -779,9 +779,10 @@ impl Renderer {
                 }
             }
 
-            let track_h = h - 2 * theme.padding;
-            let total = scene.used_h.ceil() as i32 + 2 * theme.padding;
-            if let Some((top, thumb_h)) = layout::scrollbar_thumb(track_h, total, h, scroll) {
+            // Core derives the track and the content height off the scene
+            // itself, so this renderer, the Linux painter and the golden
+            // capture cannot disagree about what the padding does to either.
+            if let Some((top, thumb_h)) = scene.scrollbar_thumb(theme.padding, h, scroll) {
                 let brush =
                     unsafe { target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None) }?;
                 let x = (w - theme.padding / 2 - SCROLLBAR_W) as f32;
@@ -846,7 +847,7 @@ impl Renderer {
                 return Ok(());
             }
             if elem.spans.is_empty() {
-                self.draw_placeholder(target, image_rect(elem, pen.1), elem.color)?;
+                self.draw_placeholder(target, elem.rect_at(pen.1), elem.color)?;
                 return Ok(());
             }
         }
@@ -1006,7 +1007,7 @@ impl Renderer {
         pen_y: f32,
         theme: &Theme,
     ) -> windows::core::Result<bool> {
-        let rect = image_rect(elem, pen_y);
+        let rect = elem.rect_at(pen_y);
         if rect.w <= 0.0 || rect.h <= 0.0 {
             return Ok(false);
         }
@@ -1203,15 +1204,6 @@ fn shift_at(shifts: &[f32], i: usize) -> f32 {
 /// the panel's own edge, a table cell's rule, and the spec's `1em / 14`
 /// cell border at base size.
 const PLACEHOLDER_EDGE: f32 = 1.0;
-
-/// One image element's box, at the scroll it is being drawn at.
-///
-/// The scene's rects are in unscrolled panel space, like every other rect
-/// it reports, and an image element's `pen` is its own top-left - so the
-/// whole box moves by the same offset the pen did.
-fn image_rect(elem: &SceneElem, pen_y: f32) -> SceneRect {
-    SceneRect { y: pen_y, ..elem.rect }
-}
 
 /// A brush that paints nothing, for a
 /// span this pass is not drawing.

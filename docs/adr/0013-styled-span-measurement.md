@@ -93,8 +93,8 @@ benefit; it is not a measurement input, and no geometry depends on it.
   grows precisely where staleness is hardest to notice.
 - **Exposing the inline layout pass as a trait** — there is exactly one implementation of
   it and there will only ever be one, so by ADR-0001's own rule it is a hypothetical seam.
-  It stays private to `src/ui/layout.rs` and is tested through `layout::scene` against
-  fixed metrics.
+  It stays private to the `src/ui/layout/` module — private submodules inside it are
+  organisation, not a seam — and is tested through `layout::scene` against fixed metrics.
 - **Keeping the one-string seam and wrapping in core** — the previous section's argument:
   it moves line breaking to the side of the seam that has no shaper.
 

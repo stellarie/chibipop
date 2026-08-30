@@ -281,7 +281,7 @@ type Claim = (&'static str, fn(&Value) -> bool);
 /// feature it is named for.
 ///
 /// A "ruby run" fixture whose scene
-/// carries no [`RubyRun`] is not a
+/// carries no [`RubyBox`] is not a
 /// fixture, and the way to notice is
 /// not to read the golden by eye - a
 /// tree that stopped parsing the way

@@ -32,7 +32,7 @@ use crate::geom::PhysRect;
 use crate::present::{AnkiPopupState, Card, CollapsedRow, GlossBlock, GlossEntry};
 use crate::text::layout::TextGeom;
 use crate::text::TextSpan;
-use crate::ui::layout::{BoxStyle, Edges, ElemBox, GlossOrigin, MarkerRun, Rgb, RubyRun};
+use crate::ui::layout::{BoxStyle, Edges, ElemBox, GlossOrigin, MarkerBox, Rgb, RubyBox};
 use serde_json::{json, Value};
 
 /// One capture's full input.
@@ -187,11 +187,13 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
         None => Value::Null,
     };
 
-    // paint_once's thumb inputs, at
-    // this capture's window size.
-    let track_h = view_h - 2 * spec.theme.padding;
-    let total = scene.used_h.ceil() as i32 + 2 * spec.theme.padding;
-    let thumb = layout::scrollbar_thumb(track_h, total, view_h, scroll_dip)
+    // paint_once's thumb, off the same
+    // scene method it calls, so the
+    // golden records the derivation the
+    // renderer performs rather than a
+    // second copy of it.
+    let thumb = scene
+        .scrollbar_thumb(spec.theme.padding, view_h, scroll_dip)
         .map(|(top, h)| json!({ "top": top, "h": h }))
         .unwrap_or(Value::Null);
 
@@ -415,8 +417,8 @@ impl OutOfFlow<'_> {
     }
 }
 
-impl<'a> From<&'a RubyRun> for OutOfFlow<'a> {
-    fn from(r: &'a RubyRun) -> OutOfFlow<'a> {
+impl<'a> From<&'a RubyBox> for OutOfFlow<'a> {
+    fn from(r: &'a RubyBox) -> OutOfFlow<'a> {
         OutOfFlow {
             text: &r.text,
             x: r.x,
@@ -431,8 +433,8 @@ impl<'a> From<&'a RubyRun> for OutOfFlow<'a> {
     }
 }
 
-impl<'a> From<&'a MarkerRun> for OutOfFlow<'a> {
-    fn from(m: &'a MarkerRun) -> OutOfFlow<'a> {
+impl<'a> From<&'a MarkerBox> for OutOfFlow<'a> {
+    fn from(m: &'a MarkerBox) -> OutOfFlow<'a> {
         OutOfFlow {
             text: &m.text,
             x: m.x,
