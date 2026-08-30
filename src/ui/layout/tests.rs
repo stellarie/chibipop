@@ -6047,3 +6047,56 @@ fn a_stylesheet_sets_and_suppresses_a_list_marker() {
     // stylesheet silenced - where the default would have drawn `•`.
     assert_eq!(vec![vec!["＊ ", "① "]], markers, "{:?}", texts(&s));
 }
+
+/// The gap a reader of あくどい saw between the sense number and its
+/// glosses. Jitendex declares the glossary list's own indent -
+/// `ul[data-sc-content="glossary"] { padding-left: 0.25em }`, the one list
+/// in the 97-archive corpus that declares any - and a browser makes that
+/// padding *replace* the default list gutter, exactly as it replaces the
+/// UA's `padding-inline-start` and Yomitan's `--list-padding1` rule.
+/// Charging [`LIST_INDENT_EM`] on top left 1.9em of blank gutter after
+/// `①` where the dictionary asked for 0.5em: the two `padding-left:
+/// 0.25em` declarations (the sense item's and the glossary list's) and
+/// nothing else.
+#[test]
+fn a_lists_own_padding_replaces_the_default_gutter() {
+    let p = card_with(vec![css_tree(
+        "Jitendex.org",
+        &sc(concat!(
+            r#"{"tag":"ul","data":{"content":"sense-groups"},"content":["#,
+            r#"{"tag":"li","data":{"content":"sense-group"},"content":["#,
+            r#"{"tag":"ol","content":["#,
+            r#"{"tag":"li","data":{"content":"sense"},"#,
+            r#""style":{"listStyleType":"\"\u2460\""},"content":["#,
+            r#"{"tag":"ul","data":{"content":"glossary"},"#,
+            r#""content":[{"tag":"li","content":"to eat"}]}]}]}]}]}"#,
+        )),
+        "ul[data-sc-content=\"sense-groups\"] { list-style-type: \"＊\" }
+         li[data-sc-content=\"sense-group\"] { padding-left: 0.25em }
+         li[data-sc-content=\"sense\"] {
+             padding-left: 0.25em;
+             & ul[data-sc-content=\"glossary\"] {
+                 list-style-type: none;
+                 padding-left: 0.25em;
+             }
+         }",
+    )]);
+    let s = laid_out(&p, 400.0, 4000.0, false, false);
+    let item = s.elems.iter().find(|e| e.text == "to eat").expect("the gloss");
+
+    // Two levels of default gutter - the sense-groups list and the bare
+    // `ol`, neither of which declares a padding - plus the three declared
+    // `padding-left: 0.25em`: the sense-group item's, the sense item's,
+    // and the glossary list's own, which *replaced* its level.
+    assert_eq!(s.origin + 2.0 * LEVEL + 0.75 * BOX_EM, item.pen.0, "{:?}", item.marker);
+    // The sense number still hangs at the `ol`'s content edge.
+    assert_eq!(2, item.marker.len(), "the outer ＊ and the sense's ①");
+    let sense = &item.marker[1];
+    assert_eq!(
+        s.origin + 2.0 * LEVEL + 0.25 * BOX_EM - marker_w("① "),
+        item.pen.0 + sense.x,
+    );
+    // The whole defect in one number: what stands between the marker box
+    // and the first glyph of the gloss is the two remaining paddings.
+    assert_eq!(0.5 * BOX_EM, -sense.x - marker_w("① "));
+}

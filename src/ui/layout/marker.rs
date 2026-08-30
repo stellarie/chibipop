@@ -483,13 +483,29 @@ impl Paragraphs<'_> {
     /// resolved value is handed to
     /// [`Paragraphs::owe`] with the
     /// label.
-    pub(super) fn list(&mut self, id: NodeId, ctx: Ctx, ordered: bool) {
+    pub(super) fn list(&mut self, id: NodeId, ctx: Ctx, ordered: bool, pad_left: f32) {
         let doc = self.doc;
+        // A list that declares its own
+        // left padding replaces the
+        // default gutter rather than
+        // adding to it, exactly as an
+        // author's `padding-left`
+        // replaces the UA's
+        // `padding-inline-start` and
+        // Yomitan's own
+        // `--list-padding1` rule. The
+        // box already paid the declared
+        // padding ([`Paragraphs::wrap`]),
+        // so the level costs nothing
+        // more here. Jitendex's glossary
+        // list (`padding-left: 0.25em`)
+        // is the one list in the
+        // 97-archive corpus that
+        // declares any.
+        let level =
+            if pad_left > 0.0 { 0.0 } else { LIST_INDENT_EM * ctx.inline.size };
         let ctx = Ctx {
-            block: Block {
-                indent: ctx.block.indent + LIST_INDENT_EM * ctx.inline.size,
-                ..ctx.block
-            },
+            block: Block { indent: ctx.block.indent + level, ..ctx.block },
             ..ctx
         };
         // Nothing to mark: `display:

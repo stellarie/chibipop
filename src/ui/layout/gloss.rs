@@ -652,7 +652,7 @@ impl Paragraphs<'_> {
         // own children, so it takes
         // them over from `children`.
         if node.kind == Kind::List {
-            return self.list(id, next, node.tag == Tag::Ol);
+            return self.list(id, next, node.tag == Tag::Ol, block.style.padding.left);
         }
         self.children(id, next);
     }
@@ -740,7 +740,7 @@ impl Paragraphs<'_> {
         // takes them over from
         // `children`.
         if node.kind == Kind::List {
-            self.list(id, inner, node.tag == Tag::Ol);
+            self.list(id, inner, node.tag == Tag::Ol, block.style.padding.left);
         } else {
             self.children(id, inner);
         }
