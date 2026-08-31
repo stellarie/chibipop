@@ -1,0 +1,20 @@
+# The suppression list `sweep.zip` is swept against.
+#
+# A fixture, not an adjudication: the real list is `tests/render-sweep/
+# suppressions.toml` and holds verdicts about real dictionaries. This one
+# exists so the smoke test can prove the whole path - a committed file, read
+# from disk, absorbing violations from a real archive - over an archive CI
+# can see.
+#
+# `sweep.zip` renders three rows into two distinct violating shapes. The first
+# is suppressed here and the second deliberately is not, so one run shows both
+# halves of the rule. The third entry names a shape no row produces, so the
+# run also has an unused exemption to report.
+
+[[suppress]]
+signature = "dropped-text | FixtureSweep | content > div > ruby > rt > text"
+reason = "A ruby with no base has nothing to hang a reading over, so the renderer draws none (src/ui/layout/ruby.rs)."
+
+[[suppress]]
+signature = "dropped-text | FixtureSweep | content > div > ruby > rt[data-sc-never] > text"
+reason = "Never matched by this archive: the unused report has to have something to name."

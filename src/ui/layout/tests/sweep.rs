@@ -14,10 +14,18 @@
 //! [`a_row_capped_sweep_of_the_fixture_archive_reports_every_entry`], a sweep
 //! of the committed three-row fixture archive - so the machinery is proven
 //! without the corpus.
+//!
+//! One thing a sweep does commit: its [`Suppressions`], the adjudicated
+//! non-bugs at `tests/render-sweep/suppressions.toml`. A candidate quotes a
+//! dictionary verbatim and stays out of the repo; a verdict about a shape is
+//! exactly what the repo should remember, so the sweep's judgment
+//! accumulates and a re-run stays quiet about what a human already decided.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use anyhow::Context as _;
 
 use super::*;
 use crate::dict::archive::{for_each_term, is_frequency_archive, read_index, read_styles_css};
@@ -83,6 +91,17 @@ impl Invariant {
             Invariant::DroppedText => "dropped-text",
         }
     }
+
+    /// The invariant a name spells, or `None` when this build checks no
+    /// such thing.
+    ///
+    /// The inverse of [`as_str`](Self::as_str), and the whole of what makes
+    /// a suppression entry *unknown*: a committed exemption naming an
+    /// invariant that has since been renamed or removed can never absorb
+    /// anything, so the run says so rather than letting it rot.
+    fn named(name: &str) -> Option<Invariant> {
+        Invariant::ALL.into_iter().find(|i| i.as_str() == name)
+    }
 }
 
 /// The fingerprint that makes two violations the same candidate.
@@ -103,15 +122,36 @@ struct Signature {
 }
 
 impl Signature {
+    /// What [`key`](Self::key) puts between its three fields.
+    ///
+    /// Named because two things read the format: a candidate file writes it
+    /// and the suppression list matches against it, and a separator the two
+    /// disagreed about would make every exemption silently miss.
+    const FIELDS: &'static str = " | ";
+
     /// The shape signature as one line: what one candidate is keyed by, and
     /// what the filename's digest is taken over.
     fn key(&self) -> String {
-        format!(
-            "{} | {} | {}",
-            self.invariant.as_str(),
-            self.dictionary,
-            self.shape.join(" > ")
-        )
+        let sep = Self::FIELDS;
+        let shape = self.shape.join(" > ");
+        format!("{}{sep}{}{sep}{shape}", self.invariant.as_str(), self.dictionary)
+    }
+
+    /// The invariant a written signature names, or `None` when this build
+    /// cannot have produced it.
+    ///
+    /// `None` covers both ways a committed suppression can be stale: a
+    /// signature naming an invariant nothing checks, and one with too few
+    /// fields to be a signature at all. The dictionary title is not
+    /// validated - the corpus is local and unbounded, so a name this run saw
+    /// no archive for is an *unused* entry, not a malformed one.
+    fn named_invariant(key: &str) -> Option<Invariant> {
+        let mut fields = key.split(Self::FIELDS);
+        let name = fields.next()?;
+        // A dictionary and a shape have to follow it. A title holding the
+        // separator only splits into more fields, never fewer.
+        let (_dictionary, _shape) = (fields.next()?, fields.next()?);
+        Invariant::named(name)
     }
 }
 
@@ -368,6 +408,109 @@ fn dropped_text(
     checked
 }
 
+// ---- the suppression list ----
+
+/// The committed memory of adjudicated non-bugs.
+///
+/// A sweep's judgment has to accumulate, or every run re-presents the shapes
+/// the last one already decided were fine. This is the whole of that memory:
+/// shape signature to one-line reason, read from a file a human reviews in a
+/// diff. Nothing here quotes a dictionary, which is what makes it the one
+/// part of a sweep that may be committed.
+///
+/// Keyed by signature, so absorbing a violation is one probe rather than a
+/// scan of the list, and the summary prints in a stable order whatever order
+/// the file happened to list.
+#[derive(Default)]
+struct Suppressions {
+    entries: BTreeMap<String, Suppression>,
+}
+
+/// One adjudicated non-bug, and what this run handed it.
+struct Suppression {
+    /// Why the shape is not a bug, as the file states it.
+    reason: String,
+    /// `None` when this build checks no such invariant: the entry can never
+    /// absorb anything, so a run reports it rather than counting it unused
+    /// for a reason nobody could act on.
+    invariant: Option<Invariant>,
+    /// Violations this entry absorbed in this run.
+    ///
+    /// Zero after a full run is the whole of *unused*: an exemption that
+    /// stopped applying is one nobody would otherwise notice, and a list
+    /// that only ever grows is how exemptions widen.
+    absorbed: u64,
+}
+
+/// The suppression list as the committed file spells it.
+///
+/// `deny_unknown_fields` because the two keys are the whole format: a
+/// misspelled `resaon` would otherwise commit an exemption with no stated
+/// reason, which is the one thing this file exists to prevent.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuppressFile {
+    #[serde(default)]
+    suppress: Vec<SuppressEntry>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuppressEntry {
+    signature: String,
+    reason: String,
+}
+
+impl Suppressions {
+    /// Reads the committed list.
+    fn load(path: &Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading the suppression list at {}", path.display()))?;
+        Self::parse(&text)
+            .with_context(|| format!("in the suppression list at {}", path.display()))
+    }
+
+    /// One entry per shape, or an error naming the entry that stopped it.
+    ///
+    /// Every defect here is a defect in a *committed* file, so each is an
+    /// error rather than a warning: an entry with no reason exempts a shape
+    /// nobody can review, and a duplicate signature silently drops one of
+    /// the two reasons a reviewer approved.
+    fn parse(text: &str) -> anyhow::Result<Self> {
+        let file: SuppressFile = toml::from_str(text)?;
+        let mut entries = BTreeMap::new();
+        for e in file.suppress {
+            let signature = e.signature.trim().to_string();
+            let reason = e.reason.trim().to_string();
+            anyhow::ensure!(!signature.is_empty(), "an entry with an empty signature");
+            anyhow::ensure!(!reason.is_empty(), "{signature}: an entry with no reason");
+            anyhow::ensure!(
+                !reason.contains('\n'),
+                "{signature}: a reason is one line, and this one is not",
+            );
+            let invariant = Signature::named_invariant(&signature);
+            let seen = entries.insert(signature.clone(), Suppression {
+                reason,
+                invariant,
+                absorbed: 0,
+            });
+            anyhow::ensure!(seen.is_none(), "{signature}: listed twice");
+        }
+        Ok(Suppressions { entries })
+    }
+
+    /// Absorbs one violation, if an entry claims its shape.
+    fn absorb(&mut self, key: &str) -> bool {
+        match self.entries.get_mut(key) {
+            Some(e) => {
+                e.absorbed += 1;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 // ---- candidates and the report ----
 
 /// One deduplicated violation awaiting adjudication.
@@ -411,10 +554,27 @@ struct DictSummary {
     /// Visible strings the invariants were stated over.
     strings: u64,
     violations: u64,
+    /// Violations a committed suppression absorbed.
+    ///
+    /// Counted beside `violations` rather than taken out of it: an exemption
+    /// that made the violation count fall would be an exemption nobody could
+    /// audit, which is the one thing a suppression list must not become.
+    suppressed: u64,
     candidates: u64,
     /// Entries whose parse or layout panicked, plus a walk this archive
     /// refused: an unreadable bank file is one error for the archive.
     errors: u64,
+}
+
+/// What filing one violation did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Filed {
+    /// A committed suppression claimed its shape; no candidate exists.
+    Suppressed,
+    /// A shape already seen: its candidate's count went up.
+    Repeat,
+    /// A shape not seen before: a candidate was opened for it.
+    Fresh,
 }
 
 /// What one sweep saw.
@@ -424,39 +584,103 @@ struct Report {
     /// By [`Signature::key`], so the report is ordered and one shape is one
     /// entry however many entries showed it.
     candidates: BTreeMap<String, Candidate>,
+    /// The exemptions this run applied, and what each absorbed.
+    suppress: Suppressions,
+    /// Did this run leave rows unchecked?
+    ///
+    /// Learned from the walk itself - a row cap that fired, an unreadable
+    /// bank file, an entry that panicked - rather than from the intent to
+    /// cap, so it says what actually happened. It is what stops such a run
+    /// from calling an exemption unused: the rows that would have used it
+    /// may simply never have been read.
+    partial: bool,
 }
 
 impl Report {
-    /// Files one violation, collapsing it into the candidate for its shape.
-    fn record(&mut self, v: Violation, exemplar: impl FnOnce() -> Exemplar) -> bool {
+    /// Files one violation: absorbed by an exemption, or collapsed into the
+    /// candidate for its shape.
+    ///
+    /// Suppression comes first, so a suppressed shape costs no exemplar and
+    /// reaches no candidate file at all.
+    fn record(&mut self, v: Violation, exemplar: impl FnOnce() -> Exemplar) -> Filed {
         let key = v.signature.key();
+        if self.suppress.absorb(&key) {
+            return Filed::Suppressed;
+        }
         match self.candidates.get_mut(&key) {
             Some(c) => {
                 c.occurrences += 1;
-                false
+                Filed::Repeat
             }
             None => {
                 let mut exemplar = exemplar();
                 exemplar.measured = v.measured;
                 self.candidates
                     .insert(key, Candidate { signature: v.signature, occurrences: 1, exemplar });
-                true
+                Filed::Fresh
             }
         }
     }
 
-    /// One line per dictionary, then the run's own.
-    fn print(&self) {
+    /// The whole run summary, as a `--nocapture` run prints it.
+    ///
+    /// A string rather than a walk of `println!`s because the absorbed
+    /// counts are the suppression list's own acceptance criterion, and a
+    /// criterion no test can read is a wish.
+    fn summary(&self) -> String {
+        let mut out = String::new();
         let mut total = DictSummary { dictionary: "TOTAL".into(), ..DictSummary::default() };
         for d in &self.dicts {
-            println!("{}", summary_line(d));
+            out.push_str(&summary_line(d));
+            out.push('\n');
             total.entries += d.entries;
             total.strings += d.strings;
             total.violations += d.violations;
+            total.suppressed += d.suppressed;
             total.errors += d.errors;
         }
         total.candidates = self.candidates.len() as u64;
-        println!("{}", summary_line(&total));
+        out.push_str(&summary_line(&total));
+        out.push('\n');
+        out.push_str(&self.suppression_summary());
+        out
+    }
+
+    /// Every exemption this run carried: what it absorbed, and the verdict
+    /// on an exemption that absorbed nothing.
+    ///
+    /// Printed whether or not the list is empty, because "no exemptions" is
+    /// itself the answer to whether one widened.
+    fn suppression_summary(&self) -> String {
+        let mut out = String::new();
+        let (mut absorbed, mut unused, mut unknown) = (0u64, 0u64, 0u64);
+        for (signature, e) in &self.suppress.entries {
+            absorbed += e.absorbed;
+            let verdict = if e.invariant.is_none() {
+                unknown += 1;
+                "UNKNOWN"
+            } else if e.absorbed == 0 && !self.partial {
+                unused += 1;
+                "UNUSED"
+            } else {
+                "ok"
+            };
+            out.push_str(&format!(
+                "sweep  suppression  absorbed={:<8} {verdict:<8} {signature}  # {}\n",
+                e.absorbed, e.reason,
+            ));
+        }
+        let entries = self.suppress.entries.len();
+        out.push_str(&format!(
+            "sweep  suppressions  entries={entries}  absorbed={absorbed}  \
+             unused={unused}  unknown={unknown}",
+        ));
+        if self.partial {
+            out.push_str(
+                "\nsweep  suppressions  rows went unread, so no entry is called unused",
+            );
+        }
+        out
     }
 
     /// Writes one JSON file per candidate into `dir`, and returns them.
@@ -488,8 +712,9 @@ impl Report {
 /// One summary row, dictionary or total.
 fn summary_line(d: &DictSummary) -> String {
     format!(
-        "sweep  {:<40} entries={:<8} strings={:<9} violations={:<8} candidates={:<5} errors={}",
-        d.dictionary, d.entries, d.strings, d.violations, d.candidates, d.errors,
+        "sweep  {:<40} entries={:<8} strings={:<9} violations={:<8} suppressed={:<8} \
+         candidates={:<5} errors={}",
+        d.dictionary, d.entries, d.strings, d.violations, d.suppressed, d.candidates, d.errors,
     )
 }
 
@@ -725,25 +950,34 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
         sum.strings += checked.strings;
         for v in checked.violations {
             sum.violations += 1;
-            let fresh = report.record(v, || Exemplar {
+            let filed = report.record(v, || Exemplar {
                 row: r.row,
                 term: r.term.clone(),
                 reading: r.reading.clone(),
                 measured: BTreeMap::new(),
                 glossary: r.glossary.clone(),
             });
-            if fresh {
-                sum.candidates += 1;
+            match filed {
+                Filed::Suppressed => sum.suppressed += 1,
+                Filed::Repeat => {}
+                Filed::Fresh => sum.candidates += 1,
             }
         }
         Ok(())
     });
     if let Err(err) = walk {
-        if !err.chain().any(|e| e.is::<RowCap>()) {
+        if err.chain().any(|e| e.is::<RowCap>()) {
+            // Rows this archive holds and this run never read.
+            report.partial = true;
+        } else {
             sum.errors += 1;
             eprintln!("sweep  {title}: {err:#}");
         }
     }
+    // A panicked entry and an unreadable bank file are rows that went
+    // unchecked as surely as capped ones, so neither may leave an exemption
+    // looking stale.
+    report.partial |= sum.errors > 0;
     report.dicts.push(sum);
 }
 
@@ -807,6 +1041,16 @@ fn candidate_dir() -> PathBuf {
     }
 }
 
+/// The committed suppression list.
+///
+/// A fixed repo path and no environment override, unlike the three knobs
+/// above: those move where a *local* run reads and writes, and this file is
+/// the run's committed memory. A sweep that could be pointed at a different
+/// list would be a sweep whose exemptions nobody reviewed.
+fn suppression_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/render-sweep/suppressions.toml")
+}
+
 /// A scene that lost a string the parsed entry holds is a violation, and the
 /// candidate names both the string and the shape it sat in.
 ///
@@ -859,14 +1103,15 @@ fn repeats_of_one_shape_collapse_into_one_counted_candidate() {
 
     let mut report = Report::default();
     for (row, term) in [(7, "\u{4e00}"), (8, "\u{4e8c}"), (9, "\u{4e09}")] {
-        let fresh = report.record(found.violations[0].clone(), || Exemplar {
+        let filed = report.record(found.violations[0].clone(), || Exemplar {
             row,
             term: term.to_string(),
             reading: term.to_string(),
             measured: BTreeMap::new(),
             glossary: glossary.clone(),
         });
-        assert_eq!(row == 7, fresh, "only the first sighting of a shape is a new candidate");
+        let want = if row == 7 { Filed::Fresh } else { Filed::Repeat };
+        assert_eq!(want, filed, "only the first sighting of a shape is a new candidate");
     }
 
     assert_eq!(1, report.candidates.len(), "three violations, one shape, one candidate");
@@ -931,6 +1176,11 @@ fn folded_whitespace_and_a_line_break_drop_no_text() {
 /// `CHIBIPOP_SWEEP_OUT` moves the candidate files. `#[ignore]`d rather than
 /// skipped-when-unset so a normal `cargo test` counts it as ignored and says
 /// so, instead of passing a test that did nothing.
+///
+/// The committed suppression list is loaded before the first archive, and a
+/// list that will not parse stops the run: a sweep that quietly swept with
+/// no exemptions would re-present every shape already adjudicated, and the
+/// adjudicator would have no way to tell.
 #[test]
 #[ignore = "needs a local corpus: set CHIBIPOP_SWEEP_CORPUS and run with --ignored --nocapture"]
 fn corpus_render_sweep() {
@@ -940,13 +1190,15 @@ fn corpus_render_sweep() {
     let archives = corpus_archives(&dir);
     assert!(!archives.is_empty(), "no term archives under {}", dir.display());
     let cap = row_cap();
+    let suppress = Suppressions::load(&suppression_file())
+        .unwrap_or_else(|e| panic!("the suppression list: {e:#}"));
 
-    let mut report = Report::default();
+    let mut report = Report { suppress, ..Report::default() };
     for (i, zip) in archives.iter().enumerate() {
         sweep_archive(zip, i as i64 + 1, cap, &mut report);
     }
 
-    report.print();
+    println!("{}", report.summary());
     let out = candidate_dir();
     let written = report.write(&out).unwrap_or_else(|e| panic!("writing candidates: {e}"));
     println!("sweep  wrote {} candidate files to {}", written.len(), out.display());
@@ -1037,4 +1289,171 @@ fn a_sweep_of_the_media_fixture_renders_every_row_that_holds_text() {
     assert_eq!(0, d.errors, "no media shape panics the renderer");
     assert_eq!(4, d.entries, "five rows, and the image-only row is not an entry");
     assert!(d.strings > 0, "the invariant was stated over real strings");
+}
+
+/// The committed format: one shape signature, one line saying why the shape
+/// is not a bug.
+///
+/// Every other case here is a defect in a *committed* file, so each is an
+/// error and not a warning. An entry with no reason exempts a shape nobody
+/// can review, a duplicate silently drops one of two reasons a reviewer
+/// approved, and a misspelled key does both at once.
+#[test]
+fn a_suppression_entry_is_a_signature_and_a_one_line_reason() {
+    let one = concat!(
+        "[[suppress]]\n",
+        "signature = \"dropped-text | Some Dict | content > div > text\"\n",
+        "reason = \"The author's own blank line; a reader loses nothing.\"\n",
+    );
+    let list = Suppressions::parse(one).expect("a well-formed list");
+
+    assert_eq!(1, list.entries.len());
+    let e = &list.entries["dropped-text | Some Dict | content > div > text"];
+    assert_eq!(Some(Invariant::DroppedText), e.invariant);
+    assert_eq!("The author's own blank line; a reader loses nothing.", e.reason);
+    assert_eq!(0, e.absorbed, "an entry absorbs nothing until a run hands it something");
+
+    let refused = |text: &str| match Suppressions::parse(text) {
+        Err(e) => format!("{e:#}"),
+        Ok(_) => panic!("a defective list parsed"),
+    };
+    assert!(
+        refused(&one.replace("The author's own blank line; a reader loses nothing.", ""))
+            .contains("no reason"),
+        "an exemption with no stated reason",
+    );
+    assert!(
+        refused(&format!("{one}{one}")).contains("listed twice"),
+        "one signature, two reasons, and no way to tell which was reviewed",
+    );
+    assert!(
+        Suppressions::parse(&one.replace("reason =", "resaon =")).is_err(),
+        "a misspelled key is not a silent exemption",
+    );
+    assert!(
+        Suppressions::parse(&one.replace(
+            "\"The author's own blank line; a reader loses nothing.\"",
+            "\"\"\"\nnot\none line\n\"\"\"",
+        ))
+        .is_err(),
+        "a reason is one line, so a reviewer reads a list rather than an essay",
+    );
+    assert!(Suppressions::parse("").expect("no exemptions is a list").entries.is_empty());
+}
+
+/// An exemption the sweep cannot act on is named, never obeyed in silence.
+///
+/// The two ways a committed entry rots. *Unknown* is a signature this build
+/// could not have produced, so nothing will ever match it. *Unused* is a
+/// signature it could have produced and did not, which is how an exemption
+/// outlives the defect it forgave - and a run that never said so would let
+/// the list only grow.
+#[test]
+fn an_unknown_or_unused_suppression_is_named_in_the_summary() {
+    let text = concat!(
+        "[[suppress]]\n",
+        "signature = \"dropped-text | Some Dict | content > text\"\n",
+        "reason = \"A shape no archive in this run held.\"\n",
+        "\n",
+        "[[suppress]]\n",
+        "signature = \"orphan-fragment | Some Dict | content > text\"\n",
+        "reason = \"An invariant this build does not check.\"\n",
+    );
+    let list = || Suppressions::parse(text).expect("a well-formed list");
+
+    let full = Report { suppress: list(), ..Report::default() }.summary();
+    assert!(verdict_for(&full, "dropped-text |").contains("UNUSED"), "{full}");
+    assert!(verdict_for(&full, "orphan-fragment |").contains("UNKNOWN"), "{full}");
+    assert!(full.contains("entries=2  absorbed=0  unused=1  unknown=1"), "{full}");
+
+    // A partial run left rows unread, so it has no standing to call an entry
+    // unused. An unknown one is unknown however much a run read.
+    let partial = Report { suppress: list(), partial: true, ..Report::default() }.summary();
+    assert!(!partial.contains("UNUSED"), "{partial}");
+    assert!(partial.contains("unused=0  unknown=1"), "{partial}");
+    assert!(verdict_for(&partial, "orphan-fragment |").contains("UNKNOWN"), "{partial}");
+}
+
+/// The summary's own line for one suppression entry.
+///
+/// Both suppression tests read a verdict off the printed report rather than
+/// off a field, because the report is what a reviewer audits and a count no
+/// run prints is a count nobody checks.
+fn verdict_for<'a>(summary: &'a str, needle: &str) -> &'a str {
+    summary
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no line for {needle} in:\n{summary}"))
+}
+
+/// The committed list is readable by the build that reads it.
+///
+/// It is edited by hand between sweeps, and the next sweep is the only thing
+/// that would otherwise notice a typo - hours into a corpus run, or worse,
+/// never. This is the one thing CI can check about a file whose entries are
+/// about dictionaries CI has never seen.
+#[test]
+fn the_committed_suppression_list_parses() {
+    let path = suppression_file();
+    Suppressions::load(&path).unwrap_or_else(|e| panic!("{e:#}"));
+}
+
+/// The whole suppression path over a real archive: one shape absorbed, one
+/// shape still a candidate.
+///
+/// `sweep.zip` renders three rows into two distinct violating shapes, and
+/// `sweep-suppressions.toml` exempts one of them and names a third shape no
+/// row produces. So one run shows every half of the rule: an exemption that
+/// absorbs and reports its count, a violation that still reaches a candidate
+/// file, and an exemption that absorbed nothing and is called out for it.
+#[test]
+fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan");
+    let zip = dir.join("sweep.zip");
+    let suppressed = "dropped-text | FixtureSweep | content > div > ruby > rt > text";
+    let open = "dropped-text | FixtureSweep | content > div > ruby[data-sc-content] > rt > text";
+    let never = "dropped-text | FixtureSweep | content > div > ruby > rt[data-sc-never] > text";
+    let list = || {
+        Suppressions::load(&dir.join("sweep-suppressions.toml")).expect("the fixture list")
+    };
+
+    let mut report = Report { suppress: list(), ..Report::default() };
+    sweep_archive(&zip, 1, None, &mut report);
+
+    let d = &report.dicts[0];
+    assert_eq!("FixtureSweep", d.dictionary);
+    assert_eq!(0, d.errors, "no fixture row panics");
+    assert_eq!(3, d.entries, "one reading over a base, two with none");
+    assert_eq!(
+        2, d.violations,
+        "an exemption may never lower the violation count, or nobody can audit it",
+    );
+    assert_eq!(1, d.suppressed, "one of the two shapes is exempt");
+    assert_eq!(1, d.candidates, "the other still needs adjudicating");
+    assert_eq!(vec![open], report.candidates.keys().collect::<Vec<_>>());
+
+    let summary = report.summary();
+    assert!(verdict_for(&summary, suppressed).contains("absorbed=1"), "{summary}");
+    assert!(!verdict_for(&summary, suppressed).contains("UNUSED"), "{summary}");
+    assert!(verdict_for(&summary, never).contains("absorbed=0"), "{summary}");
+    assert!(verdict_for(&summary, never).contains("UNUSED"), "{summary}");
+    assert!(summary.contains("entries=2  absorbed=1  unused=1  unknown=0"), "{summary}");
+
+    // On disk: the shape awaiting adjudication, and nothing for the one a
+    // human already decided about.
+    let out = std::env::temp_dir()
+        .join(format!("chibipop-sweep-suppress-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let written = report.write(&out).expect("writing candidates");
+    assert_eq!(1, written.len(), "a suppressed shape produces no candidate file");
+    let text = std::fs::read_to_string(&written[0]).expect("the candidate file");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("readable JSON");
+    assert_eq!(open, json["signature"], "{text}");
+    std::fs::remove_dir_all(&out).expect("cleaning up");
+
+    // A capped run read one row, so the shape it never reached is not unused.
+    let mut capped = Report { suppress: list(), ..Report::default() };
+    sweep_archive(&zip, 1, Some(1), &mut capped);
+    let capped = capped.summary();
+    assert!(!capped.contains("UNUSED"), "{capped}");
 }

@@ -1,0 +1,33 @@
+# The corpus sweep's suppression list: adjudicated non-bugs, one line each.
+#
+# The sweep (`src/ui/layout/tests/sweep.rs`) loads this file before it checks
+# an invariant. A violation whose shape signature appears here produces no
+# candidate; the run summary reports how many violations each entry absorbed,
+# and names any entry that absorbed nothing so a stale exemption surfaces
+# instead of rotting.
+#
+# This is the one committed part of a sweep. Candidates quote a dictionary's
+# glossary verbatim and never enter the repo, but an adjudication's verdict is
+# exactly what the repo should remember.
+#
+# To add an entry:
+#
+#   1. Adjudicate the candidate. Only a non-bug belongs here; a real defect
+#      becomes a dict-render-parity issue and a fragment test.
+#   2. Copy the candidate file's `signature` field verbatim into `signature`.
+#      It is `<invariant> | <dictionary> | <shape>`, and it must match
+#      character for character - the sweep compares whole strings, never
+#      prefixes.
+#   3. Write one line saying why the shape is not a bug. Not what it is: why
+#      a reader is not harmed by it.
+#
+# Keep entries sorted by signature, so a diff reads as one added block.
+#
+# An entry looks like this:
+#
+#   [[suppress]]
+#   signature = "dropped-text | Some Dictionary | content > div > rt > text"
+#   reason = "The author annotates a base the entry does not carry; nothing is lost."
+#
+# No entry yet: adjudication is the render-sweep effort's own ticket, and an
+# exemption invented before a candidate existed would be a guess.
