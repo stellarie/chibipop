@@ -148,7 +148,7 @@ impl SettingsStatus {
     }
 
     fn matches(&self, current_gen: u64) -> bool {
-        self.gen.map_or(true, |gen| gen == current_gen)
+        self.gen.is_none_or(|gen| gen == current_gen)
     }
 }
 
