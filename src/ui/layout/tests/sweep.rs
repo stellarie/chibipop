@@ -24,10 +24,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 
 use super::*;
+use crate::config::MAX_WIDTH_RANGE;
 use crate::dict::archive::{for_each_term, is_frequency_archive, read_index, read_styles_css};
 use crate::dict::gloss::{plain_items, renders_text, GlossDoc, Kind, NodeId, NodePath, StyleKey};
 use crate::dict::sheet::{self, Sheet};
@@ -45,6 +47,28 @@ const SWEEP_W: f32 = 424.0;
 /// sets `view_h` - but a sweep that scrolled would still be reading a panel
 /// no reader has, so it asks for the whole thing.
 const SWEEP_H: f32 = 100_000.0;
+
+/// The width cap [`SWEEP_W`] stands for, in percent of the monitor.
+///
+/// `Config::default()` asks for a quarter of the screen, so the 424 pixels
+/// the suite measures at are a 1696-pixel monitor's quarter. Pinned by
+/// [`the_swept_widths_run_from_the_default_cap_to_the_ceiling`], so the wide
+/// width below cannot drift from the default it is derived from.
+const SWEEP_W_PERCENT: f32 = 25.0;
+
+/// The wider panel *width monotonicity* lays every entry out at a second
+/// time.
+///
+/// The same monitor at the settings ceiling instead of the default cap:
+/// [`MAX_WIDTH_RANGE`]'s upper bound is 90%, so this is the widest panel a
+/// reader can ask for. The pair is therefore the default width and the
+/// widest one, not the whole of [`MAX_WIDTH_RANGE`] - a reader may also
+/// narrow the panel to 10%, and a narrower panel drawing taller content is
+/// the property holding rather than breaking. What the pair buys is that
+/// content growing between them grows inside a panel somebody can actually
+/// open: a violation is a render a reader could meet by dragging one slider
+/// rightwards.
+const SWEEP_WIDE_W: f32 = SWEEP_W * MAX_WIDTH_RANGE.1 as f32 / SWEEP_W_PERCENT;
 
 /// Every editorial role reaches the panel.
 ///
@@ -85,6 +109,8 @@ enum Invariant {
     HorizontalOverflow,
     /// Two boxes the walk stacked standing on the same pixels.
     OverlappingBoxes,
+    /// Content the wider of two panels drew taller than the narrower one.
+    WidthMonotonicity,
 }
 
 impl Invariant {
@@ -94,12 +120,13 @@ impl Invariant {
     /// write is never mistaken for a stale one of its own. An invariant added
     /// without joining this list would leave its files behind after a run
     /// that stopped flagging them.
-    const ALL: [Invariant; 5] = [
+    const ALL: [Invariant; 6] = [
         Invariant::DroppedText,
         Invariant::OrphanFragment,
         Invariant::MarkerGap,
         Invariant::HorizontalOverflow,
         Invariant::OverlappingBoxes,
+        Invariant::WidthMonotonicity,
     ];
 
     fn as_str(self) -> &'static str {
@@ -109,6 +136,7 @@ impl Invariant {
             Invariant::MarkerGap => "marker-gap",
             Invariant::HorizontalOverflow => "horizontal-overflow",
             Invariant::OverlappingBoxes => "overlapping-boxes",
+            Invariant::WidthMonotonicity => "width-monotonicity",
         }
     }
 
@@ -402,6 +430,20 @@ struct Checked {
     /// pair the entry holds: two boxes a whole paragraph apart cannot
     /// intersect, and the walk stops asking about them.
     pairs: u64,
+    /// Entries *width monotonicity* was stated over.
+    ///
+    /// Also the number of second layouts this run paid for, since the
+    /// invariant is one comparison per entry: a `widths` of zero beside a
+    /// nonzero `wide_cost` would be time spent on nothing.
+    widths: u64,
+    /// What those second layouts cost.
+    ///
+    /// The one number here that is not a count, and it rides along for the
+    /// same reason the counts do: *width monotonicity* doubles the sweep's
+    /// layout work, so the run has to be able to say what its own cost
+    /// was. Set by [`sweep_entry`], which is where the second layout is
+    /// laid out, and [`Duration::ZERO`] from every checker.
+    wide_cost: Duration,
     /// Checks an invariant declined to make.
     ///
     /// A fragment no paragraph draws as one string, or a marker no ancestor
@@ -423,6 +465,8 @@ impl Checked {
         self.boxes += other.boxes;
         self.pairs += other.pairs;
         self.declined += other.declined;
+        self.widths += other.widths;
+        self.wide_cost += other.wide_cost;
         self.violations.extend(other.violations);
     }
 }
@@ -525,6 +569,7 @@ struct Thresholds {
     marker_gap_slack_em: f32,
     overflow_slack_px: f32,
     overlap_slack_px: f32,
+    monotonic_slack_px: f32,
 }
 
 impl Thresholds {
@@ -535,6 +580,7 @@ impl Thresholds {
         marker_gap_slack_em: MARKER_GAP_SLACK_EM,
         overflow_slack_px: OVERFLOW_SLACK_PX,
         overlap_slack_px: OVERLAP_SLACK_PX,
+        monotonic_slack_px: MONOTONIC_SLACK_PX,
     };
 }
 
@@ -1194,6 +1240,129 @@ fn overlapping_boxes(
     checked
 }
 
+// ---- width monotonicity ----
+
+/// How much taller the wider panel may stand before the sweep calls it a
+/// violation, in pixels.
+///
+/// Half a pixel, for the reason [`OVERFLOW_SLACK_PX`] is: a content height
+/// is a sum of measured advances, and the two panels sum a different number
+/// of them, so the comparison has to clear the float arithmetic that built
+/// both totals. It is no wrap tolerance - one line of unwanted growth is
+/// orders of magnitude past it - and it is in pixels rather than in ems
+/// because what this invariant catches makes content taller, which no font
+/// size scales.
+const MONOTONIC_SLACK_PX: f32 = 0.5;
+
+/// *Width monotonicity*: a wider panel never draws taller content.
+///
+/// The classic wrap-logic property, and the only invariant here stated over
+/// two renders of one entry rather than over one: give a wrapper more room
+/// and every line it breaks holds more or holds the same, so the height can
+/// only fall. A height that rose says some rule spent the extra width on
+/// something other than the wrap - an indent that scaled off the panel, a
+/// column that gained a break, a box that fitted at one width and not at
+/// the other - and a reader widening the popup would watch the entry get
+/// longer.
+///
+/// Stated over `content_h`, the whole body plus both paddings and the number
+/// the panel is sized from, so a violation is height a reader would really
+/// gain. Neither side is clamped: [`SWEEP_H`] is taller than any entry in
+/// the corpus, and the clamp only sets `view_h` anyway.
+fn width_monotonicity(
+    dictionary: &str,
+    doc: &GlossDoc,
+    narrow: &PopupScene,
+    wide: &PopupScene,
+    t: Thresholds,
+) -> Checked {
+    let mut checked = Checked { widths: 1, ..Checked::default() };
+    let taller = wide.content_h - narrow.content_h;
+    if taller <= t.monotonic_slack_px {
+        return checked;
+    }
+    let mut measured = BTreeMap::new();
+    measured.insert("narrow_w_px".to_string(), format!("{:.2}", panel_width(narrow)));
+    measured.insert("wide_w_px".to_string(), format!("{:.2}", panel_width(wide)));
+    measured.insert("narrow_h_px".to_string(), format!("{:.2}", narrow.content_h));
+    measured.insert("wide_h_px".to_string(), format!("{:.2}", wide.content_h));
+    measured.insert("taller_px".to_string(), format!("{taller:.2}"));
+    let shape = match grown_shape(doc, narrow, wide, t) {
+        Some((shape, grew)) => {
+            measured.insert("shape_taller_px".to_string(), format!("{grew:.2}"));
+            shape
+        }
+        // No shape the sweep can *name* grew, so either the height came from
+        // the room between the boxes - a gap, a margin, a block's own
+        // padding - or it came from a box [`shape_heights`] left out. The
+        // entry is then the only shape this sweep can honestly file it
+        // under, and one candidate per dictionary is the right batch for a
+        // defect no one node's markup owns. The word is angle-bracketed for
+        // the reason [`elem_shape`]'s is: no node can spell it.
+        None => vec!["<entry>".to_string()],
+    };
+    checked.violations.push(Violation {
+        signature: Signature {
+            invariant: Invariant::WidthMonotonicity,
+            dictionary: dictionary.to_string(),
+            shape,
+        },
+        measured,
+    });
+    checked
+}
+
+/// The shape whose own boxes grew the most between the two widths, and by
+/// how much.
+///
+/// Which node to blame, so that two entries whose height rose in the same
+/// markup are one candidate: the entry-level number says an entry grew and
+/// says nothing an adjudicator can generalise from, while a shape is
+/// exactly what one exemplar teaches about the other thousands.
+///
+/// `None` when no one shape grew, which the caller reads as the entry's own
+/// shape rather than as no violation: the total is what the invariant is
+/// stated over, and this walk only attributes it.
+fn grown_shape(
+    doc: &GlossDoc,
+    narrow: &PopupScene,
+    wide: &PopupScene,
+    t: Thresholds,
+) -> Option<(Vec<String>, f32)> {
+    let before = shape_heights(doc, narrow);
+    let mut worst: Option<(Vec<String>, f32)> = None;
+    for (shape, after) in shape_heights(doc, wide) {
+        let grew = after - before.get(&shape).copied().unwrap_or(0.0);
+        if grew <= t.monotonic_slack_px {
+            continue;
+        }
+        if worst.as_ref().is_none_or(|(_, most)| grew > *most) {
+            worst = Some((shape, grew));
+        }
+    }
+    worst
+}
+
+/// Every shape the scene draws, with the total height its boxes take.
+///
+/// Keyed by the same shape a signature carries, so what this compares is
+/// what a candidate is filed under. Summed per shape rather than matched box
+/// for box, because the two renders are two wraps of one tree: a shape may
+/// draw a different number of boxes at each width, and monotonicity holds of
+/// the sum whatever the split.
+///
+/// A box this sweep cannot name is left out rather than pooled with the
+/// rest - [`elem_shape`] declines a gloss node deeper than a [`NodePath`]
+/// reaches, and pooling those would blame one shape for another's growth.
+fn shape_heights(doc: &GlossDoc, s: &PopupScene) -> BTreeMap<Vec<String>, f32> {
+    let mut out: BTreeMap<Vec<String>, f32> = BTreeMap::new();
+    for e in &s.elems {
+        let Some(shape) = elem_shape(doc, e) else { continue };
+        *out.entry(shape).or_insert(0.0) += e.rect.h;
+    }
+    out
+}
+
 // ---- the suppression list ----
 
 /// The committed memory of adjudicated non-bugs.
@@ -1347,6 +1516,17 @@ struct DictSummary {
     boxes: u64,
     /// Pairs of stacked boxes *no overlapping boxes* was stated over.
     pairs: u64,
+    /// Entries *width monotonicity* was stated over, which is also the
+    /// number of second layouts this run paid for.
+    widths: u64,
+    /// What those second layouts cost. See [`Checked::wide_cost`].
+    wide_cost: Duration,
+    /// What sweeping this archive cost, wall clock.
+    ///
+    /// The denominator of the second layout's share: the invariant that
+    /// doubles the layout work owns its cost, and a share is the form of
+    /// that number a reader of the summary can act on.
+    elapsed: Duration,
     /// Checks an invariant declined to make. See [`Checked::declined`].
     declined: u64,
     violations: u64,
@@ -1459,6 +1639,9 @@ impl Report {
             total.markers += d.markers;
             total.boxes += d.boxes;
             total.pairs += d.pairs;
+            total.widths += d.widths;
+            total.wide_cost += d.wide_cost;
+            total.elapsed += d.elapsed;
             total.declined += d.declined;
             total.violations += d.violations;
             total.suppressed += d.suppressed;
@@ -1467,6 +1650,10 @@ impl Report {
         total.candidates = self.candidates.len() as u64;
         out.push_str(&summary_line(&total));
         out.push('\n');
+        if self.only.contains(&Invariant::WidthMonotonicity) {
+            out.push_str(&monotonicity_cost(&total));
+            out.push('\n');
+        }
         out.push_str(&self.suppression_summary());
         out
     }
@@ -1548,8 +1735,8 @@ impl Report {
 fn summary_line(d: &DictSummary) -> String {
     format!(
         "sweep  {:<40} entries={:<8} strings={:<9} fragments={:<8} markers={:<8} \
-         boxes={:<9} pairs={:<9} declined={:<7} violations={:<8} suppressed={:<8} \
-         candidates={:<5} errors={}",
+         boxes={:<9} pairs={:<9} widths={:<8} declined={:<7} violations={:<8} \
+         suppressed={:<8} candidates={:<5} errors={}",
         d.dictionary,
         d.entries,
         d.strings,
@@ -1557,11 +1744,31 @@ fn summary_line(d: &DictSummary) -> String {
         d.markers,
         d.boxes,
         d.pairs,
+        d.widths,
         d.declined,
         d.violations,
         d.suppressed,
         d.candidates,
         d.errors,
+    )
+}
+
+/// What *width monotonicity*'s second layout cost, as a share of the run.
+///
+/// This invariant doubles the sweep's layout work, so it says out loud what
+/// that came to: a cost nobody prints is a cost nobody can decide about, and
+/// the decision this one informs is whether a full-corpus run keeps checking
+/// monotonicity beside the other five or gets a narrowed run of its own.
+///
+/// Printed only by a run that checked it, since a share of a run that never
+/// laid a second panel out is zero over zero.
+fn monotonicity_cost(total: &DictSummary) -> String {
+    let (wide, elapsed) = (total.wide_cost.as_secs_f64(), total.elapsed.as_secs_f64());
+    let share = if elapsed > 0.0 { 100.0 * wide / elapsed } else { 0.0 };
+    format!(
+        "sweep  width-monotonicity  second layout {wide:.2}s of {elapsed:.2}s \
+         ({share:.1}% of the run) over {} entries",
+        total.widths,
     )
 }
 
@@ -1719,22 +1926,18 @@ fn sweep_entry(r: &Row, sheet: &Sheet, only: &[Invariant]) -> Option<Checked> {
     sheet::apply(&mut doc, sheet);
     let doc = Arc::new(doc);
     let p = sweep_card(r, &doc);
-    let theme = Theme::dark();
-    let mut m = FakeMeasure::default();
-    let s = scene(
-        &SceneRequest {
-            presentation: &p,
-            theme: &theme,
-            max_w: SWEEP_W,
-            max_h: SWEEP_H,
-            show_back: false,
-            side_panel: false,
-            render: sweep_settings(),
-            anki: None,
-        },
-        &mut m,
-    )
-    .expect("FakeMeasure never refuses a run");
+    let s = sweep_scene(&p, SWEEP_W);
+    // The second layout is *width monotonicity*'s own cost, so an entry pays
+    // it only when that invariant is checked - and pays it under a clock,
+    // because an invariant that doubles the sweep's layout work has to be
+    // able to say what it took.
+    let mut spent = Duration::ZERO;
+    let wide = only.contains(&Invariant::WidthMonotonicity).then(|| {
+        let at = Instant::now();
+        let wide = sweep_scene(&p, SWEEP_WIDE_W);
+        spent = at.elapsed();
+        wide
+    });
     // The one place every checker is named, so an invariant added to
     // [`Invariant`] is a compile error until it is wired to a call.
     let mut found = Checked::default();
@@ -1746,9 +1949,40 @@ fn sweep_entry(r: &Row, sheet: &Sheet, only: &[Invariant]) -> Option<Checked> {
             Invariant::MarkerGap => marker_gap(&r.dict, &doc, &s, t),
             Invariant::HorizontalOverflow => horizontal_overflow(&r.dict, &doc, &s, t),
             Invariant::OverlappingBoxes => overlapping_boxes(&r.dict, &doc, &s, t),
+            Invariant::WidthMonotonicity => {
+                let wide = wide.as_ref().expect("a checked invariant has its second layout");
+                width_monotonicity(&r.dict, &doc, &s, wide, t)
+            }
         });
     }
+    found.wide_cost = spent;
     Some(found)
+}
+
+/// One popup laid out in a panel `max_w` wide, exactly as the hover path
+/// asks for one.
+///
+/// Named because *width monotonicity* asks for two of them and the pair has
+/// to differ in nothing but the width: a second call spelled out by hand
+/// would be a second render setting away from comparing two different
+/// popups and calling the difference a defect.
+fn sweep_scene(p: &Presentation, max_w: f32) -> PopupScene {
+    let theme = Theme::dark();
+    let mut m = FakeMeasure::default();
+    scene(
+        &SceneRequest {
+            presentation: p,
+            theme: &theme,
+            max_w,
+            max_h: SWEEP_H,
+            show_back: false,
+            side_panel: false,
+            render: sweep_settings(),
+            anki: None,
+        },
+        &mut m,
+    )
+    .expect("FakeMeasure never refuses a run")
 }
 
 /// The row cap, raised as an error because the archive walk is a stream and
@@ -1785,10 +2019,11 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
     let css = read_styles_css(zip).ok().flatten().unwrap_or_default();
     let sheet = Sheet::compile(&css);
     // Taken once per archive: the walk holds `report` borrowed for every row,
-    // and five names are cheaper to copy than to reason about.
+    // and six names are cheaper to copy than to reason about.
     let only = report.only.clone();
     let mut sum = DictSummary { dictionary: title.clone(), ..DictSummary::default() };
     let mut rows: i64 = 0;
+    let at = Instant::now();
     let walk = for_each_term(zip, |t| {
         if cap.is_some_and(|c| rows as u64 >= c) {
             return Err(anyhow::Error::new(RowCap));
@@ -1817,6 +2052,8 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
         sum.markers += checked.markers;
         sum.boxes += checked.boxes;
         sum.pairs += checked.pairs;
+        sum.widths += checked.widths;
+        sum.wide_cost += checked.wide_cost;
         sum.declined += checked.declined;
         for v in checked.violations {
             sum.violations += 1;
@@ -1848,6 +2085,7 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
     // unchecked as surely as capped ones, so neither may leave an exemption
     // looking stale.
     report.partial |= sum.errors > 0;
+    sum.elapsed = at.elapsed();
     report.dicts.push(sum);
 }
 
@@ -2091,6 +2329,32 @@ fn swept_media(
     css: &str,
     media: Vec<(String, Intrinsic)>,
 ) -> (Arc<GlossDoc>, PopupScene) {
+    let (doc, p) = sweep_fixture(glossary, css, media);
+    let s = shown(&p, sweep_settings());
+    (doc, s)
+}
+
+/// One fixture glossary at both swept widths, through the calls
+/// [`sweep_entry`] makes for *width monotonicity*.
+///
+/// The pair rather than one scene, because the whole invariant is a
+/// comparison: a test that built the wider scene by hand would compare the
+/// renderer against its own arithmetic.
+fn swept_pair(glossary: &str, css: &str) -> (Arc<GlossDoc>, PopupScene, PopupScene) {
+    let (doc, p) = sweep_fixture(glossary, css, Vec::new());
+    (doc, sweep_scene(&p, SWEEP_W), sweep_scene(&p, SWEEP_WIDE_W))
+}
+
+/// One fixture glossary as a parsed tree and the popup around it.
+///
+/// The two halves every helper above needs, split out because the scene is
+/// what they disagree about: one panel, two panels, or a panel of a width a
+/// test chose.
+fn sweep_fixture(
+    glossary: &str,
+    css: &str,
+    media: Vec<(String, Intrinsic)>,
+) -> (Arc<GlossDoc>, Presentation) {
     let sheet = Sheet::compile(css);
     let mut doc = GlossDoc::parse(glossary);
     sheet::apply(&mut doc, &sheet);
@@ -2106,8 +2370,7 @@ fn swept_media(
             media,
         }],
     }]);
-    let s = shown(&p, sweep_settings());
-    (doc, s)
+    (doc, p)
 }
 
 /// The #18 shape, verbatim from the corpus: Jitendex's example translation
@@ -2804,6 +3067,220 @@ fn box_family_violations_collapse_into_counted_candidates() {
     assert_eq!("75.50", json["exemplar"]["measured"]["over_px"]);
 }
 
+/// The shape the property is about: prose long enough that the narrow panel
+/// wraps it and the wide one needs fewer lines for it.
+const WRAPPED_TREE: &str = concat!(
+    r##"{"tag":"div","data":{"content":"gloss"},"content":""##,
+    "He still holds the heavyweight title, and nobody in the division ",
+    r##"has come close to taking it from him."}"##,
+);
+
+/// The two swept widths are the default panel and the widest one.
+///
+/// [`SWEEP_WIDE_W`] is derived from the default width cap, and a derivation
+/// nothing pins is a derivation a settings edit can silently invalidate: a
+/// default of 90% would make both panels the same width and leave this
+/// invariant comparing a scene against itself, reporting a monotone corpus
+/// for the one reason a sweep must never be able to hide.
+#[test]
+fn the_swept_widths_run_from_the_default_cap_to_the_ceiling() {
+    let default = crate::config::Config::default().popup.max_width_percent;
+    assert_eq!(
+        f32::from(default),
+        SWEEP_W_PERCENT,
+        "SWEEP_W stands for the default width cap",
+    );
+    assert!(default < MAX_WIDTH_RANGE.1, "and the ceiling is wider than the default");
+    const { assert!(SWEEP_WIDE_W > SWEEP_W, "so the second layout is a wider panel") };
+}
+
+/// Content that grew at the wider panel is a violation, and the candidate
+/// names both widths, both heights, and the shape that grew.
+///
+/// The scene pair is a real one, mutated, as
+/// [`a_scene_that_lost_a_paragraph_is_a_dropped_text_violation`] is: this
+/// renderer is monotone over the fixture, so the only honest way to state
+/// the invariant is against real geometry with one unwanted line put back -
+/// which is exactly what a wrap rule that spent the extra width badly would
+/// draw.
+#[test]
+fn a_wider_panel_that_drew_taller_content_is_a_width_monotonicity_violation() {
+    let glossary = sc(WRAPPED_TREE);
+    let (doc, narrow, mut wide) = swept_pair(&glossary, "");
+    assert!(
+        wide.content_h < narrow.content_h,
+        "the wider panel wraps the gloss into fewer lines: {} vs {}",
+        wide.content_h,
+        narrow.content_h,
+    );
+    let gloss = |s: &PopupScene| {
+        s.elems.iter().position(|e| e.text.contains("heavyweight")).expect("the gloss")
+    };
+    // One paragraph's worth of unwanted growth, in the paragraph itself and
+    // in the height the panel is sized from: a wrap rule spending the extra
+    // width badly is the same two numbers moving together.
+    let taller = narrow.elems[gloss(&narrow)].rect.h;
+    let at = gloss(&wide);
+    wide.elems[at].rect.h += taller;
+    wide.content_h = narrow.content_h + taller;
+
+    let found = width_monotonicity("Fixture", &doc, &narrow, &wide, Thresholds::DEFAULT);
+
+    assert_eq!(1, found.widths, "one entry, one comparison");
+    assert_eq!(1, found.violations.len(), "one entry that grew, one violation");
+    let v = &found.violations[0];
+    assert_eq!(Invariant::WidthMonotonicity, v.signature.invariant);
+    let measured = |key: &str| v.measured.get(key).expect(key).clone();
+    assert_eq!(format!("{SWEEP_W:.2}"), measured("narrow_w_px"));
+    assert_eq!(format!("{SWEEP_WIDE_W:.2}"), measured("wide_w_px"));
+    assert_eq!(format!("{:.2}", narrow.content_h), measured("narrow_h_px"));
+    assert_eq!(format!("{:.2}", wide.content_h), measured("wide_h_px"));
+    assert_eq!(
+        format!("{:.2}", wide.content_h - narrow.content_h),
+        measured("taller_px"),
+        "both widths and both heights, so an adjudicator needs no second run",
+    );
+    assert_eq!(
+        Some(&"div[data-sc-content]".to_string()),
+        v.signature.shape.last(),
+        "and the shape names the node whose own boxes grew: {:?}",
+        v.signature.shape,
+    );
+}
+
+/// The boundary: a wider panel drawing content of exactly the same height is
+/// monotone, and one pixel more is not.
+///
+/// One pair stated three times, for the reason
+/// [`a_box_ending_exactly_at_the_panel_edge_is_no_horizontal_overflow`] is: a
+/// `<=` that became a `<` here would flag every entry whose height the extra
+/// width cannot change - a one-line gloss, a headword, an image - which is
+/// most of the corpus. Asserted at zero slack, so what is pinned is the
+/// comparison and not [`MONOTONIC_SLACK_PX`] around it.
+#[test]
+fn a_wider_panel_no_taller_than_the_narrow_one_is_no_width_monotonicity() {
+    let (doc, narrow, mut wide) = swept_pair(&sc(WRAPPED_TREE), "");
+    let tight = Thresholds { monotonic_slack_px: 0.0, ..Thresholds::DEFAULT };
+
+    let shorter = width_monotonicity("Fixture", &doc, &narrow, &wide, tight);
+    assert_eq!(1, shorter.widths, "the real pair was compared");
+    assert!(shorter.violations.is_empty(), "and a wider panel that wrapped shorter is monotone");
+
+    wide.content_h = narrow.content_h;
+    let equal = width_monotonicity("Fixture", &doc, &narrow, &wide, tight);
+    assert!(
+        equal.violations.is_empty(),
+        "equal heights are monotone: the property is not a strict decrease",
+    );
+
+    wide.content_h = narrow.content_h + 1.0;
+    let over = width_monotonicity("Fixture", &doc, &narrow, &wide, tight);
+    assert_eq!(1, over.violations.len(), "one pixel taller is not");
+}
+
+/// The second layout is laid out only for the invariant that needs it, and
+/// the run says what it cost.
+///
+/// This invariant doubles the sweep's layout work, so the cost is part of
+/// its contract: a disabled invariant must cost nothing at all, which is
+/// observable as a run that compared no widths and spent no time doing it.
+/// Over a fixture archive rather than the environment, for the reason
+/// [`a_narrowed_run_checks_only_the_invariants_it_names`] is.
+#[test]
+fn the_second_layout_is_paid_for_only_when_width_monotonicity_is_checked() {
+    let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan/terms.zip");
+
+    let mut off = Report { only: named_invariants("dropped-text"), ..Report::default() };
+    sweep_archive(&zip, 1, None, &mut off);
+    let d = &off.dicts[0];
+    assert!(d.entries > 0 && d.strings > 0, "the archive was swept");
+    assert_eq!(0, d.widths, "and no entry was compared at two widths");
+    assert_eq!(Duration::ZERO, d.wide_cost, "so no second panel was ever laid out");
+    assert!(
+        !off.summary().contains("width-monotonicity"),
+        "and a run that checked it not at all claims no share of the time",
+    );
+
+    let mut on = Report { only: named_invariants("width-monotonicity"), ..Report::default() };
+    sweep_archive(&zip, 1, None, &mut on);
+    let w = &on.dicts[0];
+    assert_eq!(w.entries, w.widths, "every entry was compared at two widths");
+    assert!(w.wide_cost > Duration::ZERO, "and every comparison paid for a second layout");
+    assert!(w.wide_cost < w.elapsed, "which is a share of the run and not the whole of it");
+    assert_eq!(0, w.strings, "the other five were not asked anything");
+    let summary = on.summary();
+    let cost = summary
+        .lines()
+        .find(|l| l.contains("width-monotonicity  second layout"))
+        .unwrap_or_else(|| panic!("the run reports its time share:\n{summary}"));
+    assert!(cost.contains("% of the run"), "as a share: {cost}");
+    assert!(cost.contains(&format!("over {} entries", w.widths)), "over its own entries: {cost}");
+}
+
+/// Width monotonicity collapses and files like every invariant before it.
+///
+/// The same claim the two family tests make: one shape is one candidate, an
+/// entry the sweep cannot attribute is its own shape rather than somebody
+/// else's, and a candidate file leads with the invariant's own name, which
+/// is what makes clearing stale files safe ([`is_candidate_file`]).
+#[test]
+fn width_monotonicity_violations_collapse_into_counted_candidates() {
+    let glossary = sc(WRAPPED_TREE);
+    let (doc, narrow, mut wide) = swept_pair(&glossary, "");
+    let at = wide.elems.iter().position(|e| e.text.contains("heavyweight")).expect("the gloss");
+    wide.elems[at].rect.h += 100.0;
+    wide.content_h = narrow.content_h + 100.0;
+    let attributed = width_monotonicity("Fixture", &doc, &narrow, &wide, Thresholds::DEFAULT);
+    assert_eq!(1, attributed.violations.len(), "one entry that grew inside one node");
+
+    // The other half of the rule: the height rose and no drawn shape grew,
+    // so the entry itself is the shape - the stacking between the boxes is
+    // what a candidate would be adjudicated over.
+    let (doc2, narrow2, mut wide2) = swept_pair(&glossary, "");
+    wide2.content_h = narrow2.content_h + 100.0;
+    let entry = width_monotonicity("Fixture", &doc2, &narrow2, &wide2, Thresholds::DEFAULT);
+    assert_eq!(1, entry.violations.len(), "one entry that grew between its nodes");
+    assert_eq!(vec!["<entry>".to_string()], entry.violations[0].signature.shape);
+
+    let mut report = Report::default();
+    let quote = |row: i64| {
+        let glossary = glossary.clone();
+        move || Exemplar {
+            row,
+            term: "\u{4e00}".to_string(),
+            reading: "\u{4e00}".to_string(),
+            measured: BTreeMap::new(),
+            glossary,
+        }
+    };
+    for row in [3, 4] {
+        report.record(attributed.violations[0].clone(), quote(row));
+    }
+    report.record(entry.violations[0].clone(), quote(9));
+
+    assert_eq!(2, report.candidates.len(), "three violations, two shapes, two candidates");
+    for (key, c) in &report.candidates {
+        assert_eq!(Invariant::WidthMonotonicity, c.signature.invariant);
+        let file = candidate_file(c, key);
+        assert!(file.starts_with("width-monotonicity-fixture-"), "readable prefix: {file}");
+        assert!(
+            is_candidate_file(Path::new(&file)),
+            "and a name this sweep can recognise as its own: {file}",
+        );
+    }
+    let counted: Vec<(u64, i64)> =
+        report.candidates.values().map(|c| (c.occurrences, c.exemplar.row)).collect();
+    assert!(
+        counted.contains(&(2, 3)) && counted.contains(&(1, 9)),
+        "counted, and the first sighting stays the exemplar: {counted:?}",
+    );
+    let (key, c) = report.candidates.iter().next().expect("a candidate");
+    let json: serde_json::Value =
+        serde_json::from_str(&candidate_json(c, key)).expect("readable JSON");
+    assert_eq!("width-monotonicity", json["invariant"]);
+    assert!(json["exemplar"]["measured"]["wide_h_px"].is_string(), "{json}");
+}
+
 /// A narrowed run checks what it was told to and nothing else.
 ///
 /// The two halves of the filter, over a fixture archive rather than the
@@ -2822,15 +3299,15 @@ fn a_narrowed_run_checks_only_the_invariants_it_names() {
     let d = &boxes_only.dicts[0];
     assert!(d.boxes > 0, "the box family ran");
     assert_eq!(
-        (0, 0, 0),
-        (d.strings, d.fragments, d.markers),
-        "and the other three were not asked anything",
+        (0, 0, 0, 0),
+        (d.strings, d.fragments, d.markers, d.widths),
+        "and the other four were not asked anything",
     );
 
     let mut whole = Report::default();
     sweep_archive(&zip, 1, None, &mut whole);
     let all = &whole.dicts[0];
-    assert!(all.strings > 0, "the default run still checks all five");
+    assert!(all.strings > 0, "the default run still checks all six");
     assert_eq!(
         (all.boxes, all.pairs),
         (d.boxes, d.pairs),
