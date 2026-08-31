@@ -361,8 +361,7 @@ impl PopupScene {
             // measured box; one em of
             // slack keeps a boundary
             // element's ascender.
-            on_panel(pen.1, elem.rect.h, elem.font_size, view_h)
-                .then_some(Painted { elem, pen })
+            on_panel(pen.1, elem.rect.h, elem.font_size, view_h).then_some(Painted { elem, pen })
         })
     }
 
@@ -414,10 +413,7 @@ pub struct SceneRequest<'a> {
 }
 
 /// Lays out one popup.
-pub fn scene(
-    req: &SceneRequest<'_>,
-    m: &mut dyn TextMeasure,
-) -> Result<PopupScene, MeasureError> {
+pub fn scene(req: &SceneRequest<'_>, m: &mut dyn TextMeasure) -> Result<PopupScene, MeasureError> {
     let theme = req.theme;
     let font = theme.font_name.as_str();
     let pad = theme.padding as f32;
@@ -454,7 +450,12 @@ pub fn scene(
                     wrap_w: content_w,
                     align: Align::Leading,
                     pen: (origin, origin + y),
-                    rect: SceneRect { x: origin, y: origin + y, w: content_w, h },
+                    rect: SceneRect {
+                        x: origin,
+                        y: origin + y,
+                        w: content_w,
+                        h,
+                    },
                     lines: 0,
                     advance: h,
                 });
@@ -505,7 +506,14 @@ pub fn scene(
                 let met = m.measure(run(font, line, avail_w))?;
                 let h = met.h;
                 y += line.top_gap;
-                out.push(text_elem(ElemKind::Collapsed, line, &met, origin, y, avail_w));
+                out.push(text_elem(
+                    ElemKind::Collapsed,
+                    line,
+                    &met,
+                    origin,
+                    y,
+                    avail_w,
+                ));
                 hits.push(HitTarget {
                     x: None,
                     y: origin + y,
@@ -515,13 +523,24 @@ pub fn scene(
                 });
                 h
             }
-            Elem::Headword { headword, prefix_u16, line } => {
+            Elem::Headword {
+                headword,
+                prefix_u16,
+                line,
+            } => {
                 let avail_w = (content_w - reserved_w).max(1.0);
                 reserved_w = 0.0;
                 let met = m.measure(run(font, line, avail_w))?;
                 let h = met.h;
                 y += line.top_gap;
-                out.push(text_elem(ElemKind::Headword, line, &met, origin, y, avail_w));
+                out.push(text_elem(
+                    ElemKind::Headword,
+                    line,
+                    &met,
+                    origin,
+                    y,
+                    avail_w,
+                ));
 
                 let mut at = Vec::new();
                 let mut chars = Vec::new();
@@ -552,7 +571,14 @@ pub fn scene(
                 let met = m.measure(run(font, line, content_w))?;
                 let h = met.h;
                 y += line.top_gap;
-                out.push(text_elem(ElemKind::BackButton, line, &met, origin, y, content_w));
+                out.push(text_elem(
+                    ElemKind::BackButton,
+                    line,
+                    &met,
+                    origin,
+                    y,
+                    content_w,
+                ));
                 hits.push(HitTarget {
                     x: None,
                     y: origin + y,
@@ -601,7 +627,12 @@ pub fn scene(
             Some(AnkiSlot {
                 label,
                 color,
-                rect: SceneRect { x: 0.0, y: view_h, w, h: met.h },
+                rect: SceneRect {
+                    x: 0.0,
+                    y: view_h,
+                    w,
+                    h: met.h,
+                },
             })
         }
         None => None,
@@ -641,7 +672,12 @@ fn text_elem(
         wrap_w,
         align: Align::Leading,
         pen: (origin, origin + y),
-        rect: SceneRect { x: origin, y: origin + y, w: met.w, h: met.h },
+        rect: SceneRect {
+            x: origin,
+            y: origin + y,
+            w: met.w,
+            h: met.h,
+        },
         lines: met.lines,
         advance: met.h,
     }
@@ -783,7 +819,9 @@ enum Elem {
     ///
     /// Steals width from the next.
     Corner(Line),
-    Separator { top_gap: f32 },
+    Separator {
+        top_gap: f32,
+    },
     /// A clickable collapsed row.
     Collapsed(usize, Line),
     /// Per-char click targets.
@@ -836,7 +874,9 @@ fn build_elements(
             }));
         }
 
-        let headword = card.written.clone()
+        let headword = card
+            .written
+            .clone()
             .or_else(|| card.reading.clone())
             .unwrap_or_default();
         if !headword.is_empty() {
@@ -888,9 +928,9 @@ fn build_elements(
                 weight: theme.dict_label_weight,
                 italic: theme.dict_label_italic,
             }));
-            if !block.glosses.is_empty() {
+            for gloss in block.glosses.iter().filter(|g| !g.is_empty()) {
                 out.push(Elem::Text(Line {
-                    text: block.glosses.join("; "),
+                    text: gloss.clone(),
                     color: theme.body_text,
                     size: theme.body_size,
                     top_gap: LINE_GAP,
@@ -906,10 +946,14 @@ fn build_elements(
     if !p.collapsed.is_empty() {
         if side_panel {
             for (i, row) in p.collapsed.iter().enumerate() {
-                let head = row.written.clone()
+                let head = row
+                    .written
+                    .clone()
                     .or_else(|| row.reading.clone())
                     .unwrap_or_default();
-                if head.is_empty() { continue; }
+                if head.is_empty() {
+                    continue;
+                }
                 side.push(SideEntry {
                     idx: i,
                     text: head,
@@ -917,29 +961,44 @@ fn build_elements(
                 });
             }
         } else {
-            out.push(Elem::Separator { top_gap: SEPARATOR_MARGIN });
+            out.push(Elem::Separator {
+                top_gap: SEPARATOR_MARGIN,
+            });
             for (i, row) in p.collapsed.iter().enumerate() {
-                let head = row.written.clone()
-                    .or_else(|| row.reading.clone())
-                    .unwrap_or_default();
+                let head = related_inline_head(row.written.as_deref(), row.reading.as_deref());
                 let text = if head.is_empty() {
                     row.summary.clone()
                 } else {
                     format!("{head} \u{2014} {}", row.summary)
                 };
-                out.push(Elem::Collapsed(i, Line {
-                    text,
-                    color: theme.collapsed_text,
-                    size: theme.collapsed_size,
-                    top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
-                    weight: theme.collapsed_weight,
-                    italic: theme.collapsed_italic,
-                }));
+                out.push(Elem::Collapsed(
+                    i,
+                    Line {
+                        text,
+                        color: theme.collapsed_text,
+                        size: theme.collapsed_size,
+                        top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
+                        weight: theme.collapsed_weight,
+                        italic: theme.collapsed_italic,
+                    },
+                ));
             }
         }
     }
 
     (out, side)
+}
+
+fn related_inline_head(written: Option<&str>, reading: Option<&str>) -> String {
+    match (
+        written.filter(|s| !s.is_empty()),
+        reading.filter(|s| !s.is_empty()),
+    ) {
+        (Some(w), Some(r)) if w != r => format!("{w}\u{3010}{r}\u{3011}"),
+        (Some(w), _) => w.to_string(),
+        (None, Some(r)) => r.to_string(),
+        (None, None) => String::new(),
+    }
 }
 
 /// The Anki button's label.
@@ -950,9 +1009,15 @@ pub fn anki_button_label(
     theme: &Theme,
     anki: &AnkiPopupState,
 ) -> Option<(String, Rgb)> {
-    if !anki.enabled { return None; }
-    if !anki.connected { return None; }
-    let expr = p.top.as_ref()
+    if !anki.enabled {
+        return None;
+    }
+    if !anki.connected {
+        return None;
+    }
+    let expr = p
+        .top
+        .as_ref()
         .and_then(|c| c.written.as_deref().or(c.reading.as_deref()))
         .unwrap_or("");
     let (text, color) = if anki.checking {
@@ -969,6 +1034,86 @@ pub fn anki_button_label(
         ("\u{ff0b} Add to Anki", theme.dict_label_text)
     };
     Some((text.to_string(), color))
+}
+
+#[cfg(test)]
+mod issue_tests {
+    use super::*;
+    use crate::present::{Card, CollapsedRow, GlossBlock};
+
+    fn card(glosses: &[&str], collapsed: Vec<CollapsedRow>) -> Presentation {
+        let top = Card {
+            written: Some("猫".into()),
+            reading: Some("ねこ".into()),
+            pos: vec![],
+            freq: None,
+            blocks: vec![GlossBlock {
+                dict_name: "Dict".to_string(),
+                glosses: glosses.iter().map(|s| s.to_string()).collect(),
+                glosses_html: vec![],
+            }],
+            match_len: 1,
+        };
+        Presentation {
+            top: Some(top.clone()),
+            collapsed,
+            all_cards: vec![top],
+            sentence: None,
+        }
+    }
+
+    #[test]
+    fn glossary_senses_become_separate_text_elements() {
+        let p = card(&["first sense", "second sense"], vec![]);
+        let (elems, _) = build_elements(&p, &Theme::dark(), false, false);
+        let glosses: Vec<&str> = elems
+            .iter()
+            .filter_map(|elem| match elem {
+                Elem::Text(line) if line.text == "first sense" || line.text == "second sense" => {
+                    Some(line.text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vec!["first sense", "second sense"], glosses);
+    }
+
+    #[test]
+    fn inline_related_rows_show_written_and_reading() {
+        let p = card(
+            &["body"],
+            vec![CollapsedRow {
+                written: Some("猫".into()),
+                reading: Some("ねこ".into()),
+                summary: "cat".into(),
+            }],
+        );
+        let (elems, _) = build_elements(&p, &Theme::dark(), false, false);
+        let row = elems.iter().find_map(|elem| match elem {
+            Elem::Collapsed(_, line) => Some(line.text.as_str()),
+            _ => None,
+        });
+        assert_eq!(Some("猫\u{3010}ねこ\u{3011} \u{2014} cat"), row);
+    }
+
+    #[test]
+    fn inline_related_rows_omit_duplicate_reading() {
+        assert_eq!("ねこ", related_inline_head(Some("ねこ"), Some("ねこ")));
+    }
+
+    #[test]
+    fn side_related_rows_remain_headword_only() {
+        let p = card(
+            &["body"],
+            vec![CollapsedRow {
+                written: Some("猫".into()),
+                reading: Some("ねこ".into()),
+                summary: "cat".into(),
+            }],
+        );
+        let (_, side) = build_elements(&p, &Theme::dark(), false, true);
+        assert_eq!("猫", side[0].text);
+    }
 }
 
 #[cfg(test)]

@@ -1016,9 +1016,9 @@ underlying defect is still there and nobody has diagnosed it past the symptom.**
 **What happened.** v0.7.2's rebuild promoted a staged database by stopping the worker, `join()`ing
 it to prove its SQLite handle had closed, renaming, then respawning. The join never returned. The
 trace is unambiguous: the worker logged `worker.thread.end` — its closure *completed* — and
-`join()` still blocked, while the main thread pumped **zero** messages for the rest of the run. The
-main thread is the one that owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows serialises every
-mouse move and keystroke on the entire desktop behind a hook whose owner is not pumping. **The
+`join()` still blocked, while the main thread pumped **zero** messages for the rest of the run. At
+the time, the main thread owned `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows serialised every
+mouse move and keystroke on the entire desktop behind a hook whose owner was not pumping. **The
 user's whole machine froze, twice.**
 
 **The leading hypothesis, unconfirmed.** WinRT/COM apartment teardown on the worker needs a message
@@ -1035,19 +1035,16 @@ and the builder's stdout reader, neither of which runs on the hook-owning thread
 installed. Verified by a zero-reference grep over 21 deleted identifiers plus a clean
 `cargo check --all-targets`.
 
-**So the defect is dormant, not dead.** Reintroducing a worker join — for a clean shutdown, for a
-schema migration, for anything — reintroduces a whole-desktop freeze, and it will not look like a
-chibipop bug when it does: the symptom is the *user's mouse* going syrupy, with chibipop's window
-looking merely busy.
+**So the defect moved to hook ownership.** The main UI thread no longer owns the hooks. Reintroducing
+main-thread hook ownership, or blocking the dedicated hook pump, reintroduces a whole-desktop
+freeze. It will not look like a chibipop bug when it does: the symptom is the *user's mouse* going
+syrupy, with chibipop's window looking merely busy.
 
-**If picked up**, in increasing order of cost: (a) never join the worker, and say so in a comment at
-`spawn_worker` — the current state, undocumented in the source; (b) if a join is genuinely needed,
-**remove the hooks first and pump while waiting** (`join` in a loop against a timeout, servicing
-messages between attempts), never a bare blocking join; (c) actually diagnose it — spawn the worker
-with an explicit COM apartment model and see whether the teardown still needs the pump. Note that
-Windows may answer a hook that misses `LowLevelHooksTimeout` by **dropping** it rather than waiting
-again, in which case the symptom is not a slow desktop but hover going silently dead — see the
-2026-07-27 spike finding. Both shapes are covered by `docs/REGRESSION.md` §1.18 step 14.
+**If picked up**, preserve the `chibipop-hooks` owner thread. If a worker join is genuinely needed,
+keep it away from that thread and keep the hook pump alive. Note that Windows may answer a hook that
+misses `LowLevelHooksTimeout` by **dropping** it rather than waiting again, in which case the symptom
+is not a slow desktop but hover going silently dead — see the 2026-07-27 spike finding. Both shapes
+are covered by `docs/REGRESSION.md` §1.18 step 14.
 
 ---
 

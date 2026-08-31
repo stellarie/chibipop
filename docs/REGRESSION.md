@@ -304,10 +304,9 @@ local orphaned by a deleted branch, and neither fired.
 
 **The Apply handler times itself** (`APPLY_BUDGET_MS`, `src/app.rs:93`) and prints
 `chibipop: Apply took <n> ms (budget 50)` to **stderr** when it exceeds it. Nothing fails and no
-test catches it — the cost lands on unrelated applications, because Apply runs on the thread that
-owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows drops a low-level hook that misses
-`LowLevelHooksTimeout`. 50 ms is a 6× margin on that 300 ms, chosen to catch the regression long
-before it can be felt. Read stderr after pressing Apply; a line there is the whole signal.
+test catches it. Before the dedicated hook thread, this cost also landed on unrelated applications,
+because Apply ran on the thread that owned `WH_MOUSE_LL` and `WH_KEYBOARD_LL`. Keep reporting the
+line, because it still proves the settings UI stall budget.
 
 **The one accepted clippy error — re-baselined 2026-08-26 (the upstream v0.9.x merge rewrote
 `deconj.rs` past its `useless_conversion` site; the three findings that same merge carried into
@@ -1362,8 +1361,8 @@ step 8 is the case that most reliably breaks it.
     exceeds 50 ms**. On v0.8.0 the UI thread does no database work at all — it reads the form,
     checks for a frequency archive, takes the library lock and spawns — so the expected result is
     **no line**. Say either way in the report: the number if it appears, "no line" if it does not.
-    Nothing fails on this and no test catches it; the cost lands on unrelated applications, because
-    Apply runs on the thread that owns the low-level hooks.
+    Nothing fails on this and no test catches it. In the current development build, low-level hooks run on their own
+    pump thread, so this line now describes settings UI latency, not desktop-wide input latency.
 12. Quit from the tray: it exits within about a second. **The shutdown `stop_worker`/join is
     deleted**, so this is no longer the second place the deadlock could be reached — but run it in
     the same session as the Apply anyway, not from a fresh launch.
@@ -1375,11 +1374,13 @@ step 8 is the case that most reliably breaks it.
     instant. This is the check that the two 2026-08-13 desktop freezes are gone at the root. Both
     ran with `WH_MOUSE_LL` and `WH_KEYBOARD_LL` still installed on a main thread that had stopped
     pumping, which serialises **every mouse move and keystroke on the entire desktop** behind
-    chibipop for up to `LowLevelHooksTimeout` — 300 ms by default — per event. **Watch for the other
-    shape of it too.** Windows may answer a hook that misses its timeout by dropping it rather than
-    waiting again (see the 2026-07-27 spike finding), in which case the symptom is not a slow
-    desktop but hover going quietly dead after the Apply with nothing on stderr. Either one fails
-    this step, and **step 6 is what catches the second**.
+    chibipop for up to `LowLevelHooksTimeout` — 300 ms by default — per event. In the current development build,
+    `src/input/hooks.rs` owns both hooks on the `chibipop-hooks` pump thread. A slow Apply line is
+    not enough to fail this step unless the desktop itself also stutters. **Watch for the other shape
+    too.** Windows may answer a hook that misses its timeout by dropping it rather than waiting
+    again (see the 2026-07-27 spike finding), in which case the symptom is not a slow desktop but
+    hover going quietly dead after the Apply with nothing on stderr. Either one fails this step, and
+    **step 6 is what catches the second**.
 15. **The frequency refusal, which has been unit-tested as a string and never seen.** Stage a
     frequency archive with `Add…` and press Apply. Expect **nothing to move** — no file leaves
     `library/`, no config is saved, the staged list stays in the form so you can drop the frequency
@@ -2219,7 +2220,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **A task that adds a field must be the task that reads it** | `field never read` is a dead-code error, and the gate asserts an exact count — one extra breaks it. (Caught once as a 6th error against the 5-error gate of the day; the gate is 3 now, the trap is unchanged.) |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
 | **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so a `build-dict` cannot have its output renamed over a database another process is holding. **This is why v0.8.0 stopped renaming.** Dictionary changes now edit the live database through a second read-write connection in WAL mode; nothing is staged and nothing is renamed, so the trap is not on that path at all. It is still live for the two paths that do build a whole file: `chibipop build-dict` from a terminal, and `chibipop settings` (§1.20) — both fail at the rename against an open database, which is why every "quit chibipop first" instruction in the app says so. **The v0.7.2 answer to this trap — stage a `.new`, stop and *join* the worker, rename, respawn — is deleted**, because that join is what deadlocked the main thread and froze the desktop. |
-| **`join()`ing a thread from the thread that owns the input hooks is a desktop-wide freeze** | Not a rebuild problem; a Win32 one, and the reason v0.7.2 is never tagged. `WH_MOUSE_LL` and `WH_KEYBOARD_LL` are serviced by their owning thread's message pump, and Windows serialises **every mouse move and keystroke on the machine** behind a hook that is not answering. A blocking `join()` on that thread stops the pump. Worse, the worker's own teardown needed that pump — its closure completed and `join()` never returned. Two whole-desktop freezes. **The fix was to delete the path, not the join**, so `join()` is now reachable from nowhere on the worker; see `docs/BACKLOG.md` §24 before reintroducing one. |
+| **Never block the thread that owns the input hooks** | Not a rebuild problem; a Win32 one, and the reason v0.7.2 is never tagged. `WH_MOUSE_LL` and `WH_KEYBOARD_LL` are serviced by their owning thread's message pump, and Windows serialises **every mouse move and keystroke on the machine** behind a hook that is not answering. In the current development build, `src/input/hooks.rs` owns both hooks on the `chibipop-hooks` pump thread. Do not run blocking work on that thread, and do not move hook ownership back to the main UI pump. |
 | **Never delete an archive before the rebuild proves out** | The user's `.zip` files are 50–200 MB downloads chibipop may not redistribute. Apply moves removals to `library/.removed/`, which `build-dict` cannot see because it scans top-level `*.zip` only, and deletes them only after the new database is in place. Every failure path calls `Pending::rollback`. |
 | **"Which listbox is it in?" is not "is it a dictionary?"** | The builder decides by reading `index.json`. A frequency list filed under Dictionaries, or a corrupt `.zip`, once satisfied the "you would have no dictionary left" guard and got the last real one deleted. Ask `library::kind_of`. |
 | **Nothing serialises two chibipops** | Both can read the library, both satisfy the guard, both delete a different archive. `lock::LibraryLock` (`CreateMutexW` + `ERROR_ALREADY_EXISTS`, named per library folder) is held for the whole Apply, rebuild included. |
