@@ -29,7 +29,7 @@ use anyhow::Context as _;
 
 use super::*;
 use crate::dict::archive::{for_each_term, is_frequency_archive, read_index, read_styles_css};
-use crate::dict::gloss::{plain_items, renders_text, GlossDoc, Kind, NodeId, StyleKey};
+use crate::dict::gloss::{plain_items, renders_text, GlossDoc, Kind, NodeId, NodePath, StyleKey};
 use crate::dict::sheet::{self, Sheet};
 use crate::present::Presentation;
 
@@ -75,6 +75,12 @@ fn sweep_settings() -> RenderSettings {
 enum Invariant {
     /// A visible string the parsed entry holds that the scene does not draw.
     DroppedText,
+    /// A small marked fragment trailing prose that the scene draws on a
+    /// paragraph of its own.
+    OrphanFragment,
+    /// More gutter between a list marker's box and its item's first glyph
+    /// than the tree asked for.
+    MarkerGap,
 }
 
 impl Invariant {
@@ -84,11 +90,14 @@ impl Invariant {
     /// write is never mistaken for a stale one of its own. An invariant added
     /// without joining this list would leave its files behind after a run
     /// that stopped flagging them.
-    const ALL: [Invariant; 1] = [Invariant::DroppedText];
+    const ALL: [Invariant; 3] =
+        [Invariant::DroppedText, Invariant::OrphanFragment, Invariant::MarkerGap];
 
     fn as_str(self) -> &'static str {
         match self {
             Invariant::DroppedText => "dropped-text",
+            Invariant::OrphanFragment => "orphan-fragment",
+            Invariant::MarkerGap => "marker-gap",
         }
     }
 
@@ -361,14 +370,40 @@ fn drawn_text(s: &PopupScene) -> String {
 
 /// What one entry's invariants saw.
 ///
-/// The string count rides along because zero violations has to be
+/// The check counts ride along because zero violations has to be
 /// distinguishable from zero checks: a walk that stopped finding text would
 /// otherwise report a clean corpus, which is the one failure a sweep must
-/// never be able to hide.
+/// never be able to hide. One count per invariant rather than one total, so
+/// no invariant's silence can hide behind another's work.
+#[derive(Default)]
 struct Checked {
-    /// Visible strings the invariants were stated over.
+    /// Visible strings *no dropped text* was stated over.
     strings: u64,
+    /// Trailing fragments *no orphan trailing fragment* was stated over.
+    fragments: u64,
+    /// Marker boxes *bounded marker gap* was stated over.
+    markers: u64,
+    /// Checks an invariant declined to make.
+    ///
+    /// A fragment no paragraph draws as one string, or a marker no ancestor
+    /// list of the paragraph owns: in both, the sweep has no ground to judge
+    /// on and says nothing. Counted because saying nothing quietly is how a
+    /// checker stops working without anybody noticing - a decline that grew
+    /// into the thousands would be a shape this invariant needs to learn,
+    /// not a clean corpus.
+    declined: u64,
     violations: Vec<Violation>,
+}
+
+impl Checked {
+    /// Every invariant's answer for one entry, as one.
+    fn merge(&mut self, other: Checked) {
+        self.strings += other.strings;
+        self.fragments += other.fragments;
+        self.markers += other.markers;
+        self.declined += other.declined;
+        self.violations.extend(other.violations);
+    }
 }
 
 /// *No dropped text*: every visible string the parsed entry holds reaches
@@ -386,7 +421,7 @@ fn dropped_text(
     s: &PopupScene,
 ) -> Checked {
     let drawn = drawn_text(s);
-    let mut checked = Checked { strings: 0, violations: Vec::new() };
+    let mut checked = Checked::default();
     for v in visible_strings(doc, roles) {
         checked.strings += 1;
         if drawn.contains(&v.text) {
@@ -406,6 +441,436 @@ fn dropped_text(
         });
     }
     checked
+}
+
+// ---- the paragraph family ----
+
+/// A trailing fragment is *small* at or below this many drawn characters.
+///
+/// A long marked node on its own line reads as a sense separation, which is
+/// what the marker line break is *for*, so the cap is what keeps this
+/// invariant pointed at fragments instead of at every break in every entry.
+/// Twelve clears Jitendex's footnote mark - `[1]` through `[12]`, the whole
+/// of the #18 class - with room for a mark that carries its own
+/// punctuation.
+///
+/// Measured over the local archive: of the 65 004 marked nodes that trail
+/// prose in Jitendex, this cap checks 64 980. It excludes 24, and it is
+/// there for the other 96 archives rather than for this one - a cap that
+/// admitted every marked node would state the invariant over phrases, where
+/// standing on a line of one's own is correct.
+const ORPHAN_MAX_CHARS: usize = 12;
+
+/// How much other text must share the paragraph a trailing fragment landed
+/// in, in characters.
+///
+/// One, because the whole of the #18 class is a fragment drawn with
+/// *nothing else* in its paragraph: the renderer opened a line for the mark
+/// alone, under the sentence it belongs to. Company rather than lead,
+/// measured against the corpus: Jitendex's `example-keyword` (51 062 nodes)
+/// is often the first word of its own sentence, so a fragment with no prose
+/// *ahead* of it is routine and correct - it is a fragment with no prose
+/// beside it at all that is the defect. A larger number asks the renderer
+/// to hold a fragment back until some quota of sentence is drawn, which is
+/// no rule a browser has, so it belongs only in the test that tightens it
+/// ([`the_fixed_footnote_re_flags_when_its_company_threshold_is_tightened`]).
+const ORPHAN_MIN_COMPANY_CHARS: usize = 1;
+
+/// Gutter tolerated between a marker box and its item's first glyph beyond
+/// what the tree asks for, as a fraction of the item's own em.
+///
+/// The #19 class is a whole default list level of surplus -
+/// [`LIST_INDENT_EM`], 1.4em - and the fixed shape's gap is the 0.5em its
+/// dictionary declared, so any tolerance under a level and over rounding
+/// separates the two. Half an em is also what absorbs the difference
+/// between the em a declared padding resolved against and the em this check
+/// spends it in: a length is read as a multiple of its own node's size, and
+/// that node may sit at a smaller size than the paragraph the gap ends at.
+const MARKER_GAP_SLACK_EM: f32 = 0.5;
+
+/// The tuned numbers the paragraph-family invariants read.
+///
+/// Passed in rather than read from the constants directly, because a
+/// detector nobody can tighten is a detector nobody can trust: the two
+/// resolved tickets are checked by rendering their verbatim shapes, asking
+/// for zero candidates, and then tightening a threshold past the fix until
+/// the same geometry is flagged again. That is the only evidence available
+/// that these checkers would have caught the defects they were written for,
+/// since the fixes are in the build that runs them.
+#[derive(Clone, Copy, Debug)]
+struct Thresholds {
+    orphan_max_chars: usize,
+    orphan_min_company: usize,
+    marker_gap_slack_em: f32,
+}
+
+impl Thresholds {
+    /// What a sweep runs with: the tuned constants above.
+    const DEFAULT: Thresholds = Thresholds {
+        orphan_max_chars: ORPHAN_MAX_CHARS,
+        orphan_min_company: ORPHAN_MIN_COMPANY_CHARS,
+        marker_gap_slack_em: MARKER_GAP_SLACK_EM,
+    };
+}
+
+/// One small marked fragment trailing prose, and the shape around it.
+struct Fragment {
+    text: String,
+    shape: Vec<String>,
+}
+
+/// Every small marked fragment that trails prose inside its own parent.
+///
+/// The oracle half of *no orphan trailing fragment*: the marker line
+/// break's own exemption, stated from outside the walk. A marked inline
+/// node whose parent already held prose is markup *inside* a sentence
+/// ([`GlossDoc::inline_prose`]), so the renderer owes it the sentence's
+/// paragraph. What the walk would legitimately break before is excluded
+/// here rather than judged and forgiven later: a marked node with no prose
+/// ahead of it separates senses, and one holding a block of its own opens a
+/// line by tag and not by mark.
+fn trailing_fragments(doc: &GlossDoc, roles: RoleFilter, t: Thresholds) -> Vec<Fragment> {
+    let mut out = Vec::new();
+    let mut shape = Vec::new();
+    // A top-level item has no parent to hold prose, so nothing trails
+    // anything until a node's own children are walked.
+    for item in doc.items() {
+        walk_fragments(doc, item, roles, false, t, &mut shape, &mut out);
+    }
+    out
+}
+
+/// `prose` is what the walk's own accumulator holds at this node: prose
+/// already seen among the parent's children, in the parent's order. Order is
+/// load-bearing exactly as it is in [`Paragraphs::children`] - a sense head
+/// is marked pills *followed* by a prose fragment, so prose behind a marked
+/// node is no evidence at all.
+///
+/// [`Paragraphs::children`]: super::gloss::Paragraphs::children
+fn walk_fragments(
+    doc: &GlossDoc,
+    id: NodeId,
+    roles: RoleFilter,
+    prose: bool,
+    t: Thresholds,
+    shape: &mut Vec<String>,
+    out: &mut Vec<Fragment>,
+) {
+    let node = *doc.node(id);
+    if !roles.allows(node.role) || node.kind == Kind::Image || node.tag == Tag::Rp {
+        return;
+    }
+    shape.push(step(doc, id));
+    if prose && doc.has_marker(id) && inline_only(doc, id) {
+        let text = folded(&unglued(&run_text(doc, id)));
+        if !text.is_empty() && text.chars().count() <= t.orphan_max_chars {
+            out.push(Fragment { text, shape: shape.clone() });
+        }
+    }
+    let mut ahead = doc.prose(id);
+    for child in doc.children(id) {
+        walk_fragments(doc, child, roles, ahead, t, shape, out);
+        ahead = ahead || doc.inline_prose(child);
+    }
+    shape.pop();
+}
+
+/// Is this node one run of inline content - nothing under it that opens a
+/// line of its own?
+///
+/// A marked node holding a `div`, a list, a table or an image is drawn on
+/// its own line because of what it *holds*, and a renderer that kept it in
+/// the sentence would be the defect. So such a node is never a fragment,
+/// however small its text.
+fn inline_only(doc: &GlossDoc, id: NodeId) -> bool {
+    let node = doc.node(id);
+    !node.tag.is_block()
+        && !matches!(
+            node.kind,
+            Kind::List | Kind::ListItem | Kind::Table | Kind::Row | Kind::Cell | Kind::Image
+        )
+        && doc.children(id).all(|child| inline_only(doc, child))
+}
+
+/// One node's text as a run concatenates it, with nothing in it a reader
+/// cannot see.
+///
+/// Joined with nothing, unlike [`drawn_text`]'s walk over whole elements: a
+/// run's spans sit character after character in one string, so this is the
+/// needle that string is searched for. Three things a run does not hold are
+/// dropped here, or the needle would never match the haystack:
+///
+/// - `<rt>`, a reading, which does not flow and rides the element as a
+///   [`RubyBox`] instead ([`measure_readings`]);
+/// - `<rp>`, for the reason [`visible_strings`] drops it;
+/// - an image, whose text is its `alt`.
+///
+/// [`measure_readings`]: super::ruby::measure_readings
+fn run_text(doc: &GlossDoc, id: NodeId) -> String {
+    let node = doc.node(id);
+    if matches!(node.tag, Tag::Rt | Tag::Rp) || node.kind == Kind::Image {
+        return String::new();
+    }
+    if node.kind == Kind::Text {
+        return doc.text(id).to_string();
+    }
+    let mut out = String::new();
+    for child in doc.children(id) {
+        out.push_str(&run_text(doc, child));
+    }
+    out
+}
+
+/// One string with every glyph gone that the renderer writes into a run and
+/// a reader never sees.
+///
+/// [`RUBY_FILLER`] is the word joiner every ruby base wears, and it sits
+/// *between* the base's own characters - so a needle taken from the tree
+/// cannot match a drawn run holding one unless both sides drop it. Compared
+/// against the filler itself rather than against a second copy of its
+/// codepoint, so the two cannot drift apart. The zero-width space rides
+/// along because a shaper gives it no advance either
+/// ([`zero_advance`](super::tests::zero_advance)), and which of the two a
+/// pass reached for is not shape.
+fn unglued(text: &str) -> String {
+    let mut buf = [0u8; 4];
+    text.chars()
+        .filter(|c| c.encode_utf8(&mut buf) != RUBY_FILLER && *c != '\u{200b}')
+        .collect()
+}
+
+/// *No orphan trailing fragment*: a small marked fragment trailing prose is
+/// drawn in the paragraph it trails, not on a line of its own.
+///
+/// Stated over the drawn paragraphs rather than over the walk's decisions,
+/// so it holds whatever rule put the fragment where it is: the measured
+/// number is how much text the renderer drew beside the fragment in the
+/// paragraph it landed in, and the #18 class is that number being zero.
+/// A fragment the scene draws nowhere is *no dropped text*'s business and
+/// not this one's.
+fn orphan_fragment(
+    dictionary: &str,
+    doc: &GlossDoc,
+    roles: RoleFilter,
+    s: &PopupScene,
+    t: Thresholds,
+) -> Checked {
+    let drawn: Vec<String> = s.elems.iter().map(|e| folded(&unglued(&e.text))).collect();
+    let mut checked = Checked::default();
+    for f in trailing_fragments(doc, roles, t) {
+        // Counted only once the fragment is one this invariant can speak
+        // about: a fragment the scene draws nowhere as one string was never
+        // stated over, and a count that rose for it would be the
+        // reassurance ticket 01's string count exists to refuse.
+        let Some(company) = best_company(&drawn, &f.text) else {
+            checked.declined += 1;
+            continue;
+        };
+        checked.fragments += 1;
+        if company >= t.orphan_min_company {
+            continue;
+        }
+        let mut measured = BTreeMap::new();
+        measured.insert("fragment".to_string(), f.text.clone());
+        measured.insert("fragment_chars".to_string(), f.text.chars().count().to_string());
+        measured.insert("company_chars".to_string(), company.to_string());
+        measured.insert("min_company_chars".to_string(), t.orphan_min_company.to_string());
+        checked.violations.push(Violation {
+            signature: Signature {
+                invariant: Invariant::OrphanFragment,
+                dictionary: dictionary.to_string(),
+                shape: f.shape,
+            },
+            measured,
+        });
+    }
+    checked
+}
+
+/// The most text any one paragraph drew beside `fragment`, or `None` when
+/// no paragraph drew the fragment at all.
+///
+/// The best case rather than the first, because a short fragment's own text
+/// may appear in more than one paragraph of an entry and the question is
+/// whether the renderer kept it in a sentence *somewhere*: one paragraph
+/// that did is the answer, and flagging the coincidence would be noise.
+fn best_company(drawn: &[String], fragment: &str) -> Option<usize> {
+    let own = fragment.chars().count();
+    drawn
+        .iter()
+        .filter(|text| text.contains(fragment))
+        .map(|text| text.chars().count().saturating_sub(own))
+        .max()
+}
+
+/// *Bounded marker gap*: what stands between a marker box and its item's
+/// first glyph is what the tree asked for.
+///
+/// The gap is read off the placed box - [`place_markers`] right-aligns it
+/// against the content edge of the list that owed it, so what is left of
+/// the paragraph's pen is exactly the indent the levels *below* that list
+/// added. The oracle is the browser rule the #19 fix states: each level
+/// costs [`LIST_INDENT_EM`] unless the list declares its own left padding,
+/// in which case the declaration replaces it, and each node's own declared
+/// left margin, border and padding costs what it declares.
+///
+/// Only the innermost marker is asked about. An item whose whole content is
+/// a nested list hangs two markers on one line, and the outer one is
+/// *meant* to stand a level away from the text.
+fn marker_gap(dictionary: &str, doc: &GlossDoc, s: &PopupScene, t: Thresholds) -> Checked {
+    let mut checked = Checked::default();
+    for e in &s.elems {
+        let Some(mark) = e.marker.last() else { continue };
+        // A paragraph with no address, or a list this sweep cannot line the
+        // marker up with, is one it declines to judge rather than one it
+        // flags on a guess - and a decline is counted as itself, never as a
+        // check. A run of them has to be able to make `markers=` fall: an
+        // origin path that stopped resolving would otherwise leave the count
+        // where it was while every judgment quietly stopped.
+        let Some(chain) = e.origin.and_then(|o| o.path).and_then(|p| chain_of(doc, p)) else {
+            checked.declined += 1;
+            continue;
+        };
+        let Some(at) = marker_list(doc, &chain) else {
+            checked.declined += 1;
+            continue;
+        };
+        checked.markers += 1;
+        // The marker's own trailing gap is inside its width ([`MARKER_GAP`]),
+        // so this is what stands between the box and the pen: the indent the
+        // levels below the marker's list added, and nothing the marker paid
+        // for itself.
+        let gap = -(mark.x + mark.w);
+        if gap <= 0.0 {
+            continue;
+        }
+        let owed = owed_indent_em(doc, &chain[at + 1..]);
+        let allowed = (owed + t.marker_gap_slack_em) * e.font_size;
+        if gap <= allowed {
+            continue;
+        }
+        let mut measured = BTreeMap::new();
+        measured.insert("gap_px".to_string(), format!("{gap:.2}"));
+        measured.insert("owed_em".to_string(), format!("{owed:.3}"));
+        measured.insert("slack_em".to_string(), format!("{:.3}", t.marker_gap_slack_em));
+        measured.insert("em_px".to_string(), format!("{:.2}", e.font_size));
+        measured.insert("marker".to_string(), mark.text.clone());
+        checked.violations.push(Violation {
+            signature: Signature {
+                invariant: Invariant::MarkerGap,
+                dictionary: dictionary.to_string(),
+                shape: chain.iter().map(|id| step(doc, *id)).collect(),
+            },
+            measured,
+        });
+    }
+    checked
+}
+
+/// The nodes a path addresses, glossary item first and the addressed node
+/// last.
+///
+/// The arena keeps first-child and next-sibling links and no parent link,
+/// so a scene element's own [`NodePath`] is the only way back up its tree -
+/// which is what a gap needs, since the room between a marker and a glyph
+/// is owed by the ancestors between them.
+///
+/// [`NodePath::resolve`] walks the same route and keeps only its end, and a
+/// path holds no prefix constructor to hand this the levels one at a time.
+/// So the descent is written twice on purpose rather than widening a
+/// dictionary API for a test's need - if the route ever stops being "the
+/// nth item, then the nth child", both change together.
+fn chain_of(doc: &GlossDoc, path: NodePath) -> Option<Vec<NodeId>> {
+    let mut steps = path.steps().iter();
+    let mut id = doc.items().nth(*steps.next()? as usize)?;
+    let mut out = vec![id];
+    for step in steps {
+        id = doc.children(id).nth(*step as usize)?;
+        out.push(id);
+    }
+    Some(out)
+}
+
+/// Where in `chain` the innermost drawn marker's own list sits.
+///
+/// The deepest list ancestor that draws a marker for the item beneath it on
+/// this chain, which is the list whose gutter the innermost [`MarkerBox`]
+/// hangs in ([`Paragraphs::list`]). `None` when no ancestor list draws one:
+/// the marker on this paragraph then belongs to a list the paragraph is not
+/// inside, which this sweep does not judge.
+///
+/// [`Paragraphs::list`]: super::marker::Paragraphs::list
+fn marker_list(doc: &GlossDoc, chain: &[NodeId]) -> Option<usize> {
+    (0..chain.len().saturating_sub(1)).rev().find(|&i| {
+        let (list, item) = (chain[i], chain[i + 1]);
+        doc.node(list).kind == Kind::List
+            && doc.node(item).kind == Kind::ListItem
+            && marker_draws(doc, list, item)
+    })
+}
+
+/// Does `list` draw a marker beside `item`?
+///
+/// `list-style-type` is inherited and the marker is drawn at the item, so
+/// the resolution is the list's own over its tag's initial value and then
+/// the item's over that - the two calls [`Paragraphs::list`] makes, in its
+/// order. The ordinal is irrelevant to whether a marker exists at all, so
+/// the first item's is asked for.
+///
+/// [`Paragraphs::list`]: super::marker::Paragraphs::list
+fn marker_draws(doc: &GlossDoc, list: NodeId, item: NodeId) -> bool {
+    let ordered = doc.node(list).tag == Tag::Ol;
+    let inherited = styled_marker(doc, list, initial_marker(ordered), true);
+    styled_marker(doc, item, inherited, true).label(1).is_some()
+}
+
+/// The left indent the nodes below a marker's list are owed, in ems.
+///
+/// One term per node: what it declares, plus a default list level for a
+/// list that declared no left padding of its own. That second clause is the
+/// browser rule the #19 fix states - an author's `padding-left` on a list
+/// *replaces* the UA gutter rather than adding to it - and stating it here
+/// rather than reading the walk's arithmetic is what makes this an oracle
+/// instead of a copy.
+fn owed_indent_em(doc: &GlossDoc, below: &[NodeId]) -> f32 {
+    below
+        .iter()
+        .map(|&id| {
+            let pad = left_of(doc, id, StyleKey::Padding, Some(StyleKey::PaddingLeft));
+            let lead = pad
+                + left_of(doc, id, StyleKey::Margin, Some(StyleKey::MarginLeft))
+                + left_of(doc, id, StyleKey::BorderWidth, None);
+            let level =
+                if doc.node(id).kind == Kind::List && pad <= 0.0 { LIST_INDENT_EM } else { 0.0 };
+            lead + level
+        })
+        .sum()
+}
+
+/// One node's declared left edge of one box property, in ems of its own
+/// size.
+///
+/// The wider of the shorthand's left edge and the longhand, where the
+/// cascade would take whichever the dictionary wrote last. Deliberately
+/// generous: this is the room a gap is *allowed*, so reading a declaration
+/// too widely costs a candidate nobody had to adjudicate, and reading it
+/// too narrowly costs a false one somebody does.
+///
+/// Resolved against a unit em, which makes the answer the multiple itself:
+/// the gap it is compared against is measured at the paragraph's own size,
+/// and [`MARKER_GAP_SLACK_EM`] is what covers a node that declared its
+/// padding at some other one.
+fn left_of(doc: &GlossDoc, id: NodeId, short: StyleKey, long: Option<StyleKey>) -> f32 {
+    let one = Ems { own: 1.0, root: 1.0 };
+    let edges = doc
+        .style_of(id, short)
+        .and_then(|v| box_edges(doc, v, one))
+        .map_or(0.0, |e| e.left);
+    let edge = long
+        .and_then(|key| doc.style_of(id, key))
+        .and_then(|v| box_len(doc, v, one))
+        .unwrap_or(0.0);
+    edges.max(edge).max(0.0)
 }
 
 // ---- the suppression list ----
@@ -551,8 +1016,14 @@ struct Exemplar {
 struct DictSummary {
     dictionary: String,
     entries: u64,
-    /// Visible strings the invariants were stated over.
+    /// Visible strings *no dropped text* was stated over.
     strings: u64,
+    /// Trailing fragments *no orphan trailing fragment* was stated over.
+    fragments: u64,
+    /// Marker boxes *bounded marker gap* was stated over.
+    markers: u64,
+    /// Checks an invariant declined to make. See [`Checked::declined`].
+    declined: u64,
     violations: u64,
     /// Violations a committed suppression absorbed.
     ///
@@ -635,6 +1106,9 @@ impl Report {
             out.push('\n');
             total.entries += d.entries;
             total.strings += d.strings;
+            total.fragments += d.fragments;
+            total.markers += d.markers;
+            total.declined += d.declined;
             total.violations += d.violations;
             total.suppressed += d.suppressed;
             total.errors += d.errors;
@@ -712,9 +1186,18 @@ impl Report {
 /// One summary row, dictionary or total.
 fn summary_line(d: &DictSummary) -> String {
     format!(
-        "sweep  {:<40} entries={:<8} strings={:<9} violations={:<8} suppressed={:<8} \
-         candidates={:<5} errors={}",
-        d.dictionary, d.entries, d.strings, d.violations, d.suppressed, d.candidates, d.errors,
+        "sweep  {:<40} entries={:<8} strings={:<9} fragments={:<8} markers={:<8} \
+         declined={:<7} violations={:<8} suppressed={:<8} candidates={:<5} errors={}",
+        d.dictionary,
+        d.entries,
+        d.strings,
+        d.fragments,
+        d.markers,
+        d.declined,
+        d.violations,
+        d.suppressed,
+        d.candidates,
+        d.errors,
     )
 }
 
@@ -855,7 +1338,8 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
     }
 }
 
-/// One term-bank row through the whole renderer.
+/// One term-bank row through the whole renderer, checked by every
+/// invariant.
 ///
 /// `None` when the row renders no text at all: the dictionary builder gives
 /// such a row no `entry` record, so no reader can ever hover it and it is not
@@ -887,7 +1371,10 @@ fn sweep_entry(r: &Row, sheet: &Sheet) -> Option<Checked> {
         &mut m,
     )
     .expect("FakeMeasure never refuses a run");
-    Some(dropped_text(&r.dict, &doc, SWEEP_ROLES, &s))
+    let mut found = dropped_text(&r.dict, &doc, SWEEP_ROLES, &s);
+    found.merge(orphan_fragment(&r.dict, &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT));
+    found.merge(marker_gap(&r.dict, &doc, &s, Thresholds::DEFAULT));
+    Some(found)
 }
 
 /// The row cap, raised as an error because the archive walk is a stream and
@@ -948,6 +1435,9 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
         let Some(checked) = checked else { return Ok(()) };
         sum.entries += 1;
         sum.strings += checked.strings;
+        sum.fragments += checked.fragments;
+        sum.markers += checked.markers;
+        sum.declined += checked.declined;
         for v in checked.violations {
             sum.violations += 1;
             let filed = report.record(v, || Exemplar {
@@ -1164,6 +1654,372 @@ fn folded_whitespace_and_a_line_break_drop_no_text() {
     assert_eq!(Vec::<Violation>::new(), found.violations);
 }
 
+/// One fixture glossary and its dictionary's own CSS, through the same two
+/// calls [`sweep_entry`] makes.
+///
+/// The tree comes back beside the scene because the paragraph-family
+/// invariants are stated over both: a checker reads the very tree the walk
+/// read, folded stylesheet and all, so its oracle cannot drift from the
+/// render it judges.
+fn swept(glossary: &str, css: &str) -> (Arc<GlossDoc>, PopupScene) {
+    let sheet = Sheet::compile(css);
+    let mut doc = GlossDoc::parse(glossary);
+    sheet::apply(&mut doc, &sheet);
+    let doc = Arc::new(doc);
+    let p = card_with(vec![GlossBlock {
+        dict_name: "Fixture".to_string(),
+        dict_id: crate::present::NO_ROW,
+        entries: vec![GlossEntry {
+            entry_id: crate::present::NO_ROW,
+            glosses: plain_items(&doc),
+            tags: Vec::new(),
+            doc: Arc::clone(&doc),
+            media: Vec::new(),
+        }],
+    }]);
+    let s = shown(&p, sweep_settings());
+    (doc, s)
+}
+
+/// The #18 shape, verbatim from the corpus: Jitendex's example translation
+/// and the footnote mark that trails it.
+const FOOTNOTE_TREE: &str = concat!(
+    r##"{"tag":"div","data":{"content":"example-sentence-b"},"content":["##,
+    r##"{"tag":"span","lang":"en","content":"He still holds the heavyweight title."},"##,
+    r##"{"tag":"span","data":{"content":"attribution-footnote"},"content":"[1]"}]}"##,
+);
+
+/// The sentence the mark trails, as the panel draws it.
+const FOOTNOTE_SENTENCE: &str = "He still holds the heavyweight title.";
+
+/// A fragment on a paragraph of its own is a violation, and the candidate
+/// names both the fragment and the prose it was cut from.
+///
+/// The scene is a real one, mutated, exactly as
+/// [`a_scene_that_lost_a_paragraph_is_a_dropped_text_violation`] is: the
+/// footnote's fix is in this build, so the only way to put the defect back
+/// is to split the paragraph the fix keeps whole - which is precisely what
+/// the marker line break did to 9 784 Jitendex entries. Building the scene
+/// by hand instead would assert against a fixture of this test's own
+/// arithmetic.
+#[test]
+fn a_footnote_split_from_its_sentence_is_an_orphan_fragment() {
+    let glossary = sc(FOOTNOTE_TREE);
+    let (doc, mut s) = swept(&glossary, "");
+    let at = s.elems.iter().position(|e| e.text.contains("[1]")).expect("the sentence");
+    assert_eq!(
+        format!("{FOOTNOTE_SENTENCE}[1]"),
+        s.elems[at].text,
+        "the fix draws sentence and mark as one paragraph",
+    );
+    let mut fragment = s.elems[at].clone();
+    fragment.text = "[1]".to_string();
+    s.elems[at].text = FOOTNOTE_SENTENCE.to_string();
+    s.elems.insert(at + 1, fragment);
+
+    let found = orphan_fragment("Fixture", &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT);
+
+    assert_eq!(1, found.fragments, "one marked node trails prose in this tree");
+    assert_eq!(1, found.violations.len(), "one orphan, one violation");
+    let v = &found.violations[0];
+    assert_eq!(Invariant::OrphanFragment, v.signature.invariant);
+    assert_eq!("Fixture", v.signature.dictionary);
+    assert_eq!(Some(&"[1]".to_string()), v.measured.get("fragment"));
+    assert_eq!(
+        Some(&"0".to_string()),
+        v.measured.get("company_chars"),
+        "the whole defect in one number: nothing else was drawn in the mark's paragraph",
+    );
+    assert_eq!(
+        vec!["content", "div[data-sc-content]", "span[data-sc-content]"],
+        v.signature.shape,
+        "the shape names every node from the glossary item down to the fragment",
+    );
+}
+
+/// The resolved #18 shape flags nothing, and flags again the moment the
+/// threshold is tightened past the fix.
+///
+/// Both halves of the same sanity check. The fix is in this build, so a
+/// clean run over the corpus node proves the invariant is quiet about
+/// correct output; tightening [`ORPHAN_MIN_COMPANY_CHARS`] past the
+/// sentence's own length proves the same checker is measuring the real
+/// company of the real mark, and would have reported zero for the render
+/// Jitendex readers actually saw.
+#[test]
+fn the_fixed_footnote_re_flags_when_its_company_threshold_is_tightened() {
+    let glossary = sc(FOOTNOTE_TREE);
+    let (doc, s) = swept(&glossary, "");
+
+    let found = orphan_fragment("Fixture", &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT);
+    assert_eq!(1, found.fragments, "the mark was checked, not skipped");
+    assert_eq!(Vec::<Violation>::new(), found.violations, "and it sits in its sentence");
+
+    let strict = Thresholds { orphan_min_company: 64, ..Thresholds::DEFAULT };
+    let found = orphan_fragment("Fixture", &doc, SWEEP_ROLES, &s, strict);
+
+    assert_eq!(1, found.violations.len(), "tightened past the fix, the same mark is flagged");
+    assert_eq!(
+        Some(&FOOTNOTE_SENTENCE.chars().count().to_string()),
+        found.violations[0].measured.get("company_chars"),
+        "and the number it reports is the sentence the fix keeps beside it",
+    );
+}
+
+/// The boundary: marked labels standing side by side are sense
+/// separations, and a separation is not an orphan.
+///
+/// Jitendex's sense head, which is the shape the marker line break exists
+/// for: a part-of-speech pill followed by a forms-restriction span, both
+/// marked, neither trailing a sentence. Prose *behind* a marked node is no
+/// evidence either - the second span here holds text and the first still
+/// keeps its own line - so an invariant that read the parent
+/// symmetrically would flag every sense head in the corpus.
+#[test]
+fn marked_labels_that_trail_no_prose_are_no_orphans() {
+    let glossary = sc(concat!(
+        r#"{"tag":"div","data":{"content":"sense"},"content":["#,
+        r#"{"tag":"span","data":{"content":"part-of-speech-info"},"content":"adj"},"#,
+        r#"{"tag":"span","data":{"content":"forms-label"},"content":"\u773c only"}]}"#
+    ));
+    let (doc, s) = swept(&glossary, "");
+    assert_eq!(
+        vec!["adj", "\u{773c} only"],
+        s.elems.iter().filter(|e| e.origin.is_some()).map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        "the walk does break between them, as a sense separation",
+    );
+
+    let found = orphan_fragment("Fixture", &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT);
+
+    assert_eq!(0, found.fragments, "neither label trails prose, so neither is a fragment");
+    assert_eq!(Vec::<Violation>::new(), found.violations);
+}
+
+/// Both orphan thresholds, at the exact value each turns on.
+///
+/// A threshold nothing pins is a threshold any edit can move: a `<=` that
+/// became a `<` here would silently stop checking the widest fragment the
+/// cap admits, and a `>=` that became a `>` would flag every fragment
+/// keeping the least company there is. So one scene is stated twice - a
+/// fragment of exactly [`ORPHAN_MAX_CHARS`] characters keeping exactly
+/// [`ORPHAN_MIN_COMPANY_CHARS`] character of company, then the same
+/// fragment one character longer, which is no longer a fragment at all.
+#[test]
+fn a_fragment_at_the_cap_with_one_character_of_company_passes() {
+    let tree = |mark: &str| {
+        sc(&format!(
+            concat!(
+                r#"{{"tag":"div","content":["#,
+                r#"{{"tag":"span","content":"x"}},"#,
+                r#"{{"tag":"span","data":{{"content":"note"}},"content":"{mark}"}}]}}"#
+            ),
+            mark = mark,
+        ))
+    };
+    let widest = "[1234567890]";
+    assert_eq!(ORPHAN_MAX_CHARS, widest.chars().count(), "the cap, exactly");
+
+    let (doc, s) = swept(&tree(widest), "");
+    assert_eq!(
+        format!("x{widest}"),
+        s.elems.iter().find(|e| e.origin.is_some()).expect("the paragraph").text,
+        "one paragraph: the mark trails prose, so the walk keeps them together",
+    );
+    let found = orphan_fragment("Fixture", &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT);
+    assert_eq!(1, found.fragments, "a fragment at the cap is still a fragment");
+    assert_eq!(
+        Vec::<Violation>::new(),
+        found.violations,
+        "and one character of company is company enough",
+    );
+
+    let (doc, s) = swept(&tree("[12345678901]"), "");
+    let found = orphan_fragment("Fixture", &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT);
+    assert_eq!(0, found.fragments, "one character past the cap is a phrase, not a fragment");
+}
+
+/// The #19 shape, verbatim: Jitendex's sense list around the glossary list
+/// that declares its own indent.
+const SENSE_TREE: &str = concat!(
+    r#"{"tag":"ul","data":{"content":"sense-groups"},"content":["#,
+    r#"{"tag":"li","data":{"content":"sense-group"},"content":["#,
+    r#"{"tag":"ol","content":["#,
+    r#"{"tag":"li","data":{"content":"sense"},"#,
+    r#""style":{"listStyleType":"\"\u2460\""},"content":["#,
+    r#"{"tag":"ul","data":{"content":"glossary"},"#,
+    r#""content":[{"tag":"li","content":"to eat"}]}]}]}]}]}"#,
+);
+
+/// That dictionary's own `styles.css`, likewise verbatim.
+const SENSE_CSS: &str = "ul[data-sc-content=\"sense-groups\"] { list-style-type: \"\u{ff0a}\" }
+     li[data-sc-content=\"sense-group\"] { padding-left: 0.25em }
+     li[data-sc-content=\"sense\"] {
+         padding-left: 0.25em;
+         & ul[data-sc-content=\"glossary\"] {
+             list-style-type: none;
+             padding-left: 0.25em;
+         }
+     }";
+
+/// A marker a whole default level from its gloss is a violation, and the
+/// fixed shape of the same tree is not.
+///
+/// The mutation is the #19 defect exactly: the glossary list charged a full
+/// [`LIST_INDENT_EM`] level *and* the two paddings its dictionary declared,
+/// so the sense number stood 1.9em from the gloss where the author asked
+/// for 0.5em. Moving the placed marker box left by one level reproduces
+/// that geometry against the real tree and the real CSS, which is the
+/// nearest a build carrying the fix can come to the render a reader of
+/// あくどい saw.
+#[test]
+fn a_marker_a_default_level_from_its_gloss_is_a_marker_gap() {
+    let (doc, mut s) = swept(&sc(SENSE_TREE), SENSE_CSS);
+    let at = s.elems.iter().position(|e| e.text == "to eat").expect("the gloss");
+    assert_eq!(2, s.elems[at].marker.len(), "the outer \u{ff0a} and the sense's \u{2460}");
+
+    let found = marker_gap("Fixture", &doc, &s, Thresholds::DEFAULT);
+    assert_eq!(1, found.markers, "one marked paragraph was checked");
+    assert_eq!(
+        Vec::<Violation>::new(),
+        found.violations,
+        "the fixed shape leaves exactly the 0.5em its dictionary declared",
+    );
+
+    let last = s.elems[at].marker.len() - 1;
+    s.elems[at].marker[last].x -= LEVEL;
+    let found = marker_gap("Fixture", &doc, &s, Thresholds::DEFAULT);
+
+    assert_eq!(1, found.violations.len(), "a level of surplus gutter, one violation");
+    let v = &found.violations[0];
+    assert_eq!(Invariant::MarkerGap, v.signature.invariant);
+    assert_eq!(
+        Some(&format!("{:.2}", 0.5 * BOX_EM + LEVEL)),
+        v.measured.get("gap_px"),
+        "the pre-fix number: the declared 0.5em plus a whole level",
+    );
+    assert_eq!(
+        Some(&"0.500".to_string()),
+        v.measured.get("owed_em"),
+        "against the 0.5em the two declarations below the \u{2460} ask for",
+    );
+    assert_eq!(
+        vec![
+            "content",
+            "ul[data-sc-content]{list-style-type}",
+            "li[data-sc-content]{padding-left}",
+            "ol",
+            "li[data-sc-content]{list-style-type,padding-left}",
+            "ul[data-sc-content]{list-style-type,padding-left}",
+            "li",
+        ],
+        v.signature.shape,
+        "the shape names the whole list nest the gap was measured inside",
+    );
+}
+
+/// The boundary: a list that declares no padding is owed its default
+/// gutter, and a gap of exactly one level spends none of the tolerance.
+///
+/// The counterpart to the #19 rule. Jitendex's glossary list replaced the
+/// default level with its own 0.25em; this one declares nothing, so the
+/// level stands and the marker of the list *above* it hangs a full 1.4em
+/// from the gloss - which is what a browser draws and what Yomitan's own
+/// `--list-padding1` puts there. Asserted at zero slack, so the boundary is
+/// the invariant's own arithmetic and not the tolerance around it.
+#[test]
+fn a_default_gutter_under_a_suppressed_marker_is_no_marker_gap() {
+    let glossary = sc(concat!(
+        r#"{"tag":"ol","content":[{"tag":"li","content":["#,
+        r#"{"tag":"ul","style":{"listStyleType":"\"\""},"#,
+        r#""content":[{"tag":"li","content":"gloss"}]}]}]}"#
+    ));
+    let (doc, s) = swept(&glossary, "");
+    let item = s.elems.iter().find(|e| e.text == "gloss").expect("the gloss");
+    assert_eq!(1, item.marker.len(), "the inner list draws none, so only `1. ` hangs here");
+    assert_eq!(
+        LEVEL,
+        -item.marker[0].x - marker_w("1. "),
+        "and it stands one default level from the gloss",
+    );
+
+    let exact = Thresholds { marker_gap_slack_em: 0.0, ..Thresholds::DEFAULT };
+    let found = marker_gap("Fixture", &doc, &s, exact);
+
+    assert_eq!(1, found.markers, "the marker was checked, not skipped");
+    assert_eq!(Vec::<Violation>::new(), found.violations);
+}
+
+/// The resolved #19 shape flags nothing, and flags again the moment the
+/// tolerance is tightened past the padding its dictionary declared.
+///
+/// The other half of the #18 sanity check, and it has to be stated as a
+/// tightened tolerance rather than a tightened rule: the gap the fix leaves
+/// *is* the declared 0.5em, so a checker that flagged it would be wrong
+/// about a browser. What the tightening shows is that this checker measures
+/// that 0.5em - the same number the ticket pinned - and would therefore
+/// have reported the 1.9em a reader saw.
+#[test]
+fn the_fixed_gutter_re_flags_when_its_slack_is_tightened_past_the_declaration() {
+    let (doc, s) = swept(&sc(SENSE_TREE), SENSE_CSS);
+
+    let strict = Thresholds { marker_gap_slack_em: -0.25, ..Thresholds::DEFAULT };
+    let found = marker_gap("Fixture", &doc, &s, strict);
+
+    assert_eq!(1, found.violations.len(), "tightened past the fix, the same gap is flagged");
+    assert_eq!(
+        Some(&format!("{:.2}", 0.5 * BOX_EM)),
+        found.violations[0].measured.get("gap_px"),
+        "and the number it reports is the gap the ticket pinned",
+    );
+}
+
+/// The paragraph family collapses and files like the tracer invariant did.
+///
+/// One shape is one candidate whatever the invariant, and a candidate file
+/// leads with the invariant's own name - which is what makes clearing stale
+/// files safe ([`is_candidate_file`]). An invariant added without a name in
+/// [`Invariant::ALL`] would leave its files behind after a run that stopped
+/// flagging them, so the name is asserted from both ends.
+#[test]
+fn paragraph_family_violations_collapse_into_counted_candidates() {
+    let glossary = sc(FOOTNOTE_TREE);
+    let (doc, mut s) = swept(&glossary, "");
+    let at = s.elems.iter().position(|e| e.text.contains("[1]")).expect("the sentence");
+    let mut fragment = s.elems[at].clone();
+    fragment.text = "[1]".to_string();
+    s.elems[at].text = FOOTNOTE_SENTENCE.to_string();
+    s.elems.insert(at + 1, fragment);
+    let found = orphan_fragment("Fixture", &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT);
+    assert_eq!(1, found.violations.len(), "one orphan to file");
+
+    let mut report = Report::default();
+    for row in [11, 12] {
+        report.record(found.violations[0].clone(), || Exemplar {
+            row,
+            term: "\u{4e00}".to_string(),
+            reading: "\u{4e00}".to_string(),
+            measured: BTreeMap::new(),
+            glossary: glossary.clone(),
+        });
+    }
+
+    assert_eq!(1, report.candidates.len(), "two entries, one shape, one candidate");
+    let c = report.candidates.values().next().expect("the candidate");
+    assert_eq!(2, c.occurrences);
+    assert_eq!(11, c.exemplar.row, "the first sighting stays the exemplar");
+    let key = c.signature.key();
+    let json: serde_json::Value =
+        serde_json::from_str(&candidate_json(c, &key)).expect("readable JSON");
+    assert_eq!("orphan-fragment", json["invariant"]);
+    assert_eq!("[1]", json["exemplar"]["measured"]["fragment"]);
+    let file = candidate_file(c, &key);
+    assert!(file.starts_with("orphan-fragment-fixture-"), "readable prefix: {file}");
+    assert!(
+        is_candidate_file(Path::new(&file)),
+        "and a name this sweep can recognise as its own: {file}",
+    );
+}
+
 /// The sweep. Local only, and the effort's primary target.
 ///
 /// ```text
@@ -1356,14 +2212,14 @@ fn an_unknown_or_unused_suppression_is_named_in_the_summary() {
         "reason = \"A shape no archive in this run held.\"\n",
         "\n",
         "[[suppress]]\n",
-        "signature = \"orphan-fragment | Some Dict | content > text\"\n",
-        "reason = \"An invariant this build does not check.\"\n",
+        "signature = \"dropped-glyph | Some Dict | content > text\"\n",
+        "reason = \"An invariant no build checks; the name was never one.\"\n",
     );
     let list = || Suppressions::parse(text).expect("a well-formed list");
 
     let full = Report { suppress: list(), ..Report::default() }.summary();
     assert!(verdict_for(&full, "dropped-text |").contains("UNUSED"), "{full}");
-    assert!(verdict_for(&full, "orphan-fragment |").contains("UNKNOWN"), "{full}");
+    assert!(verdict_for(&full, "dropped-glyph |").contains("UNKNOWN"), "{full}");
     assert!(full.contains("entries=2  absorbed=0  unused=1  unknown=1"), "{full}");
 
     // A partial run left rows unread, so it has no standing to call an entry
@@ -1371,7 +2227,7 @@ fn an_unknown_or_unused_suppression_is_named_in_the_summary() {
     let partial = Report { suppress: list(), partial: true, ..Report::default() }.summary();
     assert!(!partial.contains("UNUSED"), "{partial}");
     assert!(partial.contains("unused=0  unknown=1"), "{partial}");
-    assert!(verdict_for(&partial, "orphan-fragment |").contains("UNKNOWN"), "{partial}");
+    assert!(verdict_for(&partial, "dropped-glyph |").contains("UNKNOWN"), "{partial}");
 }
 
 /// The summary's own line for one suppression entry.
