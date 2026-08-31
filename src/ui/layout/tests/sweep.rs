@@ -81,6 +81,10 @@ enum Invariant {
     /// More gutter between a list marker's box and its item's first glyph
     /// than the tree asked for.
     MarkerGap,
+    /// A box standing outside the panel's own edges.
+    HorizontalOverflow,
+    /// Two boxes the walk stacked standing on the same pixels.
+    OverlappingBoxes,
 }
 
 impl Invariant {
@@ -90,14 +94,21 @@ impl Invariant {
     /// write is never mistaken for a stale one of its own. An invariant added
     /// without joining this list would leave its files behind after a run
     /// that stopped flagging them.
-    const ALL: [Invariant; 3] =
-        [Invariant::DroppedText, Invariant::OrphanFragment, Invariant::MarkerGap];
+    const ALL: [Invariant; 5] = [
+        Invariant::DroppedText,
+        Invariant::OrphanFragment,
+        Invariant::MarkerGap,
+        Invariant::HorizontalOverflow,
+        Invariant::OverlappingBoxes,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
             Invariant::DroppedText => "dropped-text",
             Invariant::OrphanFragment => "orphan-fragment",
             Invariant::MarkerGap => "marker-gap",
+            Invariant::HorizontalOverflow => "horizontal-overflow",
+            Invariant::OverlappingBoxes => "overlapping-boxes",
         }
     }
 
@@ -383,6 +394,14 @@ struct Checked {
     fragments: u64,
     /// Marker boxes *bounded marker gap* was stated over.
     markers: u64,
+    /// Drawn boxes *no horizontal overflow* was stated over.
+    boxes: u64,
+    /// Pairs of stacked boxes *no overlapping boxes* was stated over.
+    ///
+    /// The pairs the check actually compared, which is fewer than every
+    /// pair the entry holds: two boxes a whole paragraph apart cannot
+    /// intersect, and the walk stops asking about them.
+    pairs: u64,
     /// Checks an invariant declined to make.
     ///
     /// A fragment no paragraph draws as one string, or a marker no ancestor
@@ -401,6 +420,8 @@ impl Checked {
         self.strings += other.strings;
         self.fragments += other.fragments;
         self.markers += other.markers;
+        self.boxes += other.boxes;
+        self.pairs += other.pairs;
         self.declined += other.declined;
         self.violations.extend(other.violations);
     }
@@ -488,7 +509,7 @@ const ORPHAN_MIN_COMPANY_CHARS: usize = 1;
 /// that node may sit at a smaller size than the paragraph the gap ends at.
 const MARKER_GAP_SLACK_EM: f32 = 0.5;
 
-/// The tuned numbers the paragraph-family invariants read.
+/// The tuned numbers the invariants read.
 ///
 /// Passed in rather than read from the constants directly, because a
 /// detector nobody can tighten is a detector nobody can trust: the two
@@ -502,6 +523,8 @@ struct Thresholds {
     orphan_max_chars: usize,
     orphan_min_company: usize,
     marker_gap_slack_em: f32,
+    overflow_slack_px: f32,
+    overlap_slack_px: f32,
 }
 
 impl Thresholds {
@@ -510,6 +533,8 @@ impl Thresholds {
         orphan_max_chars: ORPHAN_MAX_CHARS,
         orphan_min_company: ORPHAN_MIN_COMPANY_CHARS,
         marker_gap_slack_em: MARKER_GAP_SLACK_EM,
+        overflow_slack_px: OVERFLOW_SLACK_PX,
+        overlap_slack_px: OVERLAP_SLACK_PX,
     };
 }
 
@@ -873,6 +898,302 @@ fn left_of(doc: &GlossDoc, id: NodeId, short: StyleKey, long: Option<StyleKey>) 
     edges.max(edge).max(0.0)
 }
 
+// ---- the box family ----
+
+/// How far a box may stand outside the panel before the sweep calls it
+/// overflow, in pixels.
+///
+/// Half a pixel, which is under one device pixel on every display either bin
+/// draws on: a box this far out clips nothing a reader can see. The number is
+/// here for the float arithmetic that placed the box and for nothing else,
+/// which is why it is in pixels and not in ems - one of the two defects this
+/// invariant exists to catch is a runaway indent, and a tolerance scaled by
+/// the font size would grow with exactly the thing running away.
+const OVERFLOW_SLACK_PX: f32 = 0.5;
+
+/// How deep two boxes must interpenetrate, on both axes, before the sweep
+/// calls them overlapping, in pixels.
+///
+/// Half a pixel, for the reason [`OVERFLOW_SLACK_PX`] is: stacked boxes meet
+/// edge to edge by design - one paragraph's bottom is the next one's top -
+/// so the question this invariant asks is never "do they touch" but "how far
+/// in", and the answer has to clear the float arithmetic that decided both
+/// edges.
+const OVERLAP_SLACK_PX: f32 = 0.5;
+
+/// One element's own text, cut to this many characters for a candidate file.
+const SNIPPET_CHARS: usize = 40;
+
+/// The panel's own width: the edge a box may not stand outside of.
+///
+/// A scene reports the width it *wants* only when a side column made it
+/// wider than the box it was offered; with no side column the main column
+/// and its two paddings are that box. Read off the scene rather than from
+/// [`SWEEP_W`], so the invariant states the same thing about a scene laid out
+/// at any other width.
+fn panel_width(s: &PopupScene) -> f32 {
+    s.panel_w.unwrap_or(2.0 * s.origin + s.content_w)
+}
+
+/// One box one element puts on the panel.
+struct DrawnBox<'a> {
+    /// Which of the element's boxes this is, for a signature to carry.
+    name: &'static str,
+    /// The glyphs inside it.
+    text: &'a str,
+    /// In panel space, whichever space the scene keeps the original in.
+    rect: SceneRect,
+}
+
+/// Every box one element puts on the panel, in panel space.
+///
+/// The element's own ink box, then the two that ride it out of its flow: a
+/// reading over its base and a marker in its list's gutter, both of which the
+/// scene keeps run-relative for a bin to add [`SceneElem::pen`] to. Each is
+/// named, because a paragraph whose ink overflows and a marker hanging off
+/// the panel's left edge share every ancestor and are not the same defect.
+///
+/// The names are angle-bracketed for the reason [`elem_shape`]'s are: a shape
+/// step is a node's own selector, and a word the sweep put there has to be
+/// one no node can spell.
+fn drawn_boxes(e: &SceneElem) -> impl Iterator<Item = DrawnBox<'_>> {
+    let (px, py) = e.pen;
+    std::iter::once(DrawnBox { name: "<element-box>", text: &e.text, rect: e.rect })
+        .chain(e.ruby.iter().map(move |r| DrawnBox {
+            name: "<ruby-box>",
+            text: &r.text,
+            rect: SceneRect { x: px + r.x, y: py + r.y, w: r.w, h: r.h },
+        }))
+        .chain(e.marker.iter().map(move |m| DrawnBox {
+            name: "<marker-box>",
+            text: &m.text,
+            rect: SceneRect { x: px + m.x, y: py + m.y, w: m.w, h: m.h },
+        }))
+}
+
+/// The shape around one scene element, or `None` when it has no shape this
+/// sweep can name.
+///
+/// A gloss element's own address, walked into the nodes it names, exactly as
+/// [`marker_gap`] reads one. The panel's own chrome carries no address and no
+/// dictionary node behind it, so it is named by kind instead: a headword that
+/// overflowed is a defect in this renderer rather than in some dictionary's
+/// markup, and a signature that could not tell the two apart would file them
+/// as one shape.
+///
+/// `None` is the third case, and it is why this returns an option rather than
+/// falling back to the chrome name for everything without a chain: a gloss
+/// node deeper than a [`NodePath`] reaches carries an address of `None` too,
+/// and filing it as chrome would let one exemption of a chrome shape absorb
+/// every deep-tree defect in the corpus. A caller declines such a box the way
+/// [`marker_gap`] declines a marker it cannot line up.
+///
+/// The chrome name is angle-bracketed because a step is otherwise a node's own
+/// selector: `step` writes a tag and its `data-sc-*` hooks, and a dictionary
+/// may tag a node anything at all, so a word the sweep contributes has to be
+/// one no node can spell.
+fn elem_shape(doc: &GlossDoc, e: &SceneElem) -> Option<Vec<String>> {
+    let Some(origin) = e.origin else {
+        return Some(vec![format!("<chrome:{}>", e.kind.as_str())]);
+    };
+    let chain = chain_of(doc, origin.path?)?;
+    Some(chain.iter().map(|id| step(doc, *id)).collect())
+}
+
+/// `text` folded and cut to [`SNIPPET_CHARS`] characters.
+///
+/// A measured number says two boxes met; the text says which two, which is
+/// the first thing an adjudicator looks for. Cut because a glossary paragraph
+/// runs to hundreds of characters and the exemplar quotes the whole entry
+/// verbatim anyway.
+fn snippet(text: &str) -> String {
+    let text = folded(text);
+    match text.char_indices().nth(SNIPPET_CHARS) {
+        Some((at, _)) => format!("{}\u{2026}", &text[..at]),
+        None => text,
+    }
+}
+
+/// *No horizontal overflow*: every box the panel draws stands inside the
+/// panel.
+///
+/// Runaway indent and an unbreakable line are the two shapes this catches,
+/// and they reach the same place from opposite ends: an indent walks the pen
+/// off the right edge, and a chunk no shaper will break carries ink past the
+/// wrap width it was given - [`FakeMeasure`] overflows rather than loops when
+/// one chunk exceeds a line, which is what a real shaper does too. Both are
+/// read off the placed box, so whatever rule put it there is what the
+/// invariant holds.
+///
+/// Stated against the *panel* and not against the content column, because the
+/// content edge is not an edge anything is clipped at: a marker hangs left of
+/// it by design and the room it hangs in is the list's own indent, so an
+/// invariant measuring from there would flag every list in the corpus. What a
+/// reader loses is what falls off the surface.
+fn horizontal_overflow(
+    dictionary: &str,
+    doc: &GlossDoc,
+    s: &PopupScene,
+    t: Thresholds,
+) -> Checked {
+    let panel_w = panel_width(s);
+    let mut checked = Checked::default();
+    for e in &s.elems {
+        for b in drawn_boxes(e) {
+            checked.boxes += 1;
+            let (right, edge) = (b.rect.x + b.rect.w, panel_w + t.overflow_slack_px);
+            let (side, over) = if b.rect.x < -t.overflow_slack_px {
+                ("left", -b.rect.x)
+            } else if right > edge {
+                ("right", right - panel_w)
+            } else {
+                continue;
+            };
+            let mut measured = BTreeMap::new();
+            measured.insert("box".to_string(), b.name.to_string());
+            measured.insert("side".to_string(), side.to_string());
+            measured.insert("over_px".to_string(), format!("{over:.2}"));
+            measured.insert("x_px".to_string(), format!("{:.2}", b.rect.x));
+            measured.insert("w_px".to_string(), format!("{:.2}", b.rect.w));
+            measured.insert("panel_w_px".to_string(), format!("{panel_w:.2}"));
+            measured.insert("text".to_string(), snippet(b.text));
+            // A box whose element this sweep cannot name is one it declines
+            // to file rather than one it files under somebody else's shape.
+            let Some(mut shape) = elem_shape(doc, e) else {
+                checked.declined += 1;
+                continue;
+            };
+            shape.push(b.name.to_string());
+            checked.violations.push(Violation {
+                signature: Signature {
+                    invariant: Invariant::HorizontalOverflow,
+                    dictionary: dictionary.to_string(),
+                    shape,
+                },
+                measured,
+            });
+        }
+    }
+    checked
+}
+
+/// Which promise a box's kind carries, or `None` when it carries none.
+///
+/// The whole exemption list for *no overlapping boxes*, stated by kind so
+/// that a kind added to the scene is a compile error here rather than a
+/// silent flood of candidates. Two sets of boxes each promise not to stand on
+/// their own, and only boxes from one set are ever compared:
+///
+/// - [`Stack::Flow`] is what the walk stacked one after another. A mis-stacked
+///   row is two of these sharing pixels.
+/// - [`Stack::Assets`] is the images. Each advances no y and composites over
+///   the spacer run whose line already bought its room, so an image against
+///   the paragraph around it is not a defect - but an image against *another*
+///   image is the double-drawn element story 9 asks for, and no run stands
+///   between two of those to report it.
+///
+/// The three kinds that carry no promise are the containers. A block, a table
+/// and a cell each lead the paragraphs inside them in draw order and their
+/// rects cover every one, so a check comparing them would report each
+/// bordered `div` in the corpus as a collision with its own contents. A corner
+/// makes none either: it advances no y and hangs in the width the headword
+/// reserved beside it, which is what a corner is *for*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stack {
+    /// The boxes the walk stacked down the panel.
+    Flow,
+    /// The assets composited over it.
+    Assets,
+}
+
+fn stack_of(kind: ElemKind) -> Option<Stack> {
+    match kind {
+        ElemKind::Separator
+        | ElemKind::Text
+        | ElemKind::Collapsed
+        | ElemKind::Headword
+        | ElemKind::BackButton => Some(Stack::Flow),
+        ElemKind::Image => Some(Stack::Assets),
+        ElemKind::Corner | ElemKind::Block | ElemKind::Table | ElemKind::Cell => None,
+    }
+}
+
+/// *No overlapping boxes*: nothing the walk stacked stands on anything else
+/// it stacked, and no asset is drawn over another.
+///
+/// Mis-stacked rows and double-drawn elements, stated as each set's own
+/// promise ([`stack_of`]). Only element rects answer for it, and the two
+/// overhangs a correct render has are outside the comparison by construction
+/// rather than forgiven by a tolerance afterwards - neither a [`RubyBox`] nor
+/// a [`MarkerBox`] is an element rect, and neither is in a set that promises
+/// anything. That is not a formality in the ruby case: a reading sits *inside*
+/// the line its own base grew for it ([`measure_readings`]), so a check that
+/// admitted it would report every ruby in the corpus against its own
+/// paragraph.
+///
+/// [`measure_readings`]: super::ruby::measure_readings
+fn overlapping_boxes(
+    dictionary: &str,
+    doc: &GlossDoc,
+    s: &PopupScene,
+    t: Thresholds,
+) -> Checked {
+    let mut checked = Checked::default();
+    let mut boxes: Vec<&SceneElem> =
+        s.elems.iter().filter(|e| stack_of(e.kind).is_some()).collect();
+    // Top edge first, draw order within a tie - `sort_by` is stable - so the
+    // loop below can stop at the first box starting past the one it is asking
+    // about, and so a pair is named in one order however the scene listed it.
+    boxes.sort_by(|a, b| a.rect.y.total_cmp(&b.rect.y));
+    for (i, upper) in boxes.iter().enumerate() {
+        let (top, bottom) = (upper.rect.y, upper.rect.y + upper.rect.h);
+        for lower in &boxes[i + 1..] {
+            // Sorted, so every box after this one starts lower still.
+            if lower.rect.y >= bottom - t.overlap_slack_px {
+                break;
+            }
+            // A promise is only about its own set: an asset over a paragraph
+            // is what compositing is.
+            if stack_of(upper.kind) != stack_of(lower.kind) {
+                continue;
+            }
+            checked.pairs += 1;
+            let across = (upper.rect.x + upper.rect.w).min(lower.rect.x + lower.rect.w)
+                - upper.rect.x.max(lower.rect.x);
+            let down = bottom.min(lower.rect.y + lower.rect.h) - top.max(lower.rect.y);
+            if across <= t.overlap_slack_px || down <= t.overlap_slack_px {
+                continue;
+            }
+            let mut measured = BTreeMap::new();
+            measured.insert("overlap_w_px".to_string(), format!("{across:.2}"));
+            measured.insert("overlap_h_px".to_string(), format!("{down:.2}"));
+            measured.insert("upper_kind".to_string(), upper.kind.as_str().to_string());
+            measured.insert("lower_kind".to_string(), lower.kind.as_str().to_string());
+            measured.insert("upper".to_string(), snippet(&upper.text));
+            measured.insert("lower".to_string(), snippet(&lower.text));
+            // Two boxes, one of which this sweep cannot name: see
+            // [`horizontal_overflow`].
+            let (Some(mut shape), Some(under)) =
+                (elem_shape(doc, upper), elem_shape(doc, lower))
+            else {
+                checked.declined += 1;
+                continue;
+            };
+            shape.push("<overlaps>".to_string());
+            shape.extend(under);
+            checked.violations.push(Violation {
+                signature: Signature {
+                    invariant: Invariant::OverlappingBoxes,
+                    dictionary: dictionary.to_string(),
+                    shape,
+                },
+                measured,
+            });
+        }
+    }
+    checked
+}
+
 // ---- the suppression list ----
 
 /// The committed memory of adjudicated non-bugs.
@@ -1022,6 +1343,10 @@ struct DictSummary {
     fragments: u64,
     /// Marker boxes *bounded marker gap* was stated over.
     markers: u64,
+    /// Drawn boxes *no horizontal overflow* was stated over.
+    boxes: u64,
+    /// Pairs of stacked boxes *no overlapping boxes* was stated over.
+    pairs: u64,
     /// Checks an invariant declined to make. See [`Checked::declined`].
     declined: u64,
     violations: u64,
@@ -1049,7 +1374,6 @@ enum Filed {
 }
 
 /// What one sweep saw.
-#[derive(Default)]
 struct Report {
     dicts: Vec<DictSummary>,
     /// By [`Signature::key`], so the report is ordered and one shape is one
@@ -1057,6 +1381,14 @@ struct Report {
     candidates: BTreeMap<String, Candidate>,
     /// The exemptions this run applied, and what each absorbed.
     suppress: Suppressions,
+    /// The invariants this run checked.
+    ///
+    /// Held here rather than passed down, because it is the same kind of
+    /// thing the suppression list is: a statement about what this run was
+    /// answerable for, which the summary has to be able to print. It also
+    /// stops a narrowed run from calling every other invariant's exemptions
+    /// unused - they were never given a violation to absorb.
+    only: Vec<Invariant>,
     /// Did this run leave rows unchecked?
     ///
     /// Learned from the walk itself - a row cap that fired, an unreadable
@@ -1065,6 +1397,23 @@ struct Report {
     /// from calling an exemption unused: the rows that would have used it
     /// may simply never have been read.
     partial: bool,
+}
+
+impl Default for Report {
+    /// A whole sweep: every invariant, no exemptions, nothing seen yet.
+    ///
+    /// Written out rather than derived for one field: an empty `only` would
+    /// be a report that checked nothing, and the default has to be the run a
+    /// caller who said nothing meant.
+    fn default() -> Self {
+        Report {
+            dicts: Vec::new(),
+            candidates: BTreeMap::new(),
+            suppress: Suppressions::default(),
+            only: Invariant::ALL.to_vec(),
+            partial: false,
+        }
+    }
 }
 
 impl Report {
@@ -1108,6 +1457,8 @@ impl Report {
             total.strings += d.strings;
             total.fragments += d.fragments;
             total.markers += d.markers;
+            total.boxes += d.boxes;
+            total.pairs += d.pairs;
             total.declined += d.declined;
             total.violations += d.violations;
             total.suppressed += d.suppressed;
@@ -1127,12 +1478,18 @@ impl Report {
     /// itself the answer to whether one widened.
     fn suppression_summary(&self) -> String {
         let mut out = String::new();
-        let (mut absorbed, mut unused, mut unknown) = (0u64, 0u64, 0u64);
+        let (mut absorbed, mut unused, mut unknown, mut unchecked) = (0u64, 0u64, 0u64, 0u64);
         for (signature, e) in &self.suppress.entries {
             absorbed += e.absorbed;
             let verdict = if e.invariant.is_none() {
                 unknown += 1;
                 "UNKNOWN"
+            } else if e.invariant.is_some_and(|i| !self.only.contains(&i)) {
+                // This run never checked the invariant, so the entry had
+                // nothing to absorb and saying it went unused would be a
+                // verdict about the filter and not about the exemption.
+                unchecked += 1;
+                "unchecked"
             } else if e.absorbed == 0 && !self.partial {
                 unused += 1;
                 "UNUSED"
@@ -1140,15 +1497,19 @@ impl Report {
                 "ok"
             };
             out.push_str(&format!(
-                "sweep  suppression  absorbed={:<8} {verdict:<8} {signature}  # {}\n",
+                "sweep  suppression  absorbed={:<8} {verdict:<9} {signature}  # {}\n",
                 e.absorbed, e.reason,
             ));
         }
         let entries = self.suppress.entries.len();
         out.push_str(&format!(
             "sweep  suppressions  entries={entries}  absorbed={absorbed}  \
-             unused={unused}  unknown={unknown}",
+             unused={unused}  unchecked={unchecked}  unknown={unknown}",
         ));
+        if self.only.len() < Invariant::ALL.len() {
+            let names: Vec<&str> = self.only.iter().map(|i| i.as_str()).collect();
+            out.push_str(&format!("\nsweep  invariants  this run checked {}", names.join(", ")));
+        }
         if self.partial {
             out.push_str(
                 "\nsweep  suppressions  rows went unread, so no entry is called unused",
@@ -1187,12 +1548,15 @@ impl Report {
 fn summary_line(d: &DictSummary) -> String {
     format!(
         "sweep  {:<40} entries={:<8} strings={:<9} fragments={:<8} markers={:<8} \
-         declined={:<7} violations={:<8} suppressed={:<8} candidates={:<5} errors={}",
+         boxes={:<9} pairs={:<9} declined={:<7} violations={:<8} suppressed={:<8} \
+         candidates={:<5} errors={}",
         d.dictionary,
         d.entries,
         d.strings,
         d.fragments,
         d.markers,
+        d.boxes,
+        d.pairs,
         d.declined,
         d.violations,
         d.suppressed,
@@ -1338,8 +1702,8 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
     }
 }
 
-/// One term-bank row through the whole renderer, checked by every
-/// invariant.
+/// One term-bank row through the whole renderer, checked by every invariant
+/// in `only`.
 ///
 /// `None` when the row renders no text at all: the dictionary builder gives
 /// such a row no `entry` record, so no reader can ever hover it and it is not
@@ -1347,7 +1711,7 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
 /// path's own, in its order - parse the stored text, fold the dictionary's
 /// stylesheet into the tree, render - so a candidate is a defect a reader
 /// could actually see.
-fn sweep_entry(r: &Row, sheet: &Sheet) -> Option<Checked> {
+fn sweep_entry(r: &Row, sheet: &Sheet, only: &[Invariant]) -> Option<Checked> {
     let mut doc = GlossDoc::parse(&r.glossary);
     if !renders_text(&doc) {
         return None;
@@ -1371,9 +1735,19 @@ fn sweep_entry(r: &Row, sheet: &Sheet) -> Option<Checked> {
         &mut m,
     )
     .expect("FakeMeasure never refuses a run");
-    let mut found = dropped_text(&r.dict, &doc, SWEEP_ROLES, &s);
-    found.merge(orphan_fragment(&r.dict, &doc, SWEEP_ROLES, &s, Thresholds::DEFAULT));
-    found.merge(marker_gap(&r.dict, &doc, &s, Thresholds::DEFAULT));
+    // The one place every checker is named, so an invariant added to
+    // [`Invariant`] is a compile error until it is wired to a call.
+    let mut found = Checked::default();
+    let t = Thresholds::DEFAULT;
+    for invariant in only {
+        found.merge(match invariant {
+            Invariant::DroppedText => dropped_text(&r.dict, &doc, SWEEP_ROLES, &s),
+            Invariant::OrphanFragment => orphan_fragment(&r.dict, &doc, SWEEP_ROLES, &s, t),
+            Invariant::MarkerGap => marker_gap(&r.dict, &doc, &s, t),
+            Invariant::HorizontalOverflow => horizontal_overflow(&r.dict, &doc, &s, t),
+            Invariant::OverlappingBoxes => overlapping_boxes(&r.dict, &doc, &s, t),
+        });
+    }
     Some(found)
 }
 
@@ -1410,6 +1784,9 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
     let title = archive_title(zip);
     let css = read_styles_css(zip).ok().flatten().unwrap_or_default();
     let sheet = Sheet::compile(&css);
+    // Taken once per archive: the walk holds `report` borrowed for every row,
+    // and five names are cheaper to copy than to reason about.
+    let only = report.only.clone();
     let mut sum = DictSummary { dictionary: title.clone(), ..DictSummary::default() };
     let mut rows: i64 = 0;
     let walk = for_each_term(zip, |t| {
@@ -1425,8 +1802,9 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
             reading: t.reading.clone(),
             glossary: serde_json::to_string(&t.glossary)?,
         };
-        let found =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep_entry(&r, &sheet)));
+        let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sweep_entry(&r, &sheet, &only)
+        }));
         let Ok(checked) = found else {
             sum.errors += 1;
             eprintln!("sweep  {title}: row {} ({}) panicked", r.row, r.term);
@@ -1437,6 +1815,8 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
         sum.strings += checked.strings;
         sum.fragments += checked.fragments;
         sum.markers += checked.markers;
+        sum.boxes += checked.boxes;
+        sum.pairs += checked.pairs;
         sum.declined += checked.declined;
         for v in checked.violations {
             sum.violations += 1;
@@ -1509,6 +1889,8 @@ const CORPUS_ENV: &str = "CHIBIPOP_SWEEP_CORPUS";
 const ROWS_ENV: &str = "CHIBIPOP_SWEEP_ROWS";
 /// Where candidate files land.
 const OUT_ENV: &str = "CHIBIPOP_SWEEP_OUT";
+/// Invariants to check, comma-separated. Unset checks every one.
+const ONLY_ENV: &str = "CHIBIPOP_SWEEP_ONLY";
 
 /// The row cap, or `None` for the whole archive.
 ///
@@ -1518,6 +1900,39 @@ const OUT_ENV: &str = "CHIBIPOP_SWEEP_OUT";
 fn row_cap() -> Option<u64> {
     let raw = std::env::var(ROWS_ENV).ok()?;
     Some(raw.parse().unwrap_or_else(|_| panic!("{ROWS_ENV} must be a row count, got {raw:?}")))
+}
+
+/// The invariants this run checks.
+///
+/// The iteration loop's other half, beside [`row_cap`]: narrowing a run to
+/// the one invariant being tuned is what makes a capped run answer in seconds
+/// rather than in a minute, and it is what lets a candidate count be read as
+/// one invariant's own rather than as five invariants' sum.
+fn invariant_filter() -> Vec<Invariant> {
+    match std::env::var(ONLY_ENV) {
+        Ok(raw) => named_invariants(&raw),
+        Err(_) => Invariant::ALL.to_vec(),
+    }
+}
+
+/// The invariants a comma-separated list names.
+///
+/// A name this build does not check stops the run, for the reason a
+/// malformed row cap does: a filter that silently matched nothing would sweep
+/// a whole corpus and report it clean.
+fn named_invariants(raw: &str) -> Vec<Invariant> {
+    let only: Vec<Invariant> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            Invariant::named(name).unwrap_or_else(|| {
+                panic!("{ONLY_ENV} names no invariant this build checks: {name:?}")
+            })
+        })
+        .collect();
+    assert!(!only.is_empty(), "{ONLY_ENV} is set and names no invariant");
+    only
 }
 
 /// Where candidates are written.
@@ -1662,6 +2077,20 @@ fn folded_whitespace_and_a_line_break_drop_no_text() {
 /// read, folded stylesheet and all, so its oracle cannot drift from the
 /// render it judges.
 fn swept(glossary: &str, css: &str) -> (Arc<GlossDoc>, PopupScene) {
+    swept_media(glossary, css, Vec::new())
+}
+
+/// [`swept`], for a dictionary whose build also recorded assets.
+///
+/// The sizing pass reads what the build recorded rather than the bytes, so an
+/// image fixture is a path and four numbers - no archive, no decoder, no
+/// database. Split out rather than folded into every caller, because exactly
+/// one invariant asks about assets and the other four never have one.
+fn swept_media(
+    glossary: &str,
+    css: &str,
+    media: Vec<(String, Intrinsic)>,
+) -> (Arc<GlossDoc>, PopupScene) {
     let sheet = Sheet::compile(css);
     let mut doc = GlossDoc::parse(glossary);
     sheet::apply(&mut doc, &sheet);
@@ -1674,7 +2103,7 @@ fn swept(glossary: &str, css: &str) -> (Arc<GlossDoc>, PopupScene) {
             glosses: plain_items(&doc),
             tags: Vec::new(),
             doc: Arc::clone(&doc),
-            media: Vec::new(),
+            media,
         }],
     }]);
     let s = shown(&p, sweep_settings());
@@ -2020,6 +2449,398 @@ fn paragraph_family_violations_collapse_into_counted_candidates() {
     );
 }
 
+/// A declared indent no shaper may break: one span whose `padding-left` is
+/// wider than the panel it is drawn in.
+///
+/// An inline box buys its horizontal room with `PILL_SPACER`, U+00A0, which
+/// is UAX #14's class GL - so the whole reservation is one chunk, and a
+/// measurer that cannot fit a chunk on a line overflows rather than loops.
+/// That is the *unbreakable line* failure exactly, written the one way a
+/// dictionary can write it: in its own stylesheet.
+const WIDE_PAD_TREE: &str =
+    r##"{"tag":"span","data":{"content":"wide"},"content":"x"}"##;
+
+/// The declaration itself: 40em of left padding, at a panel 424 pixels wide.
+const WIDE_PAD_CSS: &str = "span[data-sc-content=\"wide\"] { padding-left: 40em }";
+
+/// A run the panel cannot hold is a violation, and the candidate names the
+/// edge it left and by how much.
+///
+/// No mutation: the padding is a real declaration, the chunk is really
+/// unbreakable, and the 487.5 pixels of ink really run 75.5 past a 424-pixel
+/// panel. The one number an adjudicator needs is that overhang, so it is the
+/// one this test pins.
+#[test]
+fn an_unbreakable_line_wider_than_the_panel_is_a_horizontal_overflow() {
+    let (doc, s) = swept(&sc(WIDE_PAD_TREE), WIDE_PAD_CSS);
+
+    let found = horizontal_overflow("Fixture", &doc, &s, Thresholds::DEFAULT);
+
+    assert_eq!(3, found.boxes, "the headword, the dictionary label, and the padded run");
+    assert_eq!(1, found.violations.len(), "one box leaves the panel");
+    let v = &found.violations[0];
+    assert_eq!(Invariant::HorizontalOverflow, v.signature.invariant);
+    assert_eq!(Some(&"right".to_string()), v.measured.get("side"));
+    assert_eq!(Some(&"<element-box>".to_string()), v.measured.get("box"));
+    assert_eq!(Some(&"424.00".to_string()), v.measured.get("panel_w_px"));
+    assert_eq!(
+        Some(&"75.50".to_string()),
+        v.measured.get("over_px"),
+        "the whole defect in one number: 487.5 of ink from x=12 on a 424 panel",
+    );
+    assert_eq!(
+        vec!["content", "span[data-sc-content]{padding-left}", "<element-box>"],
+        v.signature.shape,
+        "the shape names the node that declared the indent, and which of its boxes left",
+    );
+}
+
+/// The boundary: a box whose last pixel is the panel's last pixel is inside
+/// it, and the same box one pixel wider is not.
+///
+/// One scene stated twice, because the whole invariant is one comparison and
+/// a `>` that became a `>=` would stop checking the widest box a panel can
+/// hold. Asserted at zero slack, so what is pinned is the invariant's own
+/// arithmetic and not [`OVERFLOW_SLACK_PX`] around it.
+#[test]
+fn a_box_ending_exactly_at_the_panel_edge_is_no_horizontal_overflow() {
+    let (doc, mut s) = swept(&sc(WIDE_PAD_TREE), WIDE_PAD_CSS);
+    let tight = Thresholds { overflow_slack_px: 0.0, ..Thresholds::DEFAULT };
+    let panel_w = panel_width(&s);
+    let at = s.elems.iter().position(|e| e.text.ends_with('x')).expect("the padded run");
+    s.elems[at].rect.w = panel_w - s.elems[at].rect.x;
+
+    let flush = horizontal_overflow("Fixture", &doc, &s, tight);
+    assert_eq!(3, flush.boxes, "every box is still asked about");
+    assert!(flush.violations.is_empty(), "the last pixel of the panel is on the panel");
+
+    s.elems[at].rect.w += 1.0;
+    let over = horizontal_overflow("Fixture", &doc, &s, tight);
+    assert_eq!(1, over.violations.len(), "and one pixel past it is not");
+    assert_eq!(Some(&"1.00".to_string()), over.violations[0].measured.get("over_px"));
+}
+
+/// A marker hanging in its gutter is no overflow, however far left it hangs.
+///
+/// The first of the two overhangs this family exempts by construction, and
+/// the reason the invariant is stated against the panel rather than against
+/// the content column: a marker is drawn *outside* its item's own box by
+/// definition ([`MarkerBox`]), so an edge measured at the pen would flag
+/// every list in the corpus. This marker is wider than the gutter it was
+/// given, which is the extreme of that shape - [`place_markers`] clamps it to
+/// the panel's own left edge, so its box starts at exactly zero and the check
+/// has to let it. Asserted at zero slack.
+#[test]
+fn a_marker_clamped_to_the_panel_edge_is_no_horizontal_overflow() {
+    let glossary = sc(concat!(
+        r##"{"tag":"ul","data":{"content":"wide"},"##,
+        r##""content":[{"tag":"li","content":"an item"}]}"##,
+    ));
+    let css = "ul[data-sc-content=\"wide\"] { list-style-type: \
+               \"\u{2460}\u{2461}\u{2462}\u{2463}\u{2464}\u{2465}\" }";
+    let (doc, s) = swept(&glossary, css);
+    let tight =
+        Thresholds { overflow_slack_px: 0.0, overlap_slack_px: 0.0, ..Thresholds::DEFAULT };
+
+    let item = s.elems.iter().find(|e| e.text == "an item").expect("the item");
+    let mark = item.marker.last().expect("its marker");
+    assert!(mark.x < 0.0, "the marker hangs left of the pen: {}", mark.x);
+    assert_eq!(0.0, item.pen.0 + mark.x, "and lands on the panel's own left edge");
+
+    let over = horizontal_overflow("Fixture", &doc, &s, tight);
+    assert_eq!(4, over.boxes, "the marker's box is one of the four asked about");
+    assert!(over.violations.is_empty(), "a marker in its gutter is where a marker goes");
+    let stacked = overlapping_boxes("Fixture", &doc, &s, tight);
+    assert!(stacked.violations.is_empty(), "and it is on no other box's pixels");
+}
+
+/// The #19-adjacent shape a dictionary can still write: two blocks a
+/// negative top margin pulls into each other.
+const PULLED_TREE: &str = concat!(
+    r##"{"tag":"div","content":[{"tag":"div","content":"first line here"},"##,
+    r##"{"tag":"div","data":{"content":"pull"},"content":"second line here"}]}"##,
+);
+
+/// The declaration itself: two ems of pull, against a gap of four pixels.
+const PULLED_CSS: &str = "div[data-sc-content=\"pull\"] { margin-top: -2em }";
+
+/// Two paragraphs standing on the same pixels are a violation, and the
+/// candidate names both of them.
+///
+/// No mutation here either: CSS allows a negative margin, [`box_len`] keeps
+/// one, and two ems of it really pulls the second block 26 pixels up into the
+/// first. That is the mis-stacked row this invariant exists to find, and a
+/// reader would see one sentence written over another.
+///
+/// [`box_len`]: super::style::box_len
+#[test]
+fn two_paragraphs_a_negative_margin_pulled_together_are_overlapping_boxes() {
+    let (doc, s) = swept(&sc(PULLED_TREE), PULLED_CSS);
+
+    let found = overlapping_boxes("Fixture", &doc, &s, Thresholds::DEFAULT);
+
+    assert_eq!(1, found.pairs, "one pair of stacked boxes stood near enough to ask about");
+    assert_eq!(1, found.violations.len(), "and it is a collision");
+    let v = &found.violations[0];
+    assert_eq!(Invariant::OverlappingBoxes, v.signature.invariant);
+    assert_eq!(Some(&"first line here".to_string()), v.measured.get("upper"));
+    assert_eq!(Some(&"second line here".to_string()), v.measured.get("lower"));
+    assert_eq!(
+        Some(&"26.00".to_string()),
+        v.measured.get("overlap_h_px"),
+        "the whole defect in one number: two ems of pull less the gap it ate",
+    );
+    assert_eq!(
+        vec![
+            "content",
+            "div",
+            "div",
+            "<overlaps>",
+            "content",
+            "div",
+            "div[data-sc-content]{margin-top}",
+        ],
+        v.signature.shape,
+        "the shape names both nodes, upper first",
+    );
+}
+
+/// The boundary: one paragraph's last pixel row is the next one's first, and
+/// that is a stack rather than a collision.
+///
+/// The same scene stated twice, for the reason
+/// [`a_box_ending_exactly_at_the_panel_edge_is_no_horizontal_overflow`] is: a
+/// `<=` that became a `<` here would flag every paragraph in the corpus
+/// against the one under it, because meeting edge to edge is what stacking
+/// *is*. Asserted at zero slack.
+#[test]
+fn two_paragraphs_meeting_edge_to_edge_are_no_overlapping_boxes() {
+    let (doc, mut s) = swept(&sc(PULLED_TREE), PULLED_CSS);
+    let tight = Thresholds { overlap_slack_px: 0.0, ..Thresholds::DEFAULT };
+    let first = s.elems.iter().position(|e| e.text == "first line here").expect("the first");
+    let second = s.elems.iter().position(|e| e.text == "second line here").expect("the second");
+    let bottom = s.elems[first].rect.y + s.elems[first].rect.h;
+    s.elems[second].rect.y = bottom;
+
+    let flush = overlapping_boxes("Fixture", &doc, &s, tight);
+    assert!(flush.violations.is_empty(), "one box's bottom edge is the next box's top edge");
+
+    s.elems[second].rect.y = bottom - 1.0;
+    let over = overlapping_boxes("Fixture", &doc, &s, tight);
+    assert_eq!(1, over.violations.len(), "and one pixel of interpenetration is not");
+    assert_eq!(Some(&"1.00".to_string()), over.violations[0].measured.get("overlap_h_px"));
+}
+
+/// The other boundary: two cells of one row share every pixel of their
+/// height and none of their width.
+///
+/// The half of the rule a check reading only y would lose. A table row is the
+/// one shape in the corpus that stacks nothing - both paragraphs start at the
+/// row's own top - so an invariant that called vertical coincidence a
+/// collision would report every table a dictionary holds.
+#[test]
+fn two_cells_sharing_a_row_are_no_overlapping_boxes() {
+    let glossary = sc(concat!(
+        r##"{"tag":"table","content":[{"tag":"tr","content":["##,
+        r##"{"tag":"td","content":"left cell"},{"tag":"td","content":"right cell"}]}]}"##,
+    ));
+    let (doc, s) = swept(&glossary, "");
+    let tight = Thresholds { overlap_slack_px: 0.0, ..Thresholds::DEFAULT };
+
+    let cells: Vec<&SceneElem> =
+        s.elems.iter().filter(|e| e.text.ends_with(" cell")).collect();
+    assert_eq!(2, cells.len(), "one paragraph per cell");
+    assert_eq!(cells[0].rect.y, cells[1].rect.y, "both start at their row's top");
+
+    let found = overlapping_boxes("Fixture", &doc, &s, tight);
+    assert_eq!(1, found.pairs, "the two were compared");
+    assert!(found.violations.is_empty(), "and they stand side by side, not on each other");
+}
+
+/// A reading over its base is no overlap, although its box is wholly inside
+/// its paragraph's.
+///
+/// The second overhang this family exempts by construction, and the one where
+/// the exemption is load-bearing rather than tidy: a reading sits in the room
+/// its own base grew for it, so its box is *contained* by the box of the
+/// paragraph drawing it - which this test asserts, so that a checker widened
+/// to compare every drawn box would fail here rather than report every ruby
+/// in the corpus. Nothing about the reading is forgiven by a tolerance: a
+/// [`RubyBox`] is not an element rect, so it never enters the comparison.
+#[test]
+fn a_reading_over_its_base_is_no_overlapping_box() {
+    let glossary = sc(concat!(
+        r##"{"tag":"ruby","content":[{"tag":"span","content":"\u65e5"},"##,
+        r##"{"tag":"rt","content":"\u306b\u307b\u3093\u3054"}]}"##,
+    ));
+    let (doc, s) = swept(&glossary, "");
+    let tight =
+        Thresholds { overflow_slack_px: 0.0, overlap_slack_px: 0.0, ..Thresholds::DEFAULT };
+
+    let base = s.elems.iter().find(|e| !e.ruby.is_empty()).expect("the ruby paragraph");
+    let read = &base.ruby[0];
+    let (x, y) = (base.pen.0 + read.x, base.pen.1 + read.y);
+    assert!(
+        x >= base.rect.x
+            && x + read.w <= base.rect.x + base.rect.w
+            && y >= base.rect.y
+            && y + read.h <= base.rect.y + base.rect.h,
+        "the reading's box lies inside its paragraph's: {:?} in {:?}",
+        (x, y, read.w, read.h),
+        base.rect,
+    );
+
+    let found = overlapping_boxes("Fixture", &doc, &s, tight);
+    assert!(found.violations.is_empty(), "a reading is not a box the flow stacked");
+    let over = horizontal_overflow("Fixture", &doc, &s, tight);
+    assert_eq!(4, over.boxes, "the reading's box is asked about all the same");
+    assert!(over.violations.is_empty(), "and it is on the panel");
+}
+
+/// Two assets composited on one line stand beside each other, and one moved
+/// onto the other is a violation.
+///
+/// The *double-drawn element* half of story 9, and the reason the assets
+/// carry a promise of their own rather than joining the flow's: an image
+/// shares pixels with the paragraph around it by design - the spacer run
+/// whose line bought its room sits right under it - so nothing in the flow
+/// can report two assets landing on one place. Only another asset can.
+#[test]
+fn two_assets_composited_on_one_place_are_overlapping_boxes() {
+    let glossary = sc(concat!(
+        r##"{"tag":"div","content":[{"tag":"img","path":"g/a.png"},"##,
+        r##"{"tag":"img","path":"g/b.png"}]}"##,
+    ));
+    let art = recorded(MediaFormat::Png, 20.0, 20.0);
+    let media = vec![("g/a.png".to_string(), art), ("g/b.png".to_string(), art)];
+    let (doc, mut s) = swept_media(&glossary, "", media);
+    let tight = Thresholds { overlap_slack_px: 0.0, ..Thresholds::DEFAULT };
+    let assets: Vec<usize> = s
+        .elems
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == ElemKind::Image)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(2, assets.len(), "one element per asset");
+
+    let found = overlapping_boxes("Fixture", &doc, &s, tight);
+    assert_eq!(1, found.pairs, "the two assets were compared, and nothing else was");
+    assert!(found.violations.is_empty(), "side by side on the line that bought their room");
+
+    s.elems[assets[1]].rect.x = s.elems[assets[0]].rect.x;
+    let drawn_twice = overlapping_boxes("Fixture", &doc, &s, tight);
+    assert_eq!(1, drawn_twice.violations.len(), "one asset over another is one violation");
+    let v = &drawn_twice.violations[0];
+    assert_eq!(Some(&"Image".to_string()), v.measured.get("upper_kind"));
+    assert_eq!(Some(&"Image".to_string()), v.measured.get("lower_kind"));
+    assert_eq!(Some(&"20.00".to_string()), v.measured.get("overlap_w_px"));
+}
+
+/// The box family collapses and files like the tracer invariant did.
+///
+/// The same claim [`paragraph_family_violations_collapse_into_counted_candidates`]
+/// makes, for the two invariants added after it: one shape is one candidate
+/// whatever the invariant, and a candidate file leads with the invariant's own
+/// name, which is what makes clearing stale files safe ([`is_candidate_file`]).
+/// Both are filed into one report, because the two shapes must not collapse
+/// into each other either.
+#[test]
+fn box_family_violations_collapse_into_counted_candidates() {
+    let wide = sc(WIDE_PAD_TREE);
+    let (doc, s) = swept(&wide, WIDE_PAD_CSS);
+    let overflow = horizontal_overflow("Fixture", &doc, &s, Thresholds::DEFAULT);
+    assert_eq!(1, overflow.violations.len(), "one overflowing box to file");
+    let pulled = sc(PULLED_TREE);
+    let (doc, s) = swept(&pulled, PULLED_CSS);
+    let overlap = overlapping_boxes("Fixture", &doc, &s, Thresholds::DEFAULT);
+    assert_eq!(1, overlap.violations.len(), "one collision to file");
+
+    let mut report = Report::default();
+    let quote = |glossary: &str, row: i64| {
+        let glossary = glossary.to_string();
+        move || Exemplar {
+            row,
+            term: "\u{4e00}".to_string(),
+            reading: "\u{4e00}".to_string(),
+            measured: BTreeMap::new(),
+            glossary,
+        }
+    };
+    for row in [7, 8, 9] {
+        report.record(overflow.violations[0].clone(), quote(&wide, row));
+    }
+    report.record(overlap.violations[0].clone(), quote(&pulled, 11));
+
+    assert_eq!(2, report.candidates.len(), "four violations, two shapes, two candidates");
+    let filed: Vec<(String, u64, i64, String)> = report
+        .candidates
+        .iter()
+        .map(|(key, c)| {
+            let invariant = c.signature.invariant.as_str().to_string();
+            (invariant, c.occurrences, c.exemplar.row, candidate_file(c, key))
+        })
+        .collect();
+    assert_eq!(
+        vec![
+            ("horizontal-overflow".to_string(), 3, 7),
+            ("overlapping-boxes".to_string(), 1, 11),
+        ],
+        filed.iter().map(|(i, n, row, _)| (i.clone(), *n, *row)).collect::<Vec<_>>(),
+        "one candidate each, counted, and the first sighting stays the exemplar",
+    );
+    for (invariant, _, _, file) in &filed {
+        assert!(file.starts_with(&format!("{invariant}-fixture-")), "readable prefix: {file}");
+        assert!(
+            is_candidate_file(Path::new(file)),
+            "and a name this sweep can recognise as its own: {file}",
+        );
+    }
+
+    let (key, c) = report.candidates.iter().next().expect("the overflow candidate");
+    let json: serde_json::Value =
+        serde_json::from_str(&candidate_json(c, key)).expect("readable JSON");
+    assert_eq!("horizontal-overflow", json["invariant"]);
+    assert_eq!("75.50", json["exemplar"]["measured"]["over_px"]);
+}
+
+/// A narrowed run checks what it was told to and nothing else.
+///
+/// The two halves of the filter, over a fixture archive rather than the
+/// environment: a process-wide variable is no way for one test to state what
+/// it wants. What is pinned is that naming an invariant runs that invariant's
+/// checks and stops the others - a filter that quietly ran everything would
+/// make a narrowed candidate count a lie - and that a name this build does
+/// not check stops the run instead of matching nothing.
+#[test]
+fn a_narrowed_run_checks_only_the_invariants_it_names() {
+    let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan/terms.zip");
+
+    let only = named_invariants("horizontal-overflow, overlapping-boxes");
+    let mut boxes_only = Report { only, ..Report::default() };
+    sweep_archive(&zip, 1, None, &mut boxes_only);
+    let d = &boxes_only.dicts[0];
+    assert!(d.boxes > 0, "the box family ran");
+    assert_eq!(
+        (0, 0, 0),
+        (d.strings, d.fragments, d.markers),
+        "and the other three were not asked anything",
+    );
+
+    let mut whole = Report::default();
+    sweep_archive(&zip, 1, None, &mut whole);
+    let all = &whole.dicts[0];
+    assert!(all.strings > 0, "the default run still checks all five");
+    assert_eq!(
+        (all.boxes, all.pairs),
+        (d.boxes, d.pairs),
+        "and the narrowed run made every check the whole one made for these two",
+    );
+
+    let refused = std::panic::catch_unwind(|| named_invariants("no-such-invariant"));
+    assert!(refused.is_err(), "a name this build cannot check stops the run");
+}
+
 /// The sweep. Local only, and the effort's primary target.
 ///
 /// ```text
@@ -2028,10 +2849,11 @@ fn paragraph_family_violations_collapse_into_counted_candidates() {
 /// ```
 ///
 /// `--nocapture` because the run summary is the point; `CHIBIPOP_SWEEP_ROWS`
-/// caps rows per dictionary while iterating on an invariant, and
-/// `CHIBIPOP_SWEEP_OUT` moves the candidate files. `#[ignore]`d rather than
-/// skipped-when-unset so a normal `cargo test` counts it as ignored and says
-/// so, instead of passing a test that did nothing.
+/// caps rows per dictionary while iterating on an invariant,
+/// `CHIBIPOP_SWEEP_ONLY` narrows the run to the invariants being iterated on,
+/// and `CHIBIPOP_SWEEP_OUT` moves the candidate files. `#[ignore]`d rather
+/// than skipped-when-unset so a normal `cargo test` counts it as ignored and
+/// says so, instead of passing a test that did nothing.
 ///
 /// The committed suppression list is loaded before the first archive, and a
 /// list that will not parse stops the run: a sweep that quietly swept with
@@ -2049,7 +2871,8 @@ fn corpus_render_sweep() {
     let suppress = Suppressions::load(&suppression_file())
         .unwrap_or_else(|e| panic!("the suppression list: {e:#}"));
 
-    let mut report = Report { suppress, ..Report::default() };
+    let mut report =
+        Report { suppress, only: invariant_filter(), ..Report::default() };
     for (i, zip) in archives.iter().enumerate() {
         sweep_archive(zip, i as i64 + 1, cap, &mut report);
     }
@@ -2220,14 +3043,29 @@ fn an_unknown_or_unused_suppression_is_named_in_the_summary() {
     let full = Report { suppress: list(), ..Report::default() }.summary();
     assert!(verdict_for(&full, "dropped-text |").contains("UNUSED"), "{full}");
     assert!(verdict_for(&full, "dropped-glyph |").contains("UNKNOWN"), "{full}");
-    assert!(full.contains("entries=2  absorbed=0  unused=1  unknown=1"), "{full}");
+    assert!(full.contains("entries=2  absorbed=0  unused=1  unchecked=0  unknown=1"), "{full}");
 
     // A partial run left rows unread, so it has no standing to call an entry
     // unused. An unknown one is unknown however much a run read.
     let partial = Report { suppress: list(), partial: true, ..Report::default() }.summary();
     assert!(!partial.contains("UNUSED"), "{partial}");
-    assert!(partial.contains("unused=0  unknown=1"), "{partial}");
+    assert!(partial.contains("unused=0  unchecked=0  unknown=1"), "{partial}");
     assert!(verdict_for(&partial, "dropped-glyph |").contains("UNKNOWN"), "{partial}");
+
+    // A run that never checked *no dropped text* has no standing to call its
+    // exemption unused either: the entry was never offered a violation.
+    let narrowed = Report {
+        suppress: list(),
+        only: named_invariants("horizontal-overflow"),
+        ..Report::default()
+    }
+    .summary();
+    assert!(verdict_for(&narrowed, "dropped-text |").contains("unchecked"), "{narrowed}");
+    assert!(narrowed.contains("unused=0  unchecked=1  unknown=1"), "{narrowed}");
+    assert!(
+        narrowed.contains("this run checked horizontal-overflow"),
+        "and the summary says which invariants it ran: {narrowed}",
+    );
 }
 
 /// The summary's own line for one suppression entry.
@@ -2293,7 +3131,10 @@ fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
     assert!(!verdict_for(&summary, suppressed).contains("UNUSED"), "{summary}");
     assert!(verdict_for(&summary, never).contains("absorbed=0"), "{summary}");
     assert!(verdict_for(&summary, never).contains("UNUSED"), "{summary}");
-    assert!(summary.contains("entries=2  absorbed=1  unused=1  unknown=0"), "{summary}");
+    assert!(
+        summary.contains("entries=2  absorbed=1  unused=1  unchecked=0  unknown=0"),
+        "{summary}",
+    );
 
     // On disk: the shape awaiting adjudication, and nothing for the one a
     // human already decided about.
@@ -2313,3 +3154,5 @@ fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
     let capped = capped.summary();
     assert!(!capped.contains("UNUSED"), "{capped}");
 }
+
+
