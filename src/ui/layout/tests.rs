@@ -7032,7 +7032,7 @@ fn the_pitch_row_replaces_the_reading_line_and_sits_above_the_part_of_speech() {
         texts(&s)
     );
     assert!(
-        !texts(&s).iter().any(|t| *t == "ざつだん"),
+        !texts(&s).contains(&"ざつだん"),
         "the bare reading is never drawn beside its own marked kana: {:?}",
         texts(&s)
     );
