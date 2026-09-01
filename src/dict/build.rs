@@ -499,7 +499,13 @@ fn verify_built(built: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
         );
     }
     drop(conn);
-    File::open(built)
+    // `write(true)`, not `File::open`: Windows' `FlushFileBuffers` needs a
+    // handle with write access and answers a read-only one with
+    // ERROR_ACCESS_DENIED, so a plain read handle turns every build on
+    // Windows into "Access is denied. (os error 5)".
+    File::options()
+        .write(true)
+        .open(built)
         .and_then(|f| f.sync_all())
         .with_context(|| format!("flushing {} to disk", built.display()))?;
     Ok(())
