@@ -21,6 +21,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -73,6 +74,7 @@ class Result:
 class Target:
     name: str
     exe: Path
+    disposable: bool = False
 
     @property
     def root(self) -> Path:
@@ -203,9 +205,9 @@ def build_checks() -> list[Check]:
         Check("1.27.5", "1", "Three-failure notice transition", "expected", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Trigger three plugin failures outside Apply and record the current missing notice or future one-shot notice behavior.", known_gap=True),
         Check("1.28", "1", "Fresh install with discovered meikiocr", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Seed a scratch install and confirm meikiocr discovery without premature adapter start."),
         Check("1.28.1", "1", "Fresh meikiocr startup", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Run a scratch install and confirm startup has no plugin warnings and reports windows-ocr."),
-        Check("1.28.2", "1", "Fresh meikiocr tabs", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Open settings and confirm the five tabs are present."),
-        Check("1.28.3", "1", "Fresh meikiocr engine dropdown", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Confirm the OCR engine dropdown lists Built-in and meikiocr."),
-        Check("1.28.4", "1", "Fresh meikiocr plugin tab", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Confirm the Plugins tab lists meikiocr as Enabled and does not show No plugins found."),
+        Check("1.28.2", "1", "Fresh meikiocr tabs", "auto-or-interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Open settings and confirm the five tabs are present.", auto="fresh_meikiocr_audit"),
+        Check("1.28.3", "1", "Fresh meikiocr engine dropdown", "auto-or-interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Confirm the OCR engine dropdown lists Built-in and meikiocr.", auto="fresh_meikiocr_audit"),
+        Check("1.28.4", "1", "Fresh meikiocr plugin tab", "auto-or-interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Confirm the Plugins tab lists meikiocr as Enabled and does not show No plugins found.", auto="fresh_meikiocr_audit"),
         Check("1.28.5", "1", "Fresh meikiocr builtin OCR", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Hover Japanese text and confirm it resolves through the built-in engine."),
         Check("1.28.6", "1", "Fresh meikiocr no premature adapter", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Confirm no meikiocr adapter line appears on stderr before selecting the plugin engine."),
         Check("1.28.7", "1", "Fresh meikiocr config persistence", "interactive", "docs/REGRESSION.md#128-fresh-install-with-discovered-meikiocr", "Apply the checked plugin row, reopen settings, and confirm saved and discovery-extended states behave the same."),
@@ -238,9 +240,9 @@ def build_checks() -> list[Check]:
         Check("2.11", "2", "Startup settings window", "interactive", "docs/REGRESSION.md#tier-2", "Start run with settings opening, verify buttons, TOML values, native controls, Cancel, and hover underneath."),
         Check("2.11a", "2", "Tray right click still no menu", "expected", "docs/REGRESSION.md#tier-2", "Right-click the tray icon. Known broken path should still show no menu.", known_gap=True),
         Check("2.11b", "2", "Apply caption and hint", "interactive", "docs/REGRESSION.md#tier-2", "Verify run and settings caption/hint table, including dictionary-staged wording."),
-        Check("2.11c", "2", "Quit button exits", "interactive", "docs/REGRESSION.md#tier-2", "Press Quit chibipop in settings and confirm the process exits."),
+        Check("2.11c", "2", "Quit button exits", "auto-or-interactive", "docs/REGRESSION.md#tier-2", "Press Quit chibipop in settings and confirm the process exits.", auto="settings_desktop_smoke"),
         Check("2.11d", "2", "Double-click console hidden", "interactive", "docs/REGRESSION.md#tier-2", "Launch without inheriting a console and confirm ConsoleWindowClass is hidden."),
-        Check("2.11e", "2", "WM_CLOSE behavior", "interactive", "docs/REGRESSION.md#tier-2", "Close settings via X in standalone and normal run. Confirm each documented behavior."),
+        Check("2.11e", "2", "WM_CLOSE behavior", "auto-or-interactive", "docs/REGRESSION.md#tier-2", "Close settings via X in standalone and normal run. Confirm each documented behavior.", auto="settings_desktop_smoke"),
         Check("2.12", "2", "Reorder dictionaries", "destructive", "docs/REGRESSION.md#tier-2", "Reorder dictionaries, Apply, and verify TOML substrings were reordered only.", destructive=True),
         Check("2.13", "2", "No-op Apply", "interactive", "docs/REGRESSION.md#tier-2", "Open Settings, touch nothing, Apply. TOML only formats and returns quickly."),
         Check("2.14", "2", "Settings Add archives", "destructive", "docs/REGRESSION.md#tier-2", "Import two term archives and one frequency archive, Apply, verify lookup changes, remove one, verify removal.", destructive=True),
@@ -262,6 +264,7 @@ def parse_args() -> argparse.Namespace:
             Examples:
               python scripts/manual_regression.py --list
               python scripts/manual_regression.py --tier 0 --repo-root . --repeat-tests 3
+              python scripts/manual_regression.py --test-install --tier 1 --allow-destructive
               python scripts/manual_regression.py --non-interactive --exe ./target/release/chibipop.exe --only 1.8
               python scripts/manual_regression.py --exe ./nightly/chibipop.exe --secondary-exe ./nightly-jp/chibipop.exe --corpus ./docs/fixtures/ocr-corpus.html
             """
@@ -289,9 +292,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-dictionary-mutation", action="store_true", help="Allow checks that add, remove, rebuild, or reorder dictionaries.")
     parser.add_argument("--allow-anki-write", action="store_true", help="Allow checks that create or modify Anki notes.")
     parser.add_argument("--allow-display-change", action="store_true", help="Allow checks that change display scaling.")
+    parser.add_argument("--allow-real-target-destructive", action="store_true", help="Allow destructive checks against non-disposable target roots.")
     parser.add_argument("--keep-mutated-state", action="store_true", help="Do not restore protected state after destructive checks.")
     parser.add_argument("--allow-plugin-fixtures", action="store_true", help="Allow creating temporary echo and broken plugin fixture directories beside the selected target exe.")
     parser.add_argument("--stop-target-strays", action="store_true", help="Stop chibipop.exe processes only when their executable path contains this repo's target directory.")
+    parser.add_argument("--test-install", action="store_true", help="Build release and seed a disposable install under --test-install-dir.")
+    parser.add_argument("--test-install-dir", type=Path, default=Path(".scratch/regression-test-install"), help="Disposable install directory, relative to --repo-root by default.")
+    parser.add_argument("--keep-test-install", action="store_true", help="Keep the disposable install after the run.")
     parser.add_argument("--repeat-tests", type=int, default=3)
     parser.add_argument("--min-test-total", type=int, default=400)
     parser.add_argument("--expected-clippy-warnings", type=int, default=1)
@@ -383,6 +390,167 @@ def default_target(repo_root: Path) -> Target:
     return Target("release", exe)
 
 
+TEST_INSTALL_MARKER = ".chibipop-test-install.json"
+
+
+def assert_safe_test_install_dir(path: Path, repo_root: Path) -> Path:
+    root = repo_root.resolve()
+    resolved = normalize_path(path, root)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("--test-install-dir must be inside --repo-root") from exc
+    if resolved == root:
+        raise ValueError("--test-install-dir must not be the repository root")
+    blocked = [
+        root / ".git",
+        root / "target",
+        root / "data",
+        root / "docs",
+        root / "src",
+        root / "crates",
+        root / "scripts",
+        root / "tests",
+        root / "plugins",
+        root / ".github",
+    ]
+    for item in blocked:
+        blocked_root = item.resolve()
+        try:
+            resolved.relative_to(blocked_root)
+        except ValueError:
+            continue
+        raise ValueError(f"--test-install-dir cannot be inside {blocked_root}")
+    return resolved
+
+
+def test_install_lock_path(args: argparse.Namespace) -> Path:
+    install_dir = assert_safe_test_install_dir(args.test_install_dir, args.repo_root)
+    return install_dir.with_name(install_dir.name + ".lock")
+
+
+def acquire_test_install_lock(args: argparse.Namespace) -> Path:
+    lock = test_install_lock_path(args)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise ValueError(f"test install is already in use: {lock}") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"pid": os.getpid(), "created_at": dt.datetime.now(dt.timezone.utc).isoformat()}, handle)
+    return lock
+
+
+def release_test_install_lock(args: argparse.Namespace) -> None:
+    lock = getattr(args, "test_install_lock_path", None)
+    if not lock:
+        return
+    try:
+        Path(lock).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def seed_test_install(args: argparse.Namespace, logs_dir: Path) -> tuple[Target, Result]:
+    start = time.perf_counter()
+    lock = acquire_test_install_lock(args)
+    args.test_install_lock_path = lock
+    code, out, build_elapsed, build_log = run_cmd(
+        [args.cargo, "build", "--release", "--workspace", "--exclude", "chibipop-linux"],
+        args.repo_root,
+        logs_dir,
+        "preflight-test-install-release-build",
+    )
+    if code != 0:
+        target = Target("test-install", args.repo_root / args.test_install_dir / "chibipop.exe", True)
+        result = Result(
+            "preflight.test-install",
+            "preflight",
+            "Create disposable test install",
+            "auto",
+            STATUS_FAIL,
+            f"release build exited {code}",
+            time.perf_counter() - start,
+            {"build_log": rel(build_log, args.repo_root), "build_seconds": build_elapsed},
+        )
+        return target, result
+
+    install_dir = assert_safe_test_install_dir(args.test_install_dir, args.repo_root)
+    marker = install_dir / TEST_INSTALL_MARKER
+    if install_dir.exists():
+        if not install_dir.is_dir():
+            raise ValueError(f"refusing to replace non-directory test install path: {install_dir}")
+        if not marker_identifies_test_install(marker, install_dir):
+            raise ValueError(f"refusing to replace unmarked test install directory: {install_dir}")
+        shutil.rmtree(install_dir)
+
+    exe_name = "chibipop.exe" if os.name == "nt" else "chibipop"
+    copies = [
+        (args.repo_root / "target" / "release" / exe_name, install_dir / exe_name),
+        (args.repo_root / "data" / "deconjugator.json", install_dir / "data" / "deconjugator.json"),
+        (args.repo_root / "README.md", install_dir / "README.md"),
+        (args.repo_root / "LICENSE", install_dir / "LICENSE"),
+        (args.repo_root / "plugins" / "meikiocr" / "plugin.toml", install_dir / "plugins" / "meikiocr" / "plugin.toml"),
+        (args.repo_root / "plugins" / "meikiocr" / "adapter.py", install_dir / "plugins" / "meikiocr" / "adapter.py"),
+        (args.repo_root / "plugins" / "meikiocr" / "config.toml", install_dir / "plugins" / "meikiocr" / "config.toml"),
+    ]
+    copied = []
+    for src, dst in copies:
+        if not src.exists():
+            raise FileNotFoundError(f"required package file missing: {src}")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied.append(dst.relative_to(install_dir).as_posix())
+    marker.write_text(
+        json.dumps(
+            {
+                "schema": "chibipop-test-install/v1",
+                "root": str(install_dir),
+                "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "source": rel(args.repo_root / "target" / "release" / exe_name, args.repo_root),
+                "files": copied,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    target = Target("test-install", install_dir / exe_name, True)
+    result = Result(
+        "preflight.test-install",
+        "preflight",
+        "Create disposable test install",
+        "auto",
+        STATUS_PASS,
+        "seeded disposable install from release build",
+        time.perf_counter() - start,
+        {
+            "root": rel(install_dir, args.repo_root),
+            "exe": rel(target.exe, args.repo_root),
+            "build_log": rel(build_log, args.repo_root),
+            "files": copied,
+        },
+    )
+    return target, result
+
+
+def cleanup_test_install(args: argparse.Namespace) -> Result | None:
+    if not args.test_install or args.keep_test_install:
+        return None
+    start = time.perf_counter()
+    install_dir = assert_safe_test_install_dir(args.test_install_dir, args.repo_root)
+    marker = install_dir / TEST_INSTALL_MARKER
+    if not install_dir.exists():
+        return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_PASS, "already absent", 0.0)
+    if not marker_identifies_test_install(marker, install_dir):
+        return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, f"marker missing or invalid in {install_dir}")
+    try:
+        shutil.rmtree(install_dir)
+    except OSError as exc:
+        return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, f"remove failed: {exc}", time.perf_counter() - start, {"root": rel(install_dir, args.repo_root)})
+    return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_PASS, "removed disposable install", time.perf_counter() - start, {"root": rel(install_dir, args.repo_root)})
+
+
 def parse_points(values: Iterable[str]) -> dict[str, tuple[int, int]]:
     points: dict[str, tuple[int, int]] = {}
     for value in values:
@@ -395,7 +563,28 @@ def parse_points(values: Iterable[str]) -> dict[str, tuple[int, int]]:
 
 
 def normalize_path(path: Path, base: Path) -> Path:
-    return path if path.is_absolute() else (base / path).resolve()
+    candidate = path if path.is_absolute() else base / path
+    return candidate.resolve()
+
+
+def marker_identifies_test_install(marker: Path, install_dir: Path) -> bool:
+    if not marker.exists():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("schema") != "chibipop-test-install/v1":
+        return False
+    root_text = data.get("root")
+    if not isinstance(root_text, str):
+        return False
+    try:
+        return Path(root_text).resolve() == install_dir.resolve()
+    except OSError:
+        return False
 
 
 def add_point_alias(points: dict[str, tuple[int, int]], name: str, value: str) -> None:
@@ -457,7 +646,10 @@ def snapshot_target(target: Target) -> dict[str, str]:
         for path in target.root.glob(pattern):
             if path.is_file():
                 rel = path.relative_to(target.root).as_posix()
-                found[rel] = hash_file(path)
+                try:
+                    found[rel] = hash_file(path)
+                except OSError as exc:
+                    found[rel] = f"unreadable:{exc}"
     return dict(sorted(found.items()))
 
 
@@ -528,6 +720,149 @@ def rel(path: Path, root: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return str(path)
+
+
+def creationflags_for_detached_gui() -> int:
+    if os.name != "nt":
+        return 0
+    return 0x00000008  # DETACHED_PROCESS
+
+
+def launch_logged_process(cmd: list[str | os.PathLike[str]], cwd: Path, logs_dir: Path, name: str) -> tuple[subprocess.Popen[str], Path, object]:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / f"{safe_name(name)}.log"
+    handle = log_path.open("w", encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(
+        [str(part) for part in cmd],
+        cwd=str(cwd),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+        creationflags=creationflags_for_detached_gui(),
+    )
+    return proc, log_path, handle
+
+
+class Win32Desktop:
+    WM_CLOSE = 0x0010
+    WM_COMMAND = 0x0111
+    CB_GETCOUNT = 0x0146
+    CB_GETLBTEXT = 0x0148
+    CB_GETLBTEXTLEN = 0x0149
+
+    def __init__(self) -> None:
+        import ctypes.wintypes as wt
+
+        self.wt = wt
+        self.user32 = ctypes.windll.user32
+        self.user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM), wt.LPARAM]
+        self.user32.EnumWindows.restype = wt.BOOL
+        self.user32.EnumChildWindows.argtypes = [wt.HWND, ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM), wt.LPARAM]
+        self.user32.EnumChildWindows.restype = wt.BOOL
+        self.user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+        self.user32.GetWindowThreadProcessId.restype = wt.DWORD
+        self.user32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+        self.user32.GetClassNameW.restype = ctypes.c_int
+        self.user32.GetWindowTextLengthW.argtypes = [wt.HWND]
+        self.user32.GetWindowTextLengthW.restype = ctypes.c_int
+        self.user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+        self.user32.GetWindowTextW.restype = ctypes.c_int
+        self.user32.GetDlgCtrlID.argtypes = [wt.HWND]
+        self.user32.GetDlgCtrlID.restype = ctypes.c_int
+        self.user32.IsWindowVisible.argtypes = [wt.HWND]
+        self.user32.IsWindowVisible.restype = wt.BOOL
+        self.user32.IsWindowEnabled.argtypes = [wt.HWND]
+        self.user32.IsWindowEnabled.restype = wt.BOOL
+        self.user32.SendMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        self.user32.SendMessageW.restype = wt.LPARAM
+        self.user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        self.user32.PostMessageW.restype = wt.BOOL
+
+    def class_name(self, hwnd: int) -> str:
+        buf = ctypes.create_unicode_buffer(256)
+        self.user32.GetClassNameW(self.wt.HWND(hwnd), buf, len(buf))
+        return buf.value
+
+    def text(self, hwnd: int) -> str:
+        length = self.user32.GetWindowTextLengthW(self.wt.HWND(hwnd))
+        buf = ctypes.create_unicode_buffer(length + 1)
+        self.user32.GetWindowTextW(self.wt.HWND(hwnd), buf, len(buf))
+        return buf.value
+
+    def pid_of(self, hwnd: int) -> int:
+        pid = self.wt.DWORD()
+        self.user32.GetWindowThreadProcessId(self.wt.HWND(hwnd), ctypes.byref(pid))
+        return int(pid.value)
+
+    def windows_for_pid(self, pid: int, include_children: bool = False) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+
+        def add(hwnd: int) -> None:
+            if self.pid_of(hwnd) != pid:
+                return
+            rows.append(
+                {
+                    "hwnd": hwnd,
+                    "class": self.class_name(hwnd),
+                    "text": self.text(hwnd),
+                    "id": self.user32.GetDlgCtrlID(self.wt.HWND(hwnd)),
+                    "visible": bool(self.user32.IsWindowVisible(self.wt.HWND(hwnd))),
+                    "enabled": bool(self.user32.IsWindowEnabled(self.wt.HWND(hwnd))),
+                }
+            )
+
+        callback = ctypes.WINFUNCTYPE(self.wt.BOOL, self.wt.HWND, self.wt.LPARAM)
+
+        @callback
+        def enum_top(hwnd, _param):
+            add(int(hwnd))
+            if include_children:
+                @callback
+                def enum_child(child, _child_param):
+                    add(int(child))
+                    return True
+
+                self.user32.EnumChildWindows(hwnd, enum_child, 0)
+            return True
+
+        self.user32.EnumWindows(enum_top, 0)
+        return rows
+
+    def wait_for_class(self, pid: int, class_name: str, timeout: float = 10.0) -> dict[str, object] | None:
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            for row in self.windows_for_pid(pid):
+                if row["class"] == class_name:
+                    return row
+            time.sleep(0.1)
+        return None
+
+    def post_close(self, hwnd: int) -> None:
+        self.user32.PostMessageW(self.wt.HWND(hwnd), self.WM_CLOSE, 0, 0)
+
+    def post_command(self, hwnd: int, command_id: int) -> None:
+        self.user32.PostMessageW(self.wt.HWND(hwnd), self.WM_COMMAND, command_id, 0)
+
+    def combo_items(self, hwnd: int) -> list[str]:
+        count = int(self.user32.SendMessageW(self.wt.HWND(hwnd), self.CB_GETCOUNT, 0, 0))
+        if count < 0:
+            return []
+        items = []
+        for index in range(count):
+            length = int(self.user32.SendMessageW(self.wt.HWND(hwnd), self.CB_GETLBTEXTLEN, index, 0))
+            if length < 0:
+                continue
+            buf = ctypes.create_unicode_buffer(length + 1)
+            self.user32.SendMessageW(
+                self.wt.HWND(hwnd),
+                self.CB_GETLBTEXT,
+                index,
+                self.wt.LPARAM(ctypes.addressof(buf)),
+            )
+            items.append(buf.value)
+        return items
 
 
 def parse_test_counts(output: str) -> dict[str, int]:
@@ -750,8 +1085,11 @@ def auto_settings_audit(check: Check, args: argparse.Namespace, logs_dir: Path, 
     target = first_target(targets)
     if not target:
         return unavailable(check, "needs --target")
+    seeded = ensure_fixture_database(target, args, logs_dir)
+    if seeded is not None and seeded.status != STATUS_PASS:
+        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, seeded.evidence)
     cmd = [target.exe, "settings", "--audit"]
-    code, out, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, "tier1-1.26-settings-audit")
+    code, out, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, f"tier1-{check.ident}-settings-audit")
     if code != 0:
         return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, f"settings --audit exited {code}", elapsed, {"log": rel(log, args.repo_root)})
     try:
@@ -768,7 +1106,230 @@ def auto_settings_audit(check: Check, args: argparse.Namespace, logs_dir: Path, 
     same = bool(ys) and len(set(ys)) == 1
     status = STATUS_PASS if same else STATUS_FAIL
     detail = f"Apply control y values: {ys}" if ys else "Apply control id 100 not found"
-    return Result(check.ident, check.tier, check.title, check.mode, status, detail, elapsed, {"log": rel(log, args.repo_root), "apply_y": ys})
+    evidence = {"log": rel(log, args.repo_root), "apply_y": ys}
+    if seeded is not None:
+        evidence["fixture_db"] = seeded.status
+    return Result(check.ident, check.tier, check.title, check.mode, status, detail, elapsed, evidence)
+
+
+def audit_texts(data: object) -> list[str]:
+    texts: list[str] = []
+    if isinstance(data, dict):
+        text = data.get("text")
+        if isinstance(text, str) and text:
+            texts.append(text)
+        for value in data.values():
+            texts.extend(audit_texts(value))
+    elif isinstance(data, list):
+        for value in data:
+            texts.extend(audit_texts(value))
+    return texts
+
+
+def run_settings_audit(target: Target, args: argparse.Namespace, logs_dir: Path, name: str) -> tuple[int, object | None, float, Path, str]:
+    cmd = [target.exe, "settings", "--audit"]
+    code, out, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, name)
+    data: object | None = None
+    if code == 0:
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            data = None
+    return code, data, elapsed, log, out
+
+
+def ensure_fixture_database(target: Target, args: argparse.Namespace, logs_dir: Path) -> Result | None:
+    db = target.root / "data" / "chibipop.sqlite"
+    if db.exists():
+        return None
+    if not target.disposable:
+        return Result("preflight.fixture-db", "preflight", "Seed fixture dictionary", "auto", STATUS_SKIP, "only disposable targets can be fixture-seeded")
+    archive = args.repo_root / "tests" / "fixtures" / "yomitan" / "terms.zip"
+    if not archive.exists():
+        return Result("preflight.fixture-db", "preflight", "Seed fixture dictionary", "auto", STATUS_SKIP, "missing tests/fixtures/yomitan/terms.zip")
+    library = target.root / "library"
+    library.mkdir(parents=True, exist_ok=True)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(archive, library / archive.name)
+    code, out, elapsed, log = run_cmd(
+        [target.exe, "build-dict", "--library", library, "--out", db],
+        target.root,
+        logs_dir,
+        "preflight-fixture-db",
+    )
+    status = STATUS_PASS if code == 0 and db.exists() else STATUS_FAIL
+    detail = "seeded fixture dictionary" if status == STATUS_PASS else f"build-dict exited {code}"
+    return Result("preflight.fixture-db", "preflight", "Seed fixture dictionary", "auto", status, detail, elapsed, {"log": rel(log, args.repo_root)})
+
+
+def auto_fresh_meikiocr_combo(check: Check, args: argparse.Namespace, logs_dir: Path, target: Target) -> Result:
+    seeded = ensure_fixture_database(target, args, logs_dir)
+    if seeded is not None and seeded.status != STATUS_PASS:
+        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, seeded.evidence)
+    if os.name != "nt":
+        return unavailable(check, "Win32 combo inspection requires Windows")
+    proc, log, handle = launch_logged_process([target.exe, "settings"], target.root, logs_dir, f"tier1-{check.ident}-fresh-meikiocr-combo")
+    start = time.perf_counter()
+    desktop = Win32Desktop()
+    try:
+        window = desktop.wait_for_class(proc.pid, "ChibipopSettingsClass", timeout=10.0)
+        if window is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+            return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, "settings window did not appear", time.perf_counter() - start, {"pid": proc.pid, "log": rel(log, args.repo_root)})
+        engine = None
+        deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < deadline and engine is None:
+            rows = desktop.windows_for_pid(proc.pid, include_children=True)
+            engine = next((row for row in rows if row["id"] == 146), None)
+            if engine is None:
+                time.sleep(0.1)
+        if engine is None:
+            status = STATUS_FAIL
+            detail = "engine combo id 146 not found"
+            items: list[str] = []
+        else:
+            items = desktop.combo_items(int(engine["hwnd"]))
+            missing = [item for item in ["Built-in (Windows OCR)", "meikiocr"] if item not in items]
+            status = STATUS_PASS if not missing else STATUS_FAIL
+            detail = "engine combo lists Built-in and meikiocr" if status == STATUS_PASS else f"engine combo missing {', '.join(missing)}"
+        desktop.post_close(int(window["hwnd"]))
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+        return Result(
+            check.ident,
+            check.tier,
+            check.title,
+            check.mode,
+            status,
+            detail,
+            time.perf_counter() - start,
+            {"pid": proc.pid, "items": items, "fixture_db": seeded.status if seeded else "already_present", "log": rel(log, args.repo_root)},
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+        handle.close()
+
+
+def auto_fresh_meikiocr_audit(check: Check, args: argparse.Namespace, logs_dir: Path, targets: list[Target]) -> Result:
+    target = first_target(targets)
+    if not target:
+        return unavailable(check, "needs --target")
+    if not target.disposable:
+        return unavailable(check, "fresh-install check requires --test-install")
+    if check.ident == "1.28.3":
+        return auto_fresh_meikiocr_combo(check, args, logs_dir, target)
+    seeded = ensure_fixture_database(target, args, logs_dir)
+    if seeded is not None and seeded.status != STATUS_PASS:
+        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, seeded.evidence)
+    code, data, elapsed, log, out = run_settings_audit(target, args, logs_dir, f"tier1-{check.ident}-fresh-meikiocr-audit")
+    if code != 0:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, f"settings --audit exited {code}", elapsed, {"log": rel(log, args.repo_root)})
+    if data is None:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, "audit output is not JSON", elapsed, {"log": rel(log, args.repo_root)})
+    texts = audit_texts(data)
+    dumps = data.get("dumps", []) if isinstance(data, dict) else []
+    requirements = {
+        "1.28.2": [],
+        "1.28.4": ["meikiocr 0.1.0"],
+    }
+    missing = [item for item in requirements.get(check.ident, []) if not any(item in text for text in texts)]
+    if check.ident == "1.28.2" and len(dumps) < 5:
+        missing.append("five tab dumps")
+    if "No plugins found" in "\n".join(texts):
+        missing.append("plugin discovery without No plugins found")
+    status = STATUS_PASS if not missing else STATUS_FAIL
+    detail = "fresh install audit found meikiocr controls" if status == STATUS_PASS else f"missing {', '.join(missing)}"
+    evidence = {"log": rel(log, args.repo_root), "text_count": len(texts), "dump_count": len(dumps)}
+    if seeded is not None:
+        evidence["fixture_db"] = seeded.status
+    return Result(check.ident, check.tier, check.title, check.mode, status, detail, elapsed, evidence)
+
+
+def auto_settings_desktop_smoke(check: Check, args: argparse.Namespace, logs_dir: Path, targets: list[Target]) -> Result:
+    target = first_target(targets)
+    if not target:
+        return unavailable(check, "needs --target")
+    if os.name != "nt":
+        return unavailable(check, "Win32 desktop automation requires Windows")
+    seeded = ensure_fixture_database(target, args, logs_dir)
+    if seeded is not None and seeded.status == STATUS_FAIL:
+        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, seeded.evidence)
+    command = [target.exe] if check.ident == "2.11d" else [target.exe, "settings"]
+    proc, log, handle = launch_logged_process(command, target.root, logs_dir, f"tier{check.tier}-{check.ident}-settings-desktop")
+    start = time.perf_counter()
+    desktop = Win32Desktop()
+    try:
+        window = desktop.wait_for_class(proc.pid, "ChibipopSettingsClass", timeout=10.0)
+        if window is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, "settings window did not appear", time.perf_counter() - start, {"pid": proc.pid, "log": rel(log, args.repo_root)})
+        rows = desktop.windows_for_pid(proc.pid, include_children=True)
+        classes = sorted({str(row["class"]) for row in rows if row["class"]})
+        console_rows = [row for row in rows if row["class"] == "ConsoleWindowClass"]
+        if check.ident == "2.11d":
+            visible_consoles = [row for row in console_rows if row["visible"]]
+            status = STATUS_PASS if not visible_consoles and bool(window["visible"]) else STATUS_FAIL
+            detail = "settings visible; no visible owned console" if status == STATUS_PASS else "visible owned console or hidden settings window"
+        elif check.ident == "2.11c":
+            desktop.post_command(int(window["hwnd"]), 116)
+            try:
+                proc.wait(timeout=5)
+                status = STATUS_PASS
+                detail = "Quit command closed standalone settings process"
+            except subprocess.TimeoutExpired:
+                status = STATUS_FAIL
+                detail = "process stayed alive after Quit command"
+                proc.kill()
+        else:
+            desktop.post_close(int(window["hwnd"]))
+            try:
+                proc.wait(timeout=5)
+                status = STATUS_MANUAL
+                detail = "WM_CLOSE closed standalone settings; normal run route still needs manual confirmation"
+            except subprocess.TimeoutExpired:
+                status = STATUS_FAIL
+                detail = "process stayed alive after WM_CLOSE"
+                proc.kill()
+        return Result(
+            check.ident,
+            check.tier,
+            check.title,
+            check.mode,
+            status,
+            detail,
+            time.perf_counter() - start,
+            {"pid": proc.pid, "settings_hwnd": window["hwnd"], "classes": classes, "log": rel(log, args.repo_root), "fixture_db": seeded.status if seeded else "already_present"},
+        )
+    finally:
+        if proc.poll() is None and check.ident == "2.11d":
+            if window := desktop.wait_for_class(proc.pid, "ChibipopSettingsClass", timeout=0.1):
+                desktop.post_close(int(window["hwnd"]))
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+        handle.close()
 
 
 def auto_plugin_cli(check: Check, args: argparse.Namespace, logs_dir: Path, targets: list[Target]) -> Result:
@@ -862,6 +1423,8 @@ AUTO: dict[str, Callable[..., Result]] = {
     "probe_outlined": auto_probe_outlined,
     "resources": auto_resources,
     "settings_audit": auto_settings_audit,
+    "fresh_meikiocr_audit": auto_fresh_meikiocr_audit,
+    "settings_desktop_smoke": auto_settings_desktop_smoke,
     "plugin_cli": auto_plugin_cli,
 }
 
@@ -1024,11 +1587,15 @@ def write_report(args: argparse.Namespace, targets: list[Target], results: list[
             "skip": args.skip,
             "strict": args.strict,
             "allow_destructive": args.allow_destructive,
+            "allow_real_target_destructive": args.allow_real_target_destructive,
             "allow_plugin_fixtures": args.allow_plugin_fixtures,
+            "test_install": args.test_install,
+            "test_install_dir": rel(normalize_path(args.test_install_dir, args.repo_root), args.repo_root),
+            "keep_test_install": args.keep_test_install,
             "repeat_tests": args.repeat_tests,
             "min_test_total": args.min_test_total,
         },
-        "targets": [{"name": target.name, "exe": rel(target.exe, args.repo_root), "root": rel(target.root, args.repo_root)} for target in targets],
+        "targets": [{"name": target.name, "exe": rel(target.exe, args.repo_root), "root": rel(target.root, args.repo_root), "disposable": target.disposable} for target in targets],
         "target_state": snapshots,
         "results": [result.__dict__ for result in results],
         "summary": summarize(results),
@@ -1064,75 +1631,113 @@ def main() -> int:
             print(f"{check.ident:8} tier {check.tier}  {check.mode:20} {check.title}")
         return 0
 
+    results: list[Result] = []
     logs_dir = args.logs_dir
     if not logs_dir.is_absolute():
         logs_dir = args.repo_root / logs_dir
-    targets = []
-    if args.exe:
-        targets.append(parse_target(f"primary={args.exe}", args.repo_root))
-    for index, exe in enumerate(args.secondary_exe, 1):
-        targets.append(parse_target(f"secondary{index}={exe}", args.repo_root))
-    targets.extend(parse_target(spec, args.repo_root) for spec in args.target)
-    if not targets:
-        targets = [default_target(args.repo_root)]
-    points = parse_points(args.probe_point)
-    add_point_alias(points, "pipeline", args.ja_point)
-    add_point_alias(points, "vertical", args.vertical_point)
-    add_point_alias(points, "zh_simplified", args.zh_simplified_point)
-    add_point_alias(points, "zh_traditional", args.zh_traditional_point)
-    add_point_alias(points, "alnum", args.alnum_point)
-
-    results: list[Result] = []
+    targets: list[Target] = []
     snapshots: dict[str, dict[str, object]] = {}
     backups: dict[str, Path] = {}
-    has_destructive = any(check.destructive for check in selected)
-    if has_destructive and args.allow_destructive:
-        args.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        for target in targets:
-            backup_root, snapshot = backup_protected_state(target, args.artifacts_dir)
-            backups[target.name] = backup_root
-            snapshots[target.name] = {"before": snapshot, "backup": rel(backup_root, args.repo_root)}
-
-    if args.open_fixtures:
-        record_result(results, maybe_open_fixtures(args))
-
-    if args.stop_target_strays:
-        record_result(results, stop_target_strays(args.repo_root))
-
-    for target in targets:
-        snapshots.setdefault(target.name, {"before": snapshot_target(target)})
-
-    for check in selected:
-        if check.destructive and not args.allow_destructive:
-            record_result(results, skip_check(check, "destructive check requires --allow-destructive"))
-            continue
-        if check.destructive and not args.allow_dictionary_mutation and requires_dictionary_mutation(check):
-            record_result(results, skip_check(check, "dictionary check requires --allow-dictionary-mutation"))
-            continue
-        if check.known_gap and not check.auto and not args.interactive:
-            record_result(results, Result(check.ident, check.tier, check.title, check.mode, STATUS_XFAIL, check.prompt))
-            continue
-        if not args.allow_anki_write and requires_anki_write(check):
-            record_result(results, skip_check(check, "Anki-writing check requires --allow-anki-write"))
-            continue
-        if not args.allow_config_write and requires_config_write(check):
-            record_result(results, manual_check(check, "config-writing check requires --allow-config-write for automation; run manually or pass the flag"))
-            continue
-        if not args.allow_display_change and requires_display_change(check):
-            record_result(results, manual_check(check, "display-scaling substep requires --allow-display-change; other substeps remain in the manual instructions"))
-            continue
-        if check.auto:
-            result = run_auto(check, args, logs_dir, targets, points)
-            record_result(results, result)
-            if result.status not in (STATUS_PASS, STATUS_XFAIL) and args.interactive and check.mode == "auto-or-interactive":
-                record_result(results, prompt_check(check))
-            continue
-        if args.interactive:
-            record_result(results, prompt_check(check))
-        else:
-            record_result(results, manual_check(check, "interactive check requires --interactive"))
-
+    run_error = False
     cleanup_failed = False
+
+    try:
+        explicit_targets = bool(args.exe or args.secondary_exe or args.target)
+        if args.test_install:
+            try:
+                test_target, result = seed_test_install(args, logs_dir)
+            except Exception as exc:
+                test_target = Target("test-install", normalize_path(args.test_install_dir, args.repo_root) / ("chibipop.exe" if os.name == "nt" else "chibipop"), True)
+                result = Result("preflight.test-install", "preflight", "Create disposable test install", "auto", STATUS_FAIL, str(exc))
+            targets.append(test_target)
+            record_result(results, result)
+            if result.status == STATUS_FAIL:
+                run_error = True
+
+        if not run_error:
+            if args.exe:
+                targets.append(parse_target(f"primary={args.exe}", args.repo_root))
+            for index, exe in enumerate(args.secondary_exe, 1):
+                targets.append(parse_target(f"secondary{index}={exe}", args.repo_root))
+            targets.extend(parse_target(spec, args.repo_root) for spec in args.target)
+            if not targets and not explicit_targets:
+                targets = [default_target(args.repo_root)]
+            if args.test_install and args.allow_destructive and all(target.disposable for target in targets):
+                args.allow_config_write = True
+                args.allow_dictionary_mutation = True
+                args.allow_plugin_fixtures = True
+            points = parse_points(args.probe_point)
+            add_point_alias(points, "pipeline", args.ja_point)
+            add_point_alias(points, "vertical", args.vertical_point)
+            add_point_alias(points, "zh_simplified", args.zh_simplified_point)
+            add_point_alias(points, "zh_traditional", args.zh_traditional_point)
+            add_point_alias(points, "alnum", args.alnum_point)
+
+            has_destructive = any(check.destructive for check in selected)
+            if has_destructive and args.allow_destructive:
+                args.artifacts_dir.mkdir(parents=True, exist_ok=True)
+                for target in targets:
+                    backup_root, snapshot = backup_protected_state(target, args.artifacts_dir)
+                    backups[target.name] = backup_root
+                    snapshots[target.name] = {"before": snapshot, "backup": rel(backup_root, args.repo_root)}
+
+            if args.open_fixtures:
+                record_result(results, maybe_open_fixtures(args))
+
+            if args.stop_target_strays:
+                record_result(results, stop_target_strays(args.repo_root))
+
+            for target in targets:
+                snapshots.setdefault(target.name, {"before": snapshot_target(target)})
+
+        for check in selected:
+            if run_error:
+                break
+            if check.destructive and not args.allow_destructive:
+                record_result(results, skip_check(check, "destructive check requires --allow-destructive"))
+                continue
+            if check.destructive and not args.allow_real_target_destructive and any(not target.disposable for target in targets):
+                record_result(results, skip_check(check, "destructive check against non-disposable targets requires --allow-real-target-destructive"))
+                continue
+            if check.destructive and not args.allow_dictionary_mutation and requires_dictionary_mutation(check):
+                record_result(results, skip_check(check, "dictionary check requires --allow-dictionary-mutation"))
+                continue
+            if check.known_gap and not check.auto and not args.interactive:
+                record_result(results, Result(check.ident, check.tier, check.title, check.mode, STATUS_XFAIL, check.prompt))
+                continue
+            if not args.allow_anki_write and requires_anki_write(check):
+                record_result(results, skip_check(check, "Anki-writing check requires --allow-anki-write"))
+                continue
+            if not args.allow_config_write and requires_config_write(check):
+                record_result(results, manual_check(check, "config-writing check requires --allow-config-write for automation; run manually or pass the flag"))
+                continue
+            if not args.allow_display_change and requires_display_change(check):
+                record_result(results, manual_check(check, "display-scaling substep requires --allow-display-change; other substeps remain in the manual instructions"))
+                continue
+            if check.auto:
+                result = run_auto(check, args, logs_dir, targets, points)
+                record_result(results, result)
+                if result.status not in (STATUS_PASS, STATUS_XFAIL) and args.interactive and check.mode == "auto-or-interactive":
+                    record_result(results, prompt_check(check))
+                continue
+            if args.interactive:
+                record_result(results, prompt_check(check))
+            else:
+                record_result(results, manual_check(check, "interactive check requires --interactive"))
+    except Exception as exc:
+        run_error = True
+        record_result(
+            results,
+            Result(
+                "internal.error",
+                "internal",
+                "Runner exception",
+                "auto",
+                STATUS_FAIL,
+                f"{type(exc).__name__}: {exc}",
+            ),
+        )
+
     if backups and not args.keep_mutated_state:
         for target in targets:
             backup_root = backups.get(target.name)
@@ -1162,6 +1767,8 @@ def main() -> int:
         if isinstance(before, dict):
             diff = diff_snapshot(before, after)
             snapshots[target.name]["diff"] = diff
+            if target.disposable:
+                continue
             if not args.allow_destructive and any(diff.values()):
                 record_result(
                     results,
@@ -1176,11 +1783,16 @@ def main() -> int:
                     )
                 )
 
+    cleanup_result = cleanup_test_install(args)
+    if cleanup_result is not None:
+        record_result(results, cleanup_result)
+    release_test_install_lock(args)
+
     write_report(args, targets, results, snapshots)
 
     summary = summarize(results)
     print(json.dumps(summary, sort_keys=True))
-    if cleanup_failed or summary.get(STATUS_FAIL, 0):
+    if run_error or cleanup_failed or summary.get(STATUS_FAIL, 0):
         return 1
     if args.strict and (summary.get(STATUS_SKIP, 0) or summary.get(STATUS_MANUAL, 0)):
         return 2

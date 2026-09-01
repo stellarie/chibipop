@@ -53,6 +53,27 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 > chrome --user-data-dir=/tmp/kiosk --no-first-run --kiosk file:///C:/Users/Stella/chibipop/docs/fixtures/ocr-corpus.html
 > ```
 
+> [!tip] Prefer the disposable runner install for mutation-heavy passes
+> `python scripts/manual_regression.py --test-install --allow-destructive ...`
+> builds the Windows release and seeds `.scratch/regression-test-install` from
+> the package-owned files. The runner marks that target disposable, so config,
+> dictionary, and plugin-fixture checks can mutate it without touching
+> `Documents\chibipop-nightly`, `Documents\chibipop-nightly-jp`, or any other
+> real install. Destructive checks against non-disposable targets require the
+> extra `--allow-real-target-destructive` flag.
+>
+> The disposable install is marker-gated. The runner removes it only when
+> `.chibipop-test-install.json` proves it created the directory. This keeps a
+> typo from deleting an unrelated root folder.
+>
+> Some desktop checks are agent-drivable now. The runner can launch Settings,
+> inspect the owning windows by PID, post `Quit chibipop` or standalone
+> `WM_CLOSE`, and verify the process exits. It can also audit the fresh
+> meikiocr Settings tree. Visual judgment remains manual: native appearance,
+> spacing, smooth thumb dragging, double-click console behavior, real hover
+> feel, Anki writes, and display-scaling changes still need explicit human or
+> external-system authority.
+
 ---
 
 ## Tier 0 — the automated gate (~2 min, no screen)

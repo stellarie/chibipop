@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -166,6 +167,272 @@ class ManualRegressionTests(unittest.TestCase):
             install.mkdir()
             target = manual_regression.parse_target("main=install", root)
             self.assertEqual(target.exe, install / "chibipop.exe")
+            self.assertFalse(target.disposable)
+
+    def test_seed_test_install_copies_release_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = [
+                "target/release/chibipop.exe",
+                "data/deconjugator.json",
+                "README.md",
+                "LICENSE",
+                "plugins/meikiocr/plugin.toml",
+                "plugins/meikiocr/adapter.py",
+                "plugins/meikiocr/config.toml",
+            ]
+            for name in files:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name, encoding="utf-8")
+
+            def fake_run_cmd(cmd, cwd, logs_dir, name, timeout=None):
+                log = logs_dir / "build.log"
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text("built", encoding="utf-8")
+                return 0, "built", 0.1, log
+
+            original = manual_regression.run_cmd
+            manual_regression.run_cmd = fake_run_cmd
+            args = type(
+                "Args",
+                (),
+                {
+                    "cargo": "cargo",
+                    "repo_root": root,
+                    "test_install_dir": Path(".scratch/regression-test-install"),
+                },
+            )()
+            try:
+                target, result = manual_regression.seed_test_install(args, root / "logs")
+            finally:
+                manual_regression.run_cmd = original
+                manual_regression.release_test_install_lock(args)
+
+            self.assertEqual(result.status, "PASS")
+            self.assertTrue(target.disposable)
+            self.assertEqual(target.name, "test-install")
+            self.assertTrue(target.exe.exists())
+            self.assertTrue((target.root / manual_regression.TEST_INSTALL_MARKER).exists())
+            self.assertTrue((target.root / "plugins" / "meikiocr" / "config.toml").exists())
+
+    def test_seed_test_install_refuses_unmarked_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            install.mkdir(parents=True)
+            (install / "someone-elses-file.txt").write_text("do not remove", encoding="utf-8")
+
+            def fake_run_cmd(cmd, cwd, logs_dir, name, timeout=None):
+                log = logs_dir / "build.log"
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text("built", encoding="utf-8")
+                return 0, "built", 0.1, log
+
+            original = manual_regression.run_cmd
+            manual_regression.run_cmd = fake_run_cmd
+            args = type(
+                "Args",
+                (),
+                {
+                    "cargo": "cargo",
+                    "repo_root": root,
+                    "test_install_dir": Path(".scratch/regression-test-install"),
+                },
+            )()
+            try:
+                with self.assertRaises(ValueError):
+                    manual_regression.seed_test_install(args, root / "logs")
+            finally:
+                manual_regression.run_cmd = original
+                manual_regression.release_test_install_lock(args)
+
+            self.assertTrue((install / "someone-elses-file.txt").exists())
+
+    def test_unsafe_test_install_paths_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                manual_regression.assert_safe_test_install_dir(Path("."), root)
+            with self.assertRaises(ValueError):
+                manual_regression.assert_safe_test_install_dir(Path("target"), root)
+            with self.assertRaises(ValueError):
+                manual_regression.assert_safe_test_install_dir(Path("target/release-copy"), root)
+            with self.assertRaises(ValueError):
+                manual_regression.assert_safe_test_install_dir(Path("docs/regression-install"), root)
+            with self.assertRaises(ValueError):
+                manual_regression.assert_safe_test_install_dir(Path(".scratch/../src/install"), root)
+
+    def test_marker_must_match_schema_and_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            install.mkdir(parents=True)
+            marker = install / manual_regression.TEST_INSTALL_MARKER
+            marker.write_text("{}", encoding="utf-8")
+            self.assertFalse(manual_regression.marker_identifies_test_install(marker, install))
+            marker.write_text(
+                '{"schema":"chibipop-test-install/v1","root":"'
+                + str(root / "other").replace("\\", "\\\\")
+                + '"}',
+                encoding="utf-8",
+            )
+            self.assertFalse(manual_regression.marker_identifies_test_install(marker, install))
+            marker.write_text(
+                '{"schema":"chibipop-test-install/v1","root":"'
+                + str(install).replace("\\", "\\\\")
+                + '"}',
+                encoding="utf-8",
+            )
+            self.assertTrue(manual_regression.marker_identifies_test_install(marker, install))
+
+    def test_cleanup_refuses_invalid_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            install.mkdir(parents=True)
+            (install / manual_regression.TEST_INSTALL_MARKER).write_text("{}", encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {
+                    "repo_root": root,
+                    "test_install": True,
+                    "keep_test_install": False,
+                    "test_install_dir": Path(".scratch/regression-test-install"),
+                },
+            )()
+            result = manual_regression.cleanup_test_install(args)
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "FAIL")
+            self.assertTrue(install.exists())
+
+    def test_main_cleans_test_install_and_writes_report_after_auto_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            install.mkdir(parents=True)
+            (install / "chibipop.exe").write_text("exe", encoding="utf-8")
+            marker = install / manual_regression.TEST_INSTALL_MARKER
+            marker.write_text(
+                '{"schema":"chibipop-test-install/v1","root":"'
+                + str(install).replace("\\", "\\\\")
+                + '"}',
+                encoding="utf-8",
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "repo_root": root,
+                    "cargo": "cargo",
+                    "exe": None,
+                    "secondary_exe": [],
+                    "target": [],
+                    "tier": "all",
+                    "only": [],
+                    "skip": [],
+                    "list": False,
+                    "artifacts_dir": root / "artifacts",
+                    "report": root / "artifacts" / "report.json",
+                    "logs_dir": root / "artifacts" / "logs",
+                    "interactive": False,
+                    "strict": False,
+                    "allow_destructive": False,
+                    "allow_config_write": False,
+                    "allow_dictionary_mutation": False,
+                    "allow_anki_write": False,
+                    "allow_display_change": False,
+                    "allow_real_target_destructive": False,
+                    "keep_mutated_state": False,
+                    "allow_plugin_fixtures": False,
+                    "stop_target_strays": False,
+                    "test_install": True,
+                    "test_install_dir": Path(".scratch/regression-test-install"),
+                    "keep_test_install": False,
+                    "repeat_tests": 1,
+                    "min_test_total": 0,
+                    "expected_clippy_warnings": 1,
+                    "expected_other_clippy": 0,
+                    "allow_local_golden_failure": False,
+                    "probe_point": [],
+                    "region": "",
+                    "ja_point": "",
+                    "zh_simplified_point": "",
+                    "zh_traditional_point": "",
+                    "alnum_point": "",
+                    "vertical_point": "",
+                    "show_region_seconds": 1,
+                    "open_fixtures": False,
+                    "browser_command": [],
+                    "browser_cmd_template": None,
+                    "corpus": None,
+                    "scroll_fixture": None,
+                    "plugin_image": None,
+                    "dictionary_archive": [],
+                    "term_archive": [],
+                    "frequency_archive": [],
+                    "corrupt_archive": None,
+                    "primary_language": "",
+                    "secondary_language": [],
+                    "anki_deck": "",
+                },
+            )()
+
+            def fake_parse_args():
+                return args
+
+            def fake_seed_test_install(parsed, logs_dir):
+                return (
+                    manual_regression.Target("test-install", install / "chibipop.exe", True),
+                    manual_regression.Result(
+                        "preflight.test-install",
+                        "preflight",
+                        "Create disposable test install",
+                        "auto",
+                        "PASS",
+                    ),
+                )
+
+            def fake_build_checks():
+                return [
+                    manual_regression.Check(
+                        "x",
+                        "1",
+                        "Exploding check",
+                        "auto-or-interactive",
+                        "",
+                        "",
+                        auto="resources",
+                    )
+                ]
+
+            def fake_run_auto(check, parsed, logs_dir, targets, points):
+                raise RuntimeError("boom")
+
+            original_parse_args = manual_regression.parse_args
+            original_seed = manual_regression.seed_test_install
+            original_build_checks = manual_regression.build_checks
+            original_run_auto = manual_regression.run_auto
+            manual_regression.parse_args = fake_parse_args
+            manual_regression.seed_test_install = fake_seed_test_install
+            manual_regression.build_checks = fake_build_checks
+            manual_regression.run_auto = fake_run_auto
+            try:
+                code = manual_regression.main()
+            finally:
+                manual_regression.parse_args = original_parse_args
+                manual_regression.seed_test_install = original_seed
+                manual_regression.build_checks = original_build_checks
+                manual_regression.run_auto = original_run_auto
+
+            self.assertEqual(code, 1)
+            self.assertFalse(install.exists())
+            report = json.loads(args.report.read_text(encoding="utf-8"))
+            statuses = {row["ident"]: row["status"] for row in report["results"]}
+            self.assertEqual(statuses["internal.error"], "FAIL")
+            self.assertEqual(statuses["postflight.test-install"], "PASS")
 
     def test_timeout_is_logged_as_nonzero_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,6 +464,130 @@ class ManualRegressionTests(unittest.TestCase):
         self.assertTrue(manual_regression.requires_config_write(checks["1.14.2"]))
         self.assertFalse(manual_regression.requires_display_change(checks["1.26"]))
         self.assertTrue(manual_regression.requires_display_change(checks["1.26.7"]))
+
+    def test_new_desktop_and_fresh_install_items_have_auto_handlers(self) -> None:
+        checks = {check.ident: check for check in manual_regression.build_checks()}
+        for ident in ["1.28.2", "1.28.3", "1.28.4"]:
+            self.assertEqual(checks[ident].auto, "fresh_meikiocr_audit")
+        self.assertIsNone(checks["1.28"].auto)
+        self.assertIsNone(checks["1.28.7"].auto)
+        for ident in ["2.11c", "2.11e"]:
+            self.assertEqual(checks[ident].auto, "settings_desktop_smoke")
+        self.assertIsNone(checks["2.11d"].auto)
+
+    def test_wm_close_handler_leaves_normal_run_manual(self) -> None:
+        check = manual_regression.Check(
+            "2.11e",
+            "2",
+            "WM_CLOSE behavior",
+            "auto-or-interactive",
+            "",
+            "",
+            auto="settings_desktop_smoke",
+        )
+        target = manual_regression.Target("scratch", Path("scratch/chibipop.exe"), True)
+        args = type("Args", (), {"repo_root": Path("."), "cargo": "cargo"})()
+
+        def fake_seed(target_arg, parsed, logs_dir):
+            return None
+
+        class FakeProcess:
+            pid = 123
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                raise AssertionError("should not kill")
+
+        class FakeDesktop:
+            def wait_for_class(self, pid, class_name, timeout=10.0):
+                return {"hwnd": 77, "visible": True}
+
+            def windows_for_pid(self, pid, include_children=False):
+                return []
+
+            def post_close(self, hwnd):
+                self.closed = hwnd
+
+        original_seed = manual_regression.ensure_fixture_database
+        original_launch = manual_regression.launch_logged_process
+        original_desktop = manual_regression.Win32Desktop
+        original_os_name = manual_regression.os.name
+        manual_regression.ensure_fixture_database = fake_seed
+        manual_regression.launch_logged_process = lambda cmd, cwd, logs_dir, name: (
+            FakeProcess(),
+            Path("log.txt"),
+            type("Handle", (), {"close": lambda self: None})(),
+        )
+        manual_regression.Win32Desktop = FakeDesktop
+        manual_regression.os.name = "nt"
+        try:
+            result = manual_regression.auto_settings_desktop_smoke(
+                check,
+                args,
+                Path("."),
+                [target],
+            )
+        finally:
+            manual_regression.ensure_fixture_database = original_seed
+            manual_regression.launch_logged_process = original_launch
+            manual_regression.Win32Desktop = original_desktop
+            manual_regression.os.name = original_os_name
+
+        self.assertEqual(result.status, "MANUAL")
+        self.assertIn("normal run route", result.detail)
+
+    def test_settings_audit_seeds_disposable_database_first(self) -> None:
+        check = manual_regression.Check(
+            "1.26",
+            "1",
+            "Scrollable settings window",
+            "auto-or-interactive",
+            "",
+            "",
+            auto="settings_audit",
+        )
+        target = manual_regression.Target("scratch", Path("scratch/chibipop.exe"), True)
+        args = type("Args", (), {"repo_root": Path("."), "cargo": "cargo"})()
+        calls = []
+
+        def fake_seed(target_arg, parsed, logs_dir):
+            calls.append("seed")
+            return manual_regression.Result(
+                "preflight.fixture-db",
+                "preflight",
+                "Seed fixture dictionary",
+                "auto",
+                "PASS",
+            )
+
+        def fake_run_cmd(cmd, cwd, logs_dir, name, timeout=None):
+            calls.append(name)
+            data = {"controls": [{"id": 100, "rect": {"y": 10}}]}
+            return 0, json.dumps(data), 0.1, Path("audit.log")
+
+        original_seed = manual_regression.ensure_fixture_database
+        original_run_cmd = manual_regression.run_cmd
+        manual_regression.ensure_fixture_database = fake_seed
+        manual_regression.run_cmd = fake_run_cmd
+        try:
+            result = manual_regression.auto_settings_audit(
+                check,
+                args,
+                Path("."),
+                [target],
+            )
+        finally:
+            manual_regression.ensure_fixture_database = original_seed
+            manual_regression.run_cmd = original_run_cmd
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(calls, ["seed", "tier1-1.26-settings-audit"])
+        self.assertEqual(result.evidence["fixture_db"], "PASS")
 
     def test_source_does_not_embed_local_machine_paths(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
