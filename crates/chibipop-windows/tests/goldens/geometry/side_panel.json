@@ -6,7 +6,7 @@
       "content": {
         "content_w": "456.00",
         "origin": "12.00",
-        "used_h": "203.96"
+        "used_h": "227.91"
       },
       "elements": [
         {
@@ -86,18 +86,32 @@
           "i": 5,
           "kind": "Text",
           "lines": 1,
-          "text": "raw; uncooked; fresh; natural; unedited",
+          "text": "raw; uncooked; fresh",
           "top_gap": "4.00",
-          "w": "256.57",
+          "w": "136.63",
           "wrap_w": "456.00",
           "x": "12.00",
           "y": "115.13"
         },
         {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 6,
+          "kind": "Text",
+          "lines": 1,
+          "text": "natural; unedited",
+          "top_gap": "4.00",
+          "w": "112.58",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "139.09"
+        },
+        {
           "advance": "1.00",
           "font_size": "0.00",
           "h": "1.00",
-          "i": 6,
+          "i": 7,
           "kind": "Separator",
           "lines": 0,
           "text": "",
@@ -105,21 +119,7 @@
           "w": "456.00",
           "wrap_w": "456.00",
           "x": "12.00",
-          "y": "145.09"
-        },
-        {
-          "advance": "17.29",
-          "font_size": "13.00",
-          "h": "17.29",
-          "i": 7,
-          "kind": "Collapsed",
-          "lines": 1,
-          "text": "生 — life; living",
-          "top_gap": "10.00",
-          "w": "87.35",
-          "wrap_w": "456.00",
-          "x": "12.00",
-          "y": "156.09"
+          "y": "169.04"
         },
         {
           "advance": "17.29",
@@ -128,12 +128,12 @@
           "i": 8,
           "kind": "Collapsed",
           "lines": 1,
-          "text": "生 — pure; undiluted",
-          "top_gap": "4.00",
-          "w": "120.70",
+          "text": "生【せい】 — life; living",
+          "top_gap": "10.00",
+          "w": "121.98",
           "wrap_w": "456.00",
           "x": "12.00",
-          "y": "177.38"
+          "y": "180.04"
         },
         {
           "advance": "17.29",
@@ -142,12 +142,26 @@
           "i": 9,
           "kind": "Collapsed",
           "lines": 1,
+          "text": "生【き】 — pure; undiluted",
+          "top_gap": "4.00",
+          "w": "143.50",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "201.33"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 10,
+          "kind": "Collapsed",
+          "lines": 1,
           "text": "summary-only row with no headword",
           "top_gap": "4.00",
           "w": "214.97",
           "wrap_w": "456.00",
           "x": "12.00",
-          "y": "198.67"
+          "y": "222.62"
         }
       ],
       "hits": [
@@ -165,7 +179,7 @@
           "i": 1,
           "w": null,
           "x": null,
-          "y": "156.09"
+          "y": "180.04"
         },
         {
           "action": "ExpandEntry(1)",
@@ -173,7 +187,7 @@
           "i": 2,
           "w": null,
           "x": null,
-          "y": "177.38"
+          "y": "201.33"
         },
         {
           "action": "ExpandEntry(2)",
@@ -181,7 +195,7 @@
           "i": 3,
           "w": null,
           "x": null,
-          "y": "198.67"
+          "y": "222.62"
         }
       ],
       "input": {
@@ -196,9 +210,9 @@
       },
       "match_highlight": null,
       "measure": {
-        "content_h": 228,
+        "content_h": 252,
         "total_w": 480,
-        "view_h": 228
+        "view_h": 252
       },
       "scroll": {
         "max_scroll": 0,
@@ -212,7 +226,7 @@
       "content": {
         "content_w": "321.00",
         "origin": "12.00",
-        "used_h": "123.09"
+        "used_h": "147.04"
       },
       "elements": [
         {
@@ -292,12 +306,26 @@
           "i": 5,
           "kind": "Text",
           "lines": 1,
-          "text": "raw; uncooked; fresh; natural; unedited",
+          "text": "raw; uncooked; fresh",
           "top_gap": "4.00",
-          "w": "256.57",
+          "w": "136.63",
           "wrap_w": "321.00",
           "x": "12.00",
           "y": "115.13"
+        },
+        {
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 6,
+          "kind": "Text",
+          "lines": 1,
+          "text": "natural; unedited",
+          "top_gap": "4.00",
+          "w": "112.58",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "139.09"
         }
       ],
       "hits": [
@@ -322,9 +350,9 @@
       },
       "match_highlight": null,
       "measure": {
-        "content_h": 148,
+        "content_h": 172,
         "total_w": 480,
-        "view_h": 148
+        "view_h": 172
       },
       "scroll": {
         "max_scroll": 0,

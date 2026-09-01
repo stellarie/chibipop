@@ -1,13 +1,10 @@
 # chibipop on Linux
 
-Linux support is **in development** and not yet in any release. It targets
+Linux ships from **v0.9.9**, the first release with a Linux asset. It targets
 Wayland compositors that speak the wlroots protocol family — **Hyprland is the
 reference compositor**, with sway and friends first-class alongside it. KDE
 Plasma works through the desktop portals. GNOME is best-effort. X11 is not a
 target.
-
-Everything below describes what is on `main` today. Install commands will
-appear here when the first Linux release ships.
 
 ---
 
@@ -53,16 +50,44 @@ names the running binary's real path, quoted.
 
 ## Installing
 
-Source-only today. Release packaging is built and tested — a reproducible
-`chibipop-vX.Y.Z-linux-x64.tar.gz` ([`scripts/package-linux.sh`](../scripts/package-linux.sh))
-and two AUR packages ([`packaging/aur/`](../packaging/aur/)): `chibipop`
-builds from source against the distro's ONNX Runtime, `chibipop-bin` repacks
-the release tarball with ONNX Runtime statically linked — but none of it is
-published until Linux lands in a release.
+Three routes. All three carry the OCR models, so none of them downloads
+anything on first run.
 
-Runtime dependencies: glibc, nothing else, for the tarball and `-bin` builds.
-Optional: `xdg-desktop-portal` (capture and trigger on KDE/GNOME), `pipewire`
-(the portal capture stream), a CJK font such as Noto Sans CJK.
+**The tarball.** One `tar xzf` is the whole installation. The binary, the
+deconjugation rules, the three ONNX models and the `extras/` snippets come
+out in one folder, and the binary finds the models beside itself.
+
+```bash
+tar xzf chibipop-vX.Y.Z-linux-x64.tar.gz
+cd chibipop-vX.Y.Z-linux-x64
+./chibipop probe          # the Wayland capability report
+./chibipop settings       # add dictionaries
+```
+
+**The AUR, on Arch.** `chibipop-bin` repacks that tarball; `chibipop` builds
+from the release tag against the distro's ONNX Runtime. Either one installs
+`/usr/bin/chibipop`, a `.desktop` entry and a systemd *user* unit. A pacman
+install is never portable mode, so config, data and state go to the XDG
+directories.
+
+**From source.** See [Quick start](#quick-start-hyprland) above.
+
+Runtime dependencies for the tarball and `-bin` builds: glibc, libstdc++ and a
+CJK font such as Noto Sans CJK. Nothing else — the OCR runtime is linked in.
+
+**The v0.9.9 tarball needs `GLIBC_2.39` and `GLIBCXX_3.4.31` or newer.** Those
+are measured, not estimated: the release run reads the highest versioned symbol
+the binary references from each library. They are Ubuntu 24.04's versions,
+which is the image the asset is built on. A distro older than either needs the
+source AUR package or a source build, both of which link against whatever the
+distro ships.
+
+Optional: `xdg-desktop-portal` (capture and trigger on KDE/GNOME) and
+`pipewire` (the portal capture stream).
+
+The packaging is built by [`scripts/package-linux.sh`](../scripts/package-linux.sh)
+and templated in [`packaging/aur/`](../packaging/aur/). Both are described in
+[`RELEASING.md`](RELEASING.md).
 
 ---
 

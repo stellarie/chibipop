@@ -724,6 +724,39 @@ fn inline_collapsed_rows_open_with_a_separator_rule() {
     assert_eq!(LINE_GAP, rows[1].top_gap);
 }
 
+/// A related entry is a different term, and its kana is half of its identity.
+#[test]
+fn an_inline_related_row_names_its_reading_beside_its_written_form() {
+    let s = laid_out(&with_collapsed(), 424.0, 4000.0, false, false);
+    let rows: Vec<&str> =
+        s.elems.iter().filter(|e| e.kind == ElemKind::Collapsed).map(|e| e.text.as_str()).collect();
+    assert_eq!(
+        vec!["雑音\u{3010}ざつおん\u{3011} \u{2014} noise", "雑誌\u{3010}ざっし\u{3011} \u{2014} magazine"],
+        rows
+    );
+}
+
+#[test]
+fn a_kana_only_related_row_prints_its_reading_once() {
+    let mut p = with_collapsed();
+    p.collapsed = vec![CollapsedRow {
+        written: Some("ざつおん".into()),
+        reading: Some("ざつおん".into()),
+        summary: "noise".into(),
+    }];
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    assert_eq!("ざつおん \u{2014} noise", find(&s, ElemKind::Collapsed).text);
+}
+
+/// The side column has no room for both, so it stays headword-only.
+#[test]
+fn a_side_related_row_stays_headword_only() {
+    let s = laid_out(&with_collapsed(), 424.0, 4000.0, false, true);
+    let side = s.side.as_ref().unwrap();
+    assert_eq!("雑音", side.rows[1].text);
+    assert_eq!("雑誌", side.rows[2].text);
+}
+
 // ---- scroll culling ----
 
 #[test]

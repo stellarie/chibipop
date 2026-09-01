@@ -13,7 +13,7 @@
       "content": {
         "content_w": "321.00",
         "origin": "12.00",
-        "used_h": "282.76"
+        "used_h": "290.76"
       },
       "elements": [
         {
@@ -101,46 +101,46 @@
           "y": "115.13"
         },
         {
-          "advance": "59.85",
+          "advance": "19.95",
           "font_size": "15.00",
-          "h": "59.85",
+          "h": "19.95",
           "i": 6,
           "kind": "Text",
-          "lines": 3,
-          "text": "interesting; fascinating; intriguing; enthralling; amusing; funny; comical; enjoyable; fun; entertaining; pleasant; agreeable",
+          "lines": 1,
+          "text": "interesting; fascinating; intriguing; enthralling",
           "top_gap": "4.00",
-          "w": "302.56",
+          "w": "299.30",
           "wrap_w": "321.00",
           "x": "12.00",
           "y": "136.43"
         },
         {
-          "advance": "17.29",
-          "font_size": "13.00",
-          "h": "17.29",
+          "advance": "19.95",
+          "font_size": "15.00",
+          "h": "19.95",
           "i": 7,
           "kind": "Text",
           "lines": 1,
-          "text": "大辞林",
-          "top_gap": "10.00",
-          "w": "39.00",
+          "text": "amusing; funny; comical",
+          "top_gap": "4.00",
+          "w": "158.96",
           "wrap_w": "321.00",
           "x": "12.00",
-          "y": "206.28"
+          "y": "160.38"
         },
         {
-          "advance": "39.90",
+          "advance": "19.95",
           "font_size": "15.00",
-          "h": "39.90",
+          "h": "19.95",
           "i": 8,
           "kind": "Text",
-          "lines": 2,
-          "text": "心が引かれて、楽しい気持ちになるさま。興味をそそられるさま。",
+          "lines": 1,
+          "text": "enjoyable; fun; entertaining; pleasant; agreeable",
           "top_gap": "4.00",
-          "w": "309.87",
+          "w": "316.11",
           "wrap_w": "321.00",
           "x": "12.00",
-          "y": "227.57"
+          "y": "184.33"
         },
         {
           "advance": "17.29",
@@ -149,12 +149,40 @@
           "i": 9,
           "kind": "Text",
           "lines": 1,
+          "text": "大辞林",
+          "top_gap": "10.00",
+          "w": "39.00",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "214.28"
+        },
+        {
+          "advance": "39.90",
+          "font_size": "15.00",
+          "h": "39.90",
+          "i": 10,
+          "kind": "Text",
+          "lines": 2,
+          "text": "心が引かれて、楽しい気持ちになるさま。興味をそそられるさま。",
+          "top_gap": "4.00",
+          "w": "309.87",
+          "wrap_w": "321.00",
+          "x": "12.00",
+          "y": "235.57"
+        },
+        {
+          "advance": "17.29",
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 11,
+          "kind": "Text",
+          "lines": 1,
           "text": "新明解国語辞典",
           "top_gap": "10.00",
           "w": "91.00",
           "wrap_w": "321.00",
           "x": "12.00",
-          "y": "277.47"
+          "y": "285.47"
         }
       ],
       "hits": [
@@ -200,16 +228,16 @@
         "y": 197
       },
       "measure": {
-        "content_h": 307,
+        "content_h": 315,
         "total_w": 480,
         "view_h": 300
       },
       "scroll": {
-        "max_scroll": 7,
-        "scroll_used": 7,
+        "max_scroll": 15,
+        "scroll_used": 15,
         "thumb": {
-          "h": 269,
-          "top": 7
+          "h": 262,
+          "top": 14
         }
       },
       "side_panel": {

@@ -815,9 +815,7 @@ pub(super) fn build_elements(
         } else {
             out.push(Elem::Separator { top_gap: SEPARATOR_MARGIN });
             for (i, row) in p.collapsed.iter().enumerate() {
-                let head = row.written.clone()
-                    .or_else(|| row.reading.clone())
-                    .unwrap_or_default();
+                let head = related_inline_head(row.written.as_deref(), row.reading.as_deref());
                 let text = if head.is_empty() {
                     row.summary.clone()
                 } else {
@@ -836,6 +834,24 @@ pub(super) fn build_elements(
     }
 
     (out, side)
+}
+
+/// One inline related row's headword, as the panel reads it.
+///
+/// A related entry is a different term, so its reading carries as much of the
+/// identity as its written form: 猫 and 描 read apart only by their kana. The
+/// side panel stays headword-only because its column has no room for both,
+/// and a kana-only entry would otherwise print the same string twice.
+fn related_inline_head(written: Option<&str>, reading: Option<&str>) -> String {
+    match (
+        written.filter(|s| !s.is_empty()),
+        reading.filter(|s| !s.is_empty()),
+    ) {
+        (Some(w), Some(r)) if w != r => format!("{w}\u{3010}{r}\u{3011}"),
+        (Some(w), _) => w.to_string(),
+        (None, Some(r)) => r.to_string(),
+        (None, None) => String::new(),
+    }
 }
 
 /// One accent as the panel draws it: the reading in marked kana, and the

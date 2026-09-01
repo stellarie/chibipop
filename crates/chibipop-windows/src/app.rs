@@ -17,18 +17,18 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::plugin::manifest::Manifest;
 use crate::plugin::text::PluginText;
 use crate::plugin::{discover, host};
-use crate::present::{DictInfo, Presentation, PresentConfig};
+use crate::present::{DictInfo, PresentConfig, Presentation};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::capture::{CaptureGuard, CaptureGuardMsg, WinCapture, WM_APP_CAPTURE_GUARD};
 use crate::text::layout::CaptureSize;
 use crate::text::mask::CaptureMask;
 use crate::text::ocr::{recogniser_available, WinrtOcr};
-use crate::ui::overlay::Overlay;
-use crate::ui::static_overlay::StaticRegionOverlay;
 use crate::ui::layout::anki_button_label;
+use crate::ui::overlay::Overlay;
 use crate::ui::render::Renderer;
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
+use crate::ui::static_overlay::StaticRegionOverlay;
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
@@ -83,13 +83,11 @@ const DISPATCH_TICK_MS: u32 = 20;
 /// Anchor-to-popup gap.
 const POPUP_GAP: i32 = 40;
 
-
 /// Rebuild progress poll, ms.
 const REBUILD_TICK_MS: u32 = 100;
 
-/// Over this, hooks stall.
+/// Over this, Apply visibly stalls.
 const APPLY_BUDGET_MS: u128 = 50;
-
 
 /// One dupe check's answer.
 struct AnkiDupeResult {
@@ -132,6 +130,27 @@ struct AddNoteResult {
     err: Option<String>,
 }
 
+struct SettingsStatus {
+    gen: Option<u64>,
+    text: String,
+}
+
+impl SettingsStatus {
+    fn any(text: String) -> Self {
+        Self { gen: None, text }
+    }
+
+    fn anki(gen: u64, text: String) -> Self {
+        Self {
+            gen: Some(gen),
+            text,
+        }
+    }
+
+    fn matches(&self, current_gen: u64) -> bool {
+        self.gen.is_none_or(|gen| gen == current_gen)
+    }
+}
 
 /// Settings alone, no tray.
 pub fn settings_only(
@@ -150,8 +169,9 @@ pub fn settings_only(
     let mut pending: Option<Config> = None;
     let mut tick = 0usize;
     let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
-    let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
+    let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
+    let (detect_tx, detect_rx) = mpsc::channel::<AnkiDetect>();
+    let mut detect_gen = 0u64;
     // SAFETY: no preconditions.
     let tid = unsafe { GetCurrentThreadId() };
 
@@ -170,13 +190,15 @@ pub fn settings_only(
 
         if msg.message == WM_APP_SETTINGS {
             while let Ok(status) = settings_rx.try_recv() {
-                window.set_status(&status);
+                if status.matches(detect_gen) {
+                    window.set_status(&status.text);
+                }
             }
         }
 
         if msg.message == WM_APP_ANKI_DETECT {
-            while let Ok((decks, models, fields)) = detect_rx.try_recv() {
-                window.populate_combos(&decks, &models, &fields);
+            while let Ok(result) = detect_rx.try_recv() {
+                apply_anki_detect(&window, detect_gen, result);
             }
         }
 
@@ -187,13 +209,21 @@ pub fn settings_only(
                 DispatchMessageW(&msg);
             }
         }
-        service_settings_click(&window, &settings_tx, &detect_tx, tid, &mut css_editor_so);
+        service_settings_click(
+            &window,
+            &settings_tx,
+            &detect_tx,
+            &mut detect_gen,
+            tid,
+            &mut css_editor_so,
+        );
 
         // Tab switch -> detect.
         if let Some(tab) = window.take_tab_change() {
             window.switch_tab(tab);
             if tab == 3 {
                 spawn_detect(
+                    next_anki_detect_generation(&mut detect_gen),
                     window.anki_url(),
                     window.anki_model(),
                     detect_tx.clone(),
@@ -203,6 +233,15 @@ pub fn settings_only(
         }
         if window.take_field_map_toggle() {
             window.toggle_field_map();
+        }
+        if window.take_anki_model_change() {
+            spawn_detect_fields(
+                next_anki_detect_generation(&mut detect_gen),
+                window.anki_url(),
+                window.anki_model(),
+                detect_tx.clone(),
+                tid,
+            );
         }
 
         if rebuild.is_some() {
@@ -611,7 +650,10 @@ fn edit_status(report: &EditReport) -> String {
         parts.push(format!("Removed {}.", report.removed.join(", ")));
     }
     if !report.freq_removed.is_empty() {
-        parts.push(format!("Removed frequency {}.", report.freq_removed.join(", ")));
+        parts.push(format!(
+            "Removed frequency {}.",
+            report.freq_removed.join(", ")
+        ));
     }
     if !report.failed.is_empty() {
         parts.push(format!("Not applied: {}.", report.failed.join("; ")));
@@ -708,7 +750,9 @@ fn apply_edits_with_frequencies(
     let mut conn = open_writer(db)?;
     let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
     let freqs = lib.freq_paths(dir);
-    let _ = tx.send(EditMsg::Status("Updating frequency rankings...".to_string()));
+    let _ = tx.send(EditMsg::Status(
+        "Updating frequency rankings...".to_string(),
+    ));
     crate::dict::edit::reapply_frequencies(&mut conn, &freqs, &|text| {
         let _ = tx.send(EditMsg::Status(text.to_string()));
     })?;
@@ -825,33 +869,116 @@ fn pump_edit(rx: &mpsc::Receiver<EditMsg>, w: &SettingsWindow) -> Option<Result<
     }
 }
 
-/// Reachable text + fields.
-fn reachable_message(url: &str, model: &str) -> (String, Vec<String>) {
-    match anki::model_field_names(url, model) {
-        Ok(fields) => {
-            let msg = format!(
-                "AnkiConnect is reachable. \"{model}\" fields: {}",
-                fields.join(", "),
-            );
-            (msg, fields)
+struct AnkiDetect {
+    gen: u64,
+    url: String,
+    model: String,
+    decks: Option<Vec<String>>,
+    models: Option<Vec<String>>,
+    fields: Vec<String>,
+}
+
+impl AnkiDetect {
+    fn full(
+        gen: u64,
+        url: String,
+        model: String,
+        decks: Vec<String>,
+        models: Vec<String>,
+        fields: Vec<String>,
+    ) -> Self {
+        Self {
+            gen,
+            url,
+            model,
+            decks: Some(decks),
+            models: Some(models),
+            fields,
         }
-        Err(_) => ("AnkiConnect is reachable.".into(), Vec::new()),
+    }
+
+    fn fields(gen: u64, url: String, model: String, fields: Vec<String>) -> Self {
+        Self {
+            gen,
+            url,
+            model,
+            decks: None,
+            models: None,
+            fields,
+        }
+    }
+}
+
+fn next_anki_detect_generation(gen: &mut u64) -> u64 {
+    *gen = gen.checked_add(1).unwrap_or(1);
+    *gen
+}
+
+fn anki_detect_matches(gen: u64, url: &str, model: &str, result: &AnkiDetect) -> bool {
+    result.gen == gen && result.url == url && result.model == model
+}
+
+fn reachable_message(model: &str, fields: &[String]) -> String {
+    if fields.is_empty() {
+        return "AnkiConnect is reachable.".into();
+    }
+    format!(
+        "AnkiConnect is reachable. \"{model}\" fields: {}",
+        fields.join(", "),
+    )
+}
+
+fn detect_all(gen: u64, url: String, model: String) -> AnkiDetect {
+    let deck_url = url.clone();
+    let model_url = url.clone();
+    let field_url = url.clone();
+    let requested_model = model.clone();
+    let deck_names = thread::spawn(move || anki::deck_names(&deck_url).unwrap_or_default());
+    let model_names = thread::spawn(move || anki::model_names(&model_url).unwrap_or_default());
+    let field_names =
+        thread::spawn(move || anki::model_field_names(&field_url, &model).unwrap_or_default());
+    AnkiDetect::full(
+        gen,
+        url,
+        requested_model,
+        deck_names.join().unwrap_or_default(),
+        model_names.join().unwrap_or_default(),
+        field_names.join().unwrap_or_default(),
+    )
+}
+
+fn apply_anki_detect(w: &SettingsWindow, gen: u64, result: AnkiDetect) {
+    if !anki_detect_matches(gen, &w.anki_url(), &w.anki_model(), &result) {
+        return;
+    }
+    match (result.decks, result.models) {
+        (Some(decks), Some(models)) => w.populate_combos(&decks, &models, result.fields),
+        _ => w.populate_fields(result.fields),
     }
 }
 
 /// Deck/model/field names, off-thread.
-fn spawn_detect(
+fn spawn_detect(gen: u64, url: String, model: String, tx: mpsc::Sender<AnkiDetect>, tid: u32) {
+    thread::spawn(move || {
+        let _ = tx.send(detect_all(gen, url, model));
+        // SAFETY: wakes the main loop.
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn spawn_detect_fields(
+    gen: u64,
     url: String,
     model: String,
-    tx: mpsc::Sender<(Vec<String>, Vec<String>, Vec<String>)>,
+    tx: mpsc::Sender<AnkiDetect>,
     tid: u32,
 ) {
     thread::spawn(move || {
-        let decks = anki::deck_names(&url).unwrap_or_default();
-        let models = anki::model_names(&url).unwrap_or_default();
         let fields = anki::model_field_names(&url, &model).unwrap_or_default();
-        let _ = tx.send((decks, models, fields));
-        // SAFETY: wakes the pump.
+        let _ = tx.send(AnkiDetect::fields(gen, url, model, fields));
+        // SAFETY: wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
         }
@@ -864,8 +991,9 @@ fn spawn_detect(
 /// was opened (caller must reload).
 fn service_settings_click(
     w: &SettingsWindow,
-    tx: &mpsc::Sender<String>,
-    detect_tx: &mpsc::Sender<(Vec<String>, Vec<String>, Vec<String>)>,
+    tx: &mpsc::Sender<SettingsStatus>,
+    detect_tx: &mpsc::Sender<AnkiDetect>,
+    detect_gen: &mut u64,
     tid: u32,
     css_editor: &mut Option<crate::ui::editor::CssEditor>,
 ) {
@@ -874,26 +1002,30 @@ fn service_settings_click(
             w.set_status("Testing\u{2026}");
             let url = w.anki_url();
             let model = w.anki_model();
+            let gen = next_anki_detect_generation(detect_gen);
             let tx = tx.clone();
             let detect_tx = detect_tx.clone();
             thread::spawn(move || {
                 let status = anki::check_connection(&url);
-                let (msg, fields) = match &status {
-                    Ok(true) => reachable_message(&url, &model),
-                    Ok(false) => ("AnkiConnect did not respond.".into(), Vec::new()),
-                    Err(e) => (format!("Anki test failed: {e:#}"), Vec::new()),
+                let detect =
+                    matches!(status, Ok(true)).then(|| detect_all(gen, url.clone(), model.clone()));
+                let msg = match &status {
+                    Ok(true) => detect.as_ref().map_or_else(
+                        || "AnkiConnect is reachable.".into(),
+                        |result| reachable_message(&model, &result.fields),
+                    ),
+                    Ok(false) => "AnkiConnect did not respond.".into(),
+                    Err(e) => format!("Anki test failed: {e:#}"),
                 };
-                let _ = tx.send(msg);
-                if matches!(status, Ok(true)) {
-                    let decks = anki::deck_names(&url).unwrap_or_default();
-                    let models = anki::model_names(&url).unwrap_or_default();
-                    let _ = detect_tx.send((decks, models, fields));
-                    // SAFETY: wakes the pump thread.
+                let _ = tx.send(SettingsStatus::anki(gen, msg));
+                if let Some(result) = detect {
+                    let _ = detect_tx.send(result);
+                    // SAFETY: wakes the main loop.
                     unsafe {
                         let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
                     }
                 }
-                // SAFETY: wakes the pump thread.
+                // SAFETY: wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
@@ -911,8 +1043,8 @@ fn service_settings_click(
                     },
                     Err(e) => format!("Update check failed: {e:#}"),
                 };
-                let _ = tx.send(msg);
-                // SAFETY: wakes the pump thread.
+                let _ = tx.send(SettingsStatus::any(msg));
+                // SAFETY: wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
@@ -958,8 +1090,8 @@ fn worker_open(
                     let language = match substitute {
                         Some(sub) => {
                             eprintln!(
-                                "chibipop: no {language} OCR recogniser installed; starting with {sub}"
-                            );
+                            "chibipop: no {language} OCR recogniser installed; starting with {sub}"
+                        );
                             sub
                         }
                         None => language,
@@ -1128,9 +1260,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let static_overlay = match StaticRegionOverlay::create(live.exclude_from_capture) {
         Ok(o) => Some(o),
         Err(e) => {
-            eprintln!(
-                "chibipop: the static region overlay could not be created: {e:#}"
-            );
+            eprintln!("chibipop: the static region overlay could not be created: {e:#}");
             None
         }
     };
@@ -1244,8 +1374,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // Anki dupe answers, by expr.
     let mut dupe_cache: HashMap<String, bool> = HashMap::new();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
-    let (settings_tx, settings_rx) = mpsc::channel::<String>();
-    let (detect_tx, detect_rx) = mpsc::channel::<(Vec<String>, Vec<String>, Vec<String>)>();
+    let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
+    let (detect_tx, detect_rx) = mpsc::channel::<AnkiDetect>();
+    let mut detect_gen = 0u64;
     let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
     let mut css_editor: Option<crate::ui::editor::CssEditor> = None;
     let (screenshot_tx, screenshot_rx) = mpsc::channel::<crate::action::ScreenshotCommand>();
@@ -1388,7 +1519,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             for cmd in rx {
                 let result = handle_screenshot_save(cmd);
                 let _ = tx.send(result);
-                // SAFETY: wakes the pump thread.
+                // SAFETY: wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SCREENSHOT_DONE, WPARAM(0), LPARAM(0));
                 }
@@ -1422,17 +1553,39 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
             // dropped, and `msg` is this loop's own stack storage.
             let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
-            service_settings_click(w, &settings_tx, &detect_tx, main_tid, &mut css_editor);
+            service_settings_click(
+                w,
+                &settings_tx,
+                &detect_tx,
+                &mut detect_gen,
+                main_tid,
+                &mut css_editor,
+            );
 
             // Tab switch -> detect.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
                 if tab == 3 {
-                    spawn_detect(w.anki_url(), w.anki_model(), detect_tx.clone(), main_tid);
+                    spawn_detect(
+                        next_anki_detect_generation(&mut detect_gen),
+                        w.anki_url(),
+                        w.anki_model(),
+                        detect_tx.clone(),
+                        main_tid,
+                    );
                 }
             }
             if w.take_field_map_toggle() {
                 w.toggle_field_map();
+            }
+            if w.take_anki_model_change() {
+                spawn_detect_fields(
+                    next_anki_detect_generation(&mut detect_gen),
+                    w.anki_url(),
+                    w.anki_model(),
+                    detect_tx.clone(),
+                    main_tid,
+                );
             }
 
             if handled {
@@ -1447,7 +1600,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 .as_ref()
                 .filter(|b| b.is_visible())
                 .map_or(0, |b| b.height_phys());
-            drive!(Event::Tick { cursor: cursor_pos, button_h });
+            drive!(Event::Tick {
+                cursor: cursor_pos,
+                button_h
+            });
 
             let notches = Hooks::take_whole_notches();
             if notches != 0 {
@@ -1673,12 +1829,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     &capture_guard_active,
                                 );
                                 // Kills stale results.
-                                drive!(Event::ConfigReloaded(Box::new(
-                                    controller_config(&live),
-                                )));
-                                save_in_background(&mut save_job, updated,
-                                                   config_path.to_path_buf(),
-                                                   save_tx.clone(), main_tid);
+                                drive!(Event::ConfigReloaded(Box::new(controller_config(&live),)));
+                                save_in_background(
+                                    &mut save_job,
+                                    updated,
+                                    config_path.to_path_buf(),
+                                    save_tx.clone(),
+                                    main_tid,
+                                );
                                 w.set_status(&status);
                             }
                         }
@@ -1707,8 +1865,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                         let db = db_path.clone();
                                         let dir = library.clone();
                                         thread::spawn(move || {
-                                            let done =
-                                                apply_edits_with_frequencies(&db, &dir, &edited, &etx);
+                                            let done = apply_edits_with_frequencies(
+                                                &db, &dir, &edited, &etx,
+                                            );
                                             let _ = etx.send(EditMsg::Done(done));
                                         });
                                         let ms = t0.elapsed().as_millis();
@@ -1740,9 +1899,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     &mut theme,
                                     &capture_guard_active,
                                 );
-                                drive!(Event::ConfigReloaded(Box::new(
-                                    controller_config(&live),
-                                )));
+                                drive!(Event::ConfigReloaded(Box::new(controller_config(&live),)));
                                 let clamped = settings::clamp_notice(&edited, &updated);
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
@@ -1844,7 +2001,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 freshest = Some(r);
             }
             if let Some(result) = freshest {
-                drive!(Event::LookupResult { id: result.id, outcome: result.outcome });
+                drive!(Event::LookupResult {
+                    id: result.id,
+                    outcome: result.outcome
+                });
             }
         } else if msg.message == WM_APP_ANKI {
             while let Ok(result) = anki_rx.try_recv() {
@@ -1853,7 +2013,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         dupe_cache.insert(expr.clone(), found.contains(expr));
                     }
                 }
-                drive!(Event::DupesChecked { generation: result.gen, dupes: result.dupes });
+                drive!(Event::DupesChecked {
+                    generation: result.gen,
+                    dupes: result.dupes
+                });
             }
         } else if msg.message == WM_APP_ADD_NOTE {
             while let Ok(result) = add_rx.try_recv() {
@@ -1866,18 +2029,23 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                 }
                 let failed = result.err.is_some();
-                drive!(Event::NoteAdded { expr: result.expr, failed });
+                drive!(Event::NoteAdded {
+                    expr: result.expr,
+                    failed
+                });
             }
         } else if msg.message == WM_APP_SETTINGS {
             while let Ok(status) = settings_rx.try_recv() {
                 if let Some(w) = &settings {
-                    w.set_status(&status);
+                    if status.matches(detect_gen) {
+                        w.set_status(&status.text);
+                    }
                 }
             }
         } else if msg.message == WM_APP_ANKI_DETECT {
-            while let Ok((decks, models, fields)) = detect_rx.try_recv() {
+            while let Ok(result) = detect_rx.try_recv() {
                 if let Some(w) = &settings {
-                    w.populate_combos(&decks, &models, &fields);
+                    apply_anki_detect(w, detect_gen, result);
                 }
             }
         } else if msg.message == WM_APP_SAVED {
@@ -1918,7 +2086,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 // The failure has to land too - `start_add` marked the
                 // popup in flight before it handed this add over.
                 if let Some(failed) = result.add_failed() {
-                    drive!(Event::NoteAdded { expr: result.expr, failed });
+                    drive!(Event::NoteAdded {
+                        expr: result.expr,
+                        failed
+                    });
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
@@ -2103,10 +2274,13 @@ fn show_presentation(
 /// `derive`'s empty-field-map fallback applied so a screenshot add
 /// routes its fields exactly like a plain one.
 fn anki_snapshot(cfg: &Config, live: &LiveSettings) -> crate::config::AnkiConfig {
-    crate::config::AnkiConfig { field_map: live.anki_field_map.clone(), ..cfg.anki.clone() }
+    crate::config::AnkiConfig {
+        field_map: live.anki_field_map.clone(),
+        ..cfg.anki.clone()
+    }
 }
 
-/// One plain add, off the pump thread.
+/// One add, off main loop.
 fn spawn_add_note(
     expr: String,
     fields: HashMap<String, String>,
@@ -2124,7 +2298,7 @@ fn spawn_add_note(
             .err()
             .map(|e| format!("{e:#}"));
         let _ = tx.send(AddNoteResult { expr, err });
-        // SAFETY: wakes the pump.
+        // SAFETY: wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
         }
@@ -2148,7 +2322,12 @@ fn handle_screenshot_save(
         Ok(None)
     })();
     crate::action::ScreenshotResult {
-        dir: cmd.plan.path.parent().unwrap_or(cmd.plan.path.as_path()).to_path_buf(),
+        dir: cmd
+            .plan
+            .path
+            .parent()
+            .unwrap_or(cmd.plan.path.as_path())
+            .to_path_buf(),
         expr: cmd.plan.expr,
         filed: filed.map_err(|e| format!("{e:#}")),
     }
@@ -2316,15 +2495,25 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
         // level - WDA_EXCLUDEFROMCAPTURE or the hide/reshow capture guard
         // - so it supplies no mask rects and `popup` goes unread here
         // (ADR-0008).
-        Command::RequestLookup { id, point, popup: _ } => {
+        Command::RequestLookup {
+            id,
+            point,
+            popup: _,
+        } => {
             let _ = x.trigger_tx.send(Trigger {
-                kind: TriggerKind::Hover(Hover { at: point, mask: CaptureMask::NONE }),
+                kind: TriggerKind::Hover(Hover {
+                    at: point,
+                    mask: CaptureMask::NONE,
+                }),
                 id,
             });
             None
         }
         Command::RequestDrillDown { id, text } => {
-            let _ = x.trigger_tx.send(Trigger { kind: TriggerKind::DrillDown(text), id });
+            let _ = x.trigger_tx.send(Trigger {
+                kind: TriggerKind::DrillDown(text),
+                id,
+            });
             None
         }
         Command::RequestReload { id } => {
@@ -2334,7 +2523,12 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             });
             None
         }
-        Command::ShowPopup { presentation, anchor, scroll, show_back } => {
+        Command::ShowPopup {
+            presentation,
+            anchor,
+            scroll,
+            show_back,
+        } => {
             match show_presentation(
                 x.popup,
                 x.renderer,
@@ -2348,9 +2542,11 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 x.live.side_panel,
                 x.live.popup.render_settings(),
             ) {
-                Ok((rect, content_h, view_h)) => {
-                    Some(Event::PopupPlaced { rect, content_h, view_h })
-                }
+                Ok((rect, content_h, view_h)) => Some(Event::PopupPlaced {
+                    rect,
+                    content_h,
+                    view_h,
+                }),
                 Err(e) => {
                     eprintln!("chibipop: showing the popup failed: {e:#}");
                     Some(Event::PopupPlaceFailed)
@@ -2434,7 +2630,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                     checked: Vec::new(),
                     dupes: Some(cached_dupes),
                 });
-                // SAFETY: wakes the pump.
+                // SAFETY: wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(x.main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
                 }
@@ -2461,8 +2657,12 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                         None
                     }
                 };
-                let _ = tx.send(AnkiDupeResult { gen: generation, checked: uncached, dupes });
-                // SAFETY: wakes the pump.
+                let _ = tx.send(AnkiDupeResult {
+                    gen: generation,
+                    checked: uncached,
+                    dupes,
+                });
+                // SAFETY: wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
                 }
@@ -2486,8 +2686,12 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             let root = crate::action::screenshot::save_root(&x.cfg.actions.screenshot, x.exe_dir);
             let pending = controller.popup().and_then(|view| {
                 let anki_connected = view.anki.connected;
-                crate::shot::plan_add(&view, x.cfg, &root, crate::shot::epoch_secs())
-                    .map(|plan| PendingShot { plan, anki_connected })
+                crate::shot::plan_add(&view, x.cfg, &root, crate::shot::epoch_secs()).map(|plan| {
+                    PendingShot {
+                        plan,
+                        anki_connected,
+                    }
+                })
             });
             if pending.is_some() {
                 *x.pending_shot = pending;
@@ -2496,7 +2700,10 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             spawn_add_note(expr, fields, x.live, x.add_tx, x.main_tid);
             None
         }
-        Command::LogLookup { headword, match_len } => {
+        Command::LogLookup {
+            headword,
+            match_len,
+        } => {
             println!("{headword}  match={match_len}");
             None
         }
@@ -2657,7 +2864,10 @@ fn derive(cfg: &Config) -> LiveSettings {
         },
         sentence_mode: cfg.anki.sentence_mode,
         static_region: cfg.anki.static_region.map(|a| PhysRect {
-            x: a[0], y: a[1], w: a[2], h: a[3],
+            x: a[0],
+            y: a[1],
+            w: a[2],
+            h: a[3],
         }),
         static_region_key: cfg.anki.static_region_key.clone(),
         show_static_overlay: cfg.anki.show_static_overlay,
@@ -2811,10 +3021,7 @@ fn apply_live(
 }
 
 /// Adds the action when a valid key exists.
-fn sync_ocr_clipboard_action(
-    registry: &mut crate::action::ActionRegistry,
-    hotkey: Option<&str>,
-) {
+fn sync_ocr_clipboard_action(registry: &mut crate::action::ActionRegistry, hotkey: Option<&str>) {
     if hotkey.and_then(crate::config::parse_trigger_key).is_some() {
         registry.register_at(
             2,
@@ -2834,7 +3041,7 @@ fn save_in_background(
     join_save(prev);
     *prev = Some(thread::spawn(move || {
         let _ = tx.send(cfg.save(&path));
-        // SAFETY: wakes the pump thread.
+        // SAFETY: wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
         }
@@ -2867,10 +3074,7 @@ mod tests {
     use crate::config::PopupConfig;
     #[test]
     fn dupe_partition_uses_cached_results_and_deduplicates_refs() {
-        let cache = HashMap::from([
-            ("宿舎".to_string(), true),
-            ("駅".to_string(), false),
-        ]);
+        let cache = HashMap::from([("宿舎".to_string(), true), ("駅".to_string(), false)]);
         let (dupes, uncached, cached_any) = partition_dupes(
             vec!["宿舎".into(), "宿舎".into(), "駅".into(), "猫".into()],
             &cache,
@@ -2878,6 +3082,48 @@ mod tests {
         assert_eq!(HashSet::from(["宿舎".to_string()]), dupes);
         assert_eq!(vec!["猫".to_string()], uncached);
         assert!(cached_any);
+    }
+
+    #[test]
+    fn anki_detect_rejects_same_model_old_generation() {
+        let result = AnkiDetect::fields(1, "http://127.0.0.1:8765".into(), "Basic".into(), vec![]);
+        assert!(anki_detect_matches(
+            1,
+            "http://127.0.0.1:8765",
+            "Basic",
+            &result
+        ));
+        assert!(!anki_detect_matches(
+            2,
+            "http://127.0.0.1:8765",
+            "Basic",
+            &result
+        ));
+    }
+
+    #[test]
+    fn anki_detect_rejects_changed_url() {
+        let result = AnkiDetect::fields(3, "http://127.0.0.1:8765".into(), "Basic".into(), vec![]);
+        assert!(!anki_detect_matches(
+            3,
+            "http://127.0.0.1:8766",
+            "Basic",
+            &result
+        ));
+    }
+
+    #[test]
+    fn stale_anki_test_status_is_rejected() {
+        let status = SettingsStatus::anki(3, "AnkiConnect is reachable.".into());
+        assert!(status.matches(3));
+        assert!(!status.matches(4));
+    }
+
+    #[test]
+    fn non_anki_status_is_always_current() {
+        let status = SettingsStatus::any("You already have the latest version.".into());
+        assert!(status.matches(3));
+        assert!(status.matches(4));
     }
 
     /// The shipped popup section with the two fields these tests are
@@ -2909,7 +3155,6 @@ mod tests {
             theme_from_config(&popup_config("anything-else", "X")).background
         );
     }
-
 
     #[test]
     fn derive_carries_every_popup_field() {
@@ -2994,7 +3239,9 @@ mod tests {
             live.present_cfg.terms,
             "the enabled name, then the installed dictionary neither list mentions"
         );
-        let sent = rx.try_recv().expect("the reload must have reached the worker");
+        let sent = rx
+            .try_recv()
+            .expect("the reload must have reached the worker");
         match sent.kind {
             TriggerKind::Reload(settings) => {
                 assert_eq!(live.present_cfg, settings.present_cfg);
@@ -3014,7 +3261,10 @@ mod tests {
         cfg.dictionaries.pitch = vec!["Jitendex.org".to_string()];
         let mut live = derive(&cfg);
         let before = live.present_cfg.clone();
-        let dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
+        let dicts = vec![DictInfo {
+            dict_id: 1,
+            name: "Jitendex.org".to_string(),
+        }];
         let (tx, rx) = mpsc::channel::<Trigger>();
 
         rescope_lookups(&mut live, &cfg, &dicts, &tx);
@@ -3146,7 +3396,6 @@ mod tests {
         assert!(!asked);
     }
 
-
     fn di(id: i64, name: &str) -> crate::present::DictInfo {
         crate::present::DictInfo {
             dict_id: id,
@@ -3172,7 +3421,9 @@ mod tests {
     }
 
     fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/yomitan").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/yomitan")
+            .join(name)
     }
 
     /// WAL, as build-dict writes it.
@@ -3335,7 +3586,11 @@ mod tests {
         assert!(library.join("freq.zip").exists());
         let conn = rusqlite::Connection::open(&db).unwrap();
         let freq: i64 = conn
-            .query_row("SELECT freq FROM term WHERE surface = ?1", ["食べる"], |r| r.get(0))
+            .query_row(
+                "SELECT freq FROM term WHERE surface = ?1",
+                ["食べる"],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(7, freq);
         assert_eq!(None, drifted(&library, &db).unwrap());
@@ -3366,7 +3621,11 @@ mod tests {
         assert_eq!(1, report.dicts.len());
         let conn = rusqlite::Connection::open(&db).unwrap();
         let ranked: i64 = conn
-            .query_row("SELECT COUNT(*) FROM term WHERE freq IS NOT NULL", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM term WHERE freq IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(0, ranked);
         assert_eq!(None, drifted(&library, &db).unwrap());
@@ -3602,8 +3861,6 @@ mod tests {
             "nothing may be imported before the refusal"
         );
     }
-
-
 
     /// Never the last dictionary.
     #[test]

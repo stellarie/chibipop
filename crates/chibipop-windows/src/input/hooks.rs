@@ -7,11 +7,15 @@
 
 use crate::config::TriggerMode;
 use crate::geom::PhysPoint;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU8, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Movement gate, physical px.
@@ -19,6 +23,9 @@ const MOVEMENT_GATE_PX: i64 = 4;
 
 /// "No point stored" sentinel.
 const NO_POINT: i64 = i64::MIN;
+
+/// Hook thread startup budget.
+const HOOK_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Last point the gate accepted.
 static LAST_ACCEPTED: AtomicI64 = AtomicI64::new(NO_POINT);
@@ -28,7 +35,6 @@ static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
 
 /// The configured trigger vkcode.
 static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x10);
-
 
 /// Whether the trigger key is held.
 static KEY_DOWN: AtomicBool = AtomicBool::new(false);
@@ -119,7 +125,10 @@ fn pack(p: PhysPoint) -> i64 {
 }
 
 fn unpack(v: i64) -> PhysPoint {
-    PhysPoint { x: (v >> 32) as i32, y: v as i32 }
+    PhysPoint {
+        x: (v >> 32) as i32,
+        y: v as i32,
+    }
 }
 
 fn mode_to_u8(m: TriggerMode) -> u8 {
@@ -130,7 +139,11 @@ fn mode_to_u8(m: TriggerMode) -> u8 {
 }
 
 fn u8_to_mode(v: u8) -> TriggerMode {
-    if v == 1 { TriggerMode::HoldKey } else { TriggerMode::Live }
+    if v == 1 {
+        TriggerMode::HoldKey
+    } else {
+        TriggerMode::Live
+    }
 }
 
 /// Whether a move may count now.
@@ -153,9 +166,7 @@ fn modifier_variants(vk: u16) -> Option<(u16, u16)> {
 
 /// True if this event fires add.
 fn add_hotkey_hit(down: bool, vk: u16) -> bool {
-    down
-        && vk == ANKI_ADD_VK.load(Ordering::SeqCst)
-        && ANKI_ADD_ARMED.load(Ordering::SeqCst)
+    down && vk == ANKI_ADD_VK.load(Ordering::SeqCst) && ANKI_ADD_ARMED.load(Ordering::SeqCst)
 }
 
 /// Live Ctrl/Shift/Alt bitmask.
@@ -221,7 +232,10 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     // lparam is a valid, aligned pointer to an MSLLHOOKSTRUCT for the
     // duration of this call.
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-    let p = PhysPoint { x: data.pt.x, y: data.pt.y };
+    let p = PhysPoint {
+        x: data.pt.x,
+        y: data.pt.y,
+    };
 
     if selection_active() {
         return;
@@ -270,15 +284,21 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     } else {
         // For modifiers with L/R variants,
         // only hide when both sides up.
-        let still_held = modifier_variants(target)
-            .is_some_and(|(l, r)| {
-                // The hook fires before state.
-                let other = if vk == l { r } else if vk == r { l } else { return false };
-                // SAFETY: no preconditions.
-                (unsafe {
-                    windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(other as i32)
-                } as u16 & 0x8000) != 0
-            });
+        let still_held = modifier_variants(target).is_some_and(|(l, r)| {
+            // The hook fires before state.
+            let other = if vk == l {
+                r
+            } else if vk == r {
+                l
+            } else {
+                return false;
+            };
+            // SAFETY: no preconditions.
+            (unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(other as i32) }
+                as u16
+                & 0x8000)
+                != 0
+        });
         if !still_held {
             KEY_DOWN.store(false, Ordering::SeqCst);
             let hold = u8_to_mode(MODE.load(Ordering::SeqCst)) != TriggerMode::Live;
@@ -297,7 +317,10 @@ unsafe fn record_click(lparam: LPARAM) {
     // guarantees lparam is a valid, aligned pointer to an
     // MSLLHOOKSTRUCT for the duration of this call.
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-    let p = PhysPoint { x: data.pt.x, y: data.pt.y };
+    let p = PhysPoint {
+        x: data.pt.x,
+        y: data.pt.y,
+    };
     PENDING_CLICK.store(pack(p), Ordering::SeqCst);
 }
 
@@ -350,22 +373,29 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// The two installed hooks.
-pub struct Hooks {
+/// The installed Win32 hooks.
+struct InstalledHooks {
     mouse: HHOOK,
     keyboard: HHOOK,
 }
 
-impl Hooks {
+enum HookStartup {
+    QueueReady(u32),
+    Installed(Result<()>),
+}
+
+impl InstalledHooks {
     /// Installs both, or neither.
-    pub fn install() -> Result<Hooks> {
+    fn install() -> Result<InstalledHooks> {
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None)
                 .context("GetModuleHandleW(None)")?
                 .into();
 
             let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), Some(hinstance), 0)
-                .context("SetWindowsHookExW(WH_MOUSE_LL) failed - the mouse hook did not install")?;
+                .context(
+                "SetWindowsHookExW(WH_MOUSE_LL) failed - the mouse hook did not install",
+            )?;
 
             let keyboard = match SetWindowsHookExW(
                 WH_KEYBOARD_LL,
@@ -382,7 +412,86 @@ impl Hooks {
                 }
             };
 
-            Ok(Hooks { mouse, keyboard })
+            Ok(InstalledHooks { mouse, keyboard })
+        }
+    }
+}
+
+impl Drop for InstalledHooks {
+    /// Unhooks both, best effort.
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.mouse);
+            let _ = UnhookWindowsHookEx(self.keyboard);
+        }
+    }
+}
+
+/// Hook pump thread.
+pub struct Hooks {
+    thread_id: u32,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl Hooks {
+    /// Starts the hook pump.
+    pub fn install() -> Result<Hooks> {
+        let (startup_tx, startup_rx) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("chibipop-hooks".to_string())
+            .spawn(move || run_hook_thread(startup_tx))
+            .context("spawning the low-level input hook thread")?;
+
+        let thread_id = match startup_rx.recv_timeout(HOOK_STARTUP_TIMEOUT) {
+            Ok(HookStartup::QueueReady(thread_id)) => thread_id,
+            Ok(HookStartup::Installed(_)) => {
+                let _ = worker.join();
+                return Err(anyhow!(
+                    "the low-level input hook thread reported startup out of order"
+                ));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(anyhow!(
+                    "the low-level input hook thread did not create a message queue in time"
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = worker.join();
+                return Err(anyhow!(
+                    "the low-level input hook thread exited before startup completed"
+                ));
+            }
+        };
+
+        match startup_rx.recv_timeout(HOOK_STARTUP_TIMEOUT) {
+            Ok(HookStartup::Installed(Ok(()))) => Ok(Hooks {
+                thread_id,
+                worker: Some(worker),
+            }),
+            Ok(HookStartup::Installed(Err(e))) => {
+                let _ = worker.join();
+                Err(e)
+            }
+            Ok(HookStartup::QueueReady(_)) => {
+                if stop_hook_thread(thread_id) {
+                    let _ = worker.join();
+                }
+                Err(anyhow!(
+                    "the low-level input hook thread reported message queue readiness twice"
+                ))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                stop_hook_thread(thread_id);
+                Err(anyhow!(
+                    "the low-level input hook thread did not install hooks in time"
+                ))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = worker.join();
+                Err(anyhow!(
+                    "the low-level input hook thread exited before installing hooks"
+                ))
+            }
         }
     }
 
@@ -453,7 +562,11 @@ impl Hooks {
     /// Takes the banked click, once.
     pub fn take_click() -> Option<PhysPoint> {
         let v = PENDING_CLICK.swap(NO_POINT, Ordering::SeqCst);
-        if v == NO_POINT { None } else { Some(unpack(v)) }
+        if v == NO_POINT {
+            None
+        } else {
+            Some(unpack(v))
+        }
     }
 
     /// Sets the gating mode.
@@ -525,17 +638,53 @@ impl Hooks {
 }
 
 impl Drop for Hooks {
-    /// Unhooks both, best effort.
+    /// Stops the hook pump.
     fn drop(&mut self) {
-        // Redundant; unhook restores.
         SCROLL_ARMED.store(false, Ordering::SeqCst);
         CLICK_ARMED.store(false, Ordering::SeqCst);
         ANKI_ADD_ARMED.store(false, Ordering::SeqCst);
-        unsafe {
-            let _ = UnhookWindowsHookEx(self.mouse);
-            let _ = UnhookWindowsHookEx(self.keyboard);
+        BACK_ARMED.store(false, Ordering::SeqCst);
+        let posted = stop_hook_thread(self.thread_id);
+        if let Some(worker) = self.worker.take() {
+            if posted && worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
+            }
         }
     }
+}
+
+fn stop_hook_thread(thread_id: u32) -> bool {
+    unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)).is_ok() }
+}
+
+fn run_hook_thread(startup_tx: mpsc::Sender<HookStartup>) {
+    let thread_id = unsafe { GetCurrentThreadId() };
+    let mut msg = MSG::default();
+    unsafe {
+        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+    }
+    if startup_tx.send(HookStartup::QueueReady(thread_id)).is_err() {
+        return;
+    }
+
+    let hooks = match InstalledHooks::install() {
+        Ok(hooks) => hooks,
+        Err(e) => {
+            let _ = startup_tx.send(HookStartup::Installed(Err(e)));
+            return;
+        }
+    };
+    if startup_tx.send(HookStartup::Installed(Ok(()))).is_err() {
+        return;
+    }
+
+    loop {
+        let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        if got.0 <= 0 {
+            break;
+        }
+    }
+    drop(hooks);
 }
 
 #[cfg(test)]
@@ -557,7 +706,11 @@ mod tests {
         // Exact multiples: none banked.
         accumulate_wheel(240);
         assert_eq!(2, Hooks::take_whole_notches());
-        assert_eq!(0, Hooks::take_whole_notches(), "nothing should be left over");
+        assert_eq!(
+            0,
+            Hooks::take_whole_notches(),
+            "nothing should be left over"
+        );
 
         // Hi-res deltas must add up.
         accumulate_wheel(40);
@@ -565,7 +718,11 @@ mod tests {
         accumulate_wheel(40);
         assert_eq!(0, Hooks::take_whole_notches(), "80 is not yet a notch");
         accumulate_wheel(40);
-        assert_eq!(1, Hooks::take_whole_notches(), "40+40+40 is one whole notch");
+        assert_eq!(
+            1,
+            Hooks::take_whole_notches(),
+            "40+40+40 is one whole notch"
+        );
         assert_eq!(0, Hooks::take_whole_notches());
 
         // % keeps the dividend's sign.
@@ -604,9 +761,7 @@ mod tests {
         // aligned MSLLHOOKSTRUCT that outlives the call (it is on this
         // frame's stack). Armed, so the callback returns before ever
         // reaching `CallNextHookEx`.
-        let result = unsafe {
-            mouse_hook_proc(0, WPARAM(WM_MOUSEWHEEL as usize), lparam)
-        };
+        let result = unsafe { mouse_hook_proc(0, WPARAM(WM_MOUSEWHEEL as usize), lparam) };
 
         assert_eq!(1, result.0, "an armed wheel event must be swallowed");
         assert_eq!(1, Hooks::take_whole_notches(), "and its delta banked");
@@ -729,7 +884,10 @@ mod tests {
         Hooks::set_add_armed(true);
         let _ = Hooks::take_add_hotkey();
 
-        let data = KBDLLHOOKSTRUCT { vkCode: 0x41, ..Default::default() };
+        let data = KBDLLHOOKSTRUCT {
+            vkCode: 0x41,
+            ..Default::default()
+        };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
         // SAFETY: `data` is a live, aligned KBDLLHOOKSTRUCT on this
         // frame's stack for the whole call - the exact contract
@@ -748,7 +906,10 @@ mod tests {
         Hooks::set_add_armed(true);
         let _ = Hooks::take_add_hotkey();
 
-        let data = KBDLLHOOKSTRUCT { vkCode: 0x42, ..Default::default() };
+        let data = KBDLLHOOKSTRUCT {
+            vkCode: 0x42,
+            ..Default::default()
+        };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
         // SAFETY: same contract as the test above.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
@@ -821,7 +982,10 @@ mod tests {
         Hooks::set_back_armed(false);
         let _ = Hooks::take_back();
 
-        let data = KBDLLHOOKSTRUCT { vkCode: VK_ESCAPE as u32, ..Default::default() };
+        let data = KBDLLHOOKSTRUCT {
+            vkCode: VK_ESCAPE as u32,
+            ..Default::default()
+        };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
         // SAFETY: same contract as add-hotkey tests.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
@@ -835,7 +999,10 @@ mod tests {
         Hooks::set_back_armed(true);
         let _ = Hooks::take_back();
 
-        let data = KBDLLHOOKSTRUCT { vkCode: VK_ESCAPE as u32, ..Default::default() };
+        let data = KBDLLHOOKSTRUCT {
+            vkCode: VK_ESCAPE as u32,
+            ..Default::default()
+        };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
         // SAFETY: same contract as add-hotkey tests.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
@@ -851,7 +1018,10 @@ mod tests {
         Hooks::set_back_armed(true);
         let _ = Hooks::take_back();
 
-        let data = KBDLLHOOKSTRUCT { vkCode: 0x41, ..Default::default() };
+        let data = KBDLLHOOKSTRUCT {
+            vkCode: 0x41,
+            ..Default::default()
+        };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
         // SAFETY: same contract as add-hotkey tests.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };

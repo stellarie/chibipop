@@ -37,12 +37,12 @@ use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
     OFN_NOCHANGEDIR, OPENFILENAMEW,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, ReleaseCapture, SetCapture, SetFocus,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// What the user did with the window. Read and cleared by `app::run`.
@@ -206,6 +206,25 @@ const FIELD_MAP_SOURCES: [&str; FIELD_SOURCES.len() + 1] = {
     }
     all
 };
+
+/// Field rows per pump.
+const FIELD_MAP_ROWS_PER_PUMP: usize = 4;
+
+struct PendingFieldMap {
+    fields: Vec<String>,
+    existing: Vec<crate::config::FieldMapping>,
+    next: usize,
+}
+
+impl PendingFieldMap {
+    fn new(fields: Vec<String>, existing: Vec<crate::config::FieldMapping>) -> Self {
+        Self {
+            fields,
+            existing,
+            next: 0,
+        }
+    }
+}
 
 /// The sentence-capture combo, in the order it is filled.
 ///
@@ -549,7 +568,9 @@ fn work_area_height(hwnd: HWND) -> Option<i32> {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        GetMonitorInfoW(hmon, &mut mi).as_bool().then(|| mi.rcWork.bottom - mi.rcWork.top)
+        GetMonitorInfoW(hmon, &mut mi)
+            .as_bool()
+            .then(|| mi.rcWork.bottom - mi.rcWork.top)
     }
 }
 
@@ -591,15 +612,29 @@ fn place_bottom(hwnd: HWND) {
             let Ok(c) = GetDlgItem(Some(hwnd), id) else {
                 continue;
             };
-            let _ = SetWindowPos(c, None, dpi_scale(hwnd, x), top + dpi_scale(hwnd, dy),
-                0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                c,
+                None,
+                dpi_scale(hwnd, x),
+                top + dpi_scale(hwnd, dy),
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
         let Ok((viewport, _)) = panes(hwnd) else {
             return;
         };
         let band = (top - dpi_scale(hwnd, CONTENT_Y)).max(0);
-        let _ = SetWindowPos(viewport, None, 0, 0, dpi_scale(hwnd, WIN_W), band,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            viewport,
+            None,
+            0,
+            0,
+            dpi_scale(hwnd, WIN_W),
+            band,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         // The page it ranged by moved.
         repage(hwnd, viewport);
     }
@@ -637,8 +672,15 @@ fn move_content(hwnd: HWND, y: i32) {
         let Ok((_, content)) = panes(hwnd) else {
             return;
         };
-        let _ = SetWindowPos(content, None, 0, y, 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            content,
+            None,
+            0,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -730,6 +772,9 @@ thread_local! {
     // Field-map toggle click, by `HWND`.
     static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
 
+    // Pending Anki-model switch.
+    static ANKI_MODEL_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
+
     // Pending OCR-language switch.
     static LANG_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
 
@@ -763,6 +808,15 @@ fn record_field_map_toggle(hwnd: HWND) {
     FIELD_MAP_TOGGLE.with(|c| c.set(Some(hwnd.0 as isize)));
 }
 
+fn record_anki_model_change(hwnd: HWND) {
+    ANKI_MODEL_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
+    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
+    // live for this call. WM_NULL only wakes the app pump.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+    }
+}
+
 fn remember_plugin_dirs(hwnd: HWND, dirs: Vec<PathBuf>) {
     PLUGIN_DIRS.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, dirs)));
 }
@@ -784,7 +838,9 @@ fn plugin_configure_idx(id: i32) -> Option<usize> {
 
 /// Opens it in Explorer.
 unsafe fn open_plugin_dir(hwnd: HWND, idx: usize) {
-    let Some(dir) = plugin_dir_at(hwnd, idx) else { return };
+    let Some(dir) = plugin_dir_at(hwnd, idx) else {
+        return;
+    };
     let path = wide(&dir.to_string_lossy());
     // SAFETY: `path` is NUL-terminated UTF-16 valid for the
     // call; the OS only reads it, and a bad path just fails
@@ -855,6 +911,7 @@ unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
     path.parent().map(|p| p.to_path_buf())
 }
 
+
 fn record_language_change(hwnd: HWND) {
     LANG_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
     // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
@@ -889,7 +946,9 @@ unsafe fn cancel_capture(hwnd: HWND) {
     // was captured from that same control.
     unsafe {
         let mine = hwnd.0 as isize;
-        let captured = CAPTURING.with(|c| c.get()).and_then(|(h, id)| (h == mine).then_some(id));
+        let captured = CAPTURING
+            .with(|c| c.get())
+            .and_then(|(h, id)| (h == mine).then_some(id));
         let Some(id) = captured else { return };
         CAPTURING.with(|c| c.set(None));
         let prev = CAPTURE_PREV
@@ -935,6 +994,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if id == ID_SENTENCE_MODE && notify == CBN_SELCHANGE as u16 {
                 unsafe { update_static_controls(hwnd) };
+                return LRESULT(0);
+            }
+            if id == ID_ANKI_MODEL && notify == CBN_SELCHANGE as u16 {
+                record_anki_model_change(hwnd);
                 return LRESULT(0);
             }
             if let Some(idx) = plugin_configure_idx(id) {
@@ -1045,9 +1108,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_MOUSEWHEEL => {
             // Signed high word; low is keys.
             let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32;
-            let step = delta / WHEEL_DELTA as i32
-                * WHEEL_LINES
-                * dpi_scale(hwnd, SCROLL_LINE);
+            let step = delta / WHEEL_DELTA as i32 * WHEEL_LINES * dpi_scale(hwnd, SCROLL_LINE);
             // Forward scrolls towards the top.
             scroll_to(hwnd, |si| si.nPos - step);
             LRESULT(0)
@@ -1203,7 +1264,10 @@ pub fn japanese_font_families() -> Vec<String> {
     // cannot dangle. The device context is released on every path.
     unsafe {
         let hdc = GetDC(None);
-        let lf = LOGFONTW { lfCharSet: SHIFTJIS_CHARSET, ..Default::default() };
+        let lf = LOGFONTW {
+            lfCharSet: SHIFTJIS_CHARSET,
+            ..Default::default()
+        };
         EnumFontFamiliesExW(
             hdc,
             &lf,
@@ -1230,8 +1294,12 @@ unsafe extern "system" fn enum_font_cb(
     unsafe {
         let elf = &*(lf as *const ENUMLOGFONTEXW);
         let name = String::from_utf16_lossy(
-            &elf.elfLogFont.lfFaceName
-                [..elf.elfLogFont.lfFaceName.iter().position(|&c| c == 0).unwrap_or(0)],
+            &elf.elfLogFont.lfFaceName[..elf
+                .elfLogFont
+                .lfFaceName
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(0)],
         );
         if !name.is_empty() && !name.starts_with('@') {
             (*(lparam.0 as *mut Vec<String>)).push(name);
@@ -1243,13 +1311,13 @@ unsafe extern "system" fn enum_font_cb(
 /// Combo rows: name, tag.
 ///
 /// D4: absent tag kept, marked.
-fn language_choices(installed: Vec<(String, String)>, configured: &str)
-    -> Vec<(String, String)> {
+fn language_choices(installed: Vec<(String, String)>, configured: &str) -> Vec<(String, String)> {
     let mut out = installed;
-    if !configured.is_empty()
-        && !out.iter().any(|(_, tag)| tag_matches(tag, configured))
-    {
-        out.push((format!("{configured} (not installed)"), configured.to_string()));
+    if !configured.is_empty() && !out.iter().any(|(_, tag)| tag_matches(tag, configured)) {
+        out.push((
+            format!("{configured} (not installed)"),
+            configured.to_string(),
+        ));
     }
     out
 }
@@ -1259,7 +1327,8 @@ fn language_index(rows: &[(String, String)], configured: &str) -> Option<usize> 
     if configured.is_empty() {
         return None;
     }
-    rows.iter().position(|(_, tag)| tag_matches(tag, configured))
+    rows.iter()
+        .position(|(_, tag)| tag_matches(tag, configured))
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -1303,7 +1372,12 @@ unsafe fn child(
         // SAFETY: `hwnd` was just created; `WM_SETFONT` copies nothing and
         // the font outlives the window (it is destroyed in `Drop`).
         unsafe {
-            SendMessageW(hwnd, WM_SETFONT, Some(WPARAM(f.0 as usize)), Some(LPARAM(1)));
+            SendMessageW(
+                hwnd,
+                WM_SETFONT,
+                Some(WPARAM(f.0 as usize)),
+                Some(LPARAM(1)),
+            );
         }
     }
     Ok(hwnd)
@@ -2006,7 +2080,9 @@ unsafe fn update_engine_controls(hwnd: HWND) {
     // SAFETY: each id is a live descendant of `hwnd`, created in
     // `build`; a missing one is skipped via `dlg_item`'s `Err`.
     unsafe {
-        let Ok(engine) = dlg_item(hwnd, ID_ENGINE) else { return };
+        let Ok(engine) = dlg_item(hwnd, ID_ENGINE) else {
+            return;
+        };
         let idx = SendMessageW(engine, CB_GETCURSEL, None, None).0;
         if let Ok(lang) = dlg_item(hwnd, ID_OCR_LANG) {
             let _ = EnableWindow(lang, idx <= 0);
@@ -2050,6 +2126,7 @@ unsafe fn update_static_controls(hwnd: HWND) {
     }
 }
 
+
 /// An edit or combo's own text.
 unsafe fn window_text(ctrl: HWND) -> String {
     // SAFETY: `ctrl` is a live control the caller
@@ -2068,13 +2145,75 @@ unsafe fn window_text(ctrl: HWND) -> String {
     }
 }
 
+unsafe fn combo_row(combo: HWND, index: usize) -> Option<String> {
+    // SAFETY: `combo` is a live combo box owned by the caller.
+    unsafe {
+        let len = SendMessageW(combo, CB_GETLBTEXTLEN, Some(WPARAM(index)), None).0;
+        if len < 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let copied = SendMessageW(
+            combo,
+            CB_GETLBTEXT,
+            Some(WPARAM(index)),
+            Some(LPARAM(buf.as_mut_ptr() as isize)),
+        )
+        .0;
+        if copied < 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..copied as usize]))
+    }
+}
+
+unsafe fn combo_rows_match(combo: HWND, rows: &[String]) -> bool {
+    // SAFETY: `combo` is a live combo box owned by the caller.
+    unsafe {
+        let count = SendMessageW(combo, CB_GETCOUNT, None, None).0;
+        if count < 0 || count as usize != rows.len() {
+            return false;
+        }
+        rows.iter()
+            .enumerate()
+            .all(|(idx, want)| combo_row(combo, idx).as_ref() == Some(want))
+    }
+}
+
+unsafe fn fill_combo_if_changed(combo: HWND, rows: &[String]) {
+    // SAFETY: `combo` is a live combo box owned by the caller.
+    unsafe {
+        if combo_rows_match(combo, rows) {
+            return;
+        }
+        let cur = window_text(combo);
+        SendMessageW(combo, CB_RESETCONTENT, None, None);
+        for name in rows {
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(wide(name).as_ptr() as isize)),
+            );
+        }
+        SendMessageW(
+            combo,
+            WM_SETTEXT,
+            None,
+            Some(LPARAM(wide(&cur).as_ptr() as isize)),
+        );
+    }
+}
+
 /// Pick .zip archives.
 ///
 /// Empty when cancelled.
 unsafe fn pick_archives(owner: HWND) -> Vec<PathBuf> {
     let mut buf = vec![0u16; 32 * 1024];
     // Win32 wants a NUL-run.
-    let filter: Vec<u16> = "Yomitan archives (*.zip)\0*.zip\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = "Yomitan archives (*.zip)\0*.zip\0\0"
+        .encode_utf16()
+        .collect();
     let title = wide("Add a dictionary archive");
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
@@ -2150,6 +2289,19 @@ fn default_source<'a>(existing: &'a [crate::config::FieldMapping], field: &str) 
         .unwrap_or("(none)")
 }
 
+fn field_map_chunk_end(next: usize, total: usize) -> usize {
+    next.saturating_add(FIELD_MAP_ROWS_PER_PUMP).min(total)
+}
+
+fn begin_field_map_result(
+    fields: &[String],
+    rows: &[(String, HWND)],
+    pending: &mut Option<PendingFieldMap>,
+) -> bool {
+    pending.take();
+    !fields.is_empty() && !field_names_match(rows, fields)
+}
+
 /// True if rows match fields.
 fn field_names_match(rows: &[(String, HWND)], fields: &[String]) -> bool {
     rows.len() == fields.len() && rows.iter().zip(fields).all(|((n, _), f)| n == f)
@@ -2191,8 +2343,10 @@ fn merged_field_map(
     saved: &[crate::config::FieldMapping],
     readings: &[(&str, &str)],
 ) -> Vec<crate::config::FieldMapping> {
-    let mut out: Vec<crate::config::FieldMapping> =
-        readings.iter().filter_map(|(field, source)| row_mapping(field, source)).collect();
+    let mut out: Vec<crate::config::FieldMapping> = readings
+        .iter()
+        .filter_map(|(field, source)| row_mapping(field, source))
+        .collect();
     out.extend(
         saved
             .iter()
@@ -2209,7 +2363,9 @@ fn field_map_rows_needed(n: usize) -> i32 {
 
 /// Truncated for a column.
 fn column_label(name: &str) -> &str {
-    name.char_indices().nth(COL_LABEL_MAX_CHARS).map_or(name, |(i, _)| &name[..i])
+    name.char_indices()
+        .nth(COL_LABEL_MAX_CHARS)
+        .map_or(name, |(i, _)| &name[..i])
 }
 
 /// One discovered plugin's row.
@@ -2231,7 +2387,8 @@ fn discovered_text_providers(
         let Ok(m) = parsed else {
             continue;
         };
-        if m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+        if m.roles
+            .contains(&crate::plugin::manifest::Role::TextProvider)
             && !names.contains(&m.name)
         {
             names.push(m.name.clone());
@@ -2269,7 +2426,9 @@ fn plugin_row(
 
 /// A refused plugin's folder.
 fn dir_label(dir: &Path) -> String {
-    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// This row's plugin name.
@@ -2308,7 +2467,11 @@ fn plugins_group_h(n: usize) -> i32 {
 
 /// Toggle glyph for fold state.
 fn field_map_toggle_label(collapsed: bool) -> &'static str {
-    if collapsed { "Field mapping \u{25B6}" } else { "Field mapping \u{25BC}" }
+    if collapsed {
+        "Field mapping \u{25B6}"
+    } else {
+        "Field mapping \u{25BC}"
+    }
 }
 
 /// `&&` renders one `&`.
@@ -2340,7 +2503,9 @@ fn parse_px(text: &str, fallback: i32) -> i32 {
 /// `None` unless capturing.
 fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
-    let id = CAPTURING.with(|c| c.get()).and_then(|(h, id)| (h == mine).then_some(id))?;
+    let id = CAPTURING
+        .with(|c| c.get())
+        .and_then(|(h, id)| (h == mine).then_some(id))?;
     CAPTURING.with(|c| c.set(None));
     let cell = match id {
         ID_TRIGGER_KEY => &CAPTURED_VK,
@@ -2436,6 +2601,7 @@ pub struct SettingsWindow {
     field_map_rows: RefCell<Vec<(String, HWND)>>,
     /// Field-map labels + group box.
     field_map_extra: RefCell<Vec<HWND>>,
+    pending_field_map: RefCell<Option<PendingFieldMap>>,
     /// True while collapsed.
     field_map_collapsed: Cell<bool>,
     /// Anki static rows end, page y.
@@ -2459,17 +2625,14 @@ impl SettingsWindow {
     /// like from in here.
     ///
     /// `mode` words the Apply button.
-    pub fn open(
-        form: &SettingsForm,
-        stale: &[String],
-        mode: ApplyMode,
-    ) -> Result<SettingsWindow> {
+    pub fn open(form: &SettingsForm, stale: &[String], mode: ApplyMode) -> Result<SettingsWindow> {
         // SAFETY: every call below is an ordinary window-creation FFI call
         // with handles this function owns; each `?` leaves nothing to leak
         // because the window is the only resource and it is not yet created.
         unsafe {
-            let hinstance: HINSTANCE =
-                GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
+            let hinstance: HINSTANCE = GetModuleHandleW(None)
+                .context("GetModuleHandleW(None)")?
+                .into();
             register_class(hinstance)?;
             register_pane_class(hinstance)?;
 
@@ -2514,6 +2677,7 @@ impl SettingsWindow {
                 plugin_names: Vec::new(),
                 field_map_rows: RefCell::new(Vec::new()),
                 field_map_extra: RefCell::new(Vec::new()),
+                pending_field_map: RefCell::new(None),
                 field_map_collapsed: Cell::new(true),
                 anki_static_bottom: 0,
                 tab_heights: [0; 5],
@@ -2613,7 +2777,11 @@ impl SettingsWindow {
             let idx = dlg_item(self.hwnd, ID_THEME)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
                 .unwrap_or(0);
-            if idx == 1 { "light".into() } else { "dark".into() }
+            if idx == 1 {
+                "light".into()
+            } else {
+                "dark".into()
+            }
         }
     }
 
@@ -2635,6 +2803,7 @@ impl SettingsWindow {
     ///
     /// Callback precedes a picker.
     pub fn pump(&self, before_blocking: impl FnOnce()) {
+        self.pump_field_map();
         if self.take_language_change() {
             self.rescope_dicts();
         }
@@ -2696,8 +2865,10 @@ impl SettingsWindow {
         // checked, and `SetWindowTextW` copies the string during the call,
         // so each temporary outlives its only use.
         unsafe {
-            for (id, px) in [(ID_CAPTURE_W, ocr.capture_width), (ID_CAPTURE_H, ocr.capture_height)]
-            {
+            for (id, px) in [
+                (ID_CAPTURE_W, ocr.capture_width),
+                (ID_CAPTURE_H, ocr.capture_height),
+            ] {
                 if let Ok(c) = dlg_item(self.hwnd, id) {
                     let _ = SetWindowTextW(c, PCWSTR(wide(&px.to_string()).as_ptr()));
                 }
@@ -2788,7 +2959,9 @@ impl SettingsWindow {
         // SAFETY: `ID_ENGINE` is a live descendant of
         // `self.hwnd`, created in `build`.
         let idx = unsafe {
-            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else { return None };
+            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else {
+                return None;
+            };
             SendMessageW(e, CB_GETCURSEL, None, None).0 as usize
         };
         let name = self.engine_names.get(idx)?;
@@ -2800,7 +2973,9 @@ impl SettingsWindow {
         // SAFETY: `ID_ENGINE` is a live descendant of
         // `self.hwnd`, created in `build`.
         let idx = unsafe {
-            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else { return None };
+            let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else {
+                return None;
+            };
             SendMessageW(e, CB_GETCURSEL, None, None).0 as usize
         };
         self.engine_names.get(idx).map(|s| s.as_str())
@@ -2810,7 +2985,9 @@ impl SettingsWindow {
     ///
     /// Snapshots the old one first.
     fn rescope_dicts(&self) {
-        let Some(next) = self.selected_language() else { return };
+        let Some(next) = self.selected_language() else {
+            return;
+        };
         let mut staged = self.staged.borrow_mut();
         let prev = staged.dict_list_language.clone();
         if prev == next {
@@ -2845,6 +3022,17 @@ impl SettingsWindow {
     /// Pending fold toggle, if any.
     pub fn take_field_map_toggle(&self) -> bool {
         FIELD_MAP_TOGGLE.with(|c| match c.get() {
+            Some(h) if h == self.hwnd.0 as isize => {
+                c.set(None);
+                true
+            }
+            _ => false,
+        })
+    }
+
+    /// Pending model switch, if any.
+    pub fn take_anki_model_change(&self) -> bool {
+        ANKI_MODEL_CHANGED.with(|c| match c.get() {
             Some(h) if h == self.hwnd.0 as isize => {
                 c.set(None);
                 true
@@ -2938,32 +3126,23 @@ impl SettingsWindow {
     }
 
     /// Fills deck/model + map rows.
-    pub fn populate_combos(&self, decks: &[String], models: &[String], fields: &[String]) {
+    pub fn populate_combos(&self, decks: &[String], models: &[String], fields: Vec<String>) {
         // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live descendants of
         // `self.hwnd`, created in `build`; each `SendMessageW` copies the
         // string during the call.
         unsafe {
             if let Ok(deck) = dlg_item(self.hwnd, ID_ANKI_DECK) {
-                let cur = window_text(deck);
-                SendMessageW(deck, CB_RESETCONTENT, None, None);
-                for name in decks {
-                    SendMessageW(deck, CB_ADDSTRING, None,
-                        Some(LPARAM(wide(name).as_ptr() as isize)));
-                }
-                SendMessageW(deck, WM_SETTEXT, None,
-                    Some(LPARAM(wide(&cur).as_ptr() as isize)));
+                fill_combo_if_changed(deck, decks);
             }
             if let Ok(model) = dlg_item(self.hwnd, ID_ANKI_MODEL) {
-                let cur = window_text(model);
-                SendMessageW(model, CB_RESETCONTENT, None, None);
-                for name in models {
-                    SendMessageW(model, CB_ADDSTRING, None,
-                        Some(LPARAM(wide(name).as_ptr() as isize)));
-                }
-                SendMessageW(model, WM_SETTEXT, None,
-                    Some(LPARAM(wide(&cur).as_ptr() as isize)));
+                fill_combo_if_changed(model, models);
             }
         }
+        self.populate_field_map(fields);
+    }
+
+    /// Fills map rows only.
+    pub fn populate_fields(&self, fields: Vec<String>) {
         self.populate_field_map(fields);
     }
 
@@ -2980,8 +3159,13 @@ impl SettingsWindow {
     /// what makes it safe - the save preserves what it never rendered
     /// (ticket 21). Nothing here deletes a mapping the user did not ask to
     /// delete: unmapping is setting a rendered row to `"(none)"`.
-    fn populate_field_map(&self, fields: &[String]) {
-        if fields.is_empty() || self.field_map_unchanged(fields) {
+    fn populate_field_map(&self, fields: Vec<String>) {
+        let needs_rebuild = {
+            let rows = self.field_map_rows.borrow();
+            let mut pending = self.pending_field_map.borrow_mut();
+            begin_field_map_result(&fields, &rows, &mut pending)
+        };
+        if !needs_rebuild {
             return;
         }
         // SAFETY: every hwnd in `field_map_extra`/`field_map_rows` was
@@ -2998,12 +3182,50 @@ impl SettingsWindow {
         // Nothing said about the map seeds nothing: `default_source` already
         // renders an unmapped field as `"(none)"`.
         let existing = self.staged.borrow().field_map.clone().unwrap_or_default();
-        let (extra, rows) = self.build_field_map_rows(fields, &existing);
-        *self.field_map_extra.borrow_mut() = extra;
-        *self.field_map_rows.borrow_mut() = rows;
+        if let Some(group) = self.build_field_map_box(fields.len()) {
+            self.field_map_extra.borrow_mut().push(group);
+        }
+        *self.pending_field_map.borrow_mut() = Some(PendingFieldMap::new(fields, existing));
+        self.pump_field_map();
+    }
+
+    fn pump_field_map(&self) {
+        let has_more = {
+            let mut pending = self.pending_field_map.borrow_mut();
+            let Some(build) = pending.as_mut() else {
+                return;
+            };
+            let total = build.fields.len();
+            let end = field_map_chunk_end(build.next, build.fields.len());
+            for idx in build.next..end {
+                let name = &build.fields[idx];
+                if let Some((label, row)) =
+                    self.build_field_map_row(total, idx, name, &build.existing)
+                {
+                    self.field_map_extra.borrow_mut().push(label);
+                    self.field_map_rows.borrow_mut().push(row);
+                }
+            }
+            build.next = end;
+            let has_more = build.next < build.fields.len();
+            if !has_more {
+                pending.take();
+            }
+            has_more
+        };
         // SAFETY: every hwnd was just created as a descendant of `self.hwnd`.
         unsafe { self.apply_field_map_visibility() };
         self.ensure_room_for(self.field_map_bottom());
+        if has_more {
+            self.wake();
+        }
+    }
+
+    fn wake(&self) {
+        // SAFETY: `self.hwnd` is live until `Drop`; WM_NULL only wakes pump.
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        }
     }
 
     /// Shows/hides field-map rows.
@@ -3026,7 +3248,10 @@ impl SettingsWindow {
     ///
     /// Window y, like `bottom_y0`.
     fn field_map_bottom(&self) -> i32 {
-        let n = self.field_map_rows.borrow().len();
+        let n = self.pending_field_map.borrow().as_ref().map_or_else(
+            || self.field_map_rows.borrow().len(),
+            |pending| pending.fields.len(),
+        );
         let page = if n == 0 || self.field_map_collapsed.get() {
             self.anki_static_bottom
         } else {
@@ -3056,77 +3281,113 @@ impl SettingsWindow {
             let Ok(after) = GetDlgItem(Some(self.hwnd), ID_TAB) else {
                 return;
             };
-            let _ = SetWindowPos(self.viewport, Some(after), 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                self.viewport,
+                Some(after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
         }
     }
 
-    /// Builds the box + field rows.
-    fn build_field_map_rows(
-        &self,
-        fields: &[String],
-        existing: &[crate::config::FieldMapping],
-    ) -> (Vec<HWND>, Vec<(String, HWND)>) {
+    fn build_field_map_box(&self, field_count: usize) -> Option<HWND> {
         let f = self.font;
-        let h = self.hwnd;
-        // Page y, like `build`.
         let page = self.content;
         let y0 = self.anki_static_bottom;
-        let rows_n = field_map_rows_needed(fields.len());
+        let rows_n = field_map_rows_needed(field_count);
         let map_h = 20 + rows_n * ROW_H + 8;
-        let mut extra = Vec::new();
-        let mut rows = Vec::new();
         // SAFETY: `h` is `self.hwnd` and `page` its content pane, both live
         // for the caller's duration; every control created is a child of
         // `page` and outlives this call.
         unsafe {
-            if let Ok(g) = child(page, w!("BUTTON"), "",
+            child(
+                page,
+                w!("BUTTON"),
+                "",
                 WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
-                PAD - 6, y0, WIN_W - 2 * PAD, map_h, 0, f)
-            {
-                extra.push(g);
-            }
-            for (idx, name) in fields.iter().enumerate() {
-                let idx = idx as i32;
-                let col = idx / rows_n;
-                let row = idx % rows_n;
-                let x = PAD + col * (COL_W + COL_GAP);
-                let y = y0 + 20 + row * ROW_H;
-                if let Ok(l) = child(page, w!("STATIC"), column_label(name),
-                    WINDOW_STYLE(0), x, y + 4, COL_LABEL_W, ROW_H, 0, f)
-                {
-                    extra.push(l);
-                }
-                let id = ID_FIELD_MAP_BASE + idx;
-                let combo_x = x + COL_LABEL_W + COL_LABEL_GAP;
-                if let Ok(combo) = child(page, w!("COMBOBOX"), "",
-                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                    combo_x, y, COL_COMBO_W, 140, id, f)
-                {
-                    let want = default_source(existing, name);
-                    for (j, src) in FIELD_MAP_SOURCES.iter().enumerate() {
-                        SendMessageW(combo, CB_ADDSTRING, None,
-                            Some(LPARAM(wide(src).as_ptr() as isize)));
-                        if *src == want {
-                            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(j)), None);
-                        }
-                    }
-                    if SendMessageW(combo, CB_GETCURSEL, None, None).0 < 0 {
-                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
-                    }
-                    SendMessageW(combo, CB_SETDROPPEDWIDTH,
-                        Some(WPARAM(dpi_scale(h, COL_DROPPED_W) as usize)), None);
-                    rows.push((name.clone(), combo));
-                }
-            }
+                PAD - 6,
+                y0,
+                WIN_W - 2 * PAD,
+                map_h,
+                0,
+                f,
+            )
+            .ok()
         }
-        (extra, rows)
     }
 
-    /// True if rows match fields.
-    fn field_map_unchanged(&self, fields: &[String]) -> bool {
-        let rows = self.field_map_rows.borrow();
-        field_names_match(&rows, fields)
+    fn build_field_map_row(
+        &self,
+        total: usize,
+        idx: usize,
+        name: &str,
+        existing: &[crate::config::FieldMapping],
+    ) -> Option<(HWND, (String, HWND))> {
+        let f = self.font;
+        let h = self.hwnd;
+        let page = self.content;
+        let y0 = self.anki_static_bottom;
+        let rows_n = field_map_rows_needed(total);
+        let idx_i32 = i32::try_from(idx).ok()?;
+        let col = idx_i32 / rows_n;
+        let row = idx_i32 % rows_n;
+        let x = PAD + col * (COL_W + COL_GAP);
+        let y = y0 + 20 + row * ROW_H;
+        // SAFETY: `h` and `page` are live descendants owned by this window.
+        unsafe {
+            let label = child(
+                page,
+                w!("STATIC"),
+                column_label(name),
+                WINDOW_STYLE(0),
+                x,
+                y + 4,
+                COL_LABEL_W,
+                ROW_H,
+                0,
+                f,
+            )
+            .ok()?;
+            let combo_x = x + COL_LABEL_W + COL_LABEL_GAP;
+            let combo = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                combo_x,
+                y,
+                COL_COMBO_W,
+                140,
+                ID_FIELD_MAP_BASE + idx_i32,
+                f,
+            )
+            .ok()?;
+            let want = default_source(existing, name);
+            for (j, src) in FIELD_MAP_SOURCES.iter().enumerate() {
+                SendMessageW(
+                    combo,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(src).as_ptr() as isize)),
+                );
+                if *src == want {
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(j)), None);
+                }
+            }
+            if SendMessageW(combo, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            SendMessageW(
+                combo,
+                CB_SETDROPPEDWIDTH,
+                Some(WPARAM(dpi_scale(h, COL_DROPPED_W) as usize)),
+                None,
+            );
+            Some((label, (name.to_string(), combo)))
+        }
     }
 
     /// Fits the window to content.
@@ -3142,8 +3403,10 @@ impl SettingsWindow {
         unsafe {
             // Or the pages clip.
             let _ = SetWindowPos(
-                self.content, None,
-                0, 0,
+                self.content,
+                None,
+                0,
+                0,
                 dpi_scale(self.hwnd, WIN_W),
                 dpi_scale(self.hwnd, new_y0 - CONTENT_Y),
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
@@ -3204,8 +3467,12 @@ impl SettingsWindow {
                     );
                     continue;
                 };
-                let Some(name) =
-                    self.staged.borrow().staged_adds.last().map(|a| a.name.clone())
+                let Some(name) = self
+                    .staged
+                    .borrow()
+                    .staged_adds
+                    .last()
+                    .map(|a| a.name.clone())
                 else {
                     continue;
                 };
@@ -3227,8 +3494,12 @@ impl SettingsWindow {
 
     /// Picks a folder, saves it.
     unsafe fn configure_engine(&self) {
-        let Some(name) = self.selected_engine_name() else { return };
-        let Some(dir) = self.selected_engine_dir() else { return };
+        let Some(name) = self.selected_engine_name() else {
+            return;
+        };
+        let Some(dir) = self.selected_engine_dir() else {
+            return;
+        };
         let title = format!("Select your {name} installation");
         // SAFETY: `self.hwnd` is live; the picker frees its
         // own PIDL before returning.
@@ -3290,8 +3561,7 @@ impl SettingsWindow {
     }
 
     /// Create every control, returning the 96-DPI `y` its layout reached.
-    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String])
-        -> Result<i32> {
+    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String]) -> Result<i32> {
         let f = self.font;
         let h = self.hwnd;
         let mut y = PAD;
@@ -3317,10 +3587,18 @@ impl SettingsWindow {
             let _ = InitCommonControlsEx(&icex);
 
             // ---- Tab control ----
-            let tab = child(h, w!("SysTabControl32"), "",
+            let tab = child(
+                h,
+                w!("SysTabControl32"),
+                "",
                 WS_TABSTOP | WS_CLIPSIBLINGS,
-                PAD - 6, y, WIN_W - 2 * PAD, TAB_H,
-                ID_TAB, f)?;
+                PAD - 6,
+                y,
+                WIN_W - 2 * PAD,
+                TAB_H,
+                ID_TAB,
+                f,
+            )?;
             let mut t0 = wide("General");
             let mut item = TcItemW {
                 mask: TCIF_TEXT_VAL,
@@ -3331,30 +3609,69 @@ impl SettingsWindow {
                 i_image: -1,
                 l_param: 0,
             };
-            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(0)),
-                Some(LPARAM(&item as *const _ as isize)));
+            SendMessageW(
+                tab,
+                TCM_INSERTITEMW_MSG,
+                Some(WPARAM(0)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
             let mut t1 = wide("Dictionaries");
             item.psz_text = t1.as_mut_ptr();
-            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(1)),
-                Some(LPARAM(&item as *const _ as isize)));
+            SendMessageW(
+                tab,
+                TCM_INSERTITEMW_MSG,
+                Some(WPARAM(1)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
             let mut t2 = wide("OCR / Debug");
             item.psz_text = t2.as_mut_ptr();
-            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(2)),
-                Some(LPARAM(&item as *const _ as isize)));
+            SendMessageW(
+                tab,
+                TCM_INSERTITEMW_MSG,
+                Some(WPARAM(2)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
             let mut t3 = wide("Anki");
             item.psz_text = t3.as_mut_ptr();
-            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(3)),
-                Some(LPARAM(&item as *const _ as isize)));
+            SendMessageW(
+                tab,
+                TCM_INSERTITEMW_MSG,
+                Some(WPARAM(3)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
             let mut t4 = wide("Plugins");
             item.psz_text = t4.as_mut_ptr();
-            SendMessageW(tab, TCM_INSERTITEMW_MSG, Some(WPARAM(4)),
-                Some(LPARAM(&item as *const _ as isize)));
+            SendMessageW(
+                tab,
+                TCM_INSERTITEMW_MSG,
+                Some(WPARAM(4)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
             // Sized when the band is known.
-            self.viewport = child(h, pane_class_name(), "",
+            self.viewport = child(
+                h,
+                pane_class_name(),
+                "",
                 WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-                0, CONTENT_Y, WIN_W, 0, ID_VIEWPORT, None)?;
-            self.content = child(self.viewport, pane_class_name(), "", WS_CLIPSIBLINGS,
-                0, 0, WIN_W, 0, ID_CONTENT, None)?;
+                0,
+                CONTENT_Y,
+                WIN_W,
+                0,
+                ID_VIEWPORT,
+                None,
+            )?;
+            self.content = child(
+                self.viewport,
+                pane_class_name(),
+                "",
+                WS_CLIPSIBLINGS,
+                0,
+                0,
+                WIN_W,
+                0,
+                ID_CONTENT,
+                None,
+            )?;
             // Or Tab skips every page.
             for pane in [self.viewport, self.content] {
                 let ex = GetWindowLongW(pane, GWL_EXSTYLE) as u32 | WS_EX_CONTROLPARENT.0;
@@ -3365,42 +3682,108 @@ impl SettingsWindow {
             y = 0;
 
             let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(page, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX as u32),
-                      PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
+                child(
+                    page,
+                    w!("BUTTON"),
+                    text,
+                    WINDOW_STYLE(BS_GROUPBOX as u32),
+                    PAD - 6,
+                    y,
+                    WIN_W - 2 * PAD,
+                    height,
+                    0,
+                    f,
+                )
             };
             // Same, but carrying WS_GROUP so it ends the preceding group.
             let group_start = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(page, w!("BUTTON"), text,
-                      WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
-                      PAD - 6, y, WIN_W - 2 * PAD, height, 0, f)
+                child(
+                    page,
+                    w!("BUTTON"),
+                    text,
+                    WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
+                    PAD - 6,
+                    y,
+                    WIN_W - 2 * PAD,
+                    height,
+                    0,
+                    f,
+                )
             };
             let label = |text: &str, y: i32| -> WinResult<HWND> {
-                child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H, 0, f)
+                child(
+                    page,
+                    w!("STATIC"),
+                    text,
+                    WINDOW_STYLE(0),
+                    PAD,
+                    y + 4,
+                    LABEL_W,
+                    ROW_H,
+                    0,
+                    f,
+                )
             };
 
             // ---- Trigger ----
             gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
             y += 20;
-            let live = child(page, w!("BUTTON"), "Live",
+            let live = child(
+                page,
+                w!("BUTTON"),
+                "Live",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
-                PAD, y, 120, ROW_H, ID_MODE_LIVE, f)?;
+                PAD,
+                y,
+                120,
+                ROW_H,
+                ID_MODE_LIVE,
+                f,
+            )?;
             gen.push(live);
-            let hold = child(page, w!("BUTTON"), "Hold key",
+            let hold = child(
+                page,
+                w!("BUTTON"),
+                "Hold key",
                 WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
-                PAD + 130, y, 120, ROW_H, ID_MODE_HOLD, f)?;
+                PAD + 130,
+                y,
+                120,
+                ROW_H,
+                ID_MODE_HOLD,
+                f,
+            )?;
             gen.push(hold);
             let is_live = matches!(form.mode, crate::config::TriggerMode::Live);
-            SendMessageW(live, BM_SETCHECK,
-                Some(WPARAM(if is_live { 1 } else { 0 })), None);
-            SendMessageW(hold, BM_SETCHECK,
-                Some(WPARAM(if is_live { 0 } else { 1 })), None);
+            SendMessageW(
+                live,
+                BM_SETCHECK,
+                Some(WPARAM(if is_live { 1 } else { 0 })),
+                None,
+            );
+            SendMessageW(
+                hold,
+                BM_SETCHECK,
+                Some(WPARAM(if is_live { 0 } else { 1 })),
+                None,
+            );
             y += ROW_H + ROW_GAP;
             gen.push(label("Trigger key", y)?);
             let key_vk = crate::config::parse_trigger_key(&form.trigger_key).unwrap_or(0x10);
             CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, key_vk))));
             let key_name = crate::config::trigger_key_name(key_vk);
-            let key_btn = child(page, w!("BUTTON"), &key_name, WS_TABSTOP,
-                FIELD_X, y, FIELD_W, ROW_H, ID_TRIGGER_KEY, f)?;
+            let key_btn = child(
+                page,
+                w!("BUTTON"),
+                &key_name,
+                WS_TABSTOP,
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_TRIGGER_KEY,
+                f,
+            )?;
             gen.push(key_btn);
             let _ = EnableWindow(key_btn, !is_live);
             y += ROW_H + 18;
@@ -3409,17 +3792,34 @@ impl SettingsWindow {
             // WS_GROUP terminates the radio group above. Without it the group
             // runs to the end of the window and arrow keys walk straight out
             // of Live/Hold Shift into the combos.
-            gen.push(group_start("Popup", y, 6 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30)?);
+            gen.push(group_start(
+                "Popup",
+                y,
+                6 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30,
+            )?);
             y += 20;
 
             gen.push(label("Theme", y)?);
-            let theme = child(page, w!("COMBOBOX"), "",
+            let theme = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_THEME, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                220,
+                ID_THEME,
+                f,
+            )?;
             gen.push(theme);
             for (i, name) in ["dark", "light"].iter().enumerate() {
-                SendMessageW(theme, CB_ADDSTRING, None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)));
+                SendMessageW(
+                    theme,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(name).as_ptr() as isize)),
+                );
                 if form.theme == *name {
                     SendMessageW(theme, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
@@ -3430,9 +3830,18 @@ impl SettingsWindow {
             y += ROW_H + ROW_GAP;
 
             gen.push(label("Font", y)?);
-            let fonts_hwnd = child(page, w!("COMBOBOX"), "",
+            let fonts_hwnd = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 260, ID_FONT, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                260,
+                ID_FONT,
+                f,
+            )?;
             gen.push(fonts_hwnd);
             let mut families = japanese_font_families();
             // Spec D4: an absent configured font is still offered and
@@ -3443,8 +3852,12 @@ impl SettingsWindow {
                 families.sort();
             }
             for (i, name) in families.iter().enumerate() {
-                SendMessageW(fonts_hwnd, CB_ADDSTRING, None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)));
+                SendMessageW(
+                    fonts_hwnd,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(name).as_ptr() as isize)),
+                );
                 if name == &form.font {
                     SendMessageW(fonts_hwnd, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
@@ -3452,59 +3865,132 @@ impl SettingsWindow {
             self.fonts = families;
             y += ROW_H + ROW_GAP;
 
-            gen.push(child(page, w!("BUTTON"), "Customize CSS\u{2026}",
+            gen.push(child(
+                page,
+                w!("BUTTON"),
+                "Customize CSS\u{2026}",
                 WS_TABSTOP,
-                FIELD_X, y, FIELD_W, ROW_H, ID_CSS_EDITOR, f)?);
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_CSS_EDITOR,
+                f,
+            )?);
             y += ROW_H + ROW_GAP;
 
             self.widths = numeric_choices(
-                MAX_WIDTH_RANGE.0 as i64, MAX_WIDTH_RANGE.1 as i64, 5,
-                form.max_width_percent as i64);
+                MAX_WIDTH_RANGE.0 as i64,
+                MAX_WIDTH_RANGE.1 as i64,
+                5,
+                form.max_width_percent as i64,
+            );
             gen.push(label("Max width (% of screen)", y)?);
-            let mw = child(page, w!("COMBOBOX"), "",
+            let mw = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_MAX_WIDTH, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                220,
+                ID_MAX_WIDTH,
+                f,
+            )?;
             gen.push(mw);
             fill_numeric(mw, &self.widths, form.max_width_percent as i64);
             y += ROW_H + ROW_GAP;
 
             self.heights = numeric_choices(
-                MAX_HEIGHT_RANGE.0 as i64, MAX_HEIGHT_RANGE.1 as i64, 5,
-                form.max_height_percent as i64);
+                MAX_HEIGHT_RANGE.0 as i64,
+                MAX_HEIGHT_RANGE.1 as i64,
+                5,
+                form.max_height_percent as i64,
+            );
             gen.push(label("Max height (% of screen)", y)?);
-            let mh = child(page, w!("COMBOBOX"), "",
+            let mh = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_MAX_HEIGHT, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                220,
+                ID_MAX_HEIGHT,
+                f,
+            )?;
             gen.push(mh);
             fill_numeric(mh, &self.heights, form.max_height_percent as i64);
             y += ROW_H + ROW_GAP;
 
             self.summaries = numeric_choices(
-                SUMMARY_RANGE.0 as i64, SUMMARY_RANGE.1 as i64, 10,
-                form.summary_chars as i64);
+                SUMMARY_RANGE.0 as i64,
+                SUMMARY_RANGE.1 as i64,
+                10,
+                form.summary_chars as i64,
+            );
             gen.push(label("Summary length (characters)", y)?);
-            let sm = child(page, w!("COMBOBOX"), "",
+            let sm = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_SUMMARY, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                220,
+                ID_SUMMARY,
+                f,
+            )?;
             gen.push(sm);
             fill_numeric(sm, &self.summaries, form.summary_chars as i64);
             y += ROW_H + ROW_GAP + 4;
 
             let check = |text: &str, id: i32, on: bool, y: i32| -> WinResult<HWND> {
-                let c = child(page, w!("BUTTON"), text,
+                let c = child(
+                    page,
+                    w!("BUTTON"),
+                    text,
                     WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                    PAD, y, WIN_W - 2 * PAD - 20, ROW_H, id, f)?;
+                    PAD,
+                    y,
+                    WIN_W - 2 * PAD - 20,
+                    ROW_H,
+                    id,
+                    f,
+                )?;
                 SendMessageW(c, BM_SETCHECK, Some(WPARAM(if on { 1 } else { 0 })), None);
                 Ok(c)
             };
-            gen.push(check("Box the word being defined", ID_HIGHLIGHT, form.highlight_match, y)?);
+            gen.push(check(
+                "Box the word being defined",
+                ID_HIGHLIGHT,
+                form.highlight_match,
+                y,
+            )?);
             y += ROW_H;
-            gen.push(check("Scroll long entries with the wheel", ID_SCROLL, form.scroll_popup, y)?);
+            gen.push(check(
+                "Scroll long entries with the wheel",
+                ID_SCROLL,
+                form.scroll_popup,
+                y,
+            )?);
             y += ROW_H;
-            gen.push(check("Show related words beside the popup", ID_SIDE_PANEL, form.side_panel, y)?);
+            gen.push(check(
+                "Show related words beside the popup",
+                ID_SIDE_PANEL,
+                form.side_panel,
+                y,
+            )?);
             y += ROW_H;
-            gen.push(check("Hide the popup from screen capture", ID_EXCLUDE,
-                  form.exclude_from_capture, y)?);
+            gen.push(check(
+                "Hide the popup from screen capture",
+                ID_EXCLUDE,
+                form.exclude_from_capture,
+                y,
+            )?);
             y += ROW_H + 18;
 
             // ---- Entry content ----
@@ -3683,22 +4169,43 @@ impl SettingsWindow {
                 engine_names.push(form.engine.clone());
             }
             ocr.push(label("OCR engine", y)?);
-            let engine = child(page, w!("COMBOBOX"), "",
+            let engine = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W - BTN_W - 8, 220, ID_ENGINE, f)?;
+                FIELD_X,
+                y,
+                FIELD_W - BTN_W - 8,
+                220,
+                ID_ENGINE,
+                f,
+            )?;
             ocr.push(engine);
             for name in &engine_names {
-                let shown = if name == "builtin" { "Built-in (Windows OCR)" } else { name };
-                SendMessageW(engine, CB_ADDSTRING, None,
-                    Some(LPARAM(wide(shown).as_ptr() as isize)));
+                let shown = if name == "builtin" {
+                    "Built-in (Windows OCR)"
+                } else {
+                    name
+                };
+                SendMessageW(
+                    engine,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(shown).as_ptr() as isize)),
+                );
             }
-            let engine_idx = engine_names.iter().position(|n| n == &form.engine).unwrap_or(0);
+            let engine_idx = engine_names
+                .iter()
+                .position(|n| n == &form.engine)
+                .unwrap_or(0);
             SendMessageW(engine, CB_SETCURSEL, Some(WPARAM(engine_idx)), None);
             self.engine_names = engine_names;
             let mut engine_dirs = HashMap::new();
             for (dir, parsed) in &found {
                 if let Ok(m) = parsed {
-                    if m.roles.contains(&crate::plugin::manifest::Role::TextProvider)
+                    if m.roles
+                        .contains(&crate::plugin::manifest::Role::TextProvider)
                         && !engine_dirs.contains_key(&m.name)
                     {
                         engine_dirs.insert(m.name.clone(), dir.clone());
@@ -3706,21 +4213,46 @@ impl SettingsWindow {
                 }
             }
             self.engine_dirs = engine_dirs;
-            let cfg_btn = child(page, w!("BUTTON"), "Configure…", WS_TABSTOP,
-                FIELD_X + FIELD_W - BTN_W, y, BTN_W, ROW_H, ID_ENGINE_CONFIGURE, f)?;
+            let cfg_btn = child(
+                page,
+                w!("BUTTON"),
+                "Configure…",
+                WS_TABSTOP,
+                FIELD_X + FIELD_W - BTN_W,
+                y,
+                BTN_W,
+                ROW_H,
+                ID_ENGINE_CONFIGURE,
+                f,
+            )?;
             ocr.push(cfg_btn);
             let _ = ShowWindow(cfg_btn, SW_HIDE);
             y += ROW_H;
             ocr.push(label("OCR language", y)?);
-            let lang = child(page, w!("COMBOBOX"), "",
+            let lang = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_OCR_LANG, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                220,
+                ID_OCR_LANG,
+                f,
+            )?;
             ocr.push(lang);
-            let langs =
-                language_choices(crate::text::ocr::installed_recognisers(), &form.ocr_language);
+            let langs = language_choices(
+                crate::text::ocr::installed_recognisers(),
+                &form.ocr_language,
+            );
             for (name, _) in &langs {
-                SendMessageW(lang, CB_ADDSTRING, None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)));
+                SendMessageW(
+                    lang,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(name).as_ptr() as isize)),
+                );
             }
             if let Some(i) = language_index(&langs, &form.ocr_language) {
                 SendMessageW(lang, CB_SETCURSEL, Some(WPARAM(i)), None);
@@ -3728,65 +4260,165 @@ impl SettingsWindow {
             self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
             let _ = EnableWindow(lang, engine_idx == 0);
             y += ROW_H;
-            ocr.push(child(page, w!("STATIC"),
+            ocr.push(child(
+                page,
+                w!("STATIC"),
                 "Installed recognizers, plus any marked (not installed).",
-                WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
+                WINDOW_STYLE(0),
+                PAD,
+                y + 4,
+                WIN_W - 2 * PAD - 20,
+                ROW_H,
+                0,
+                f,
+            )?);
             y += ROW_H;
             self.passes = numeric_choices(
-                PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64, 1,
-                form.max_ocr_passes as i64);
+                PASSES_RANGE.0 as i64,
+                PASSES_RANGE.1 as i64,
+                1,
+                form.max_ocr_passes as i64,
+            );
             ocr.push(label("OCR passes per hover", y)?);
-            let ps = child(page, w!("COMBOBOX"), "",
+            let ps = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 160, ID_PASSES, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                160,
+                ID_PASSES,
+                f,
+            )?;
             ocr.push(ps);
             fill_numeric(ps, &self.passes, form.max_ocr_passes as i64);
             y += ROW_H;
-            ocr.push(child(page, w!("STATIC"),
+            ocr.push(child(
+                page,
+                w!("STATIC"),
                 "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
+                WINDOW_STYLE(0),
+                PAD,
+                y,
+                WIN_W - 2 * PAD - 20,
+                28,
+                0,
+                f,
+            )?);
             y += 28;
             ocr.push(label("Capture width (px)", y)?);
-            ocr.push(child(page, w!("EDIT"), &form.capture_width.to_string(),
+            ocr.push(child(
+                page,
+                w!("EDIT"),
+                &form.capture_width.to_string(),
                 WS_TABSTOP | WS_BORDER,
-                FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_W, f)?);
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_CAPTURE_W,
+                f,
+            )?);
             y += ROW_H;
             ocr.push(label("Capture height (px)", y)?);
-            ocr.push(child(page, w!("EDIT"), &form.capture_height.to_string(),
+            ocr.push(child(
+                page,
+                w!("EDIT"),
+                &form.capture_height.to_string(),
                 WS_TABSTOP | WS_BORDER,
-                FIELD_X, y, FIELD_W, ROW_H, ID_CAPTURE_H, f)?);
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_CAPTURE_H,
+                f,
+            )?);
             y += ROW_H;
-            ocr.push(child(page, w!("STATIC"), "Vertical mode swaps these two values.",
-                WINDOW_STYLE(0), PAD, y + 4, WIN_W - 2 * PAD - 20, ROW_H, 0, f)?);
+            ocr.push(child(
+                page,
+                w!("STATIC"),
+                "Vertical mode swaps these two values.",
+                WINDOW_STYLE(0),
+                PAD,
+                y + 4,
+                WIN_W - 2 * PAD - 20,
+                ROW_H,
+                0,
+                f,
+            )?);
             y += ROW_H;
-            ocr.push(check("Prefer vertical text (manga, VN)",
-                ID_PREFER_VERT, form.prefer_vertical, y)?);
+            ocr.push(check(
+                "Prefer vertical text (manga, VN)",
+                ID_PREFER_VERT,
+                form.prefer_vertical,
+                y,
+            )?);
             y += ROW_H;
-            ocr.push(check("Scan alphanumeric text",
-                ID_SCAN_ALNUM, form.scan_alphanumeric, y)?);
+            ocr.push(check(
+                "Scan alphanumeric text",
+                ID_SCAN_ALNUM,
+                form.scan_alphanumeric,
+                y,
+            )?);
             y += ROW_H;
-            let per_char = check("Look up each character as you hover",
-                ID_PER_CHAR, form.per_character_lookup, y)?;
+            let per_char = check(
+                "Look up each character as you hover",
+                ID_PER_CHAR,
+                form.per_character_lookup,
+                y,
+            )?;
             ocr.push(per_char);
             let _ = EnableWindow(per_char, is_live);
             y += ROW_H;
-            ocr.push(child(page, w!("STATIC"),
+            ocr.push(child(
+                page,
+                w!("STATIC"),
                 "Live mode only. Off: the popup holds while the cursor stays on \
                  the matched word.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 28, 0, f)?);
+                WINDOW_STYLE(0),
+                PAD,
+                y,
+                WIN_W - 2 * PAD - 20,
+                28,
+                0,
+                f,
+            )?);
             y += 28;
-            let scan = child(page, w!("BUTTON"), "Outline what each hover captured",
+            let scan = child(
+                page,
+                w!("BUTTON"),
+                "Outline what each hover captured",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_SHOW_SCAN, f)?;
+                PAD,
+                y,
+                WIN_W - 2 * PAD - 20,
+                ROW_H,
+                ID_SHOW_SCAN,
+                f,
+            )?;
             ocr.push(scan);
-            SendMessageW(scan, BM_SETCHECK,
-                Some(WPARAM(if form.show_scan_region { 1 } else { 0 })), None);
+            SendMessageW(
+                scan,
+                BM_SETCHECK,
+                Some(WPARAM(if form.show_scan_region { 1 } else { 0 })),
+                None,
+            );
             y += ROW_H;
-            ocr.push(check("Show which OCR engine is active",
-                ID_ENGINE_LOG, form.show_engine_log, y)?);
+            ocr.push(check(
+                "Show which OCR engine is active",
+                ID_ENGINE_LOG,
+                form.show_engine_log,
+                y,
+            )?);
             y += ROW_H;
-            ocr.push(check("Show adapter log in status bar",
-                ID_ADAPTER_LOG, form.show_adapter_log, y)?);
+            ocr.push(check(
+                "Show adapter log in status bar",
+                ID_ADAPTER_LOG,
+                form.show_adapter_log,
+                y,
+            )?);
             y += ROW_H + 18;
             let y_ocr = y;
 
@@ -3794,58 +4426,141 @@ impl SettingsWindow {
             y = 0;
             ank.push(group("Anki", y, 9 * ROW_H + 34)?);
             y += 20;
-            let anki_chk = child(page, w!("BUTTON"), "Enable Anki integration",
+            let anki_chk = child(
+                page,
+                w!("BUTTON"),
+                "Enable Anki integration",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                PAD, y, WIN_W - 2 * PAD - 20, ROW_H, ID_ANKI_ENABLED, f)?;
+                PAD,
+                y,
+                WIN_W - 2 * PAD - 20,
+                ROW_H,
+                ID_ANKI_ENABLED,
+                f,
+            )?;
             ank.push(anki_chk);
-            SendMessageW(anki_chk, BM_SETCHECK,
-                Some(WPARAM(if form.anki_enabled { 1 } else { 0 })), None);
+            SendMessageW(
+                anki_chk,
+                BM_SETCHECK,
+                Some(WPARAM(if form.anki_enabled { 1 } else { 0 })),
+                None,
+            );
             y += ROW_H;
-            ank.push(check("Show notification when a card is added",
-                ID_NOTIFY_ON_ADD, form.notify_on_add, y)?);
+            ank.push(check(
+                "Show notification when a card is added",
+                ID_NOTIFY_ON_ADD,
+                form.notify_on_add,
+                y,
+            )?);
             y += ROW_H;
             ank.push(label("AnkiConnect URL", y)?);
-            ank.push(child(page, w!("EDIT"), &form.anki_url,
+            ank.push(child(
+                page,
+                w!("EDIT"),
+                &form.anki_url,
                 WS_TABSTOP | WS_BORDER,
-                FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_URL, f)?);
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_ANKI_URL,
+                f,
+            )?);
             y += ROW_H;
             ank.push(label("Deck", y)?);
-            let deck = child(page, w!("COMBOBOX"), &form.anki_deck,
+            let deck = child(
+                page,
+                w!("COMBOBOX"),
+                &form.anki_deck,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 160, ID_ANKI_DECK, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                160,
+                ID_ANKI_DECK,
+                f,
+            )?;
             ank.push(deck);
-            SendMessageW(deck, WM_SETTEXT, None,
-                Some(LPARAM(wide(&form.anki_deck).as_ptr() as isize)));
+            SendMessageW(
+                deck,
+                WM_SETTEXT,
+                None,
+                Some(LPARAM(wide(&form.anki_deck).as_ptr() as isize)),
+            );
             y += ROW_H;
             ank.push(label("Note type", y)?);
-            let model = child(page, w!("COMBOBOX"), &form.anki_model,
+            let model = child(
+                page,
+                w!("COMBOBOX"),
+                &form.anki_model,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 160, ID_ANKI_MODEL, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                160,
+                ID_ANKI_MODEL,
+                f,
+            )?;
             ank.push(model);
-            SendMessageW(model, WM_SETTEXT, None,
-                Some(LPARAM(wide(&form.anki_model).as_ptr() as isize)));
+            SendMessageW(
+                model,
+                WM_SETTEXT,
+                None,
+                Some(LPARAM(wide(&form.anki_model).as_ptr() as isize)),
+            );
             y += ROW_H;
             ank.push(label("Shortcut key", y)?);
             let add_vk = crate::config::parse_trigger_key(&form.anki_add_key).unwrap_or(0x41);
             ANKI_CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, add_vk))));
             let add_name = crate::config::trigger_key_name(add_vk);
-            ank.push(child(page, w!("BUTTON"), &add_name, WS_TABSTOP,
-                FIELD_X, y, FIELD_W, ROW_H, ID_ANKI_ADD_KEY, f)?);
+            ank.push(child(
+                page,
+                w!("BUTTON"),
+                &add_name,
+                WS_TABSTOP,
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_ANKI_ADD_KEY,
+                f,
+            )?);
             y += ROW_H;
-            ank.push(check("Include screenshot when adding",
-                ID_INCLUDE_SCREENSHOT, form.include_screenshot, y)?);
+            ank.push(check(
+                "Include screenshot when adding",
+                ID_INCLUDE_SCREENSHOT,
+                form.include_screenshot,
+                y,
+            )?);
             y += ROW_H;
-            ank.push(check("First dictionary only",
-                ID_FIRST_DICT_ONLY, form.first_dict_only, y)?);
+            ank.push(check(
+                "First dictionary only",
+                ID_FIRST_DICT_ONLY,
+                form.first_dict_only,
+                y,
+            )?);
             y += ROW_H;
             ank.push(label("Sentence capture", y)?);
-            let sentence_combo = child(page, w!("COMBOBOX"), "",
+            let sentence_combo = child(
+                page,
+                w!("COMBOBOX"),
+                "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_SENTENCE_MODE, f)?;
+                FIELD_X,
+                y,
+                FIELD_W,
+                220,
+                ID_SENTENCE_MODE,
+                f,
+            )?;
             ank.push(sentence_combo);
             for (i, (mode, text)) in SENTENCE_MODES.iter().enumerate() {
-                SendMessageW(sentence_combo, CB_ADDSTRING, None,
-                    Some(LPARAM(wide(text).as_ptr() as isize)));
+                SendMessageW(
+                    sentence_combo,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)),
+                );
                 if form.sentence_mode == *mode {
                     SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
@@ -3855,9 +4570,18 @@ impl SettingsWindow {
             }
             y += ROW_H;
             let is_static = form.sentence_mode == SentenceMode::Static;
-            ank.push(child(page, w!("STATIC"), "Region hotkey",
-                WINDOW_STYLE(0), PAD, y + 4, LABEL_W, ROW_H,
-                ID_STATIC_REGION_LABEL, f)?);
+            ank.push(child(
+                page,
+                w!("STATIC"),
+                "Region hotkey",
+                WINDOW_STYLE(0),
+                PAD,
+                y + 4,
+                LABEL_W,
+                ROW_H,
+                ID_STATIC_REGION_LABEL,
+                f,
+            )?);
             let sr_vk = crate::config::parse_trigger_key(&form.static_region_key);
             let sr_label = sr_vk
                 .map(crate::config::trigger_key_name)
@@ -3871,36 +4595,91 @@ impl SettingsWindow {
             SR_CAPTURED_VK.with(|c| {
                 c.set(sr_vk.map(|vk| (h.0 as isize, vk)));
             });
-            ank.push(child(page, w!("BUTTON"), &sr_label, WS_TABSTOP,
-                FIELD_X, y, FIELD_W, ROW_H, ID_STATIC_REGION_KEY, f)?);
+            ank.push(child(
+                page,
+                w!("BUTTON"),
+                &sr_label,
+                WS_TABSTOP,
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_STATIC_REGION_KEY,
+                f,
+            )?);
             y += ROW_H;
-            ank.push(check("Show capture region outline",
-                ID_SHOW_STATIC_OVERLAY, form.show_static_overlay, y)?);
+            ank.push(check(
+                "Show capture region outline",
+                ID_SHOW_STATIC_OVERLAY,
+                form.show_static_overlay,
+                y,
+            )?);
             y += ROW_H;
-            ank.push(child(page, w!("STATIC"),
+            ank.push(child(
+                page,
+                w!("STATIC"),
                 "Tip: enable capture exclusion in General for best results",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD, ROW_H,
-                ID_STATIC_CAPTURE_HINT, f)?);
+                WINDOW_STYLE(0),
+                PAD,
+                y,
+                WIN_W - 2 * PAD,
+                ROW_H,
+                ID_STATIC_CAPTURE_HINT,
+                f,
+            )?);
             if !is_static {
-                for &id in &[ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY,
-                             ID_SHOW_STATIC_OVERLAY, ID_STATIC_CAPTURE_HINT] {
+                for &id in &[
+                    ID_STATIC_REGION_LABEL,
+                    ID_STATIC_REGION_KEY,
+                    ID_SHOW_STATIC_OVERLAY,
+                    ID_STATIC_CAPTURE_HINT,
+                ] {
                     if let Ok(c) = dlg_item(h, id) {
                         let _ = ShowWindow(c, SW_HIDE);
                     }
                 }
             }
             y += ROW_H;
-            ank.push(child(page, w!("BUTTON"), "Refresh", WS_TABSTOP,
-                  PAD, y, 80, ROW_H, ID_ANKI_TEST, f)?);
-            ank.push(child(page, w!("STATIC"),
+            ank.push(child(
+                page,
+                w!("BUTTON"),
+                "Refresh",
+                WS_TABSTOP,
+                PAD,
+                y,
+                80,
+                ROW_H,
+                ID_ANKI_TEST,
+                f,
+            )?);
+            ank.push(child(
+                page,
+                w!("STATIC"),
                 "Click to load decks and field mappings from Anki",
-                WINDOW_STYLE(0), PAD + 88, y + 2, WIN_W - 2 * PAD - 96, ROW_H, 0, f)?);
+                WINDOW_STYLE(0),
+                PAD + 88,
+                y + 2,
+                WIN_W - 2 * PAD - 96,
+                ROW_H,
+                0,
+                f,
+            )?);
             y += ROW_H + 8 + GROUP_GAP;
 
             // ---- Field-map toggle ----
             let toggle_text = field_map_toggle_label(self.field_map_collapsed.get());
-            ank.push(child(page, w!("BUTTON"), toggle_text, WS_TABSTOP,
-                  PAD, y, 160, ROW_H, ID_FIELD_MAP_TOGGLE, f)?);
+            ank.push(child(
+                page,
+                w!("BUTTON"),
+                toggle_text,
+                WS_TABSTOP,
+                PAD,
+                y,
+                160,
+                ROW_H,
+                ID_FIELD_MAP_TOGGLE,
+                f,
+            )?);
             y += ROW_H + 8;
 
             let y_ank = y;
@@ -3913,9 +4692,18 @@ impl SettingsWindow {
             plug.push(group("Plugins", y, plugins_group_h(found.len()))?);
             y += 20;
             if found.is_empty() {
-                plug.push(child(page, w!("STATIC"),
+                plug.push(child(
+                    page,
+                    w!("STATIC"),
                     &format!("No plugins found in {}.", plugins_root.display()),
-                    WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 36, 0, f)?);
+                    WINDOW_STYLE(0),
+                    PAD,
+                    y,
+                    WIN_W - 2 * PAD - 20,
+                    36,
+                    0,
+                    f,
+                )?);
                 y += 40;
             } else {
                 for (idx, (dir, parsed)) in found.iter().enumerate() {
@@ -3927,24 +4715,75 @@ impl SettingsWindow {
                     let row = plugin_row(dir, parsed, &enabled_plugins);
                     plugin_names.push(plugin_key(dir, parsed));
                     plugin_dirs.push(dir.clone());
-                    plug.push(child(page, w!("STATIC"), &row.label, WINDOW_STYLE(0),
-                        PAD, ry + 4, bx - PAD - 8, ROW_H, 0, f)?);
-                    let chk = child(page, w!("BUTTON"), "Enable",
+                    plug.push(child(
+                        page,
+                        w!("STATIC"),
+                        &row.label,
+                        WINDOW_STYLE(0),
+                        PAD,
+                        ry + 4,
+                        bx - PAD - 8,
+                        ROW_H,
+                        0,
+                        f,
+                    )?);
+                    let chk = child(
+                        page,
+                        w!("BUTTON"),
+                        "Enable",
                         WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                        bx, ry, BTN_W, ROW_H,
-                        ID_PLUGIN_ENABLE_BASE + idx, f)?;
-                    SendMessageW(chk, BM_SETCHECK,
-                        Some(WPARAM(if row.checked { 1 } else { 0 })), None);
+                        bx,
+                        ry,
+                        BTN_W,
+                        ROW_H,
+                        ID_PLUGIN_ENABLE_BASE + idx,
+                        f,
+                    )?;
+                    SendMessageW(
+                        chk,
+                        BM_SETCHECK,
+                        Some(WPARAM(if row.checked { 1 } else { 0 })),
+                        None,
+                    );
                     let _ = EnableWindow(chk, row.can_enable);
                     plug.push(chk);
-                    plug.push(child(page, w!("STATIC"), &row.roles, WINDOW_STYLE(0),
-                        PAD, ry + ROW_H + 4, bx - PAD - 8, ROW_H, 0, f)?);
+                    plug.push(child(
+                        page,
+                        w!("STATIC"),
+                        &row.roles,
+                        WINDOW_STYLE(0),
+                        PAD,
+                        ry + ROW_H + 4,
+                        bx - PAD - 8,
+                        ROW_H,
+                        0,
+                        f,
+                    )?);
                     let status_y = ry + 2 * ROW_H;
-                    plug.push(child(page, w!("STATIC"), &row.status, WINDOW_STYLE(0),
-                        PAD, status_y, bx - PAD - 8, PLUGIN_STATUS_H, 0, f)?);
-                    plug.push(child(page, w!("BUTTON"), "Configure", WS_TABSTOP,
-                        bx, status_y, BTN_W, ROW_H,
-                        ID_PLUGIN_CONFIGURE_BASE + idx, f)?);
+                    plug.push(child(
+                        page,
+                        w!("STATIC"),
+                        &row.status,
+                        WINDOW_STYLE(0),
+                        PAD,
+                        status_y,
+                        bx - PAD - 8,
+                        PLUGIN_STATUS_H,
+                        0,
+                        f,
+                    )?);
+                    plug.push(child(
+                        page,
+                        w!("BUTTON"),
+                        "Configure",
+                        WS_TABSTOP,
+                        bx,
+                        status_y,
+                        BTN_W,
+                        ROW_H,
+                        ID_PLUGIN_CONFIGURE_BASE + idx,
+                        f,
+                    )?);
                     y = ry + PLUGIN_ROW_H;
                 }
             }
@@ -3953,40 +4792,96 @@ impl SettingsWindow {
 
             // Window y from here on.
             // place_bottom re-pins these.
-            let bottom_y0 =
-                y_general.max(y_dict).max(y_ocr).max(y_ank).max(y_plugins) + CONTENT_Y;
+            let bottom_y0 = y_general.max(y_dict).max(y_ocr).max(y_ank).max(y_plugins) + CONTENT_Y;
 
             // ---- Updates ----
             // Stays on `h`, not the pane.
-            child(h, w!("BUTTON"), "Updates",
+            child(
+                h,
+                w!("BUTTON"),
+                "Updates",
                 WINDOW_STYLE(BS_GROUPBOX as u32),
-                PAD - 6, bottom_y0, WIN_W - 2 * PAD, ROW_H + 24, ID_UPDATES, f)?;
-            child(h, w!("BUTTON"), "Check for updates", WS_TABSTOP,
-                  PAD, bottom_y0 + BOTTOM_UPDATE_DY, 136, ROW_H, ID_CHECK_UPDATE, f)?;
+                PAD - 6,
+                bottom_y0,
+                WIN_W - 2 * PAD,
+                ROW_H + 24,
+                ID_UPDATES,
+                f,
+            )?;
+            child(
+                h,
+                w!("BUTTON"),
+                "Check for updates",
+                WS_TABSTOP,
+                PAD,
+                bottom_y0 + BOTTOM_UPDATE_DY,
+                136,
+                ROW_H,
+                ID_CHECK_UPDATE,
+                f,
+            )?;
 
             // ---- Apply / Cancel ----
             // Also the progress line.
             let staged = form.has_staged();
-            child(h, w!("EDIT"),
+            child(
+                h,
+                w!("EDIT"),
                 apply_hint(self.apply_mode, staged),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
-                PAD, bottom_y0 + BOTTOM_STATUS_DY, WIN_W - 2 * PAD - 16, STATUS_H,
-                ID_STATUS, f)?;
-            child(h, w!("BUTTON"), apply_caption(self.apply_mode),
-                  WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
-                  BOTTOM_APPLY_X, bottom_y0 + BOTTOM_BTN_DY, 136, ROW_H + 4, ID_APPLY, f)?;
+                PAD,
+                bottom_y0 + BOTTOM_STATUS_DY,
+                WIN_W - 2 * PAD - 16,
+                STATUS_H,
+                ID_STATUS,
+                f,
+            )?;
+            child(
+                h,
+                w!("BUTTON"),
+                apply_caption(self.apply_mode),
+                WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
+                BOTTOM_APPLY_X,
+                bottom_y0 + BOTTOM_BTN_DY,
+                136,
+                ROW_H + 4,
+                ID_APPLY,
+                f,
+            )?;
             // Far left: not beside Apply.
-            child(h, w!("BUTTON"), "Quit chibipop", WS_TABSTOP,
-                  PAD, bottom_y0 + BOTTOM_BTN_DY, 116, ROW_H + 4, ID_QUIT, f)?;
+            child(
+                h,
+                w!("BUTTON"),
+                "Quit chibipop",
+                WS_TABSTOP,
+                PAD,
+                bottom_y0 + BOTTOM_BTN_DY,
+                116,
+                ROW_H + 4,
+                ID_QUIT,
+                f,
+            )?;
 
             // The band the tabs occupy.
             let band_h = bottom_y0 - CONTENT_Y;
-            let _ = SetWindowPos(self.viewport, None, 0, 0,
-                dpi_scale(h, WIN_W), dpi_scale(h, band_h),
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            let _ = SetWindowPos(self.content, None, 0, 0,
-                dpi_scale(h, WIN_W), dpi_scale(h, band_h),
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                self.viewport,
+                None,
+                0,
+                0,
+                dpi_scale(h, WIN_W),
+                dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = SetWindowPos(
+                self.content,
+                None,
+                0,
+                0,
+                dpi_scale(h, WIN_W),
+                dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
             self.place_viewport();
 
             self.anki_static_bottom = y_ank;
@@ -4028,11 +4923,14 @@ impl SettingsWindow {
             };
             let pick = |values: &[i64], id: i32, fallback: i64| -> i64 {
                 let i = combo_index(id);
-                if i < 0 { fallback } else { *values.get(i as usize).unwrap_or(&fallback) }
+                if i < 0 {
+                    fallback
+                } else {
+                    *values.get(i as usize).unwrap_or(&fallback)
+                }
             };
-            let text_of = |id: i32| -> String {
-                dlg_item(h, id).map(|c| window_text(c)).unwrap_or_default()
-            };
+            let text_of =
+                |id: i32| -> String { dlg_item(h, id).map(|c| window_text(c)).unwrap_or_default() };
             let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
             // Empty is not missing.
@@ -4049,14 +4947,21 @@ impl SettingsWindow {
             let pitch = role_rows(ID_PITCH, &template.pitch);
             let staged = self.staged.borrow();
 
-            let theme = if combo_index(ID_THEME) == 1 { "light" } else { "dark" };
+            let theme = if combo_index(ID_THEME) == 1 {
+                "light"
+            } else {
+                "dark"
+            };
             let sentence_mode = sentence_mode_at(combo_index(ID_SENTENCE_MODE));
             let font = {
                 let i = combo_index(ID_FONT);
                 if i < 0 {
                     template.font.clone()
                 } else {
-                    self.fonts.get(i as usize).cloned().unwrap_or_else(|| template.font.clone())
+                    self.fonts
+                        .get(i as usize)
+                        .cloned()
+                        .unwrap_or_else(|| template.font.clone())
                 }
             };
             let ocr_language = {
@@ -4099,7 +5004,10 @@ impl SettingsWindow {
                 .iter()
                 .map(|(name, combo)| {
                     let i = SendMessageW(*combo, CB_GETCURSEL, None, None).0.max(0);
-                    let src = FIELD_MAP_SOURCES.get(i as usize).copied().unwrap_or("(none)");
+                    let src = FIELD_MAP_SOURCES
+                        .get(i as usize)
+                        .copied()
+                        .unwrap_or("(none)");
                     (name.as_str(), src)
                 })
                 .collect();
@@ -4119,12 +5027,18 @@ impl SettingsWindow {
                 trigger_key,
                 theme: theme.to_string(),
                 font,
-                max_width_percent: pick(&self.widths, ID_MAX_WIDTH,
-                                        template.max_width_percent as i64) as u8,
-                max_height_percent: pick(&self.heights, ID_MAX_HEIGHT,
-                                         template.max_height_percent as i64) as u8,
-                summary_chars: pick(&self.summaries, ID_SUMMARY,
-                                    template.summary_chars as i64) as usize,
+                max_width_percent: pick(
+                    &self.widths,
+                    ID_MAX_WIDTH,
+                    template.max_width_percent as i64,
+                ) as u8,
+                max_height_percent: pick(
+                    &self.heights,
+                    ID_MAX_HEIGHT,
+                    template.max_height_percent as i64,
+                ) as u8,
+                summary_chars: pick(&self.summaries, ID_SUMMARY, template.summary_chars as i64)
+                    as usize,
                 highlight_match: checked(ID_HIGHLIGHT),
                 scroll_popup: checked(ID_SCROLL),
                 side_panel: checked(ID_SIDE_PANEL),
@@ -4141,8 +5055,7 @@ impl SettingsWindow {
                 ranking_strategy: ranking_strategy_at(combo_index(ID_RANKING)),
                 dict_list_language: staged.dict_list_language.clone(),
                 per_language: staged.per_language.clone(),
-                max_ocr_passes: pick(&self.passes, ID_PASSES,
-                                     template.max_ocr_passes as i64) as u8,
+                max_ocr_passes: pick(&self.passes, ID_PASSES, template.max_ocr_passes as i64) as u8,
                 prefer_vertical: checked(ID_PREFER_VERT),
                 capture_width: px(ID_CAPTURE_W, template.capture_width),
                 capture_height: px(ID_CAPTURE_H, template.capture_height),
@@ -4188,8 +5101,12 @@ unsafe fn fill_numeric(combo: HWND, values: &[i64], current: i64) {
     // SAFETY: `combo` is a live control created by the caller.
     unsafe {
         for (i, v) in values.iter().enumerate() {
-            SendMessageW(combo, CB_ADDSTRING, None,
-                         Some(LPARAM(wide(&v.to_string()).as_ptr() as isize)));
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(wide(&v.to_string()).as_ptr() as isize)),
+            );
             if *v == current {
                 SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(i)), None);
             }
@@ -4227,6 +5144,11 @@ impl Drop for SettingsWindow {
                 c.set(None);
             }
         });
+        ANKI_MODEL_CHANGED.with(|c| {
+            if c.get().is_some_and(|h| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
         LANG_CHANGED.with(|c| {
             if c.get().is_some_and(|h| h == self.hwnd.0 as isize) {
                 c.set(None);
@@ -4259,13 +5181,20 @@ impl Drop for SettingsWindow {
         });
         CAPTURE_PREV.with(|c| {
             let mut slot = c.borrow_mut();
-            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
+            if slot
+                .as_ref()
+                .is_some_and(|(h, _)| *h == self.hwnd.0 as isize)
+            {
                 *slot = None;
             }
         });
+
         PLUGIN_DIRS.with(|c| {
             let mut slot = c.borrow_mut();
-            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
+            if slot
+                .as_ref()
+                .is_some_and(|(h, _)| *h == self.hwnd.0 as isize)
+            {
                 *slot = None;
             }
         });
@@ -4333,7 +5262,10 @@ mod tests {
     // ---- field mapping ----
 
     fn mapping(anki_field: &str, source: &str) -> crate::config::FieldMapping {
-        crate::config::FieldMapping { anki_field: anki_field.into(), source: source.into() }
+        crate::config::FieldMapping {
+            anki_field: anki_field.into(),
+            source: source.into(),
+        }
     }
 
     #[test]
@@ -4381,9 +5313,15 @@ mod tests {
     /// mapping the user never touched.
     #[test]
     fn merged_field_map_keeps_a_mapping_the_model_lacks() {
-        let saved = vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")];
+        let saved = vec![
+            mapping("Front", "expression"),
+            mapping("LegacyAudio", "audio"),
+        ];
         assert_eq!(
-            vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")],
+            vec![
+                mapping("Front", "expression"),
+                mapping("LegacyAudio", "audio")
+            ],
             merged_field_map(&saved, &[("Front", "expression")]),
         );
     }
@@ -4417,7 +5355,10 @@ mod tests {
     /// outcomes, decided by whether the model has the field at all.
     #[test]
     fn merged_field_map_separates_a_none_row_from_a_field_with_no_row() {
-        let saved = vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")];
+        let saved = vec![
+            mapping("Front", "expression"),
+            mapping("LegacyAudio", "audio"),
+        ];
         assert_eq!(
             vec![mapping("LegacyAudio", "audio")],
             merged_field_map(&saved, &[("Front", "(none)")]),
@@ -4467,12 +5408,15 @@ mod tests {
     #[test]
     #[ignore]
     fn reading_a_model_missing_a_mapped_field_keeps_the_mapping() {
-        let saved = vec![mapping("Front", "expression"), mapping("LegacyAudio", "audio")];
+        let saved = vec![
+            mapping("Front", "expression"),
+            mapping("LegacyAudio", "audio"),
+        ];
         let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         form.field_map = Some(saved.clone());
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
             .expect("opening the settings window");
-        window.populate_combos(&[], &[], &["Front".to_string()]);
+        window.populate_combos(&[], &[], vec!["Front".to_string()]);
         assert_eq!(Some(saved), window.read(&form).field_map);
     }
 
@@ -4514,6 +5458,55 @@ mod tests {
         assert!(!field_names_match(&rows, &fields));
     }
 
+    #[test]
+    fn matching_prefix_result_cancels_pending_field_map() {
+        let fields = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+        let rows = vec![
+            ("A".to_string(), dummy_hwnd(1)),
+            ("B".to_string(), dummy_hwnd(2)),
+            ("C".to_string(), dummy_hwnd(3)),
+            ("D".to_string(), dummy_hwnd(4)),
+        ];
+        let mut pending = Some(PendingFieldMap::new(
+            vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string(),
+                "E".to_string(),
+            ],
+            Vec::new(),
+        ));
+        pending.as_mut().unwrap().next = FIELD_MAP_ROWS_PER_PUMP;
+
+        assert!(!begin_field_map_result(&fields, &rows, &mut pending));
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn empty_result_cancels_pending_field_map() {
+        let fields: Vec<String> = Vec::new();
+        let rows = vec![("A".to_string(), dummy_hwnd(1))];
+        let mut pending = Some(PendingFieldMap::new(
+            vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string(),
+            ],
+            Vec::new(),
+        ));
+        pending.as_mut().unwrap().next = FIELD_MAP_ROWS_PER_PUMP;
+
+        assert!(!begin_field_map_result(&fields, &rows, &mut pending));
+        assert!(pending.is_none());
+    }
+
     // ---- field-map columns ----
 
     #[test]
@@ -4528,6 +5521,13 @@ mod tests {
     #[test]
     fn field_map_rows_needed_floors_at_one() {
         assert_eq!(1, field_map_rows_needed(0));
+    }
+
+    #[test]
+    fn field_map_chunk_end_caps_each_pump() {
+        assert_eq!(4, field_map_chunk_end(0, 23));
+        assert_eq!(8, field_map_chunk_end(4, 23));
+        assert_eq!(23, field_map_chunk_end(20, 23));
     }
 
     #[test]
@@ -4634,7 +5634,10 @@ mod tests {
     #[test]
     fn a_multi_pick_joins_each_name_onto_the_directory() {
         assert_eq!(
-            vec![PathBuf::from(r"C:\dicts\a.zip"), PathBuf::from(r"C:\dicts\b.zip")],
+            vec![
+                PathBuf::from(r"C:\dicts\a.zip"),
+                PathBuf::from(r"C:\dicts\b.zip")
+            ],
             split_picked(&nul_run(&[r"C:\dicts", "a.zip", "b.zip"]))
         );
     }
@@ -4676,8 +5679,14 @@ mod tests {
     #[test]
     fn the_japanese_font_list_excludes_vertical_duplicates() {
         let families = japanese_font_families();
-        assert!(!families.is_empty(), "no Japanese-capable font families found");
-        assert!(!families.iter().any(|f| f.starts_with('@')), "got {families:?}");
+        assert!(
+            !families.is_empty(),
+            "no Japanese-capable font families found"
+        );
+        assert!(
+            !families.iter().any(|f| f.starts_with('@')),
+            "got {families:?}"
+        );
     }
 
     // ---- trigger-key capture ----
@@ -4798,7 +5807,10 @@ mod tests {
 
         assert_eq!(None, resolved_ocr_clipboard_key(hwnd, None));
         assert_eq!(None, resolved_ocr_clipboard_key(hwnd, Some("")));
-        assert_eq!(Some("f9".to_string()), resolved_ocr_clipboard_key(hwnd, Some("f9")));
+        assert_eq!(
+            Some("f9".to_string()),
+            resolved_ocr_clipboard_key(hwnd, Some("f9"))
+        );
     }
 
     // ---- anki add-key capture ----
@@ -4846,7 +5858,11 @@ mod tests {
     fn stored_trigger_key_round_trips_through_parse_trigger_key() {
         for vk in [0x10u16, 0x11, 0x12, 0x70, 0x7B, 0x41, 0x30, 0x20, 0xBA] {
             let stored = stored_trigger_key(vk);
-            assert_eq!(Some(vk), crate::config::parse_trigger_key(&stored), "{stored}");
+            assert_eq!(
+                Some(vk),
+                crate::config::parse_trigger_key(&stored),
+                "{stored}"
+            );
         }
     }
 
@@ -4937,8 +5953,10 @@ mod tests {
 
     #[test]
     fn the_installed_order_is_the_listed_order() {
-        let tags: Vec<String> =
-            language_choices(installed(), "ja").into_iter().map(|(_, t)| t).collect();
+        let tags: Vec<String> = language_choices(installed(), "ja")
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
         assert_eq!(vec!["ja".to_string(), "en-US".to_string()], tags);
     }
 
@@ -4977,13 +5995,19 @@ mod tests {
             ("English (United States)".to_string(), "en-US".to_string()),
             ("Japanese".to_string(), "ja".to_string()),
             ("Chinese (Simplified)".to_string(), "zh-Hans-CN".to_string()),
-            ("Chinese (Traditional)".to_string(), "zh-Hant-TW".to_string()),
+            (
+                "Chinese (Traditional)".to_string(),
+                "zh-Hant-TW".to_string(),
+            ),
         ]
     }
 
     #[test]
     fn a_configured_prefix_is_not_appended_as_a_phantom_row() {
-        assert_eq!(installed_four(), language_choices(installed_four(), "zh-Hans"));
+        assert_eq!(
+            installed_four(),
+            language_choices(installed_four(), "zh-Hans")
+        );
     }
 
     #[test]
@@ -5005,7 +6029,10 @@ mod tests {
     fn a_genuinely_absent_language_is_still_appended_and_read_back() {
         let rows = language_choices(installed_four(), "ko");
         assert_eq!(5, rows.len());
-        assert_eq!(("ko (not installed)".to_string(), "ko".to_string()), rows[4]);
+        assert_eq!(
+            ("ko (not installed)".to_string(), "ko".to_string()),
+            rows[4]
+        );
         assert_eq!(Some(4), language_index(&rows, "ko"));
     }
 
@@ -5677,7 +6704,10 @@ mod tests {
     // ---- re-scoping the terms list ----
 
     fn installed_two() -> Vec<String> {
-        vec!["Jitendex.org [2026-07-09]".to_string(), "大辞林　第四版".to_string()]
+        vec![
+            "Jitendex.org [2026-07-09]".to_string(),
+            "大辞林　第四版".to_string(),
+        ]
     }
 
     fn names(rows: &[&str]) -> Vec<String> {
@@ -5767,6 +6797,7 @@ mod tests {
             ]),
             scope_rows(&all, &names(&["大辞林　第四版"]), &names(&["broken.zip"]))
         );
+
     }
 
     // ---- the layout budget ----
@@ -5966,7 +6997,10 @@ mod tests {
 
     #[test]
     fn an_enabled_plugin_is_labelled_enabled() {
-        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let m = manifest_stub(
+            "meikiocr",
+            vec![crate::plugin::manifest::Role::TextProvider],
+        );
         let row = plugin_row(Path::new("meikiocr"), &Ok(m), &["meikiocr".to_string()]);
         assert_eq!("Enabled", row.status);
         assert!(row.checked);
@@ -5976,7 +7010,10 @@ mod tests {
 
     #[test]
     fn an_unlisted_plugin_is_labelled_disabled() {
-        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let m = manifest_stub(
+            "meikiocr",
+            vec![crate::plugin::manifest::Role::TextProvider],
+        );
         let row = plugin_row(Path::new("meikiocr"), &Ok(m), &[]);
         assert_eq!("Disabled", row.status);
         assert!(!row.checked);
@@ -5997,7 +7034,10 @@ mod tests {
 
     #[test]
     fn discovered_text_providers_includes_a_provider() {
-        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let m = manifest_stub(
+            "meikiocr",
+            vec![crate::plugin::manifest::Role::TextProvider],
+        );
         let found = vec![(PathBuf::from("meikiocr"), Ok(m))];
         let names = discovered_text_providers(&found);
         assert_eq!(vec!["meikiocr".to_string()], names);
@@ -6005,7 +7045,10 @@ mod tests {
 
     #[test]
     fn discovered_text_providers_excludes_a_non_provider_role() {
-        let m = manifest_stub("scorer", vec![crate::plugin::manifest::Role::FieldContributor]);
+        let m = manifest_stub(
+            "scorer",
+            vec![crate::plugin::manifest::Role::FieldContributor],
+        );
         let found = vec![(PathBuf::from("scorer"), Ok(m))];
         let names = discovered_text_providers(&found);
         assert!(names.is_empty());
@@ -6030,7 +7073,10 @@ mod tests {
 
     #[test]
     fn roles_text_handles_a_single_role() {
-        assert_eq!("text-provider", roles_text(&[crate::plugin::manifest::Role::TextProvider]));
+        assert_eq!(
+            "text-provider",
+            roles_text(&[crate::plugin::manifest::Role::TextProvider])
+        );
     }
 
     #[test]
@@ -6060,7 +7106,10 @@ mod tests {
 
     #[test]
     fn plugin_key_uses_the_manifest_name() {
-        let m = manifest_stub("meikiocr", vec![crate::plugin::manifest::Role::TextProvider]);
+        let m = manifest_stub(
+            "meikiocr",
+            vec![crate::plugin::manifest::Role::TextProvider],
+        );
         assert_eq!("meikiocr", plugin_key(Path::new("meikiocr"), &Ok(m)));
     }
 
@@ -6082,7 +7131,10 @@ mod tests {
     #[test]
     fn plugin_configure_idx_is_none_outside_the_block() {
         assert_eq!(None, plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE - 1));
-        assert_eq!(None, plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN));
+        assert_eq!(
+            None,
+            plugin_configure_idx(ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN)
+        );
         assert_eq!(None, plugin_configure_idx(ID_PLUGIN_ENABLE_BASE));
     }
 
@@ -6090,7 +7142,10 @@ mod tests {
     fn plugin_dir_at_reads_back_what_build_remembered() {
         let hwnd = dummy_hwnd(9101);
         remember_plugin_dirs(hwnd, vec![PathBuf::from("plugins/meikiocr")]);
-        assert_eq!(Some(PathBuf::from("plugins/meikiocr")), plugin_dir_at(hwnd, 0));
+        assert_eq!(
+            Some(PathBuf::from("plugins/meikiocr")),
+            plugin_dir_at(hwnd, 0)
+        );
     }
 
     #[test]
@@ -6105,7 +7160,10 @@ mod tests {
     fn engine_dirs_maps_name_to_path() {
         let mut dirs = HashMap::new();
         dirs.insert("meikiocr".to_string(), PathBuf::from("plugins/meikiocr"));
-        assert_eq!(dirs.get("meikiocr").unwrap().as_os_str(), "plugins/meikiocr");
+        assert_eq!(
+            dirs.get("meikiocr").unwrap().as_os_str(),
+            "plugins/meikiocr"
+        );
         assert!(!dirs.contains_key("nonexistent"));
     }
 
@@ -6113,7 +7171,9 @@ mod tests {
     fn write_config_replaces_existing_path() {
         let existing = "meikiocr_path = \"\"\nhf_home = ''\nthreads = 4\n";
         let result = set_config_path(existing, r"C:\tools\meikiocr\.venv\Lib\site-packages");
-        assert!(result.contains(r#"meikiocr_path = "C:\\tools\\meikiocr\\.venv\\Lib\\site-packages""#));
+        assert!(
+            result.contains(r#"meikiocr_path = "C:\\tools\\meikiocr\\.venv\\Lib\\site-packages""#)
+        );
         assert!(result.contains("hf_home = ''"));
         assert!(result.contains("threads = 4"));
     }

@@ -1016,9 +1016,9 @@ underlying defect is still there and nobody has diagnosed it past the symptom.**
 **What happened.** v0.7.2's rebuild promoted a staged database by stopping the worker, `join()`ing
 it to prove its SQLite handle had closed, renaming, then respawning. The join never returned. The
 trace is unambiguous: the worker logged `worker.thread.end` — its closure *completed* — and
-`join()` still blocked, while the main thread pumped **zero** messages for the rest of the run. The
-main thread is the one that owns `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows serialises every
-mouse move and keystroke on the entire desktop behind a hook whose owner is not pumping. **The
+`join()` still blocked, while the main thread pumped **zero** messages for the rest of the run. At
+the time, the main thread owned `WH_MOUSE_LL` and `WH_KEYBOARD_LL`, and Windows serialised every
+mouse move and keystroke on the entire desktop behind a hook whose owner was not pumping. **The
 user's whole machine froze, twice.**
 
 **The leading hypothesis, unconfirmed.** WinRT/COM apartment teardown on the worker needs a message
@@ -1035,19 +1035,16 @@ and the builder's stdout reader, neither of which runs on the hook-owning thread
 installed. Verified by a zero-reference grep over 21 deleted identifiers plus a clean
 `cargo check --all-targets`.
 
-**So the defect is dormant, not dead.** Reintroducing a worker join — for a clean shutdown, for a
-schema migration, for anything — reintroduces a whole-desktop freeze, and it will not look like a
-chibipop bug when it does: the symptom is the *user's mouse* going syrupy, with chibipop's window
-looking merely busy.
+**So the defect moved to hook ownership.** The main UI thread no longer owns the hooks. Reintroducing
+main-thread hook ownership, or blocking the dedicated hook pump, reintroduces a whole-desktop
+freeze. It will not look like a chibipop bug when it does: the symptom is the *user's mouse* going
+syrupy, with chibipop's window looking merely busy.
 
-**If picked up**, in increasing order of cost: (a) never join the worker, and say so in a comment at
-`spawn_worker` — the current state, undocumented in the source; (b) if a join is genuinely needed,
-**remove the hooks first and pump while waiting** (`join` in a loop against a timeout, servicing
-messages between attempts), never a bare blocking join; (c) actually diagnose it — spawn the worker
-with an explicit COM apartment model and see whether the teardown still needs the pump. Note that
-Windows may answer a hook that misses `LowLevelHooksTimeout` by **dropping** it rather than waiting
-again, in which case the symptom is not a slow desktop but hover going silently dead — see the
-2026-07-27 spike finding. Both shapes are covered by `docs/REGRESSION.md` §1.18 step 14.
+**If picked up**, preserve the `chibipop-hooks` owner thread. If a worker join is genuinely needed,
+keep it away from that thread and keep the hook pump alive. Note that Windows may answer a hook that
+misses `LowLevelHooksTimeout` by **dropping** it rather than waiting again, in which case the symptom
+is not a slow desktop but hover going silently dead — see the 2026-07-27 spike finding. Both shapes
+are covered by `docs/REGRESSION.md` §1.18 step 14.
 
 ---
 
@@ -1516,7 +1513,89 @@ stays open, per this plan.
 
 ---
 
-## 37. 55% of a hover is SQLite probes that find nothing
+## 37. Tier 0 cannot be all-green on a developer machine: the geometry goldens are pinned to the CI image
+
+**Found 2026-08-29, running tier 0 before tagging v0.9.9 at `98b133c`.**
+`geometry_golden_full_chrome` fails on the Windows development box and passes on CI, on
+the same commit. One field diverges:
+
+```
+variants.default.elements.3.w: golden "46.43" -> measured "47.03"  ["Text" "ざつだん"]
+```
+
+Everything else matches: the other seven golden fixtures pass, and the rest of the suite
+is 1338 green. Clippy is exactly 1 and the release build finishes.
+
+**This is not a regression.** ADR-0011 asserts DirectWrite metrics with **no tolerance**,
+against goldens blessed on `windows-2025`, and it names the mechanism: "Drift enters only
+via runner-image font updates." Two machines with different Yu Gothic UI files measure the
+same string differently, and 0.6 px is exactly that size of difference. What the ADR did
+not anticipate is that a *developer box* is a second image, permanently.
+
+**The consequence is a process one.** `RELEASING.md` step 2 says "Run tier 0 locally. Do
+not tag a commit you have not gated." That instruction can no longer be satisfied on this
+machine: its test line is red before any change is made. A reader who does not know why
+has two bad options — bless locally, which reds CI for everyone else, or stop reading the
+line, which is how the next real golden failure gets waved through.
+
+### What would fix it, and what would not
+
+| Option | Why it is not free |
+|---|---|
+| Widen to a tolerance | ADR-0011 rejects this explicitly. A tolerance masks the bug class the gate exists for: rounding moved into core, off-by-one gap accounting, scroll-culling boundary shifts. |
+| Bless locally | Reds CI. The goldens are one file, shared. |
+| Skip the goldens off CI (`CI` env var) | Cheap, and it makes the local gate green — but it also means the adapter's only regression net never runs where the code is written. |
+| A second golden set per machine | Two baselines to keep honest, and nothing tells you when they disagree for a real reason. |
+| Ship the font with the fixtures | The measurement would stop depending on the machine at all. Largest change; also the only one that makes local and CI mean the same thing. |
+
+**Not decided.** The cheap option and the correct option are not the same one here, which
+is why this is a backlog item and not a fix. Until it is picked up, tier 0's table says
+what a green run looks like on this machine: 1338 passed, 1 failed, and the failure named.
+
+**Evidence:** `docs/REGRESSION.md` tier 0; CI run 33111391694 (all four jobs green at
+`98b133c`); `crates/chibipop-windows/tests/geometry_goldens.rs`;
+`docs/adr/0011-layout-golden-verification.md`.
+
+---
+
+## 38. ~~`release.yml` runs the geometry goldens on `windows-latest`, which ADR-0011 forbids~~ — **FIXED 2026-08-29**
+
+> [!note] Fixed the same day it was found, on oniichan's instruction
+> `release.yml`'s Windows job is now `runs-on: windows-2025`, matching
+> `ci.yml`'s tier0 job, and carries a comment saying why and naming this item.
+> Moving either pin now means moving both, in the same commit as the re-blessed
+> goldens. The v0.9.9 release was already built and drafted on the old label —
+> which resolved to `windows-2025` anyway, so those assets are unaffected.
+
+**Found 2026-08-29, reading the release workflow before tagging v0.9.9.**
+`ci.yml`'s tier 0 job is pinned to `windows-2025`, with a comment explaining that the
+runner image is part of the goldens' baseline. `release.yml`'s Windows job runs
+`cargo test --workspace --exclude chibipop-linux` — the same suite, including the same
+goldens — on `runs-on: windows-latest`.
+
+```yaml
+  windows:
+    name: Build and package (Windows)
+    runs-on: windows-latest
+```
+
+**It works today**, because `windows-latest` currently resolves to `windows-2025`. It
+stops working the day GitHub migrates the label. The failure mode is the bad one: the tag
+is already pushed and permanent, the release job reds on a test that has nothing to do
+with the release, and no asset is produced.
+
+**The fix is one word** — `windows-2025`, matching `ci.yml`, with the same comment. It was
+left out of the v0.9.9 release commit deliberately: changing the release workflow is a
+change to what gets released, and that is oniichan's call, not a side effect of cutting a
+tag. He made it the same day, and the pin landed on its own branch.
+
+**Evidence:** `.github/workflows/release.yml`; `.github/workflows/ci.yml` tier 0's
+`runs-on` and its comment; `docs/adr/0011-layout-golden-verification.md`, "tier0 pins its
+image".
+
+---
+
+## 39. 55% of a hover is SQLite probes that find nothing
 
 Measured, not suspected: [docs/research/lookup-cost.md](research/lookup-cost.md).
 
@@ -1555,7 +1634,7 @@ glossary decoding; it is never making the call.
 
 ---
 
-## 38. `terms_for` spends more time allocating rows than SQLite spends producing them
+## 40. `terms_for` spends more time allocating rows than SQLite spends producing them
 
 Measured: [docs/research/lookup-cost.md](research/lookup-cost.md).
 
@@ -1586,7 +1665,7 @@ decompression until after ranking. **[MODELLED]** ceiling is the measured
 
 ---
 
-## 39. Deconjugation is 23% of a hover and never touches the database
+## 41. Deconjugation is 23% of a hover and never touches the database
 
 Measured: [docs/research/lookup-cost.md](research/lookup-cost.md). The prefix loop -
 25 prefixes x 104 rules - costs **228.5 µs at p50** on a 12-dictionary library (22.6%)
@@ -1594,7 +1673,7 @@ and 224.1 µs (27.1%) on a single-dictionary one. It is identical on both, becau
 pure CPU with no database involved, and it is larger than everything the dictionary
 rendering work touches.
 
-It is also the source of the 131 misses in item 37: most of what it produces does not
+It is also the source of the 131 misses in item 39: most of what it produces does not
 exist in any dictionary. The two items compose - a bloom filter rejects the products
 cheaply, memoisation stops producing them twice - and neither subsumes the other.
 
