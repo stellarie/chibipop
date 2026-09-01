@@ -110,6 +110,24 @@ pub(super) fn measure_readings(
         };
     }
     let gaiji = gaiji_bases(flow, run);
+    // What each stack of bands asks
+    // for, charged to the base slot
+    // they all share. Every band of one
+    // stack asks its line for the
+    // *whole* stack, so the tallest
+    // span on the line reserves all of
+    // it however many bands reached it
+    // - and the bands cannot land on
+    // different lines, because each
+    // filler is a word joiner beside
+    // the one before it.
+    let base_of = base_slots(flow);
+    let mut stack = vec![0.0f32; flow.ruby.len()];
+    for (slot, ruby) in flow.ruby.iter().enumerate() {
+        if !ruby.text.is_empty() {
+            stack[base_of[slot] as usize] += ruby.style.size;
+        }
+    }
     // A line of height `h` gives
     // `ascent * h` to the space above
     // its baseline, and a base of its
@@ -123,15 +141,12 @@ pub(super) fn measure_readings(
     // which turns the growth into a
     // size.
     for (span, asked) in flow.spans.iter().zip(run.iter_mut()) {
-        let Some(read) = flow.ruby.get(span.ruby as usize).filter(|_| span.filler) else {
+        if !span.filler || span.ruby as usize >= flow.ruby.len() {
             continue;
-        };
+        }
         let box_ = out[span.ruby as usize];
-        let grown = if box_.ascent > 0.0 {
-            read.style.size / box_.ascent
-        } else {
-            read.style.size
-        };
+        let asked_h = stack[base_of[span.ruby as usize] as usize];
+        let grown = if box_.ascent > 0.0 { asked_h / box_.ascent } else { asked_h };
         asked.size = span.style.size.max(gaiji[span.ruby as usize]) + grown;
     }
     Ok(out)
@@ -182,6 +197,38 @@ fn gaiji_bases(flow: &Flow, run: &[StyledSpan<'_>]) -> Vec<f32> {
     out
 }
 
+/// The base each slot's reading
+/// annotates: its own slot, or - for a
+/// band past the first - the slot whose
+/// base the whole stack shares.
+///
+/// A band names its base by counting
+/// outwards rather than by index
+/// ([`FlowRuby::band`]), so this is the
+/// one place the count is turned back
+/// into a slot. One forward scan is
+/// enough because a stack is
+/// contiguous: [`Paragraphs::ruby`]
+/// pushes each band's filler straight
+/// after the one before it, and a
+/// paragraph's renumbering
+/// ([`Paragraphs::flush`]) keeps spans
+/// in the order it found them.
+///
+/// [`Paragraphs::ruby`]: super::gloss::Paragraphs
+/// [`Paragraphs::flush`]: super::gloss::Paragraphs
+fn base_slots(flow: &Flow) -> Vec<u32> {
+    let mut out = Vec::with_capacity(flow.ruby.len());
+    let mut base = 0u32;
+    for (slot, ruby) in flow.ruby.iter().enumerate() {
+        if ruby.band == 0 {
+            base = slot as u32;
+        }
+        out.push(base);
+    }
+    out
+}
+
 /// The paragraph's readings, placed.
 ///
 /// Pure: the lines already carry the
@@ -195,12 +242,18 @@ pub(super) fn place_ruby(
     wrap_w: f32,
     slack: f32,
 ) -> Vec<RubyBox> {
+    let base_of = base_slots(flow);
     let mut out = Vec::new();
     for (slot, ruby) in flow.ruby.iter().enumerate() {
         let box_ = read[slot];
         if ruby.text.is_empty() || box_.h <= 0.0 {
             continue;
         }
+        // The slot whose base this
+        // reading annotates: its own,
+        // or - past the first band -
+        // the one the stack shares.
+        let anchor = base_of[slot];
         // Which of the slot's spans the
         // reading is placed against.
         // Its base, normally. A `<ruby>`
@@ -214,11 +267,11 @@ pub(super) fn place_ruby(
         // stands at the pen where a base
         // would have begun and measures
         // nothing.
-        let based = flow.spans.iter().any(|s| s.ruby == slot as u32 && !s.filler);
+        let based = flow.spans.iter().any(|s| s.ruby == anchor && !s.filler);
         let base = |b: &&SpanBox| {
             flow.spans
                 .get(b.span as usize)
-                .is_some_and(|s| s.ruby == slot as u32 && s.filler != based)
+                .is_some_and(|s| s.ruby == anchor && s.filler != based)
         };
         // The first line the base
         // landed on, and its extent
@@ -269,13 +322,19 @@ pub(super) fn place_ruby(
                 (l.min(b.x), r.max(b.x + b.w), up.max(rise(b)))
             });
         // Its bottom against that ink
-        // top. Clamped into the line, so
-        // a measurer that gave the line
-        // no extra room draws the reading
+        // top, or against the band below
+        // it: the stack's own height is
+        // what stands between the base
+        // and this band's floor.
+        // Clamped into the line, so a
+        // measurer that gave the line no
+        // extra room draws the reading
         // small and high rather than off
         // the paragraph.
+        let stacked: f32 =
+            (anchor as usize..=slot).map(|j| read[j].h).sum();
         let floor = geom.baseline - top;
-        let y = geom.y + (floor - box_.h).max(0.0);
+        let y = geom.y + (floor - stacked).max(0.0);
         // Centred over the base, and
         // never off the panel's left
         // edge: a reading wider than its
@@ -406,6 +465,41 @@ pub(super) const RUBY_FILLER: &str = "\u{2060}";
 pub(super) struct FlowRuby {
     pub(super) text: String,
     pub(super) style: Inline,
+    /// Which annotation band this
+    /// reading is, counted outwards
+    /// from the base: `0` for the one
+    /// nearest it.
+    ///
+    /// The HTML ruby model reads a run
+    /// of `rt` after one base as one
+    /// independent annotation level
+    /// each
+    /// (<https://www.w3.org/TR/html-ruby-extensions/>),
+    /// and 岩波国語辞典　第八版 writes
+    /// 17 of them - `<ruby>七色<rt>なな
+    /// いろ</rt><rt>しちしょく</rt>
+    /// </ruby>` states both readings of
+    /// a cross-referenced headword. A
+    /// band past the first has no base
+    /// span of its own and shares the
+    /// one belonging to the nearest
+    /// band `0` before it
+    /// ([`base_slots`]).
+    ///
+    /// A count and not an index,
+    /// deliberately: a paragraph
+    /// renumbers its slots onto its own
+    /// list ([`Paragraphs::flush`]), and
+    /// a slot index stored here would
+    /// have to be renumbered with them.
+    /// Order survives that renumbering
+    /// because a band's filler is
+    /// pushed straight after the one
+    /// before it, so a stack stays
+    /// contiguous and in order.
+    ///
+    /// [`Paragraphs::flush`]: super::gloss::Paragraphs::flush
+    pub(super) band: u32,
 }
 
 /// The ruby half of the gloss walk: a `ruby` subtree, its base's slot,
@@ -474,6 +568,24 @@ impl Paragraphs<'_> {
     /// that follows, so a base is
     /// stamped with its own reading and
     /// not with its neighbour's.
+    ///
+    /// An `rt` whose slot no base text
+    /// reached is the *next band* over
+    /// the base the `rt` before it
+    /// found, which is the tabular form
+    /// of double-sided ruby: one base,
+    /// then every annotation that
+    /// belongs to it
+    /// ([`FlowRuby::band`]). The two
+    /// cases are told apart by the one
+    /// fact that distinguishes them - a
+    /// base span carrying the open slot
+    /// - so `<ruby>漢<rt>かん</rt>字
+    ///   <rt>じ</rt></ruby>` still pairs
+    ///   each reading with its own
+    ///   character, and a `<ruby>` that
+    ///   reached no base at all still
+    ///   opens at band zero.
     pub(super) fn ruby(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         let style = self.styled(id, ctx.inline);
@@ -490,12 +602,20 @@ impl Paragraphs<'_> {
         // this tag exists for.
         let mut fallback: Vec<(String, Inline)> = Vec::new();
         let mut read = false;
+        let mut band = 0u32;
         let inner = Ctx { inline: style, link, ..ctx };
         let mut prose = doc.prose(id);
         for (i, child) in doc.children(id).enumerate() {
             match doc.node(child).tag {
                 Tag::Rt => {
+                    // Its own base resets the
+                    // stack; an `rt` following
+                    // an `rt` climbs it.
+                    let slot = self.open_ruby;
+                    let based = self.cur.spans.iter().any(|s| s.ruby == slot && !s.filler);
                     if self.reading(child) {
+                        band = if based { 0 } else { band + u32::from(read) };
+                        self.rubies[slot as usize].band = band;
                         read = true;
                         self.push_filler(style);
                     }
@@ -530,6 +650,7 @@ impl Paragraphs<'_> {
         self.rubies.push(FlowRuby {
             text: String::new(),
             style: Inline { size: base.size * RUBY_RATIO, ..base },
+            band: 0,
         });
         self.rubies.len() as u32 - 1
     }
@@ -557,7 +678,7 @@ impl Paragraphs<'_> {
         }
         let slot = self.open_ruby as usize;
         let style = self.styled(id, self.rubies[slot].style);
-        self.rubies[slot] = FlowRuby { text, style };
+        self.rubies[slot] = FlowRuby { text, style, band: 0 };
         true
     }
 }

@@ -6298,3 +6298,79 @@ fn an_empty_ruby_base_keeps_its_reading_beside_the_base_that_has_one() {
     // Then さんは, and the empty base begins ten units in.
     assert_eq!(10.0 * unit, gloss.ruby[1].x, "over its own hole, not over 父");
 }
+
+// ---- two readings over one base ----
+
+/// 岩波国語辞典　第八版 writes cross-references that carry both readings of a
+/// headword: `<ruby>七色<rt>なないろ</rt><rt>しちしょく</rt></ruby>`. The HTML
+/// ruby model reads a sequence of `rt` after a base as one independent
+/// annotation level each, and both engines Yomitan runs in *draw the text* -
+/// Gecko lays the tabular form out, Blink and WebKit do not, but an `rt` is
+/// rendered content in either. Drawing neither the second annotation nor its
+/// text diverges from both at once: the dictionary states that the word has
+/// two readings and the panel states that it has one.
+///
+/// The second reading is drawn as a second band, stacked over the first and
+/// centred on the same base. Both rects are pinned against that one base and
+/// the line's own height is pinned with them: a band the line did not grow
+/// for would draw over the paragraph above it, and a bin re-measuring the
+/// same spans would get the ungrown line back.
+#[test]
+fn a_base_with_two_readings_stacks_the_second_band_over_the_first() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let read_unit = unit * RUBY_RATIO;
+    let base_line = Theme::dark().body_size * LINE_H;
+    let read_line = Theme::dark().body_size * RUBY_RATIO * LINE_H;
+    // The fake hangs every line off an ascent of its tallest span's own
+    // size, so its ascent share is `1 / LINE_H`.
+    let ascent = 1.0 / LINE_H;
+
+    let s = laid_out(
+        &rich(&sc(concat!(
+            r#"{"tag":"div","content":["\u8679\u306e","#,
+            r#"{"tag":"ruby","content":["\u4e03\u8272","#,
+            r#"{"tag":"rt","content":"\u306a\u306a\u3044\u308d"},"#,
+            r#"{"tag":"rt","content":"\u3057\u3061\u3057\u3087\u304f"}]},"#,
+            r#""\u3002"]}"#,
+        ))),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert_eq!(
+        vec!["\u{306a}\u{306a}\u{3044}\u{308d}", "\u{3057}\u{3061}\u{3057}\u{3087}\u{304f}"],
+        gloss.ruby.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+        "both readings the dictionary wrote reach the panel",
+    );
+    // One invisible character per reading, which is what [`RUBY_FILLER`]
+    // already promises: two bands, two fillers, one base.
+    assert_eq!("\u{8679}\u{306e}\u{4e03}\u{8272}\u{2060}\u{2060}\u{3002}", gloss.text);
+    assert_eq!(1, gloss.lines, "and neither band broke a line");
+    // The line bought room for both bands at once, which is what keeps a
+    // bin's own re-measure of these spans agreeing with the scene.
+    assert_eq!(base_line + 2.0 * read_line / ascent, gloss.rect.h);
+
+    // 虹の, then the two-unit base 七色.
+    let (base_x, base_w) = (2.0 * unit, 2.0 * unit);
+    let (near, far) = (&gloss.ruby[0], &gloss.ruby[1]);
+
+    assert_eq!(4.0 * read_unit, near.w, "four half-size kana");
+    assert_eq!(5.0 * read_unit, far.w, "five");
+    assert_eq!(read_line, near.h);
+    assert_eq!(read_line, far.h);
+
+    // Both centred over the one base: なないろ is exactly a base wide, so it
+    // covers 七色 flush; しちしょく is half a reading unit wider on each side.
+    assert_eq!(base_x + (base_w - near.w) / 2.0, near.x);
+    assert_eq!(base_x + (base_w - far.w) / 2.0, far.x);
+
+    // The near band's bottom is the base's own ink top; the far band stands
+    // directly on the near band, and the pair fills the room the line grew.
+    let base_ink = ascent * gloss.rect.h - ascent * base_line;
+    assert_eq!(base_ink, near.y + near.h, "なないろ rests on 七色");
+    assert_eq!(near.y, far.y + far.h, "しちしょく rests on なないろ");
+    assert_eq!(0.0, far.y, "and the pair reaches the top of the room it bought");
+}
