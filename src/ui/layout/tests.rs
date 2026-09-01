@@ -6299,6 +6299,123 @@ fn an_empty_ruby_base_keeps_its_reading_beside_the_base_that_has_one() {
     assert_eq!(10.0 * unit, gloss.ruby[1].x, "over its own hole, not over 父");
 }
 
+// ---- a table whose children are not rows ----
+
+/// 旺文社漢字典 第四版's radical index: sweep row 94 (灬), its first two
+/// stroke-count groups verbatim, with the one declaration of that
+/// archive's 25 303-byte `styles.css` this shape resolves.
+///
+/// The archive writes the index as a `table` whose children are
+/// `span[data-sc-IndexSubG]`, one span per stroke-count group, and no
+/// `tr` and no `td` anywhere. Its stylesheet maps those spans onto the
+/// table model with `display: table-row`, which CSS 2.1 section 17.2 is
+/// explicitly for. chibipop resolves no `display` - the property is
+/// deliberately unmapped, because `display: grid` is the corpus's
+/// commonest declaration - so the groups reach the table walk as content
+/// written outside any cell, and what they get there is the
+/// anonymous-box repair CSS 2.1 section 17.2.1 writes for exactly this.
+fn radical_index() -> Presentation {
+    card_with(vec![css_tree(
+        "旺文社漢字典 第四版",
+        &sc(concat!(
+            r#"{"content":["#,
+            r#"{"content":["#,
+            r#"{"content":[{"content":[{"content":[{"content":"⓪","tag":"span"}"#,
+            r#"],"tag":"span","data":{"span":""}}"#,
+            r#"],"tag":"span","data":{"IndexSubNum":""}}"#,
+            r#"],"tag":"span","data":{"IndexSubNumC":""}},"#,
+            r#"{"content":[{"content":[{"content":[{"content":[{"content":"火","tag":"span"}"#,
+            r#"],"tag":"span","data":{"Red":""}}"#,
+            r#"],"tag":"span","data":{"IndexChar":"","href":"04088"}}"#,
+            r#"],"tag":"span","data":{"indexlist":"","部首内":"","class":"部首内"}}"#,
+            r#"],"tag":"span","data":{"IndexSubC":""}}"#,
+            r#"],"tag":"span","data":{"IndexSubG":""}},"#,
+            r#"{"content":["#,
+            r#"{"content":[{"content":[{"content":[{"content":"②","tag":"span"}"#,
+            r#"],"tag":"span","data":{"span":""}}"#,
+            r#"],"tag":"span","data":{"IndexSubNum":""}}"#,
+            r#"],"tag":"span","data":{"IndexSubNumC":""}},"#,
+            r#"{"content":[{"content":[{"content":[{"content":[{"content":"灰","tag":"span"}"#,
+            r#"],"tag":"span","data":{"Red":""}}"#,
+            r#"],"tag":"span","data":{"IndexChar":"","href":"04089"}}"#,
+            r#"],"tag":"span","data":{"indexlist":"","部首内":"","class":"部首内"}},"#,
+            r#"{"content":[{"content":[{"content":[{"content":"灯","tag":"span"}"#,
+            r#"],"tag":"span","data":{"Red":""}}"#,
+            r#"],"tag":"span","data":{"IndexChar":"","href":"04090"}}"#,
+            r#"],"tag":"span","data":{"indexlist":"","部首内":"","class":"部首内"}}"#,
+            r#"],"tag":"span","data":{"IndexSubC":""}}"#,
+            r#"],"tag":"span","data":{"IndexSubG":""}}"#,
+            r#"],"data":{"table":""},"tag":"table"}"#,
+        )),
+        "[data-sc-indexlist][data-sc部首内] { font-size: 1.4em; }",
+    )])
+}
+
+/// The acceptance: a run of children that are no table children is
+/// **one** anonymous cell in **one** anonymous row, so the index reads in
+/// the order the dictionary wrote it. One cell per child made the two
+/// groups two columns sharing one row - 19 of them in the whole index,
+/// each about 6 px wide, with the reading order turned 90 degrees, the
+/// right-hand strips off the edge of the panel and neighbouring strips
+/// printing glyphs over each other.
+///
+/// The arithmetic, so a reader can redo it: the stylesheet's
+/// `font-size: 1.4em` makes a kanji 21 at [`BOX_EM`], so it advances 10.5
+/// and a stroke-count number advances 7.5. Two numbers and three kanji
+/// are 46.5 wide, on one line as tall as the 1.4em that set it.
+#[test]
+fn a_table_whose_children_are_not_rows_becomes_one_cell_and_not_one_column_each() {
+    let s = laid_out(&radical_index(), 424.0, 4000.0, false, false);
+    assert_eq!(1, grid_cells(&s).len(), "one anonymous cell, not one per group");
+
+    let index = s
+        .elems
+        .iter()
+        .find(|e| e.kind == ElemKind::Text && e.text == "⓪火②灰灯")
+        .unwrap_or_else(|| panic!("the index reads in document order: {:?}", texts(&s)));
+    assert_eq!(2.0 * BOX_EM * ADVANCE + 3.0 * 1.4 * BOX_EM * ADVANCE, index.rect.w);
+    assert_eq!(1.4 * BOX_EM * LINE_H, index.rect.h, "one line, as tall as its kanji");
+
+    // And the grid is that one column and nothing else: a table with no
+    // declared width is shrink-to-fit, so 19 groups can no longer ask the
+    // panel for 19 tracks it has to scale to fit.
+    let table = find(&s, ElemKind::Table);
+    assert_eq!((index.rect.x, index.rect.y, index.rect.w), (table.rect.x, table.rect.y, table.rect.w));
+}
+
+/// An anonymous cell is no `td`, so it draws none of Yomitan's cell
+/// defaults: those hang on `.gloss-sc-th, .gloss-sc-td` and a `span`
+/// matches neither class, and CSS 2.1 section 17.2.1 gives an anonymous
+/// box the initial value of every property it does not inherit.
+///
+/// Charging them drew 19 boxes a browser leaves undrawn and took 0.25em
+/// of padding per side out of columns narrower than that, which is what
+/// drove each group's wrap width onto its own 1 px floor.
+#[test]
+fn an_anonymous_cell_draws_no_border_and_pays_no_padding() {
+    let s = laid_out(&radical_index(), 424.0, 4000.0, false, false);
+    let cell = grid_cells(&s)[0];
+    assert_eq!(BoxStyle::default(), block_box(cell).style);
+    // Which is one number twice: the content starts on the cell's own
+    // top-left corner, with no rule and no padding between.
+    assert_eq!((cell.rect.x, cell.rect.y), cell.pen);
+}
+
+/// The run is *consecutive* siblings and not every stray in the row.
+/// CSS 2.1 section 17.2.1 rule 2.3 wraps a non-cell child "and all
+/// consecutive siblings of C that are not 'table-cell' boxes", so a
+/// written cell closes the anonymous one before it and the content after
+/// it opens another - three columns, in the order the row wrote them.
+#[test]
+fn a_written_cell_closes_the_anonymous_cell_the_content_before_it_opened() {
+    let row = r#"{"tag":"tr","content":["a","b",{"tag":"td","content":"c"},"d"]}"#;
+    let s = gridded(&table(&[row.to_string()]), 424.0);
+
+    assert_eq!(3, grid_cells(&s).len());
+    let cells: Vec<&str> = grid_text(&s).iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(vec!["ab", "c", "d"], cells, "the two strays before the `td` share one cell");
+}
+
 // ---- two readings over one base ----
 
 /// 岩波国語辞典　第八版 writes cross-references that carry both readings of a

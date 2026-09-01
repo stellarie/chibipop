@@ -455,24 +455,85 @@ impl Paragraphs<'_> {
     /// census counts zero of.
     ///
     /// Content a dictionary wrote
-    /// outside any cell becomes an
-    /// implied cell in an implied row,
-    /// so a malformed table loses none
-    /// of it. An implied cell holding
-    /// only the whitespace between two
+    /// outside any cell becomes **one**
+    /// anonymous cell in **one**
+    /// anonymous row, so a malformed
+    /// table loses none of it and gains
+    /// no structure either. That count
+    /// is CSS 2.1 section 17.2.1's own
+    /// repair and not a simplification
+    /// of it: rule 2.1 wraps a child
+    /// that is no proper table child
+    /// "and all consecutive siblings of
+    /// C that are not proper table
+    /// children" in one anonymous row,
+    /// and rule 2.3 wraps a run of
+    /// non-cell children of that row in
+    /// one anonymous cell. A `td`
+    /// written straight under a `table`
+    /// is no proper table child either,
+    /// so it joins the same anonymous
+    /// row as the runs around it and
+    /// keeps its own slot in it.
+    ///
+    /// One cell per child instead is
+    /// what turned 旺文社漢字典 第四版's
+    /// radical index 90 degrees: that
+    /// index is a `table` of 19
+    /// `span`s, one per stroke-count
+    /// group, and it came out as one
+    /// row of 19 columns about 6 px
+    /// wide each. A browser reads the
+    /// dictionary's own stylesheet
+    /// there and draws 19 rows of two
+    /// columns; chibipop resolves no
+    /// `display` at all, deliberately
+    /// (`Tag::is_block`, and
+    /// `display: grid` is the corpus's
+    /// commonest declaration), so the
+    /// anonymous-box repair is the
+    /// reading it can hold - and it is
+    /// the reading a browser falls back
+    /// to with the stylesheet gone.
+    /// Neither reading produces 19
+    /// columns.
+    ///
+    /// An anonymous cell holding only
+    /// the whitespace between two
     /// written cells is dropped, and
     /// with it the column it would
     /// otherwise have invented.
     pub(super) fn rows_of(&mut self, id: NodeId, ctx: Ctx, head: bool, out: &mut Vec<Vec<Cell>>) {
         let doc = self.doc;
         let mut stray: Vec<Cell> = Vec::new();
+        // The run of consecutive
+        // children the next anonymous
+        // cell will hold, each with the
+        // index its own address needs.
+        // One buffer per table rather
+        // than one per cell: a run is
+        // closed at a boundary and
+        // started again empty.
+        let mut loose: Vec<(usize, NodeId)> = Vec::new();
         for (i, child) in doc.children(id).enumerate() {
-            let at = ctx.at(i);
             let tag = doc.node(child).tag;
             let row_level = matches!(tag, Tag::Tr | Tag::Thead | Tag::Tbody | Tag::Tfoot);
+            // Every other tag joins the
+            // run. A boundary - a
+            // written cell, a row-level
+            // tag, or the end below -
+            // closes it into the one
+            // anonymous cell it is owed.
+            if !row_level && !matches!(tag, Tag::Td | Tag::Th) {
+                loose.push((i, child));
+                continue;
+            }
+            stray.extend(self.implied(ctx, &loose));
+            loose.clear();
             if row_level && !stray.is_empty() {
                 out.push(std::mem::take(&mut stray));
             }
+            let at = ctx.at(i);
             match tag {
                 Tag::Tr => {
                     let row = self.row(child, at, head);
@@ -486,10 +547,14 @@ impl Paragraphs<'_> {
                     let inner = Ctx { inline, block: block.inherited(), ..at };
                     self.rows_of(child, inner, head || tag == Tag::Thead, out);
                 }
-                Tag::Td | Tag::Th => stray.push(self.cell(child, at, head, false)),
-                _ => stray.extend(self.implied(child, at, head)),
+                // A `td` or a `th`, and
+                // nothing else: the guard
+                // above took every other
+                // tag into the run.
+                _ => stray.push(self.cell(child, at, head)),
             }
         }
+        stray.extend(self.implied(ctx, &loose));
         if !stray.is_empty() {
             out.push(stray);
         }
@@ -518,43 +583,87 @@ impl Paragraphs<'_> {
             path: ctx.path,
         };
         let mut out = Vec::new();
+        let mut loose: Vec<(usize, NodeId)> = Vec::new();
         for (i, child) in doc.children(id).enumerate() {
-            let at = inner.at(i);
-            match doc.node(child).tag {
-                Tag::Td | Tag::Th => out.push(self.cell(child, at, head, false)),
-                _ => out.extend(self.implied(child, at, head)),
+            if !matches!(doc.node(child).tag, Tag::Td | Tag::Th) {
+                loose.push((i, child));
+                continue;
             }
+            out.extend(self.implied(inner, &loose));
+            loose.clear();
+            out.push(self.cell(child, inner.at(i), head));
         }
+        out.extend(self.implied(inner, &loose));
         out
     }
 
-    /// A cell for content written
-    /// outside one, if it renders
+    /// The one anonymous cell a run of
+    /// content written outside any cell
+    /// collapses into, if it renders
     /// anything.
     ///
     /// An explicit empty `<td>` is a
     /// blank in a paradigm and keeps
-    /// its border; an implied cell
+    /// its border; an anonymous cell
     /// holding nothing is the
     /// whitespace a dictionary left
     /// between two written cells, and
     /// a border round it would invent a
-    /// column. The node's own
-    /// declarations are not read into
-    /// the cell's box either: they
-    /// belong to the node, which
+    /// column.
+    ///
+    /// It draws no border and pays no
+    /// padding either, because it is no
+    /// `td`. Yomitan hangs its cell
+    /// defaults on
+    /// `.gloss-sc-th, .gloss-sc-td` and
+    /// a `span` matches neither class,
+    /// and CSS 2.1 section 17.2.1 gives
+    /// an anonymous box the initial
+    /// value of every property it does
+    /// not inherit. Charging
+    /// [`Paragraphs::cell_defaults`]
+    /// here drew 19 boxes a browser
+    /// leaves undrawn over 旺文社漢字典's
+    /// radical index, and took 0.25em
+    /// of padding per side out of
+    /// columns narrower than that -
+    /// which is what drove the wrap
+    /// width onto its own 1 px floor
+    /// and put every glyph of a group
+    /// on a line of its own.
+    ///
+    /// The run's own declarations are
+    /// not read into the cell's box
+    /// either: they belong to the
+    /// nodes, which
     /// [`Paragraphs::node`] resolves
     /// again inside the cell, and
     /// taking them twice would pay a
     /// margin twice.
-    pub(super) fn implied(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Option<Cell> {
-        let cell = self.cell(id, ctx, head, true);
-        (!cell.body.is_empty()).then_some(cell)
+    pub(super) fn implied(&mut self, ctx: Ctx, run: &[(usize, NodeId)]) -> Option<Cell> {
+        if run.is_empty() {
+            return None;
+        }
+        // An anonymous box has no
+        // element, so the cell is
+        // addressed by the table or the
+        // row that generated it.
+        let body = self.enclose(ctx.path, ctx.block.inherited(), |p| {
+            for &(i, child) in run {
+                p.node(child, ctx.at(i), false);
+            }
+        });
+        (!body.is_empty()).then(|| Cell {
+            body,
+            style: BoxStyle::default(),
+            base: ctx.inline,
+            at: (0, 0),
+            span: (1, 1),
+            path: ctx.path,
+        })
     }
 
-    /// One cell: a `td`, a `th`, or a
-    /// slot implied by content written
-    /// outside one.
+    /// One `td` or `th`.
     ///
     /// The cell opens a paragraph of
     /// its own rather than joining the
@@ -569,7 +678,7 @@ impl Paragraphs<'_> {
     /// address, so a hit inside a
     /// conjugation table resolves to
     /// that cell's subtree.
-    pub(super) fn cell(&mut self, id: NodeId, ctx: Ctx, head: bool, implied: bool) -> Cell {
+    pub(super) fn cell(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Cell {
         let doc = self.doc;
         let inline = self.styled(id, ctx.inline);
         // Yomitan tints a `th` and
@@ -580,40 +689,15 @@ impl Paragraphs<'_> {
         // weight from the `thead` and no
         // second rule belongs here.
         let tint = head || doc.node(id).tag == Tag::Th;
-        let mut block = self.cell_defaults(ctx.block, inline, tint);
-        if !implied {
-            block = self.declared(id, block, inline.size);
-        }
+        let defaults = self.cell_defaults(ctx.block, inline, tint);
+        let block = self.declared(id, defaults, inline.size);
         let inner = Ctx {
             inline,
             block: block.inherited(),
             link: self.link_of(id, ctx.link),
             path: ctx.path,
         };
-        // The cell's own paragraphs,
-        // collected off to one side: the
-        // grid measures each cell
-        // separately, so they cannot go
-        // into the stream the panel is
-        // stacking.
-        let outer = std::mem::take(&mut self.out);
-        self.open(ctx.path, block.inherited());
-        if implied {
-            self.node(id, ctx, false);
-        } else {
-            self.children(id, inner);
-        }
-        self.flush();
-        let mut body = std::mem::replace(&mut self.out, outer);
-        for (i, piece) in body.iter_mut().enumerate() {
-            // A cell's first paragraph
-            // starts at the cell's own
-            // top; the ones under it are
-            // spaced as the panel spaces
-            // every other stacked
-            // paragraph.
-            piece.top_gap(if i == 0 { 0.0 } else { LINE_GAP });
-        }
+        let body = self.enclose(ctx.path, block.inherited(), |p| p.children(id, inner));
         Cell {
             body,
             style: block.style,
@@ -622,6 +706,34 @@ impl Paragraphs<'_> {
             span: (span_of(doc, id, "rowSpan"), span_of(doc, id, "colSpan")),
             path: ctx.path,
         }
+    }
+
+    /// One cell's paragraphs, collected
+    /// off to one side: the grid
+    /// measures each cell separately,
+    /// so they cannot go into the
+    /// stream the panel is stacking.
+    ///
+    /// A cell's first paragraph starts
+    /// at the cell's own top; the ones
+    /// under it are spaced as the panel
+    /// spaces every other stacked
+    /// paragraph.
+    fn enclose(
+        &mut self,
+        path: Option<NodePath>,
+        block: Block,
+        walk: impl FnOnce(&mut Self),
+    ) -> Vec<Piece> {
+        let outer = std::mem::take(&mut self.out);
+        self.open(path, block);
+        walk(self);
+        self.flush();
+        let mut body = std::mem::replace(&mut self.out, outer);
+        for (i, piece) in body.iter_mut().enumerate() {
+            piece.top_gap(if i == 0 { 0.0 } else { LINE_GAP });
+        }
+        body
     }
 
     /// Yomitan's own cell box, before
