@@ -1623,17 +1623,13 @@ impl Report {
         }
     }
 
-    /// The whole run summary, as a `--nocapture` run prints it.
+    /// Every dictionary's counts folded into one row.
     ///
-    /// A string rather than a walk of `println!`s because the absorbed
-    /// counts are the suppression list's own acceptance criterion, and a
-    /// criterion no test can read is a wish.
-    fn summary(&self) -> String {
-        let mut out = String::new();
+    /// One fold and one caller-visible answer, because the printed summary
+    /// and the run manifest must never disagree about what the run saw.
+    fn totals(&self) -> DictSummary {
         let mut total = DictSummary { dictionary: "TOTAL".into(), ..DictSummary::default() };
         for d in &self.dicts {
-            out.push_str(&summary_line(d));
-            out.push('\n');
             total.entries += d.entries;
             total.strings += d.strings;
             total.fragments += d.fragments;
@@ -1649,6 +1645,21 @@ impl Report {
             total.errors += d.errors;
         }
         total.candidates = self.candidates.len() as u64;
+        total
+    }
+
+    /// The whole run summary, as a `--nocapture` run prints it.
+    ///
+    /// A string rather than a walk of `println!`s because the absorbed
+    /// counts are the suppression list's own acceptance criterion, and a
+    /// criterion no test can read is a wish.
+    fn summary(&self) -> String {
+        let mut out = String::new();
+        for d in &self.dicts {
+            out.push_str(&summary_line(d));
+            out.push('\n');
+        }
+        let total = self.totals();
         out.push_str(&summary_line(&total));
         out.push('\n');
         if self.only.contains(&Invariant::WidthMonotonicity) {
@@ -1706,7 +1717,8 @@ impl Report {
         out
     }
 
-    /// Writes one JSON file per candidate into `dir`, and returns them.
+    /// Writes one JSON file per candidate into `dir`, plus this run's
+    /// manifest, and returns the candidate files.
     ///
     /// Clears the sweep's own stale candidate files first, so what is on disk
     /// after a run is exactly that run's candidates and a shape that stopped
@@ -1714,6 +1726,12 @@ impl Report {
     /// written are removed - `CHIBIPOP_SWEEP_OUT` can name any directory, and
     /// eating a neighbour's JSON would be a poor way to report a clean
     /// corpus.
+    ///
+    /// The manifest exists because clearing stale candidates makes an empty
+    /// directory ambiguous: a corpus with nothing left to adjudicate and a
+    /// sweep nobody ran look identical on disk. It records what the run
+    /// covered, so the finish-line check can tell a clean sweep from no
+    /// sweep, and can refuse to call a capped or narrowed run a full one.
     fn write(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(dir)?;
         for entry in std::fs::read_dir(dir)? {
@@ -1728,7 +1746,32 @@ impl Report {
             std::fs::write(&path, candidate_json(c, key))?;
             written.push(path);
         }
+        std::fs::write(dir.join(RUN_MANIFEST), self.manifest_json())?;
         Ok(written)
+    }
+
+    /// This run's manifest: what it covered, and what it found.
+    ///
+    /// `rows_unread` and `invariants` are recorded apart from the
+    /// `whole_corpus` verdict they combine into, so a reader of a partial run
+    /// is told which of the two made it partial.
+    fn manifest_json(&self) -> String {
+        let t = self.totals();
+        let only: Vec<&str> = self.only.iter().map(|i| i.as_str()).collect();
+        let all = Invariant::ALL.len();
+        let json = serde_json::json!({
+            "invariants": only,
+            "invariants_available": all,
+            "rows_unread": self.partial,
+            "whole_corpus": !self.partial && self.only.len() == all,
+            "dictionaries": self.dicts.len(),
+            "entries": t.entries,
+            "violations": t.violations,
+            "suppressed": t.suppressed,
+            "candidates": t.candidates,
+            "errors": t.errors,
+        });
+        format!("{}\n", serde_json::to_string_pretty(&json).expect("a manifest serialises"))
     }
 }
 
@@ -1772,6 +1815,12 @@ fn monotonicity_cost(total: &DictSummary) -> String {
         total.widths,
     )
 }
+
+/// The run manifest's filename.
+///
+/// Deliberately not a candidate filename, so [`is_candidate_file`] leaves it
+/// alone and a rerun replaces it by name rather than by the clearing sweep.
+const RUN_MANIFEST: &str = "run.json";
 
 /// A candidate's filename: readable prefix, stable suffix.
 fn candidate_file(c: &Candidate, key: &str) -> String {
@@ -3427,6 +3476,23 @@ fn a_row_capped_sweep_of_the_fixture_archive_reports_every_entry() {
         .filter(|e| is_candidate_file(&e.path()))
         .count();
     assert_eq!(twice.len(), mine, "a rerun replaces its own output");
+
+    // The manifest is what tells a clean corpus apart from an unrun sweep, so it
+    // survives the clearing pass and reports the run that just happened.
+    let text = std::fs::read_to_string(out.join(RUN_MANIFEST)).expect("the run manifest");
+    let run: serde_json::Value = serde_json::from_str(&text).expect("readable JSON");
+    assert_eq!(Some(1), run["dictionaries"].as_u64(), "one archive was swept");
+    assert_eq!(Some(3), run["entries"].as_u64(), "every row of the fixture");
+    assert_eq!(
+        Some(whole.candidates.len() as u64),
+        run["candidates"].as_u64(),
+        "the manifest agrees with the report it came from",
+    );
+    assert_eq!(
+        Some(true),
+        run["whole_corpus"].as_bool(),
+        "an uncapped run of every invariant is a whole one",
+    );
     std::fs::remove_dir_all(&out).expect("cleaning up");
 }
 
