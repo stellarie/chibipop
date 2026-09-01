@@ -13,11 +13,14 @@ const DROP_CONTENT: [&str; 6] = [
     "example-sentence-a",
     "example-sentence-b",
 ];
+const BLOCK_TAGS: [&str; 3] = ["div", "li", "p"];
 
 /// Plain-text glosses.
 pub fn flatten_glossary(glossary: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    let Some(items) = glossary.as_array() else { return out };
+    let Some(items) = glossary.as_array() else {
+        return out;
+    };
     for item in items {
         let text = match item {
             Value::String(s) => tidy(s),
@@ -54,7 +57,9 @@ pub fn extract_pos(glossary: &Value) -> Vec<String> {
 
 /// data.content, if not null.
 fn content_marker(node: &Value) -> Option<&Value> {
-    node.get("data").and_then(|d| d.get("content")).filter(|v| !v.is_null())
+    node.get("data")
+        .and_then(|d| d.get("content"))
+        .filter(|v| !v.is_null())
 }
 
 /// One node to plain text.
@@ -76,7 +81,7 @@ fn render(node: &Value) -> String {
             if tag == Some("br") {
                 return "\n".to_string();
             }
-            if tag == Some("li") || present.is_some() {
+            if tag.is_some_and(|t| BLOCK_TAGS.contains(&t)) || present.is_some() {
                 let mut marked = String::from(BLOCK_MARK);
                 marked.push_str(&content_of(node));
                 return marked;
@@ -103,7 +108,10 @@ fn collect_pos(node: &Value, out: &mut Vec<String>) {
     if !node.is_object() {
         return;
     }
-    let marker = node.get("data").and_then(|d| d.get("content")).and_then(Value::as_str);
+    let marker = node
+        .get("data")
+        .and_then(|d| d.get("content"))
+        .and_then(Value::as_str);
     if marker.is_some_and(|m| DROP_CONTENT.contains(&m)) {
         return;
     }
@@ -154,7 +162,9 @@ const STYLE_KEYS: [(&str, &str); 6] = [
 /// `flatten_glossary`.
 pub fn render_glossary_html(glossary: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    let Some(items) = glossary.as_array() else { return out };
+    let Some(items) = glossary.as_array() else {
+        return out;
+    };
     for item in items {
         let html = match item {
             Value::String(s) => escape_text(s),
@@ -254,9 +264,11 @@ fn style_value(v: &Value) -> String {
     match v {
         Value::Number(n) => format!("{n}em"),
         Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")
-        }
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
         _ => String::new(),
     }
 }
@@ -287,7 +299,7 @@ fn tidy(text: &str) -> String {
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .collect();
-    let collapsed = collapse_spaces(&parts.join("; "));
+    let collapsed = collapse_spaces(&parts.join("\n"));
     collapsed
         .split('\n')
         .map(str::trim)
@@ -352,7 +364,7 @@ mod tests {
             {"tag": "span", "data": {"content": "sense"}, "content": "one"},
             {"tag": "span", "data": {"content": "sense"}, "content": "two"}
         ]}]);
-        assert_eq!(vec!["one; two".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["one\ntwo".to_string()], flatten_glossary(&g));
     }
 
     #[test]
@@ -361,7 +373,7 @@ mod tests {
             {"tag": "span", "data": {"content": 5}, "content": "one"},
             {"tag": "span", "data": {"content": true}, "content": "two"}
         ]}]);
-        assert_eq!(vec!["one; two".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["one\ntwo".to_string()], flatten_glossary(&g));
     }
 
     #[test]
@@ -403,7 +415,10 @@ mod tests {
             {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": "noun"},
             {"tag": "span", "content": "chatting"}
         ]}]);
-        assert_eq!(vec!["noun".to_string(), "suru".to_string()], extract_pos(&g));
+        assert_eq!(
+            vec!["noun".to_string(), "suru".to_string()],
+            extract_pos(&g)
+        );
         assert_eq!(vec!["chatting".to_string()], flatten_glossary(&g));
     }
 
@@ -427,7 +442,10 @@ mod tests {
 
     #[test]
     fn a_plain_string_passes_through() {
-        assert_eq!(vec!["to eat".to_string()], flatten_glossary(&json!(["to eat"])));
+        assert_eq!(
+            vec!["to eat".to_string()],
+            flatten_glossary(&json!(["to eat"]))
+        );
     }
 
     #[test]
@@ -482,11 +500,32 @@ mod tests {
     #[test]
     fn list_items_get_a_separator() {
         let g = json!([{"type": "structured-content", "content": {
-            "tag": "ul", "content": [
-                {"tag": "li", "content": "first"},
-                {"tag": "li", "content": "second"}
-            ]}}]);
-        assert_eq!(vec!["first; second".to_string()], flatten_glossary(&g));
+        "tag": "ul", "content": [
+            {"tag": "li", "content": "first"},
+            {"tag": "li", "content": "second"}
+        ]}}]);
+        assert_eq!(vec!["first\nsecond".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn sibling_divs_keep_a_line_break() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "div", "content": "to run"},
+            {"tag": "div", "content": "to flow"}
+        ]}]);
+        assert_eq!(vec!["to run\nto flow".to_string()], flatten_glossary(&g));
+    }
+
+    #[test]
+    fn sibling_paragraphs_keep_a_line_break() {
+        let g = json!([{"type": "structured-content", "content": [
+            {"tag": "p", "content": "first paragraph"},
+            {"tag": "p", "content": "second paragraph"}
+        ]}]);
+        assert_eq!(
+            vec!["first paragraph\nsecond paragraph".to_string()],
+            flatten_glossary(&g)
+        );
     }
 
     #[test]
@@ -532,26 +571,36 @@ mod tests {
             {"tag": "span", "data": {"content": "xref"}, "content": "see also"},
             {"tag": "span", "data": {"content": "forms"}, "content": "alt form"}
         ]}]);
-        assert_eq!(vec!["see also; alt form".to_string()], flatten_glossary(&g));
+        assert_eq!(vec!["see also\nalt form".to_string()], flatten_glossary(&g));
     }
 
     #[test]
     fn pos_labels_are_extracted_in_order() {
         let g = pos_doc(&["noun", "suru", "intransitive"]);
-        let expected = vec!["noun".to_string(), "suru".to_string(), "intransitive".to_string()];
+        let expected = vec![
+            "noun".to_string(),
+            "suru".to_string(),
+            "intransitive".to_string(),
+        ];
         assert_eq!(expected, extract_pos(&g));
     }
 
     #[test]
     fn pos_labels_do_not_leak_into_the_glossary() {
         let g = pos_doc(&["noun", "suru", "intransitive"]);
-        assert_eq!(vec!["chatting; idle talk".to_string()], flatten_glossary(&g));
+        assert_eq!(
+            vec!["chatting\nidle talk".to_string()],
+            flatten_glossary(&g)
+        );
     }
 
     #[test]
     fn repeated_pos_labels_are_deduped() {
         let g = pos_doc(&["noun", "noun", "suru"]);
-        assert_eq!(vec!["noun".to_string(), "suru".to_string()], extract_pos(&g));
+        assert_eq!(
+            vec!["noun".to_string(), "suru".to_string()],
+            extract_pos(&g)
+        );
     }
 
     #[test]
@@ -587,13 +636,19 @@ mod tests {
 
     #[test]
     fn a_plain_string_gloss_is_escaped_but_unwrapped() {
-        assert_eq!(vec!["to eat".to_string()], render_glossary_html(&json!(["to eat"])));
+        assert_eq!(
+            vec!["to eat".to_string()],
+            render_glossary_html(&json!(["to eat"]))
+        );
     }
 
     #[test]
     fn a_typed_text_node_is_escaped() {
         let g = json!([{"type": "text", "text": "5 < 10 & true"}]);
-        assert_eq!(vec!["5 &lt; 10 &amp; true".to_string()], render_glossary_html(&g));
+        assert_eq!(
+            vec!["5 &lt; 10 &amp; true".to_string()],
+            render_glossary_html(&g)
+        );
     }
 
     #[test]
@@ -659,7 +714,10 @@ mod tests {
             {"tag": "img", "path": "gaiji/x.svg"},
             {"tag": "span", "content": "meaning"}
         ]}]);
-        assert_eq!(vec!["<span>meaning</span>".to_string()], render_glossary_html(&g));
+        assert_eq!(
+            vec!["<span>meaning</span>".to_string()],
+            render_glossary_html(&g)
+        );
     }
 
     #[test]
@@ -678,10 +736,10 @@ mod tests {
     #[test]
     fn lists_render_as_real_markup_not_a_separator_hack() {
         let g = json!([{"type": "structured-content", "content": {
-            "tag": "ul", "content": [
-                {"tag": "li", "content": "first"},
-                {"tag": "li", "content": "second"}
-            ]}}]);
+        "tag": "ul", "content": [
+            {"tag": "li", "content": "first"},
+            {"tag": "li", "content": "second"}
+        ]}}]);
         assert_eq!(
             vec!["<ul><li>first</li><li>second</li></ul>".to_string()],
             render_glossary_html(&g)
@@ -699,7 +757,10 @@ mod tests {
                 {"tag": "span", "content": "a sentence"}
             ]}
         ]}]);
-        assert_eq!(vec!["<span>to eat</span>".to_string()], render_glossary_html(&g));
+        assert_eq!(
+            vec!["<span>to eat</span>".to_string()],
+            render_glossary_html(&g)
+        );
     }
 
     #[test]

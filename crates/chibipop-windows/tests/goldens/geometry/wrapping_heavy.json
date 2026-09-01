@@ -6,7 +6,7 @@
       "content": {
         "content_w": "336.00",
         "origin": "12.00",
-        "used_h": "313.99"
+        "used_h": "317.99"
       },
       "elements": [
         {
@@ -80,24 +80,38 @@
           "y": "93.84"
         },
         {
-          "advance": "119.71",
+          "advance": "79.80",
           "font_size": "15.00",
-          "h": "119.71",
+          "h": "79.80",
           "i": 5,
           "kind": "Text",
-          "lines": 6,
-          "text": "the butterfly dream: the illusion that it is impossible to distinguish between the dreamer and the dream, between waking life and the images it leaves behind; an experience impossible to tell apart from a vivid dream of the same experience",
+          "lines": 4,
+          "text": "the butterfly dream: the illusion that it is impossible to distinguish between the dreamer and the dream, between waking life and the images it leaves behind",
           "top_gap": "4.00",
-          "w": "328.74",
+          "w": "310.76",
           "wrap_w": "336.00",
           "x": "12.00",
           "y": "115.13"
         },
         {
+          "advance": "39.90",
+          "font_size": "15.00",
+          "h": "39.90",
+          "i": 6,
+          "kind": "Text",
+          "lines": 2,
+          "text": "an experience impossible to tell apart from a vivid dream of the same experience",
+          "top_gap": "4.00",
+          "w": "329.32",
+          "wrap_w": "336.00",
+          "x": "12.00",
+          "y": "198.94"
+        },
+        {
           "advance": "17.29",
           "font_size": "13.00",
           "h": "17.29",
-          "i": 6,
+          "i": 7,
           "kind": "Text",
           "lines": 1,
           "text": "大辞林",
@@ -105,13 +119,13 @@
           "w": "39.00",
           "wrap_w": "336.00",
           "x": "12.00",
-          "y": "244.84"
+          "y": "248.84"
         },
         {
           "advance": "59.85",
           "font_size": "15.00",
           "h": "59.85",
-          "i": 7,
+          "i": 8,
           "kind": "Text",
           "lines": 3,
           "text": "夢の中で胡蝶となった荘子が、夢がさめてから、自分が夢で胡蝶となったのか、胡蝶が夢で自分となっているのかと疑ったという故事。人生の儚さのたとえ。",
@@ -119,7 +133,7 @@
           "w": "333.03",
           "wrap_w": "336.00",
           "x": "12.00",
-          "y": "266.13"
+          "y": "270.13"
         }
       ],
       "hits": [
@@ -160,9 +174,9 @@
       },
       "match_highlight": null,
       "measure": {
-        "content_h": 338,
+        "content_h": 342,
         "total_w": 360,
-        "view_h": 338
+        "view_h": 342
       },
       "scroll": {
         "max_scroll": 0,
