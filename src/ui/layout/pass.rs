@@ -212,8 +212,10 @@ impl<'a> Pass<'a> {
         // the item's first line.
         let marker = place_markers(flow, &marks, &self.measured, indent, pen.0);
         // Each image over the spacer
-        // run that bought its room.
-        let images = place_images(flow, &self.measured, pen, line_at);
+        // run that bought its room, and
+        // capped at the room the block
+        // itself was given (ticket 24).
+        let images = place_images(flow, &self.measured, pen, wrap_w, line_at);
 
         let spans = flow
             .spans

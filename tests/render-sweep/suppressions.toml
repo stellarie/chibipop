@@ -29,5 +29,8 @@
 #   signature = "dropped-text | Some Dictionary | content > div > rt > text"
 #   reason = "The author annotates a base the entry does not carry; nothing is lost."
 #
-# No entry yet: adjudication is the render-sweep effort's own ticket, and an
-# exemption invented before a candidate existed would be a guess.
+# The list starts here.
+
+[[suppress]]
+signature = "width-monotonicity | 現代国語例解辞典　第五版 | content > div > div{margin-right} > span{padding} > table > tr > td{background-color,border-style,border-width,text-align,vertical-align} > div{margin}"
+reason = "A コラム illustration is capped at its own column and grows back toward its declared size when the panel widens; the reader gains a bigger picture, not a longer entry."

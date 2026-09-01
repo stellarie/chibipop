@@ -303,7 +303,7 @@ pub(super) fn place_ruby(
             .get(b.span as usize)
             .and_then(|s| flow.images.get(s.image as usize))
         {
-            Some(img) => image_rise(img, *geom),
+            Some(img) => image_rise(img, *geom, wrap_w),
             None => box_.ascent * b.h,
         };
         let (left, right, top) = measured

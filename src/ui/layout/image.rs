@@ -54,7 +54,7 @@ use super::style::{finite, shift_on, Inline};
 ///
 /// Then the arithmetic. `n` spacers at
 /// size `s` advance `n * u * s`, so
-/// the width the ladder resolved fixes
+/// the width the fitted box has fixes
 /// `s` exactly. A span of size `r`
 /// gives `asc * r` to the space above
 /// its line's baseline, so the height
@@ -65,11 +65,18 @@ use super::style::{finite, shift_on, Inline};
 /// wide: past that cap the reservation
 /// comes out a few percent narrow
 /// instead ([`IMAGE_SPACERS_PER_ASPECT`]).
+///
+/// `room` is the width the paragraph
+/// wraps at, and it is both what the
+/// probe is measured against and what
+/// [`image_box`] fits the picture to,
+/// so a picture reserves exactly the
+/// room it will be drawn in.
 pub(super) fn measure_images(
     m: &mut dyn TextMeasure,
     font: &str,
     flow: &Flow,
-    max_w: f32,
+    room: f32,
     run: &mut [StyledSpan<'_>],
 ) -> Result<(), MeasureError> {
     if flow.images.is_empty() {
@@ -88,7 +95,7 @@ pub(super) fn measure_images(
             italic: img.style.italic,
             color: img.style.color,
         };
-        m.measure(MeasureRun { spans: &[probe], max_w }, &mut scratch)?;
+        m.measure(MeasureRun { spans: &[probe], max_w: room }, &mut scratch)?;
         // The span's own box, not
         // `metrics.w`: DirectWrite's
         // aggregate width excludes
@@ -98,13 +105,14 @@ pub(super) fn measure_images(
         let per_size = |px: f32| if img.em > 0.0 { px / img.em } else { 0.0 };
         let advance = per_size(scratch.spans.first().map_or(0.0, |b| b.w));
         let ascent = per_size(scratch.lines.first().map_or(0.0, |l| l.baseline));
+        let (w, h) = image_box(img, room);
         // A raised image needs its rise
         // above the baseline as well as
         // its own height; a lowered one
         // hangs into the descent, which
         // is what a lowered span does
         // too and what neither reserves.
-        let rise = img.h + img.style.shift.max(0.0);
+        let rise = h + img.style.shift.max(0.0);
         let riser = if ascent > 0.0 { rise / ascent } else { rise };
         // A measurer that charges
         // nothing for a no-break space
@@ -113,7 +121,7 @@ pub(super) fn measure_images(
         // was built with: some room for
         // the image beats none.
         let spacer = if advance > 0.0 && img.spacers > 0 {
-            (img.w / (advance * img.spacers as f32)).min(riser)
+            (w / (advance * img.spacers as f32)).min(riser)
         } else {
             img.em
         };
@@ -134,7 +142,6 @@ pub(super) fn measure_images(
 /// this only reads back where each
 /// spacer landed and hangs the image
 /// off that line's baseline.
-///
 /// One element per image rather than a
 /// span of the paragraph, because an
 /// image is a replaced element: it has
@@ -144,10 +151,17 @@ pub(super) fn measure_images(
 /// advance already counts the line the
 /// riser grew - so it stacks nothing
 /// and shifts nothing after it.
+///
+/// `room` is the same width
+/// [`measure_images`] reserved
+/// against, and both fit the picture
+/// through [`image_box`], so what is
+/// drawn is exactly what was bought.
 pub(super) fn place_images(
     flow: &Flow,
     measured: &Measured,
     pen: (f32, f32),
+    room: f32,
     line_at: impl Fn(LineBox) -> f32,
 ) -> Vec<SceneElem> {
     let mut out = Vec::new();
@@ -184,11 +198,12 @@ pub(super) fn place_images(
         // landed on, with the image's box
         // as the span height a
         // line-relative value aligns.
+        let (w, h) = image_box(img, room);
         let rect = SceneRect {
             x: line_at(*geom) + left,
-            y: pen.1 + geom.y + geom.baseline - image_rise(img, *geom),
-            w: img.w,
-            h: img.h,
+            y: pen.1 + geom.y + geom.baseline - image_rise(img, *geom, room),
+            w,
+            h,
         };
         // The `alt` fallback as one
         // ordinary span, so a bin that
@@ -217,7 +232,7 @@ pub(super) fn place_images(
             weight: img.style.weight,
             italic: img.style.italic,
             top_gap: 0.0,
-            wrap_w: img.w.max(1.0),
+            wrap_w: w.max(1.0),
             align: Align::Leading,
             pen: (rect.x, rect.y),
             rect,
@@ -239,10 +254,56 @@ pub(super) fn place_images(
     out
 }
 
+/// One image's box, fitted to the room
+/// its block was given.
+///
+/// A declared size is a demand and not
+/// an answer. `image_size` resolves
+/// what the node asked for and clamps
+/// only at [`IMAGE_MAX_PX`], so a
+/// picture 現代国語例解辞典 declares
+/// `12.72em` wide was drawn 190.8 px
+/// wide inside whatever column it
+/// landed in - over the cell beside it
+/// where the table had one, and off
+/// the panel where it did not. Text in
+/// that cell rewraps when
+/// [`Pass::columns`] scales its track;
+/// a picture has nothing to rewrap, so
+/// the fit has to be here.
+///
+/// Yomitan asks for the same thing
+/// twice, `max-width: 100%` on
+/// `.gloss-image-link` and again on
+/// `.gloss-image-container`, and then
+/// clips what is left over with
+/// `overflow: hidden`. This build has
+/// no clip, and its painters stretch
+/// an asset into the rect they are
+/// given, so a width taken alone would
+/// squash a scanned illustration
+/// instead of cropping it. Both axes
+/// scale by the one factor: the reader
+/// gets the whole picture, smaller,
+/// inside its own cell.
+///
+/// Negated rather than reversed, so a
+/// room or a width that is not a
+/// number leaves the declared box
+/// exactly as it was.
+///
+/// [`Pass::columns`]: super::pass::Pass::columns
+pub(super) fn image_box(img: &FlowImage, room: f32) -> (f32, f32) {
+    if !(img.w > room && room > 0.0) {
+        return (img.w, img.h);
+    }
+    (room, img.h * (room / img.w))
+}
+
 /// How far above its line's baseline
 /// one image's box reaches.
 ///
-/// Its own height plus whatever
+/// Its own fitted height plus whatever
 /// `verticalAlign` asked for - ticket
 /// 07's own resolution, against the
 /// line the image landed on, with the
@@ -258,11 +319,16 @@ pub(super) fn place_images(
 /// reading's bottom on the top edge
 /// that leaves. A reading over a gaiji
 /// has to follow the picture, so where
-/// the picture sits is one decision.
+/// the picture sits is one decision -
+/// which is why `room` reaches here
+/// too: a mark over a picture its
+/// column shrank has to come down with
+/// it.
 ///
 /// [`place_ruby`]: super::ruby::place_ruby
-pub(super) fn image_rise(img: &FlowImage, line: LineBox) -> f32 {
-    img.h + shift_on(img.style, line, img.h)
+pub(super) fn image_rise(img: &FlowImage, line: LineBox, room: f32) -> f32 {
+    let (_, h) = image_box(img, room);
+    h + shift_on(img.style, line, h)
 }
 
 /// One image's box, by the ladder.

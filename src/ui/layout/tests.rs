@@ -6416,6 +6416,144 @@ fn a_written_cell_closes_the_anonymous_cell_the_content_before_it_opened() {
     assert_eq!(vec!["ab", "c", "d"], cells, "the two strays before the `td` share one cell");
 }
 
+// ---- a picture wider than its column ----
+
+/// 現代国語例解辞典　第五版's コラム panel: sweep row 542 (上がる), the first
+/// `tr` of its table verbatim, inside the two ancestor boxes the shape
+/// signature names. The archive holds no `styles.css`, so every
+/// declaration here is the entry's own.
+///
+/// Neither `img` declares an `alt` and the fragment carries no PNG, so
+/// `image_size` sizes each box from the node's own `width` and `height`:
+/// `7.95em` and `12.72em` across, `8em` down, at [`BOX_EM`].
+fn column_panel() -> Presentation {
+    let cell = |body: &str| {
+        format!(
+            concat!(
+                r#"{{"content":{body},"style":{{"backgroundColor":"var(--background-color)","#,
+                r#""borderStyle":"solid","borderWidth":"2px","textAlign":"center","#,
+                r#""verticalAlign":"middle"}},"tag":"td"}}"#
+            ),
+            body = body
+        )
+    };
+    let picture = |name: &str, w: f32| {
+        format!(
+            concat!(
+                r#"{{"content":{{"appearance":"auto","background":true,"collapsed":false,"#,
+                r#""collapsible":false,"height":8.0,"path":"genkokr5/GenKokR5-res-1/{name}","#,
+                r#""sizeUnits":"em","tag":"img","width":{w}}},"#,
+                r#""style":{{"margin":"0.5em"}},"tag":"div"}}"#
+            ),
+            name = name,
+            w = w
+        )
+    };
+    let title = concat!(
+        r#"{"content":{"content":"給料が上がるとテンションが上がる？","#,
+        r#""style":{"fontWeight":"bold"},"tag":"span"},"#,
+        r#""style":{"fontSize":"100%","fontWeight":"bold","padding":"0.5em","#,
+        r#""textAlign":"left"},"tag":"div"}"#
+    );
+    let row = format!(
+        r#"{{"content":[{},{},{}],"tag":"tr"}}"#,
+        cell(title),
+        cell(&picture("コラムあ_7.png", 7.95)),
+        cell(&picture("コラムあ_8.png", 12.72)),
+    );
+    card_with(vec![tree(
+        "現代国語例解辞典　第五版",
+        &sc(&format!(
+            concat!(
+                r#"{{"content":[{{"content":{{"content":{{"content":[{row}],"tag":"table"}},"#,
+                r#""style":{{"padding":"0.5em"}},"tag":"span"}},"#,
+                r#""style":{{"marginRight":"2em"}},"tag":"div"}}],"tag":"div"}}"#
+            ),
+            row = row
+        )),
+    )])
+}
+
+/// Every illustration with the block box that bought it its line: the
+/// nearest `Block` element before it in draw order, which is the
+/// `div{margin: 0.5em}` this archive wraps every picture in. A block's
+/// box leads its own content, so nearest and not first - boxes nest.
+fn pictures_in_blocks(s: &PopupScene) -> Vec<(&SceneElem, &SceneElem)> {
+    s.elems
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == ElemKind::Image)
+        .map(|(at, picture)| {
+            let block = s.elems[..at]
+                .iter()
+                .rev()
+                .find(|e| e.kind == ElemKind::Block)
+                .unwrap_or_else(|| panic!("nothing boxes the picture at {:?}", picture.rect));
+            (picture, block)
+        })
+        .collect()
+}
+
+/// Each コラム picture's fitted box, as `(w, h)`. The entry declares
+/// `7.95em` and `12.72em` across by `8em` down, which is 119.25 and 190.80
+/// by 120.00 at [`BOX_EM`]; the columns leave their blocks 78.94045 and
+/// 130.14372, and one factor per picture takes both axes down to these.
+const FITTED: [(f32, f32); 2] = [(78.94045, 79.436935), (130.14372, 81.8514)];
+
+/// The acceptance: a declared width is a demand, and the answer is the
+/// room the picture's own block was given. `Pass::columns` narrows a
+/// column and its text rewraps; a picture has nothing to rewrap, so it
+/// used to be drawn at its full declared width inside a column far
+/// narrower - over the cell to its right, and off the panel from the last
+/// column. Yomitan asks for the same cap twice (`max-width: 100%` on
+/// `.gloss-image-link` and on `.gloss-image-container`) before it clips
+/// the remainder away.
+///
+/// The two numbers the sweep measured on this entry, both zero here: the
+/// pictures overlapped by `15.67` px, and the second stood `5.26` px
+/// outside the 424 px panel - `238.46 + 190.80 - 424.00`.
+#[test]
+fn a_picture_wider_than_its_column_is_fitted_to_it_instead_of_drawn_over_the_next_cell() {
+    let s = laid_out(&column_panel(), 424.0, 4000.0, false, false);
+    let pictures = pictures_in_blocks(&s);
+    assert_eq!(2, pictures.len(), "one illustration per picture cell");
+
+    // One factor scales both axes, because this build has no clip and both
+    // painters stretch an asset into the rect they are given: a width taken
+    // alone would squash a scanned illustration instead of cropping it.
+    let boxes: Vec<(f32, f32)> = pictures.iter().map(|(p, _)| (p.rect.w, p.rect.h)).collect();
+    assert_eq!(FITTED.to_vec(), boxes);
+    // And the width is the block's own room, on both edges: a picture that
+    // does not leave the block that bought it can reach neither the cell
+    // beside it nor the edge of the panel.
+    for (picture, block) in &pictures {
+        assert_eq!((block.rect.x, block.rect.w), (picture.rect.x, picture.rect.w));
+    }
+
+    let (first, second) = (pictures[0].0.rect, pictures[1].0.rect);
+    assert_eq!(0.0, (first.x + first.w - second.x).max(0.0), "no picture over its neighbour");
+    assert_eq!(0.0, (second.x + second.w - 424.0).max(0.0), "and none outside the panel");
+}
+
+/// A picture is fitted in the reservation as well as in the paint, because
+/// [`measure_images`] and [`place_images`] fit through one function. A fix
+/// that narrowed only the drawn rect would leave every コラム row holding
+/// the line the full-size picture asked for: `FakeMeasure` gives a line
+/// twice its tallest span and an image's riser is its own height, so the
+/// paragraph around an `8em` picture measured 240 px whatever the column
+/// had already done to it.
+#[test]
+fn a_picture_its_column_shrank_reserves_the_line_it_actually_needs() {
+    let s = laid_out(&column_panel(), 424.0, 4000.0, false, false);
+    let pictures = pictures_in_blocks(&s);
+
+    let lines: Vec<f32> = pictures.iter().map(|(_, block)| block.rect.h).collect();
+    assert_eq!(vec![LINE_H * FITTED[0].1, LINE_H * FITTED[1].1], lines, "240.00 each before");
+    for (picture, block) in &pictures {
+        assert_eq!(LINE_H * picture.rect.h, block.rect.h, "the line came down with the picture");
+    }
+}
+
 // ---- two readings over one base ----
 
 /// 岩波国語辞典　第八版 writes cross-references that carry both readings of a
