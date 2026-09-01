@@ -160,6 +160,6 @@ side in that one variant, which is what the fixture was authored for.
 (`layout::Boxed`), which is what a browser draws: a bordered `div` holding three
 paragraphs draws one border around all three. So the fixture's two shapes now agree —
 each `div` draws one box — and the variant's element list grew by one textless
-`Block` element per boxed `div`, ahead of the paragraphs it frames. No golden was
-blessed: this variant is one of the thirteen still awaiting the `windows-2025`
-dispatch, so the capture will record the fixed answer the first time it runs.
+`Block` element per boxed `div`, ahead of the paragraphs it frames. The
+`windows-2025` dispatch has since run: all sixteen goldens are committed, and this
+variant's capture records the fixed answer, one box per `div`.

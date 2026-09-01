@@ -11,11 +11,56 @@
       "elements": [
         {
           "advance": "0.00",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 0,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Corner",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "54.63",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "54.63",
+                "x": "0.00"
+              }
+            ],
+            "w": "54.63"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "freq 5120",
           "top_gap": "0.00",
           "w": "54.63",
@@ -25,11 +70,56 @@
         },
         {
           "advance": "26.60",
+          "block_box": null,
           "font_size": "20.00",
           "h": "26.60",
           "i": 1,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Headword",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "60.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "60.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "60.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
           "text": "可哀想",
           "top_gap": "0.00",
           "w": "60.00",
@@ -39,11 +129,56 @@
         },
         {
           "advance": "19.95",
+          "block_box": null,
           "font_size": "15.00",
           "h": "19.95",
           "i": 2,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "58.45",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "58.45",
+                "x": "0.00"
+              }
+            ],
+            "w": "58.45"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "42.60",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 15,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "かわいそう",
           "top_gap": "4.00",
           "w": "58.45",
@@ -53,11 +188,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 3,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "87.01",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "87.01",
+                "x": "0.00"
+              }
+            ],
+            "w": "87.01"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "66.55",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 15,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "adjectival noun",
           "top_gap": "4.00",
           "w": "87.01",
@@ -67,11 +247,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 4,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "46.77",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "46.77",
+                "x": "0.00"
+              }
+            ],
+            "w": "46.77"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "93.84",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "Jitendex",
           "top_gap": "10.00",
           "w": "46.77",
@@ -81,11 +306,62 @@
         },
         {
           "advance": "19.95",
+          "block_box": null,
           "font_size": "15.00",
           "h": "19.95",
           "i": 5,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "148.94",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "148.94",
+                "x": "0.00"
+              }
+            ],
+            "w": "148.94"
+          },
+          "origin": {
+            "dict_id": 0,
+            "entry_id": 0,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "115.13",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 24,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "poor; pitiable; pathetic",
           "top_gap": "4.00",
           "w": "148.94",

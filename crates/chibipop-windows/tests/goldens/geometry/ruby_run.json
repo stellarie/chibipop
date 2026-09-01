@@ -1,0 +1,940 @@
+{
+  "fixture": "ruby_run",
+  "variants": {
+    "default": {
+      "anki_button": null,
+      "content": {
+        "content_w": "356.00",
+        "origin": "12.00",
+        "used_h": "171.63"
+      },
+      "elements": [
+        {
+          "advance": "0.00",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Corner",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "61.64",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "61.64",
+                "x": "0.00"
+              }
+            ],
+            "w": "61.64"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 10,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "freq 24810",
+          "top_gap": "0.00",
+          "w": "61.64",
+          "wrap_w": "356.00",
+          "x": "306.36",
+          "y": "12.00"
+        },
+        {
+          "advance": "26.60",
+          "block_box": null,
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 1,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Headword",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "76.32",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "76.32",
+                "x": "0.00"
+              }
+            ],
+            "w": "76.32"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 12,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
+          "text": "胡蝶の夢",
+          "top_gap": "0.00",
+          "w": "76.32",
+          "wrap_w": "286.36",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 2,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "77.16",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "77.16",
+                "x": "0.00"
+              }
+            ],
+            "w": "77.16"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "42.60",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 21,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "こちょうのゆめ",
+          "top_gap": "4.00",
+          "w": "77.16",
+          "wrap_w": "356.00",
+          "x": "12.00",
+          "y": "42.60"
+        },
+        {
+          "advance": "17.29",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 3,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "60.88",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "60.88",
+                "x": "0.00"
+              }
+            ],
+            "w": "60.88"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "66.55",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 10,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "expression",
+          "top_gap": "4.00",
+          "w": "60.88",
+          "wrap_w": "356.00",
+          "x": "12.00",
+          "y": "66.55"
+        },
+        {
+          "advance": "17.29",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "39.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "39.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "39.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "93.84",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "大辞林",
+          "top_gap": "10.00",
+          "w": "39.00",
+          "wrap_w": "356.00",
+          "x": "12.00",
+          "y": "93.84"
+        },
+        {
+          "advance": "32.25",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "32.25",
+          "i": 5,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "32.25",
+            "line_boxes": [
+              {
+                "baseline": "26.16",
+                "h": "32.25",
+                "w": "304.45",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "15.45",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 1,
+                "w": "30.00",
+                "x": "15.45"
+              },
+              {
+                "h": "32.25",
+                "line": 0,
+                "span": 2,
+                "w": "0.00",
+                "x": "45.45"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 3,
+                "w": "37.20",
+                "x": "45.45"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 4,
+                "w": "15.00",
+                "x": "82.65"
+              },
+              {
+                "h": "32.25",
+                "line": 0,
+                "span": 5,
+                "w": "0.00",
+                "x": "97.65"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 6,
+                "w": "37.96",
+                "x": "97.65"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 7,
+                "w": "15.00",
+                "x": "135.61"
+              },
+              {
+                "h": "32.25",
+                "line": 0,
+                "span": 8,
+                "w": "0.00",
+                "x": "150.61"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 9,
+                "w": "153.85",
+                "x": "150.61"
+              }
+            ],
+            "w": "304.45"
+          },
+          "origin": {
+            "dict_id": 3,
+            "entry_id": 301,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "115.13",
+          "ruby": [
+            {
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "h": "9.98",
+              "italic": false,
+              "size": "7.50",
+              "text": "こちょう",
+              "w": "19.93",
+              "weight": 400,
+              "x": "20.48",
+              "y": "0.00"
+            },
+            {
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "h": "9.98",
+              "italic": false,
+              "size": "7.50",
+              "text": "うつつ",
+              "w": "16.73",
+              "weight": 400,
+              "x": "81.78",
+              "y": "0.00"
+            },
+            {
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "h": "9.98",
+              "italic": false,
+              "size": "7.50",
+              "text": "さかい",
+              "w": "17.29",
+              "weight": 400,
+              "x": "134.46",
+              "y": "0.00"
+            }
+          ],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 3,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 9,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "24.24",
+              "weight": 400
+            },
+            {
+              "at": 12,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 21,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 24,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "24.24",
+              "weight": 400
+            },
+            {
+              "at": 27,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 36,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 39,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "24.24",
+              "weight": 400
+            },
+            {
+              "at": 42,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 39,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "1. 胡蝶⁠の夢。現⁠と夢の境⁠が定かでないことのたとえ。",
+          "top_gap": "4.00",
+          "w": "304.45",
+          "wrap_w": "356.00",
+          "x": "12.00",
+          "y": "115.13"
+        },
+        {
+          "advance": "32.25",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "32.25",
+          "i": 6,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "32.25",
+            "line_boxes": [
+              {
+                "baseline": "26.16",
+                "h": "32.25",
+                "w": "192.55",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "15.45",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 1,
+                "w": "15.00",
+                "x": "15.45"
+              },
+              {
+                "h": "32.25",
+                "line": 0,
+                "span": 2,
+                "w": "0.00",
+                "x": "30.45"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 3,
+                "w": "15.00",
+                "x": "30.45"
+              },
+              {
+                "h": "32.25",
+                "line": 0,
+                "span": 4,
+                "w": "0.00",
+                "x": "45.45"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 5,
+                "w": "12.24",
+                "x": "45.45"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 6,
+                "w": "15.00",
+                "x": "57.69"
+              },
+              {
+                "h": "27.33",
+                "line": 0,
+                "span": 7,
+                "w": "0.00",
+                "x": "72.69"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 8,
+                "w": "30.00",
+                "x": "72.69"
+              },
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 9,
+                "w": "89.87",
+                "x": "102.69"
+              }
+            ],
+            "w": "192.55"
+          },
+          "origin": {
+            "dict_id": 3,
+            "entry_id": 302,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "151.38",
+          "ruby": [
+            {
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "h": "9.98",
+              "italic": false,
+              "size": "7.50",
+              "text": "そう",
+              "w": "10.55",
+              "weight": 400,
+              "x": "17.67",
+              "y": "0.00"
+            },
+            {
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "h": "9.98",
+              "italic": false,
+              "size": "7.50",
+              "text": "し",
+              "w": "5.24",
+              "weight": 400,
+              "x": "35.33",
+              "y": "0.00"
+            },
+            {
+              "color": [
+                138,
+                162,
+                200
+              ],
+              "h": "5.99",
+              "italic": false,
+              "size": "4.50",
+              "text": "せいぶつろん",
+              "w": "21.84",
+              "weight": 400,
+              "x": "54.27",
+              "y": "3.99"
+            }
+          ],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 3,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 6,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "24.24",
+              "weight": 400
+            },
+            {
+              "at": 9,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 12,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "24.24",
+              "weight": 400
+            },
+            {
+              "at": 15,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 18,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 21,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "20.55",
+              "weight": 400
+            },
+            {
+              "at": 24,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 30,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 21,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "2. 荘⁠子⁠の斉⁠物論に見える説話。",
+          "top_gap": "4.00",
+          "w": "192.55",
+          "wrap_w": "356.00",
+          "x": "12.00",
+          "y": "151.38"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"胡\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"蝶\")",
+          "h": "26.60",
+          "i": 1,
+          "w": "20.00",
+          "x": "32.00",
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"夢\")",
+          "h": "26.60",
+          "i": 2,
+          "w": "20.00",
+          "x": "68.32",
+          "y": "12.00"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "ruby_run",
+        "max_h": 486,
+        "max_w": 380,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "default"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 196,
+        "total_w": 380,
+        "view_h": 196
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    }
+  }
+}

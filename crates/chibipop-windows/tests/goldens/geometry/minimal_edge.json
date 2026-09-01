@@ -43,11 +43,56 @@
       "elements": [
         {
           "advance": "26.60",
+          "block_box": null,
           "font_size": "20.00",
           "h": "26.60",
           "i": 0,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Headword",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "20.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "20.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "20.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 3,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
           "text": "猫",
           "top_gap": "0.00",
           "w": "20.00",
@@ -57,11 +102,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 1,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "39.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "39.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "39.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "48.60",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "大辞林",
           "top_gap": "10.00",
           "w": "39.00",
