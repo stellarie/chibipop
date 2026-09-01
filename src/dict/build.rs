@@ -1,7 +1,7 @@
 //! The schema and the writer.
 
 use crate::dict::archive::{
-    for_each_freq_row, for_each_media, for_each_term, read_index, read_styles_css,
+    for_each_freq_row, for_each_media, for_each_row, read_index, read_styles_css, TermBanks,
 };
 use crate::dict::frequency::{lookup_freq, merge_freq_row, FreqTable};
 use crate::dict::gloss::{renders_text, GlossDoc, Kind, NodeId};
@@ -9,10 +9,12 @@ use crate::dict::media::{self, Intrinsic};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bumped to 3 by ticket 02: the `entry` record now stores the dictionary's
@@ -26,9 +28,9 @@ const BATCH_ROWS: usize = 2;
 #[cfg(not(test))]
 const BATCH_ROWS: usize = 500;
 
-/// One buffered `term` row.
+/// One buffered `term` row, as spans into the bank being written.
 #[allow(clippy::type_complexity)]
-type TermBatchRow = (String, Option<String>, String, String, Option<i64>, i64, i64);
+type TermBatchRow = (Span, Option<Span>, Span, Span, Option<i64>, i64, i64);
 
 const DDL: &str = "
 CREATE TABLE dict (
@@ -504,9 +506,26 @@ fn build_into(
     let freq_table = load_freqs(freqs)?;
 
     let mut conn = Connection::open(out).with_context(|| format!("creating {}", out.display()))?;
+    // The bulk load's own settings, and only its own: this is a throwaway
+    // file that `promote` reads back before anything is allowed to depend
+    // on it, so durability here buys nothing a `quick_check` does not.
+    //
+    // `journal_mode = MEMORY` rather than `WAL`: a write-ahead log makes
+    // every page of a half-gigabyte load hit the disk twice - once into the
+    // log, once when the checkpoint copies it back - and the load has no
+    // concurrent reader to serve. A rollback journal over a file that
+    // starts empty has almost no original pages to save, and in memory it
+    // has none. The finished file is stamped back into WAL below, because
+    // *that* one is read while `edit::add_dictionary` writes to it.
+    //
+    // Nothing else: a bigger `cache_size` and a `temp_store = MEMORY` were
+    // both measured on the jitendex import and both cost peak memory for no
+    // time at all - a load that only ever appends has nothing to re-read,
+    // and the index build's sorter spills to a file the OS keeps in its own
+    // cache anyway. 128 MiB of page cache cost 150 MiB of RSS and 0.08s.
     conn.execute_batch(
         "PRAGMA page_size = 8192;
-         PRAGMA journal_mode = WAL;
+         PRAGMA journal_mode = MEMORY;
          PRAGMA synchronous = OFF;",
     )?;
     create_schema(&conn)?;
@@ -527,13 +546,18 @@ fn build_into(
         media.add(one.media);
         styles.add(one.styles);
     }
-    batches.flush(&tx)?;
 
     write_meta(&tx, terms, freqs)?;
     on_progress("building  creating index");
     ensure_indexes(&tx)?;
     tx.commit()?;
-    conn.execute_batch("ANALYZE;")?;
+    // The mode the promoted database is read in; see the pragma block above.
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    // `analysis_limit` caps how many index rows each statistic samples. The
+    // planner's choices here turn on orders of magnitude - is `surface`
+    // selective? - and a 400-row sample answers that as well as a full scan
+    // of 660 000 term rows, in a fraction of the time.
+    conn.execute_batch("PRAGMA analysis_limit = 400; ANALYZE;")?;
 
     if media.referenced > 0 {
         on_progress(&media.line("all dictionaries"));
@@ -575,11 +599,67 @@ pub(crate) struct Loaded {
     pub(crate) styles: StyleCounts,
 }
 
+/// A slice of a [`PreparedBank`]'s buffer: `(start, end)` in bytes.
+///
+/// A pair of `u32` rather than a `String` per field, because a bank holds
+/// tens of thousands of rows and every one of them would otherwise be four
+/// heap allocations the binder immediately copies out of. The buffer they
+/// index is at most one bank's text ([`crate::dict::archive`]'s `MAX_BANK`,
+/// 256 MiB) because every byte pushed into it is a byte the bank already
+/// spelled out, so `u32` cannot overflow.
+type Span = (u32, u32);
+
+/// One kept term-bank row, ready to bind.
+#[derive(Clone, Copy)]
+struct PreparedRow {
+    glossary: Span,
+    written: Span,
+    reading: Span,
+    rules: Span,
+    freq: Option<i64>,
+    /// The headword is kana-only, so it needs one `term` row and not two.
+    same: bool,
+}
+
+/// One bank's kept rows, and the assets they named.
+///
+/// Everything a bank contributes lands in one growable buffer, so handing a
+/// bank from the thread that parsed it to the thread that writes it moves
+/// three allocations rather than a hundred thousand.
+struct PreparedBank {
+    text: String,
+    rows: Vec<PreparedRow>,
+    assets: BTreeSet<String>,
+}
+
+/// How many threads an import parses banks on.
+///
+/// Capped, and not by politeness: each thread holds the bank it is reading
+/// and the bank it has prepared, so the ceiling is what bounds a rebuild's
+/// peak memory at roughly `2 * MAX_IMPORT_THREADS` bank-sized buffers. Eight
+/// is past the knee on every corpus measured - the writer thread's SQLite
+/// inserts are the floor from about four onwards.
+const MAX_IMPORT_THREADS: usize = 8;
+
+fn worker_count(banks: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    banks.min(cores).clamp(1, MAX_IMPORT_THREADS)
+}
+
 /// Buffers shared by archives.
 pub(crate) struct Batches {
-    json_buf: Vec<u8>,
-    entries: Vec<(i64, i64, String)>,
+    /// Row buffers, reused for every bank of every archive. They hold spans
+    /// into the bank currently being written, so they are always empty
+    /// between banks.
+    entries: Vec<(i64, i64, Span)>,
     terms: Vec<TermBatchRow>,
+    /// The full-batch `INSERT`s, built once. A 500-row insert names 3 500
+    /// placeholders, and a full batch is what almost every one of an
+    /// import's thousands of flushes carries. The odd short batch - a
+    /// bank's last rows, or a term batch that overshot by one because an
+    /// entry contributed two rows - builds its own.
+    entry_sql: String,
+    term_sql: String,
     /// Content hash to `media_blob.blob_id`, across every archive in one
     /// build, so an asset shared by two dictionaries is stored once and
     /// costs one `SELECT` the second time instead of one per path.
@@ -589,17 +669,12 @@ pub(crate) struct Batches {
 impl Batches {
     pub(crate) fn new() -> Batches {
         Batches {
-            json_buf: Vec::with_capacity(512),
             entries: Vec::with_capacity(BATCH_ROWS),
-            terms: Vec::with_capacity(BATCH_ROWS),
+            terms: Vec::with_capacity(BATCH_ROWS + 1),
+            entry_sql: insert_sql(ENTRY_INSERT, 3, BATCH_ROWS),
+            term_sql: insert_sql(TERM_INSERT, 7, BATCH_ROWS),
             blobs: HashMap::new(),
         }
-    }
-
-    /// Writes what is buffered.
-    pub(crate) fn flush(&mut self, tx: &rusqlite::Transaction) -> Result<()> {
-        flush_entries(tx, &mut self.entries)?;
-        flush_terms(tx, &mut self.terms)
     }
 }
 
@@ -624,71 +699,12 @@ pub(crate) fn insert_archive(
     let mut term_rows: i64 = 0;
     let mut assets: BTreeSet<String> = BTreeSet::new();
 
-    for_each_term(archive, |t| {
-        // Serialise first, then parse the stored text: the record is what a
-        // hover will read, so a term row that renders nothing here renders
-        // nothing there either, and the emptiness test cannot drift from it.
-        batches.json_buf.clear();
-        serde_json::to_writer(&mut batches.json_buf, &t.glossary)?;
-        let glossary = std::str::from_utf8(&batches.json_buf)
-            .context("json output was not utf-8")?
-            .to_string();
-        // An image-only or whitespace-only glossary is not an entry. Same
-        // rule as before the tree existed; it is what keeps a gaiji-only
-        // term row out of the term index.
-        let doc = GlossDoc::parse(&glossary);
-        if !renders_text(&doc) {
-            return Ok(());
-        }
-        // Only a kept row's images are collected, and from the parse the
-        // emptiness test already ran: a row that renders no text is not an
-        // entry, so no hover can reach it and its assets are unreachable
-        // too. Walking the tree here also means the build never re-scans
-        // the raw JSON for paths.
-        collect_assets(&doc, &mut assets);
-        entry_id += 1;
-        if entry_id % 5000 == 0 {
-            on_progress(&format!("progress  {entry_id} / ?"));
-        }
-
-        batches.entries.push((entry_id, dict_id, glossary));
-        if batches.entries.len() >= BATCH_ROWS {
-            flush_entries(tx, &mut batches.entries)?;
-        }
-
-        let written: &str = &t.term;
-        let reading: &str = if t.reading.is_empty() { &t.term } else { &t.reading };
-        let rank = lookup_freq(freqs, written, Some(reading));
-        let same = written == reading;
-
-        batches.terms.push((
-            reading.to_string(),
-            if same { None } else { Some(written.to_string()) },
-            reading.to_string(),
-            t.rules.clone(),
-            rank,
-            entry_id,
-            dict_id,
-        ));
-        term_rows += 1;
-
-        if !same {
-            batches.terms.push((
-                written.to_string(),
-                Some(written.to_string()),
-                reading.to_string(),
-                t.rules.clone(),
-                rank,
-                entry_id,
-                dict_id,
-            ));
-            term_rows += 1;
-        }
-
-        if batches.terms.len() >= BATCH_ROWS {
-            // Flush entries first.
-            flush_entries(tx, &mut batches.entries)?;
-            flush_terms(tx, &mut batches.terms)?;
+    for_each_prepared_bank(archive, freqs, |bank| {
+        write_bank(tx, &bank, dict_id, &mut entry_id, &mut term_rows, batches, on_progress)?;
+        if assets.is_empty() {
+            assets = bank.assets;
+        } else {
+            assets.extend(bank.assets);
         }
         Ok(())
     })?;
@@ -701,6 +717,237 @@ pub(crate) fn insert_archive(
         media,
         styles,
     })
+}
+
+/// One prepared bank into `entry` and `term`.
+///
+/// The whole bank is written before the next one is touched, so the row
+/// buffers only ever hold spans into `bank.text`.
+fn write_bank(
+    tx: &rusqlite::Transaction,
+    bank: &PreparedBank,
+    dict_id: i64,
+    entry_id: &mut i64,
+    term_rows: &mut i64,
+    batches: &mut Batches,
+    on_progress: &dyn Fn(&str),
+) -> Result<()> {
+    for row in &bank.rows {
+        *entry_id += 1;
+        if *entry_id % 5000 == 0 {
+            on_progress(&format!("progress  {entry_id} / ?"));
+        }
+
+        batches.entries.push((*entry_id, dict_id, row.glossary));
+        batches.terms.push((
+            row.reading,
+            if row.same { None } else { Some(row.written) },
+            row.reading,
+            row.rules,
+            row.freq,
+            *entry_id,
+            dict_id,
+        ));
+        *term_rows += 1;
+        if !row.same {
+            batches.terms.push((
+                row.written,
+                Some(row.written),
+                row.reading,
+                row.rules,
+                row.freq,
+                *entry_id,
+                dict_id,
+            ));
+            *term_rows += 1;
+        }
+
+        if batches.entries.len() >= BATCH_ROWS || batches.terms.len() >= BATCH_ROWS {
+            // Entries first: a `term` row names the `entry` row it belongs to.
+            flush_entries(tx, &bank.text, batches)?;
+            flush_terms(tx, &bank.text, batches)?;
+        }
+    }
+    flush_entries(tx, &bank.text, batches)?;
+    flush_terms(tx, &bank.text, batches)
+}
+
+/// Every term bank of one archive, prepared off the writer's thread and
+/// handed over in archive order.
+///
+/// Order is not an aesthetic: `entry_id` is assigned as banks arrive, and a
+/// rebuild that numbered its entries by whichever thread finished first
+/// would write a different database every time. So the workers race and the
+/// results are re-sequenced here, which costs at most one bank of latency
+/// per out-of-order finish.
+///
+/// A bank is the unit of work because it is self-contained JSON: parsing
+/// one, parsing each of its glossaries, and testing them for renderable
+/// text is about four fifths of an import's CPU and shares nothing between
+/// banks. Only the SQLite writes have to be serial, and they are.
+fn for_each_prepared_bank(
+    archive: &Path,
+    freqs: &FreqTable,
+    mut on_bank: impl FnMut(PreparedBank) -> Result<()>,
+) -> Result<()> {
+    let mut banks = TermBanks::open(archive)?;
+    let count = banks.len();
+    let threads = worker_count(count);
+    if count == 0 {
+        return Ok(());
+    }
+    if threads == 1 {
+        for i in 0..count {
+            let text = banks.read(i)?;
+            on_bank(prepare_bank(&text, banks.name(i), freqs)?)?;
+        }
+        return Ok(());
+    }
+    drop(banks);
+
+    let next = AtomicUsize::new(0);
+    // A rendezvous channel, so a worker that finishes early blocks instead
+    // of running ahead and buffering banks nobody has asked for yet. That,
+    // plus the reorder buffer below, is what bounds peak memory.
+    let (send, recv) = sync_channel::<(usize, Result<PreparedBank>)>(0);
+
+    std::thread::scope(|scope| -> Result<()> {
+        for _ in 0..threads {
+            let send = send.clone();
+            let next = &next;
+            scope.spawn(move || {
+                let mut banks = match TermBanks::open(archive) {
+                    Ok(banks) => banks,
+                    Err(why) => {
+                        let _ = send.send((count, Err(why)));
+                        return;
+                    }
+                };
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= count {
+                        return;
+                    }
+                    let made = banks
+                        .read(i)
+                        .and_then(|text| prepare_bank(&text, banks.name(i), freqs));
+                    // A closed channel means the writer has given up.
+                    if send.send((i, made)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(send);
+
+        let mut held: BTreeMap<usize, PreparedBank> = BTreeMap::new();
+        let mut want = 0usize;
+        while want < count {
+            let (i, made) = recv
+                .recv()
+                .context("a dictionary import thread stopped without a result")?;
+            held.insert(i, made?);
+            while let Some(bank) = held.remove(&want) {
+                on_bank(bank)?;
+                want += 1;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// One bank's text into the rows the writer binds.
+///
+/// The whole per-row cost of an import lives here: the row parse, the
+/// glossary parse, and the emptiness test. Nothing touches the database.
+fn prepare_bank(text: &str, name: &str, freqs: &FreqTable) -> Result<PreparedBank> {
+    let mut bank =
+        PreparedBank { text: String::with_capacity(text.len()), rows: Vec::new(), assets: BTreeSet::new() };
+    let mut glossary = String::new();
+
+    for_each_row(text, name, |t| {
+        // Minify first, then parse the stored text: the record is what a
+        // hover will read, so a term row that renders nothing here renders
+        // nothing there either, and the emptiness test cannot drift from it.
+        glossary.clear();
+        minify_json(t.glossary, &mut glossary);
+        // An image-only or whitespace-only glossary is not an entry. Same
+        // rule as before the tree existed; it is what keeps a gaiji-only
+        // term row out of the term index.
+        let doc = GlossDoc::parse(&glossary);
+        if !renders_text(&doc) {
+            return Ok(());
+        }
+        // Only a kept row's images are collected, and from the parse the
+        // emptiness test already ran: a row that renders no text is not an
+        // entry, so no hover can reach it and its assets are unreachable
+        // too. Walking the tree here also means the build never re-scans
+        // the raw JSON for paths.
+        collect_assets(&doc, &mut bank.assets);
+
+        let reading: &str = if t.reading.is_empty() { &t.term } else { &t.reading };
+        let freq = lookup_freq(freqs, &t.term, Some(reading));
+        let same = t.term == reading;
+
+        let glossary = push_span(&mut bank.text, &glossary);
+        let written = push_span(&mut bank.text, &t.term);
+        let reading = if same { written } else { push_span(&mut bank.text, reading) };
+        let rules = push_span(&mut bank.text, &t.rules);
+        bank.rows.push(PreparedRow { glossary, written, reading, rules, freq, same });
+        Ok(())
+    })?;
+
+    Ok(bank)
+}
+
+/// Appends `s` and returns where it landed.
+fn push_span(buf: &mut String, s: &str) -> Span {
+    let start = buf.len() as u32;
+    buf.push_str(s);
+    (start, buf.len() as u32)
+}
+
+/// A span's text.
+fn slice(text: &str, span: Span) -> &str {
+    &text[span.0 as usize..span.1 as usize]
+}
+
+/// The archive's own glossary bytes, minus the whitespace between them.
+///
+/// Stored verbatim otherwise, which is what the `entry.glossary` column has
+/// always claimed to hold and what it now actually holds: the previous
+/// writer round-tripped every glossary through a `serde_json::Value` and a
+/// serializer, which cost two of every six seconds a jitendex import spent
+/// and silently re-sorted every object's keys on the way through.
+///
+/// The whitespace does have to go: a pretty-printed bank is 9% larger than
+/// its minified form on jitendex, and that is 9% of a half-gigabyte
+/// database for bytes no reader ever looks at.
+fn minify_json(json: &str, into: &mut String) {
+    let b = json.as_bytes();
+    let mut copied = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for i in 0..b.len() {
+        let c = b[i];
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+        } else if c.is_ascii_whitespace() {
+            // Runs are copied whole, so compact JSON - which is nearly all
+            // of it - is one `push_str` of the entire glossary.
+            into.push_str(&json[copied..i]);
+            copied = i + 1;
+        }
+    }
+    into.push_str(&json[copied..]);
 }
 
 /// One dictionary's own `styles.css`, stored verbatim and counted once.
@@ -885,79 +1132,82 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     hasher.finalize()
 }
 
+const ENTRY_INSERT: &str = "INSERT INTO entry (entry_id, dict_id, glossary) VALUES ";
+const TERM_INSERT: &str =
+    "INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id) VALUES ";
+
+/// `head` followed by `rows` tuples of `cols` numbered placeholders.
+fn insert_sql(head: &str, cols: usize, rows: usize) -> String {
+    use std::fmt::Write;
+    let mut sql = String::with_capacity(head.len() + rows * cols * 7);
+    sql.push_str(head);
+    let mut n = 1;
+    for row in 0..rows {
+        sql.push_str(if row == 0 { "(" } else { ",(" });
+        for col in 0..cols {
+            let _ = write!(sql, "{}?{n}", if col == 0 { "" } else { "," });
+            n += 1;
+        }
+        sql.push(')');
+    }
+    sql
+}
+
 /// Flushes buffered entry rows.
-fn flush_entries(tx: &rusqlite::Transaction, batch: &mut Vec<(i64, i64, String)>) -> Result<()> {
+fn flush_entries(tx: &rusqlite::Transaction, text: &str, batches: &mut Batches) -> Result<()> {
+    let batch = &batches.entries;
     if batch.is_empty() {
         return Ok(());
     }
-    let placeholders: Vec<String> = (0..batch.len())
-        .map(|i| {
-            let b = i * 3 + 1;
-            format!("(?{b},?{},?{})", b + 1, b + 2)
-        })
-        .collect();
-    let sql = format!(
-        "INSERT INTO entry (entry_id, dict_id, glossary) VALUES {}",
-        placeholders.join(","),
-    );
-    let mut stmt = tx.prepare_cached(&sql)?;
+    let owned;
+    let sql = if batch.len() == BATCH_ROWS {
+        &batches.entry_sql
+    } else {
+        owned = insert_sql(ENTRY_INSERT, 3, batch.len());
+        &owned
+    };
+    let mut stmt = tx.prepare_cached(sql)?;
     let mut idx = 1;
     for row in batch.iter() {
         stmt.raw_bind_parameter(idx, row.0)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, row.1)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, &row.2)?;
-        idx += 1;
+        stmt.raw_bind_parameter(idx + 1, row.1)?;
+        stmt.raw_bind_parameter(idx + 2, slice(text, row.2))?;
+        idx += 3;
     }
     stmt.raw_execute()?;
-    batch.clear();
+    drop(stmt);
+    batches.entries.clear();
     Ok(())
 }
 
 /// Flushes buffered term rows.
-fn flush_terms(tx: &rusqlite::Transaction, batch: &mut Vec<TermBatchRow>) -> Result<()> {
+fn flush_terms(tx: &rusqlite::Transaction, text: &str, batches: &mut Batches) -> Result<()> {
+    let batch = &batches.terms;
     if batch.is_empty() {
         return Ok(());
     }
-    let placeholders: Vec<String> = (0..batch.len())
-        .map(|i| {
-            let b = i * 7 + 1;
-            format!(
-                "(?{b},?{},?{},?{},?{},?{},?{})",
-                b + 1,
-                b + 2,
-                b + 3,
-                b + 4,
-                b + 5,
-                b + 6,
-            )
-        })
-        .collect();
-    let sql = format!(
-        "INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id) VALUES {}",
-        placeholders.join(","),
-    );
-    let mut stmt = tx.prepare_cached(&sql)?;
+    let owned;
+    let sql = if batch.len() == BATCH_ROWS {
+        &batches.term_sql
+    } else {
+        owned = insert_sql(TERM_INSERT, 7, batch.len());
+        &owned
+    };
+    let mut stmt = tx.prepare_cached(sql)?;
     let mut idx = 1;
     for row in batch.iter() {
-        stmt.raw_bind_parameter(idx, &row.0)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, &row.1)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, &row.2)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, &row.3)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, row.4)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, row.5)?;
-        idx += 1;
-        stmt.raw_bind_parameter(idx, row.6)?;
-        idx += 1;
+        stmt.raw_bind_parameter(idx, slice(text, row.0))?;
+        stmt.raw_bind_parameter(idx + 1, row.1.map(|s| slice(text, s)))?;
+        stmt.raw_bind_parameter(idx + 2, slice(text, row.2))?;
+        stmt.raw_bind_parameter(idx + 3, slice(text, row.3))?;
+        stmt.raw_bind_parameter(idx + 4, row.4)?;
+        stmt.raw_bind_parameter(idx + 5, row.5)?;
+        stmt.raw_bind_parameter(idx + 6, row.6)?;
+        idx += 7;
     }
     stmt.raw_execute()?;
-    batch.clear();
+    drop(stmt);
+    batches.terms.clear();
     Ok(())
 }
 
@@ -1747,6 +1997,95 @@ mod tests {
             cells(&conn, "SELECT glossary FROM entry WHERE dict_id = 2 ORDER BY entry_id"),
             "and to the same glossary records"
         );
+    }
+
+    /// The one thing threading a build can silently break.
+    ///
+    /// `banks.zip` has twelve term banks and one of them is a hundred times
+    /// the size of the others, so eleven banks finish while bank 3 is still
+    /// being parsed. Every one of those has to wait: `entry_id` is assigned
+    /// in archive order, and a build that numbered by completion order
+    /// would write a different database on every run and break every
+    /// `entry_id` a caller already holds.
+    ///
+    /// Asserted as the whole sequence rather than a count, because a count
+    /// passes whatever the order was.
+    #[test]
+    fn a_many_bank_archive_is_numbered_in_archive_order() {
+        let out = out_path("many_banks");
+        let _guard = TempDbGuard(out.clone());
+
+        let counts = build(&[fixture("banks.zip")], &[], &out, &|_| {}).unwrap();
+
+        // Eleven banks of four rows, and one of four hundred.
+        assert_eq!(11 * 4 + 400, counts.entries);
+        let conn = Connection::open(&out).unwrap();
+        let mut stmt = conn.prepare("SELECT surface FROM term ORDER BY rowid").unwrap();
+        let surfaces: Vec<String> =
+            stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        // Two `term` rows per entry, reading first: the headwords here are
+        // all kanji-shaped, so none of them collapses to one row.
+        let expected: Vec<String> = (1..=12)
+            .flat_map(|bank| {
+                let rows = if bank == 3 { 400 } else { 4 };
+                (0..rows).flat_map(move |row| {
+                    [format!("b{bank:02}r{row:03}"), format!("b{bank:02}w{row:03}")]
+                })
+            })
+            .collect();
+        assert_eq!(expected, surfaces, "banks 10-12 follow 9, and bank 3 holds its place");
+    }
+
+    /// Two runs of a threaded build have to agree byte for byte in every
+    /// table a reader touches. The timestamp in `meta` is the one thing that
+    /// may differ, so it is excluded rather than the comparison weakened.
+    #[test]
+    fn a_many_bank_build_is_reproducible() {
+        let one = out_path("many_banks_a");
+        let two = out_path("many_banks_b");
+        let _g1 = TempDbGuard(one.clone());
+        let _g2 = TempDbGuard(two.clone());
+        let archives = [fixture("banks.zip"), fixture("terms.zip")];
+
+        build(&archives, &[fixture("freq.zip")], &one, &|_| {}).unwrap();
+        build(&archives, &[fixture("freq.zip")], &two, &|_| {}).unwrap();
+
+        let sql = "SELECT entry_id, dict_id, glossary FROM entry ORDER BY entry_id";
+        let terms = "SELECT rowid, surface, written, reading, pos, freq, entry_id, dict_id \
+                     FROM term ORDER BY rowid";
+        let a = Connection::open(&one).unwrap();
+        let b = Connection::open(&two).unwrap();
+        assert_eq!(cells(&a, sql), cells(&b, sql));
+        assert_eq!(cells(&a, terms), cells(&b, terms));
+    }
+
+    /// The stored glossary is the archive's own bytes, minus the whitespace
+    /// between them. Key order included: the writer used to round-trip every
+    /// glossary through a `serde_json::Value`, whose map is sorted, and
+    /// nothing about that was ever wanted.
+    #[test]
+    fn the_stored_glossary_is_the_archives_own_json_minified() {
+        assert_eq!(
+            r#"{"type":"text","text":"a b","n":[1,2]}"#,
+            minified(r#"{ "type": "text", "text": "a b", "n": [ 1, 2 ] }"#)
+        );
+    }
+
+    /// Whitespace inside a string is content, not layout.
+    #[test]
+    fn minifying_leaves_string_contents_alone() {
+        assert_eq!(r#"["a\n b","c \\","  "]"#, minified(r#"[ "a\n b", "c \\" , "  " ]"#));
+    }
+
+    fn minified(json: &str) -> String {
+        let mut out = String::new();
+        minify_json(json, &mut out);
+        // Minifying must never change what the JSON means.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(json).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        );
+        out
     }
 
     fn index_names(conn: &Connection) -> Vec<String> {

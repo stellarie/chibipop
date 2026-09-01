@@ -86,6 +86,40 @@ SWEEP_BANK = [
      ]}}]],
 ]
 
+BANKS_INDEX = {"title": "FixtureBanks", "format": 3, "revision": "1"}
+
+# Twelve term banks, so the builder's bank pool actually runs more than one
+# thread and has to put the results back in archive order (`entry_id` is
+# assigned as banks arrive, so a rebuild that numbered by whichever thread
+# finished first would write a different database every time).
+#
+# Bank 3 is two orders of magnitude larger than its neighbours on purpose:
+# with even banks the threads finish roughly in order and the reordering is
+# never exercised. One slow bank guarantees that eleven banks complete while
+# it is still running, which is exactly the case that must not reorder the
+# database.
+#
+# The headwords carry their own bank and row number, so a test can assert
+# the whole sequence rather than a count. Ten, eleven and twelve are there
+# for the numeric bank sort: `term_bank_10` follows `term_bank_9`.
+BANK_COUNT = 12
+SLOW_BANK = 3
+
+
+def bank_rows(bank):
+    rows = 400 if bank == SLOW_BANK else 4
+    return [
+        [f"b{bank:02}w{row:03}", f"b{bank:02}r{row:03}", "", "", 0,
+         [f"bank {bank} row {row}"]]
+        for row in range(rows)
+    ]
+
+
+BANKS = {
+    f"term_bank_{bank}.json": bank_rows(bank)
+    for bank in range(1, BANK_COUNT + 1)
+}
+
 
 def write(path, index, banks):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -98,5 +132,6 @@ if __name__ == "__main__":
     write(HERE / "terms.zip", TERMS_INDEX, {"term_bank_1.json": TERM_BANK})
     write(HERE / "freq.zip", FREQ_INDEX, {"term_meta_bank_1.json": FREQ_BANK})
     write(HERE / "sweep.zip", SWEEP_INDEX, {"term_bank_1.json": SWEEP_BANK})
-    for name in ("terms.zip", "freq.zip", "sweep.zip"):
+    write(HERE / "banks.zip", BANKS_INDEX, BANKS)
+    for name in ("terms.zip", "freq.zip", "sweep.zip", "banks.zip"):
         print(f"wrote {HERE / name}")

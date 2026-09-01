@@ -71,7 +71,7 @@ pub fn add_dictionary(
         &mut batches,
         on_progress,
     )?;
-    batches.flush(&tx)?;
+    // `insert_archive` writes every bank it reads before it returns.
     record_source(&tx, archive)?;
     refresh_stats(&tx)?;
 

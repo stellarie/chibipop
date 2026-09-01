@@ -1,11 +1,14 @@
 //! Yomitan archive reading.
 
 use anyhow::{Context, Result};
-use serde::de::{DeserializeSeed, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, SeqAccess, Visitor};
+use serde_json::value::RawValue;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
+use std::marker::PhantomData;
 use std::path::Path;
 use zip::ZipArchive;
 
@@ -26,12 +29,20 @@ const MAX_ASSET: u64 = 16 << 20;
 /// largest `styles.css` is 37 048 bytes, so 4 MiB refuses only corruption.
 const MAX_STYLESHEET: u64 = 4 << 20;
 
-/// One row from a term bank.
-pub struct TermEntry {
-    pub term: String,
-    pub reading: String,
-    pub rules: String,
-    pub glossary: Value,
+/// One row from a term bank, borrowed from the bank's own text.
+///
+/// Nothing here is copied that the bank did not already spell out: the
+/// three short fields borrow unless the JSON escaped them, and `glossary`
+/// is the archive's own bytes. The builder stores those bytes, so a term
+/// row costs one parse of the bank and no round trip through a
+/// `serde_json::Value` tree and a serializer - which on jitendex is two of
+/// every six seconds an import used to spend.
+pub struct TermRow<'a> {
+    pub term: Cow<'a, str>,
+    pub reading: Cow<'a, str>,
+    pub rules: Cow<'a, str>,
+    /// The structured-content glossary, verbatim JSON.
+    pub glossary: &'a str,
 }
 
 /// An archive's index.json.
@@ -41,18 +52,74 @@ pub fn read_index(zip: &Path) -> Result<Value> {
 }
 
 /// Streams term bank rows.
-pub fn for_each_term(zip: &Path, mut on_term: impl FnMut(TermEntry) -> Result<()>) -> Result<()> {
-    for_each_bank_row(zip, "term_bank_", |row| {
-        let Value::Array(mut row) = row else { return Ok(()) };
-        let Some(term) = row.first().and_then(Value::as_str).map(str::to_string) else {
-            return Ok(());
-        };
-        on_term(TermEntry {
-            term,
-            reading: str_at(&row, 1),
-            rules: str_at(&row, 3),
-            glossary: take_at(&mut row, 5),
-        })
+///
+/// One archive, one thread, banks in order. The builder drives
+/// [`TermBanks`] directly instead, because the per-row work parallelises
+/// and this does not; this is the shape every other reader wants.
+pub fn for_each_term(
+    zip: &Path,
+    mut on_term: impl FnMut(TermRow) -> Result<()>,
+) -> Result<()> {
+    let mut banks = TermBanks::open(zip)?;
+    for i in 0..banks.len() {
+        let text = banks.read(i)?;
+        for_each_row(&text, banks.name(i), &mut on_term)?;
+    }
+    Ok(())
+}
+
+/// One archive's term banks, in order, readable one at a time.
+///
+/// Split out of [`for_each_term`] so the builder can hand banks to a pool
+/// of threads: a bank is the natural unit of parallel work, because it is
+/// self-contained JSON and the expensive part of an import - the row
+/// parse, the glossary parse, the emptiness test - is per row and shares
+/// nothing. Each thread opens its own handle, so the central directory is
+/// read once per thread and never contended.
+pub struct TermBanks {
+    archive: ZipArchive<File>,
+    names: Vec<String>,
+}
+
+impl TermBanks {
+    pub fn open(zip: &Path) -> Result<TermBanks> {
+        let archive = open_archive(zip)?;
+        let names = sorted_banks(&archive_names(&archive), "term_bank_");
+        Ok(TermBanks { archive, names })
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    pub fn name(&self, i: usize) -> &str {
+        &self.names[i]
+    }
+
+    /// The `i`th bank's text.
+    pub fn read(&mut self, i: usize) -> Result<String> {
+        let name = self.names[i].clone();
+        read_entry(&mut self.archive, &name)
+    }
+}
+
+/// Streams one already-read bank's rows.
+///
+/// A row that is not an array, or whose first field is not a string, is
+/// skipped - the same tolerance the `Value` reader had, for the same
+/// reason: an archive is third-party bytes.
+pub fn for_each_row(
+    text: &str,
+    name: &str,
+    mut on_row: impl FnMut(TermRow) -> Result<()>,
+) -> Result<()> {
+    stream_rows(text, name, &mut |row: MaybeRow| match row.0 {
+        Some(row) => on_row(row),
+        None => Ok(()),
     })
 }
 
@@ -218,16 +285,6 @@ pub fn is_frequency_archive(zip: &Path) -> bool {
     name_says_freq || index_says_freq
 }
 
-/// A row field, or empty.
-fn str_at(row: &[Value], i: usize) -> String {
-    row.get(i).and_then(Value::as_str).unwrap_or("").to_string()
-}
-
-/// A row field, moved out.
-fn take_at(row: &mut [Value], i: usize) -> Value {
-    row.get_mut(i).map_or_else(|| Value::Array(Vec::new()), Value::take)
-}
-
 /// Python-style truthiness.
 fn is_truthy(v: &Value) -> bool {
     match v {
@@ -286,13 +343,17 @@ fn for_each_bank_row(
 }
 
 /// Streams one bank's rows.
-fn stream_rows<F>(text: &str, name: &str, on_row: &mut F) -> Result<()>
+///
+/// Generic in the row type so the freq reader keeps its `Value` and the
+/// term reader can take a [`TermRow`] that borrows straight out of `text`.
+fn stream_rows<'de, T, F>(text: &'de str, name: &str, on_row: &mut F) -> Result<()>
 where
-    F: FnMut(Value) -> Result<()>,
+    T: serde::Deserialize<'de>,
+    F: FnMut(T) -> Result<()>,
 {
     let mut failed = None;
     let mut de = serde_json::Deserializer::from_str(text);
-    let outcome = Rows { on_row, failed: &mut failed }.deserialize(&mut de);
+    let outcome = Rows { on_row, failed: &mut failed, row: PhantomData }.deserialize(&mut de);
     if let Some(err) = failed {
         return Err(err);
     }
@@ -301,14 +362,16 @@ where
 }
 
 /// Visits array elements.
-struct Rows<'a, F> {
+struct Rows<'a, T, F> {
     on_row: &'a mut F,
     failed: &'a mut Option<anyhow::Error>,
+    row: PhantomData<fn() -> T>,
 }
 
-impl<'de, F> DeserializeSeed<'de> for Rows<'_, F>
+impl<'de, T, F> DeserializeSeed<'de> for Rows<'_, T, F>
 where
-    F: FnMut(Value) -> Result<()>,
+    T: serde::Deserialize<'de>,
+    F: FnMut(T) -> Result<()>,
 {
     type Value = ();
 
@@ -320,9 +383,10 @@ where
     }
 }
 
-impl<'de, F> Visitor<'de> for Rows<'_, F>
+impl<'de, T, F> Visitor<'de> for Rows<'_, T, F>
 where
-    F: FnMut(Value) -> Result<()>,
+    T: serde::Deserialize<'de>,
+    F: FnMut(T) -> Result<()>,
 {
     type Value = ();
 
@@ -334,7 +398,7 @@ where
     where
         A: SeqAccess<'de>,
     {
-        while let Some(row) = seq.next_element::<Value>()? {
+        while let Some(row) = seq.next_element::<T>()? {
             if let Err(err) = (self.on_row)(row) {
                 *self.failed = Some(err);
                 return Err(serde::de::Error::custom("row rejected"));
@@ -342,6 +406,103 @@ where
         }
         Ok(())
     }
+}
+
+/// One term-bank row, or nothing this build can read as one.
+///
+/// The wrapper exists because a row that is not an array, or whose first
+/// field is not a string, is *skipped* rather than fatal - and a
+/// `Deserialize` impl has to return something.
+struct MaybeRow<'a>(Option<TermRow<'a>>);
+
+impl<'de> serde::Deserialize<'de> for MaybeRow<'de> {
+    fn deserialize<D>(de: D) -> std::result::Result<MaybeRow<'de>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        de.deserialize_any(RowVisitor)
+    }
+}
+
+struct RowVisitor;
+
+impl<'de> Visitor<'de> for RowVisitor {
+    type Value = MaybeRow<'de>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a term-bank row")
+    }
+
+    /// Yomitan's positional row: term, reading, definition tags, rules,
+    /// score, glossary, sequence, term tags. Only four are read, and every
+    /// one is captured as raw JSON first so that a field of the wrong type
+    /// costs that field and never the row.
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<MaybeRow<'de>, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let term: Option<&'de RawValue> = seq.next_element()?;
+        let reading: Option<&'de RawValue> = seq.next_element()?;
+        seq.next_element::<IgnoredAny>()?;
+        let rules: Option<&'de RawValue> = seq.next_element()?;
+        seq.next_element::<IgnoredAny>()?;
+        let glossary: Option<&'de RawValue> = seq.next_element()?;
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+        // No term, no row - exactly what the `Value` reader did.
+        let Some(term) = term.and_then(text_field) else { return Ok(MaybeRow(None)) };
+        Ok(MaybeRow(Some(TermRow {
+            term,
+            reading: reading.and_then(text_field).unwrap_or(Cow::Borrowed("")),
+            rules: rules.and_then(text_field).unwrap_or(Cow::Borrowed("")),
+            // An absent glossary is an empty one, as `Value::take` made it.
+            glossary: glossary.map_or("[]", RawValue::get),
+        })))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<MaybeRow<'de>, E> {
+        Ok(MaybeRow(None))
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<MaybeRow<'de>, E> {
+        Ok(MaybeRow(None))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<MaybeRow<'de>, E> {
+        Ok(MaybeRow(None))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<MaybeRow<'de>, E> {
+        Ok(MaybeRow(None))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<MaybeRow<'de>, E> {
+        Ok(MaybeRow(None))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<MaybeRow<'de>, E> {
+        Ok(MaybeRow(None))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<MaybeRow<'de>, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(MaybeRow(None))
+    }
+}
+
+/// A raw field as text, borrowed unless the JSON escaped it.
+///
+/// `None` for anything that is not a JSON string, which is what makes a
+/// numeric `reading` cost the reading and not the entry.
+fn text_field(raw: &RawValue) -> Option<Cow<'_, str>> {
+    let json = raw.get();
+    if let Ok(borrowed) = serde_json::from_str::<&str>(json) {
+        return Some(Cow::Borrowed(borrowed));
+    }
+    serde_json::from_str::<String>(json).ok().map(Cow::Owned)
 }
 
 /// Matching banks, sorted.
@@ -385,23 +546,18 @@ mod tests {
         assert_eq!(Some("FixtureTerms"), idx["title"].as_str());
     }
 
-    fn collect_terms(zip: &Path) -> Vec<TermEntry> {
-        let mut out = Vec::new();
-        for_each_term(zip, |t| {
-            out.push(t);
+    #[test]
+    fn every_term_row_is_read_with_its_rules_field() {
+        let mut terms = Vec::new();
+        for_each_term(&fixture("terms.zip"), |t| {
+            terms.push((t.term.into_owned(), t.reading.into_owned(), t.rules.into_owned()));
             Ok(())
         })
         .unwrap();
-        out
-    }
-
-    #[test]
-    fn every_term_row_is_read_with_its_rules_field() {
-        let terms = collect_terms(&fixture("terms.zip"));
         assert_eq!(3, terms.len());
-        let taberu = terms.iter().find(|t| t.term == "食べる").expect("食べる present");
-        assert_eq!("たべる", taberu.reading);
-        assert_eq!("v1", taberu.rules);
+        let taberu = terms.iter().find(|t| t.0 == "食べる").expect("食べる present");
+        assert_eq!("たべる", taberu.1);
+        assert_eq!("v1", taberu.2);
     }
 
     #[test]
@@ -466,90 +622,87 @@ mod tests {
         );
     }
 
+    /// The four fields a row is read for, defaults included.
+    fn fields(bank: &str) -> Vec<(String, String, String, String)> {
+        let mut out = Vec::new();
+        for_each_row(bank, "term_bank_1.json", |t| {
+            out.push((
+                t.term.into_owned(),
+                t.reading.into_owned(),
+                t.rules.into_owned(),
+                t.glossary.to_string(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
     #[test]
     fn ragged_row_with_only_term_reads_defaults() {
-        let row = vec![Value::String("word".to_string())];
-        assert_eq!("", str_at(&row, 1));
-        assert_eq!("", str_at(&row, 3));
         assert_eq!(
-            Value::Array(Vec::new()),
-            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+            vec![("word".into(), String::new(), String::new(), "[]".into())],
+            fields(r#"[["word"]]"#)
         );
     }
 
     #[test]
     fn ragged_row_with_term_and_reading_only() {
-        let row = serde_json::json!([
-            "食べる",
-            "たべる"
-        ]).as_array().unwrap().clone();
-        assert_eq!("食べる", str_at(&row, 0));
-        assert_eq!("たべる", str_at(&row, 1));
-        assert_eq!("", str_at(&row, 3));
         assert_eq!(
-            Value::Array(Vec::new()),
-            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+            vec![("食べる".into(), "たべる".into(), String::new(), "[]".into())],
+            fields(r#"[["食べる","たべる"]]"#)
         );
     }
 
     #[test]
     fn ragged_row_has_rules_but_no_glossary() {
-        let row = serde_json::json!([
-            "飲む",
-            "のむ",
-            "",
-            "v5"
-        ]).as_array().unwrap().clone();
-        assert_eq!("飲む", str_at(&row, 0));
-        assert_eq!("のむ", str_at(&row, 1));
-        assert_eq!("v5", str_at(&row, 3));
         assert_eq!(
-            Value::Array(Vec::new()),
-            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+            vec![("飲む".into(), "のむ".into(), "v5".into(), "[]".into())],
+            fields(r#"[["飲む","のむ","","v5"]]"#)
         );
     }
 
     #[test]
     fn field_with_wrong_type_falls_back_to_default() {
-        let row = serde_json::json!([
-            "走る",
-            123,
-            "",
-            999
-        ]).as_array().unwrap().clone();
-        assert_eq!("走る", str_at(&row, 0));
-        assert_eq!("", str_at(&row, 1));
-        assert_eq!("", str_at(&row, 3));
         assert_eq!(
-            Value::Array(Vec::new()),
-            row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()))
+            vec![("走る".into(), String::new(), String::new(), "[]".into())],
+            fields(r#"[["走る",123,"",999]]"#)
         );
     }
 
     #[test]
-    fn glossary_with_wrong_type_falls_back_to_empty() {
-        let row = serde_json::json!([
-            "読む",
-            "よむ",
-            "",
-            "v5",
-            0,
-            "not an array"
-        ]).as_array().unwrap().clone();
-        let glossary = row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()));
-        assert_eq!(Value::String("not an array".to_string()), glossary);
+    fn glossary_with_wrong_type_is_kept_verbatim() {
+        assert_eq!(
+            vec![("読む".into(), "よむ".into(), "v5".into(), r#""not an array""#.into())],
+            fields(r#"[["読む","よむ","","v5",0,"not an array"]]"#)
+        );
+    }
+
+    /// A row this build cannot read as one is skipped, never fatal: an
+    /// archive is third-party bytes and one bad row must not cost the
+    /// dictionary.
+    #[test]
+    fn a_row_that_is_not_an_array_of_a_term_is_skipped() {
+        assert!(fields(r#"[null,42,"x",{"a":1},[123],[]]"#).is_empty());
+    }
+
+    /// The glossary reaches the builder exactly as the archive spelled it -
+    /// key order and all - because that is what the `entry` record stores.
+    #[test]
+    fn the_glossary_is_the_archives_own_bytes() {
+        let bank = r#"[["語","ご","","",0,[{"type": "text", "text": "hi"}]]]"#;
+        assert_eq!(r#"[{"type": "text", "text": "hi"}]"#, fields(bank)[0].3);
+    }
+
+    /// An escaped field cannot borrow, and must still come out decoded.
+    #[test]
+    fn an_escaped_field_is_unescaped() {
+        assert_eq!("a\"b\nc", fields(r#"[["a\"b\nc"]]"#)[0].0);
     }
 
     #[test]
     fn glossary_missing_falls_back_to_empty_array() {
-        let row = serde_json::json!([
-            "書く",
-            "かく",
-            "",
-            "v5"
-        ]).as_array().unwrap().clone();
-        let glossary = row.get(5).cloned().unwrap_or_else(|| Value::Array(Vec::new()));
-        assert_eq!(Value::Array(Vec::new()), glossary);
+        assert_eq!("[]", fields(r#"[["書く","かく","","v5"]]"#)[0].3);
     }
 
     // ---- media extraction (ticket 03) ----

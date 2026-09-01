@@ -2033,9 +2033,9 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
             dict: title.clone(),
             dict_id,
             row: rows,
-            term: t.term.clone(),
-            reading: t.reading.clone(),
-            glossary: serde_json::to_string(&t.glossary)?,
+            term: t.term.into_owned(),
+            reading: t.reading.into_owned(),
+            glossary: t.glossary.to_string(),
         };
         let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sweep_entry(&r, &sheet, &only)
