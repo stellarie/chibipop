@@ -16,6 +16,7 @@
 use super::apply::{self, LinuxFields};
 use super::autostart;
 use super::channel::{HotkeyChannel, HotkeyControl};
+use super::filechooser;
 use super::rebuild;
 use super::snippets::{self, Compositor};
 use crate::clipboard;
@@ -114,10 +115,15 @@ struct App {
     capture_w: String,
     capture_h: String,
     selected_dict: Option<String>,
-    /// The path typed into the Add row; there is no portal file dialog
-    /// on this window's dependency budget, and a path entry never lies
-    /// about which file it took.
+    /// The path typed into the Add row. Kept beside the Browse button
+    /// rather than replaced by it: the portal is not on every desktop
+    /// (`filechooser::explain` says so when it is missing), and a path
+    /// entry never lies about which file it took.
     add_path: String,
+    /// A Browse dialog is open. The portal call waits on a human, so it
+    /// runs on its own thread; this is what keeps a second click from
+    /// stacking a second dialog on top of the first.
+    picking: bool,
     /// The live rebuild's last rendered progress line; empty when idle.
     /// Its presence *is* the busy flag - Rebuild and Apply are refused
     /// while it is set.
@@ -153,6 +159,7 @@ impl App {
             fonts,
             selected_dict: None,
             add_path: String::new(),
+            picking: false,
             rebuild_progress: None,
             checking_update: false,
             status: String::new(),
@@ -306,9 +313,9 @@ impl App {
         self.rebuild_progress.is_some()
     }
 
-    /// Stage the typed path for import. `~` is expanded first: this
-    /// entry is the only way to add a dictionary (no portal dialog), and
-    /// a shell is the only thing that would otherwise do it.
+    /// Stage the typed path for import. `~` is expanded first, because
+    /// the entry takes what a shell would have expanded; the Browse
+    /// button beside it hands over absolute paths and skips this.
     fn add_dictionary(&mut self) {
         let typed = self.add_path.trim();
         if typed.is_empty() {
@@ -348,6 +355,90 @@ impl App {
                 );
             }
         }
+    }
+
+    /// Open the desktop's own file dialog.
+    ///
+    /// The portal call waits on a human, so it cannot run on iced's
+    /// executor: a thread makes the blocking call and the window learns
+    /// the answer through a one-shot channel, which is the same shape
+    /// the rebuild uses for its progress lines.
+    fn browse_dictionaries(&mut self) -> Task<Message> {
+        if self.picking || self.busy() {
+            return Task::none();
+        }
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        if let Err(err) = std::thread::Builder::new()
+            .name("chibipop-filechooser".to_string())
+            .spawn(move || {
+                let _ = tx.send(filechooser::pick("Add dictionary archives"));
+            })
+        {
+            self.status = format!("Could not open the file dialog: {err}");
+            return Task::none();
+        }
+        self.picking = true;
+        self.status = "Choose one or more Yomitan .zip archives…".to_string();
+        // The sender is dropped only if the thread panics, and a
+        // cancelled dialog is already an `Ok`; either way the button has
+        // to come back, so the channel's own failure is an answer too.
+        Task::perform(rx, |sent| {
+            Message::DictPicked(sent.unwrap_or_else(|_| {
+                Err("The file dialog stopped without answering.".to_string())
+            }))
+        })
+    }
+
+    /// Stage everything the dialog handed back, in the order it listed.
+    ///
+    /// Reported as one line, not one per file: picking twelve archives
+    /// is the point of the button, and twelve statuses would leave the
+    /// user reading only the last one.
+    fn took_picked(&mut self, picked: Result<filechooser::Picked, String>) {
+        self.picking = false;
+        let sources = match picked {
+            Ok(filechooser::Picked::Files(paths)) => paths,
+            Ok(filechooser::Picked::Cancelled) => {
+                self.status = "No dictionary was chosen.".to_string();
+                return;
+            }
+            Err(why) => {
+                self.status = why;
+                return;
+            }
+        };
+        // A rebuild can have claimed the library while the dialog was
+        // open; staging into a form the builder is already reading is
+        // the race `busy` exists to refuse.
+        if self.busy() {
+            self.status = "A rebuild is running; add those archives once it finishes.".to_string();
+            return;
+        }
+        let mut staged = 0usize;
+        let mut refused = Vec::new();
+        for source in &sources {
+            match self.form.stage_add(source) {
+                Some(_) => staged += 1,
+                // stage_add refuses an unreadable archive and a source
+                // it already holds; the file itself is the only thing to
+                // say, and naming which ones is why they are collected.
+                None => refused.push(name_of(source)),
+            }
+        }
+        self.status = match (staged, refused.as_slice()) {
+            (0, []) => "No dictionary was chosen.".to_string(),
+            (0, names) => format!(
+                "{} is not a readable dictionary archive, or is already staged.",
+                names.join(", ")
+            ),
+            (n, []) => format!("{n} archive{} staged; press Rebuild to build them in.", plural(n)),
+            (n, names) => format!(
+                "{n} archive{} staged; press Rebuild to build them in. Skipped {} - not a \
+                 readable dictionary archive, or already staged.",
+                plural(n),
+                names.join(", ")
+            ),
+        };
     }
 
     /// Stage the selected row for removal.
@@ -415,6 +506,25 @@ impl App {
     }
 }
 
+/// A refused archive named the way the user picked it: the file name,
+/// not the whole path. A dialog's worth of absolute paths in one status
+/// line is unreadable, and the directory is the one part they just saw.
+fn name_of(source: &std::path::Path) -> String {
+    source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source.display().to_string())
+}
+
+/// The `s` in "2 archives"; empty for one.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Mode(TriggerMode),
@@ -448,6 +558,10 @@ enum Message {
     AddPath(String),
     DictAdd,
     DictRemove,
+    /// Open the desktop's file dialog (`super::filechooser`).
+    DictBrowse,
+    /// What that dialog came back with, off its own thread.
+    DictPicked(Result<filechooser::Picked, String>),
     Rebuild,
     RebuildProgress(rebuild::Progress),
     Passes(u8),
@@ -549,6 +663,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AddPath(v) => app.add_path = v,
         Message::DictAdd => app.add_dictionary(),
         Message::DictRemove => app.remove_dictionary(),
+        Message::DictBrowse => return app.browse_dictionaries(),
+        Message::DictPicked(picked) => app.took_picked(picked),
         Message::Rebuild => return app.start_rebuild(),
         Message::RebuildProgress(p) => app.took_progress(p),
         Message::Passes(v) => app.form.max_ocr_passes = v,
@@ -1015,8 +1131,14 @@ fn dictionaries_section(app: &App) -> Element<'_, Message> {
     ]
     .spacing(16);
 
+    // Browse first, because it is the one that opens a picker and the
+    // entry beside it is the fallback for a desktop with no portal. Both
+    // are shut while a rebuild owns the library, and Browse is shut
+    // again while its own dialog is up.
     let add = row![
-        text_input("path to a Yomitan .zip", &app.add_path)
+        button("Browse…")
+            .on_press_maybe((!app.busy() && !app.picking).then_some(Message::DictBrowse)),
+        text_input("or type a path to a Yomitan .zip", &app.add_path)
             .on_input_maybe((!app.busy()).then_some(Message::AddPath))
             .width(Length::Fill),
         button("Add").on_press_maybe((!app.busy()).then_some(Message::DictAdd)),
@@ -1717,6 +1839,7 @@ mod tests {
             capture_h: "160".to_string(),
             selected_dict: None,
             add_path: String::new(),
+            picking: false,
             rebuild_progress: None,
             checking_update: false,
             status: String::new(),
@@ -2366,6 +2489,98 @@ mod tests {
         assert!(app.form.has_staged(), "the add must wait for a rebuild");
         assert!(app.add_path.is_empty(), "the entry clears once the path is taken");
         assert!(app.status.contains("Rebuild"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point of the Browse button: one dialog, many archives,
+    /// all staged from a single answer.
+    #[test]
+    fn a_picked_selection_stages_every_archive_in_it() {
+        let dir = scratch("picked");
+        let mut app = app(&dir);
+        app.picking = true;
+        let _ = update(
+            &mut app,
+            Message::DictPicked(Ok(filechooser::Picked::Files(vec![
+                fixture("terms.zip"),
+                fixture("sweep.zip"),
+            ]))),
+        );
+
+        assert!(!app.picking, "the Browse button has to come back");
+        assert_eq!(2, app.form.staged_adds.len(), "{:?}", app.form.staged_adds);
+        assert!(app.status.starts_with("2 archives staged"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mixed selection stages what it can and names what it did not,
+    /// because a status line that only counted successes would leave the
+    /// user hunting for the file that never arrived.
+    #[test]
+    fn a_picked_selection_names_the_files_it_refused() {
+        let dir = scratch("picked-mixed");
+        let mut app = app(&dir);
+        let _ = update(
+            &mut app,
+            Message::DictPicked(Ok(filechooser::Picked::Files(vec![
+                fixture("terms.zip"),
+                dir.join("nope.zip"),
+            ]))),
+        );
+
+        assert_eq!(1, app.form.staged_adds.len(), "{:?}", app.form.staged_adds);
+        assert!(app.status.starts_with("1 archive staged"), "{}", app.status);
+        assert!(app.status.contains("nope.zip"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dismissed dialog is not a failure, and it must not read as one.
+    #[test]
+    fn a_dismissed_dialog_stages_nothing_and_reopens_the_button() {
+        let dir = scratch("picked-cancel");
+        let mut app = app(&dir);
+        app.picking = true;
+        // Both halves of the Browse button's gate build a widget tree:
+        // a shut button and a live one take different iced paths.
+        let _ = view(&app);
+        let _ = update(&mut app, Message::DictPicked(Ok(filechooser::Picked::Cancelled)));
+
+        assert!(!app.picking);
+        assert!(!app.form.has_staged());
+        assert_eq!("No dictionary was chosen.", app.status);
+        let _ = view(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rebuild can claim the library while the dialog is open, and
+    /// staging into a form the builder is already reading is the race
+    /// `busy` exists to refuse.
+    #[test]
+    fn a_selection_that_lands_during_a_rebuild_is_refused_rather_than_staged() {
+        let dir = scratch("picked-busy");
+        let mut app = app(&dir);
+        app.rebuild_progress = Some("Importing…".to_string());
+        let _ = update(
+            &mut app,
+            Message::DictPicked(Ok(filechooser::Picked::Files(vec![fixture("terms.zip")]))),
+        );
+
+        assert!(!app.form.has_staged());
+        assert!(app.status.contains("rebuild is running"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No portal on this desktop: the window says so in the one place
+    /// the user is looking, and the typed path beside it still works.
+    #[test]
+    fn a_portal_failure_becomes_the_status_line_and_reopens_the_button() {
+        let dir = scratch("picked-err");
+        let mut app = app(&dir);
+        app.picking = true;
+        let _ = update(&mut app, Message::DictPicked(Err("no portal here".to_string())));
+
+        assert!(!app.picking);
+        assert_eq!("no portal here", app.status);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

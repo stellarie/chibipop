@@ -12,6 +12,7 @@ mod app;
 mod apply;
 mod autostart;
 pub mod child;
+mod filechooser;
 mod rebuild;
 mod snippets;
 mod update;
