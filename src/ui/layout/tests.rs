@@ -6189,3 +6189,112 @@ fn a_lists_own_padding_replaces_the_default_gutter() {
     // and the first glyph of the gloss is the two remaining paddings.
     assert_eq!(0.5 * BOX_EM, -sense.x - marker_w("① "));
 }
+
+/// A `<ruby>` that reaches no base at all still draws its reading.
+///
+/// 岩波国語辞典　第八版 writes 円周率 as `▽「π（<ruby><rt>パイ</rt></ruby>）」で表す。`:
+/// the `<ruby>` has one child and it is the `<rt>`. CSS ruby gives an
+/// annotation with no base an anonymous empty ruby base, so the annotation is
+/// laid out over nothing and stays visible - and Yomitan declares no `ruby`
+/// or `rt` rule, so a Yomitan reader gets that browser default and reads
+/// `パイ` between the parentheses. Dropping it leaves the reader an empty
+/// pair of parentheses where the dictionary spelled the letter out.
+///
+/// Pinned to *where* the reading lands and not merely to its being drawn: an
+/// annotation placed over the following word would satisfy *no dropped text*
+/// and still be wrong. With no base to centre on, the reading stands flush at
+/// the pen its base would have started at.
+#[test]
+fn a_reading_with_no_base_stands_at_the_pen_its_base_would_have_taken() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let base_line = Theme::dark().body_size * LINE_H;
+    let read_line = Theme::dark().body_size * RUBY_RATIO * LINE_H;
+    // The fake hangs every line off an ascent of its tallest span's own
+    // size, so its ascent share is `1 / LINE_H`.
+    let ascent = 1.0 / LINE_H;
+
+    let s = laid_out(
+        &rich(&sc(concat!(
+            r#"{"tag":"div","content":["\u25bd\u300c\u03c0\uff08","#,
+            r#"{"tag":"ruby","content":{"tag":"rt","content":"\u30d1\u30a4"}},"#,
+            r#""\uff09\u300d\u3067\u8868\u3059\u3002"]}"#,
+        ))),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert_eq!(
+        "\u{25bd}\u{300c}\u{3c0}\u{ff08}\u{2060}\u{ff09}\u{300d}\u{3067}\u{8868}\u{3059}\u{3002}",
+        gloss.text,
+        "the base-less ruby still buys its line a filler",
+    );
+    assert_eq!(
+        vec!["\u{30d1}\u{30a4}"],
+        gloss.ruby.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+        "and the reading the dictionary wrote is drawn",
+    );
+    // The line grew for the reading exactly as a based one grows it.
+    assert_eq!(1, gloss.lines);
+    assert_eq!(base_line + read_line / ascent, gloss.rect.h);
+
+    let read = &gloss.ruby[0];
+    // Four characters stand before the `<ruby>`, so the anonymous empty base
+    // begins four units in. Two half-size kana are one base wide.
+    assert_eq!(4.0 * unit, read.x, "flush at the pen, not centred on nothing");
+    assert_eq!(2.0 * unit * RUBY_RATIO, read.w);
+    assert_eq!(read_line, read.h);
+    assert_eq!(0.0, read.y, "in the room its own filler bought");
+}
+
+/// The same shape written by an archive that lost its kanji: Onomatoproject
+/// writes ちゃらちゃら's example as
+/// `お<ruby>父<rt>とう</rt></ruby>さんは<ruby>""<rt>きら</rt></ruby>いだ！`, so 嫌 is
+/// missing from the bytes themselves. A browser renders the author's broken
+/// markup readably and a Yomitan reader reads `きらいだ`; rendering less than
+/// a browser renders from the same bytes is the divergence, whoever wrote the
+/// bytes.
+///
+/// The neighbouring prose is the archive's own, because *no dropped text* is
+/// stated as containment: a fragment whose surrounding prose happened to hold
+/// the two kana `きら` would pass for the wrong reason. Both readings are
+/// pinned, so a fix that placed the base-less one over 父 fails here.
+#[test]
+fn an_empty_ruby_base_keeps_its_reading_beside_the_base_that_has_one() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let s = laid_out(
+        &rich(&sc(concat!(
+            r#"{"tag":"div","content":["#,
+            r#"{"tag":"span","content":"\u3057\u305f\u3084\u3064\u3001\u304a"},"#,
+            r#"{"tag":"ruby","content":["\u7236","#,
+            r#"{"tag":"rt","content":"\u3068\u3046"}]},"#,
+            r#"{"tag":"span","content":"\u3055\u3093\u306f"},"#,
+            r#"{"tag":"ruby","content":["","#,
+            r#"{"tag":"rt","content":"\u304d\u3089"}]},"#,
+            r#"{"tag":"span","content":"\u3044\u3060\uff01"}]}"#,
+        ))),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+
+    assert!(
+        !gloss.text.contains('\u{304d}'),
+        "the prose around the ruby holds no き of its own: {:?}",
+        gloss.text,
+    );
+    assert_eq!(
+        vec!["\u{3068}\u{3046}", "\u{304d}\u{3089}"],
+        gloss.ruby.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+        "both readings survive, in the order the archive wrote them",
+    );
+    // Six characters, then 父 - one unit wide, wearing two half-size kana,
+    // which is exactly one unit, so とう covers its base flush.
+    assert_eq!(6.0 * unit, gloss.ruby[0].x);
+    // Then さんは, and the empty base begins ten units in.
+    assert_eq!(10.0 * unit, gloss.ruby[1].x, "over its own hole, not over 父");
+}

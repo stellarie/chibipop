@@ -201,10 +201,24 @@ pub(super) fn place_ruby(
         if ruby.text.is_empty() || box_.h <= 0.0 {
             continue;
         }
+        // Which of the slot's spans the
+        // reading is placed against.
+        // Its base, normally. A `<ruby>`
+        // that reached no base at all
+        // still draws its reading and
+        // its line still grew for it;
+        // what it has no claim to is a
+        // position over a base, because
+        // there is none - so it is placed
+        // against its own filler, which
+        // stands at the pen where a base
+        // would have begun and measures
+        // nothing.
+        let based = flow.spans.iter().any(|s| s.ruby == slot as u32 && !s.filler);
         let base = |b: &&SpanBox| {
             flow.spans
                 .get(b.span as usize)
-                .is_some_and(|s| s.ruby == slot as u32 && !s.filler)
+                .is_some_and(|s| s.ruby == slot as u32 && s.filler != based)
         };
         // The first line the base
         // landed on, and its extent
@@ -270,8 +284,21 @@ pub(super) fn place_ruby(
         // line's own alignment slack
         // comes first, because the base
         // it sits over moved by it.
+        //
+        // Flush with the pen instead when
+        // no base reached the slot: CSS
+        // gives the annotation an
+        // anonymous *empty* base, so the
+        // ruby box is the annotation's
+        // own width and the annotation
+        // starts at its left edge.
+        // Centring on a zero-width point
+        // would draw the reading half its
+        // width back over the text before
+        // it.
         let indent = (wrap_w - geom.w).max(0.0) * slack;
-        let x = (indent + left + (right - left - box_.w) / 2.0).max(0.0);
+        let over = if based { (right - left - box_.w) / 2.0 } else { 0.0 };
+        let x = (indent + left + over).max(0.0);
         out.push(RubyBox {
             text: ruby.text.clone(),
             x,
@@ -385,8 +412,7 @@ pub(super) struct FlowRuby {
 /// and the reading that fills it.
 impl Paragraphs<'_> {
     /// Buys the open slot's reading its
-    /// room, if the slot has a base to
-    /// hang it over.
+    /// room.
     ///
     /// A [`RUBY_FILLER`] span of its
     /// own, appended straight after the
@@ -400,16 +426,22 @@ impl Paragraphs<'_> {
     /// the first point at which the
     /// reading's height is known.
     ///
-    /// Nothing is appended for a slot
-    /// no base text reached: an empty
-    /// ruby would otherwise buy a
-    /// taller line for a reading with
-    /// nothing to read.
+    /// A slot no base reached gets one
+    /// too. A reading with no base still
+    /// has to be drawn, so its line
+    /// still has to be tall enough for
+    /// it - CSS gives such an annotation
+    /// an anonymous empty ruby base and
+    /// a browser draws it. What it has
+    /// no claim to is a *position over a
+    /// base*, and that is
+    /// [`place_ruby`]'s to withhold: the
+    /// filler stands at the pen the base
+    /// would have begun at, and the
+    /// reading is placed flush with it
+    /// rather than centred on nothing.
     pub(super) fn push_filler(&mut self, style: Inline) {
         let slot = self.open_ruby;
-        if !self.cur.spans.iter().any(|s| s.ruby == slot && !s.filler) {
-            return;
-        }
         let at = self.cur.text.len() as u32;
         self.cur.text.push_str(RUBY_FILLER);
         self.cur.spans.push(FlowSpan {

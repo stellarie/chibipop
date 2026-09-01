@@ -3572,18 +3572,28 @@ fn the_committed_suppression_list_parses() {
 /// The whole suppression path over a real archive: one shape absorbed, one
 /// shape still a candidate.
 ///
-/// `sweep.zip` renders three rows into two distinct violating shapes, and
+/// `sweep.zip` renders four rows into two distinct violating shapes, and
 /// `sweep-suppressions.toml` exempts one of them and names a third shape no
 /// row produces. So one run shows every half of the rule: an exemption that
 /// absorbs and reports its count, a violation that still reaches a candidate
 /// file, and an exemption that absorbed nothing and is called out for it.
+///
+/// The violating shape is a runaway indent a row declares on itself, which is
+/// one of the two shapes *no horizontal overflow* is stated for and one a
+/// browser puts in the same place. It replaced a base-less `<ruby>`, which
+/// used to drop its reading and no longer does (issue 21): the two ruby rows
+/// stay in the archive as controls, so a renderer that lost a reading again
+/// would raise the violation count here rather than pass quietly.
 #[test]
 fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan");
     let zip = dir.join("sweep.zip");
-    let suppressed = "dropped-text | FixtureSweep | content > div > ruby > rt > text";
-    let open = "dropped-text | FixtureSweep | content > div > ruby[data-sc-content] > rt > text";
-    let never = "dropped-text | FixtureSweep | content > div > ruby > rt[data-sc-never] > text";
+    let suppressed =
+        "horizontal-overflow | FixtureSweep | content > div{padding-left} > <element-box>";
+    let open = "horizontal-overflow | FixtureSweep | \
+                content > div[data-sc-content]{padding-left} > <element-box>";
+    let never = "horizontal-overflow | FixtureSweep | \
+                 content > div[data-sc-never]{padding-left} > <element-box>";
     let list = || {
         Suppressions::load(&dir.join("sweep-suppressions.toml")).expect("the fixture list")
     };
@@ -3594,7 +3604,7 @@ fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
     let d = &report.dicts[0];
     assert_eq!("FixtureSweep", d.dictionary);
     assert_eq!(0, d.errors, "no fixture row panics");
-    assert_eq!(3, d.entries, "one reading over a base, two with none");
+    assert_eq!(4, d.entries, "two readings that render, two indents that overflow");
     assert_eq!(
         2, d.violations,
         "an exemption may never lower the violation count, or nobody can audit it",

@@ -6,15 +6,20 @@
 # from disk, absorbing violations from a real archive - over an archive CI
 # can see.
 #
-# `sweep.zip` renders three rows into two distinct violating shapes. The first
-# is suppressed here and the second deliberately is not, so one run shows both
-# halves of the rule. The third entry names a shape no row produces, so the
-# run also has an unused exemption to report.
+# `sweep.zip` renders four rows. Its two ruby rows are controls that violate
+# nothing: one hangs a reading over its own base and one has no base at all,
+# and issue 21 settled that the second still draws its reading. The other two
+# rows each declare 40em of left padding at a 424-pixel panel, which walks the
+# pen off the right edge - two distinct violating shapes, because only one of
+# the two carries a `data` hook. The first is suppressed here and the second
+# deliberately is not, so one run shows both halves of the rule. The third
+# entry names a shape no row produces, so the run also has an unused
+# exemption to report.
 
 [[suppress]]
-signature = "dropped-text | FixtureSweep | content > div > ruby > rt > text"
-reason = "A ruby with no base has nothing to hang a reading over, so the renderer draws none (src/ui/layout/ruby.rs)."
+signature = "horizontal-overflow | FixtureSweep | content > div{padding-left} > <element-box>"
+reason = "The dictionary declares the indent itself, and a browser puts the ink in the same place."
 
 [[suppress]]
-signature = "dropped-text | FixtureSweep | content > div > ruby > rt[data-sc-never] > text"
+signature = "horizontal-overflow | FixtureSweep | content > div[data-sc-never]{padding-left} > <element-box>"
 reason = "Never matched by this archive: the unused report has to have something to name."
