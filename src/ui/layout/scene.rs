@@ -563,6 +563,23 @@ pub struct SceneElem {
     /// a bin hands its text engine.
     pub pen: (f32, f32),
     /// The measured ink box.
+    ///
+    /// Its leading edge is the widest
+    /// line's, [`align`] already
+    /// applied, so an aligned element
+    /// has `rect.x` right of `pen.0` by
+    /// the line's own slack. Nothing
+    /// run-relative is measured from
+    /// it: a [`RubyBox`] carries that
+    /// same slack in its own `x`, and a
+    /// [`MarkerBox`] hangs in the
+    /// gutter off the content edge with
+    /// no slack at all, so both draw
+    /// from [`pen`] and adding them to
+    /// `rect.x` would count it twice.
+    ///
+    /// [`align`]: Self::align
+    /// [`pen`]: Self::pen
     pub rect: SceneRect,
     /// Wrapped line count.
     pub lines: u32,

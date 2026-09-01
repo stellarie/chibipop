@@ -278,16 +278,49 @@ impl<'a> Pass<'a> {
             place_pills(flow, &self.measured, &mut self.cover, pen, line_at);
 
         let base = flow.base(theme);
-        // A reading wider than its
-        // base overhangs it, and the
-        // ink box is the ink: without
-        // this an element would report
-        // a width its own furigana
-        // exceeds. It can only ever
-        // overhang to the right -
-        // [`place_ruby`] clamps the
-        // left edge into the box.
-        let ink_w = ruby.iter().fold(met.w, |a, r| a.max(r.x + r.w));
+        // Where the ink starts once the
+        // block's own `text-align` has
+        // moved its lines: the widest
+        // line's leading edge, which is
+        // the pen for an unaligned
+        // paragraph ([`Align::Leading`]
+        // has no slack).
+        //
+        // [`Align::Leading`]: super::scene::Align::Leading
+        let ink_x = pen.0 + (wrap_w - met.w).max(0.0) * slack;
+        // A reading wider than its base
+        // overhangs it, and the ink box
+        // is the ink: without this an
+        // element would report a width
+        // its own furigana exceeds.
+        //
+        // Measured from `ink_x` rather
+        // than from `pen.0`, because
+        // [`RubyBox::x`] is run-relative
+        // and [`place_ruby`] has already
+        // put its line's own alignment
+        // slack into it. Folding it
+        // against `met.w` and then
+        // spending the answer as a width
+        // from `ink_x` charged that slack
+        // twice: a right-aligned poet's
+        // name with five readings claimed
+        // 380px of ink where it draws 41,
+        // and 319px of the claim hung off
+        // the panel.
+        //
+        // Only the right edge grows.
+        // [`place_ruby`] clamps a reading
+        // into the *wrap* box, which is
+        // this box exactly when the
+        // paragraph is unaligned; the
+        // leading edge is an aligned run's
+        // own origin and may not move
+        // ([`SceneElem::rect`]).
+        //
+        // [`RubyBox::x`]: super::scene::RubyBox::x
+        // [`SceneElem::rect`]: super::scene::SceneElem::rect
+        let ink_w = ruby.iter().fold(met.w, |a, r| a.max(pen.0 + r.x + r.w - ink_x));
         // A marker adds nothing to it,
         // although it hangs left of
         // `pen.0`: the room it sits in
@@ -309,12 +342,7 @@ impl<'a> Pass<'a> {
             wrap_w,
             align: flow.block.align,
             pen,
-            rect: SceneRect {
-                x: pen.0 + (wrap_w - met.w).max(0.0) * slack,
-                y: pen.1,
-                w: ink_w,
-                h: met.h,
-            },
+            rect: SceneRect { x: ink_x, y: pen.1, w: ink_w, h: met.h },
             lines: met.lines,
             advance: h,
             spans,

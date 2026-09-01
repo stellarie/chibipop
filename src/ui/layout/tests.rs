@@ -6299,6 +6299,118 @@ fn an_empty_ruby_base_keeps_its_reading_beside_the_base_that_has_one() {
     assert_eq!(10.0 * unit, gloss.ruby[1].x, "over its own hole, not over 父");
 }
 
+
+// ---- a right-aligned line's own ink ----
+
+/// 小学館例解学習国語 第十二版's 百人一首 appendix, one poem card's poet line
+/// verbatim: `div[data-sc-読み人]` declaring `text-align: right` over five
+/// per-character `<ruby>`, inside the card and the appendix wrappers its
+/// selectors need.
+///
+/// The corpus flagged this shape 100 times, once per poem, as *no horizontal
+/// overflow*: a 380.41 px element box starting 362.50 px into a 424 px panel,
+/// so 318.91 px of it hung off the right edge. The line's own ink is five
+/// kanji, 41.25 px, and every reading sits inside that - the extra 339 px was
+/// the line's alignment slack, counted once by [`place_ruby`] into
+/// [`RubyBox::x`] and a second time into `rect.x`, then spent as a width.
+///
+/// The arithmetic, so a reader can redo it. `body_size` is 15 and the
+/// appendix's own `font-size: 1.1em` steps the card to 16.5, so a kanji
+/// advances 8.25 and five of them measure 41.25. The panel pads 12 and the
+/// card's `padding: 0.5em` adds 8.25, so the pen sits at 20.25 and the wrap is
+/// 400 - 16.5 = 383.50. A right-aligned line ends at the card's right content
+/// edge, so it starts at 20.25 + 383.50 - 41.25 = 362.50 and ends at 403.75,
+/// inside the panel's own content edge at 412.
+///
+/// Two numbers, because a fix that repairs the box by moving the readings is
+/// not one: `RubyBox::x` is run-relative, so the rightmost reading's leading
+/// edge is `pen.0 + r.x` and nothing else.
+///
+/// [`place_ruby`]: super::ruby::place_ruby
+#[test]
+fn a_right_aligned_lines_ink_box_counts_its_alignment_slack_once() {
+    let p = card_with(vec![css_tree(
+        "小学館例解学習国語 第十二版",
+        &sc(concat!(
+            r#"{"tag":"span","data":{"付録":""},"content":["#,
+            r#"{"tag":"span","data":{"body":""},"content":["#,
+            r#"{"tag":"div","data":{"class":"恋","句":"","恋":""},"content":["#,
+            r#"{"tag":"div","data":{"読み人":""},"content":["#,
+            r#"{"tag":"ruby","data":{"ruby":""},"content":[{"tag":"span","data":{"rb":""},"#,
+            r#""content":[{"tag":"span","content":"柿"}]},{"tag":"rt","data":{"rt":""},"#,
+            r#""content":[{"tag":"span","content":"かきの"}]}]},"#,
+            r#"{"tag":"ruby","data":{"ruby":""},"content":[{"tag":"span","data":{"rb":""},"#,
+            r#""content":[{"tag":"span","content":"本"}]},{"tag":"rt","data":{"rt":""},"#,
+            r#""content":[{"tag":"span","content":"もとの"}]}]},"#,
+            r#"{"tag":"ruby","data":{"ruby":""},"content":[{"tag":"span","data":{"rb":""},"#,
+            r#""content":[{"tag":"span","content":"人"}]},{"tag":"rt","data":{"rt":""},"#,
+            r#""content":[{"tag":"span","content":"ひと"}]}]},"#,
+            r#"{"tag":"ruby","data":{"ruby":""},"content":[{"tag":"span","data":{"rb":""},"#,
+            r#""content":[{"tag":"span","content":"麻"}]},{"tag":"rt","data":{"rt":""},"#,
+            r#""content":[{"tag":"span","content":"ま"}]}]},"#,
+            r#"{"tag":"ruby","data":{"ruby":""},"content":[{"tag":"span","data":{"rb":""},"#,
+            r#""content":[{"tag":"span","content":"呂"}]},{"tag":"rt","data":{"rt":""},"#,
+            r#""content":[{"tag":"span","content":"ろ"}]}]}"#,
+            r#"]}]}]}]}"#,
+        )),
+        "rt {
+             font-size: 0.5em;
+             font-weight: normal;
+         }
+         [data-sc付録] [data-sc-body] {
+             font-size: 1.1em;
+         }
+         [data-sc付録] [data-sc句] {
+             display: block;
+             padding: 0.5em;
+         }
+         [data-sc付録] [data-sc読み人] {
+             display: block;
+             margin-inline-start: 1.5em;
+             margin-inline-end: 3em;
+             text-align: right;
+         }",
+    )]);
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let name = s.elems.iter().find(|e| e.text.starts_with('柿')).expect("the poet's line");
+
+    // The card's em, and the kanji it advances by.
+    let em = BOX_EM * 1.1;
+    let kanji = em * ADVANCE;
+    assert_eq!(16.5, em);
+    assert_eq!(Align::Trailing, name.align, "text-align: right");
+    assert_eq!(5, name.ruby.len(), "one reading per character");
+    assert_eq!(s.origin + em / 2.0, name.pen.0, "the panel's padding plus the card's");
+    assert_eq!(400.0 - em, name.wrap_w, "the content column less the card's two paddings");
+
+    // The line ends at the card's right content edge, which is correct, and
+    // the box is the ink it covers: five kanji and no furigana, because every
+    // reading is narrower than the base it sits over.
+    assert_eq!(362.5, name.rect.x, "the aligned line's own leading edge");
+    assert_eq!(5.0 * kanji, name.rect.w, "five kanji of ink, not five of slack");
+    assert_eq!(41.25, name.rect.w);
+    assert_eq!(403.75, name.rect.x + name.rect.w, "flush with the card's content edge");
+    assert!(
+        name.rect.x + name.rect.w <= 424.0 - s.origin,
+        "and inside the panel: {} against {}",
+        name.rect.x + name.rect.w,
+        424.0 - s.origin,
+    );
+
+    // Where a bin draws the last reading: run-relative, so the element's pen
+    // and never its ink box.
+    let last = name.ruby.last().expect("the reading over 呂");
+    assert_eq!("ろ", last.text);
+    assert_eq!(kanji * RUBY_RATIO / 2.0, last.w, "half a base, halved again by the rt rule");
+    assert_eq!(398.59375, name.pen.0 + last.x, "the pen plus the run-relative offset");
+    assert!(
+        name.pen.0 + last.x + last.w <= name.rect.x + name.rect.w,
+        "so the furigana is inside the box that sized it: {} against {}",
+        name.pen.0 + last.x + last.w,
+        name.rect.x + name.rect.w,
+    );
+}
+
 // ---- a table whose children are not rows ----
 
 /// 旺文社漢字典 第四版's radical index: sweep row 94 (灬), its first two

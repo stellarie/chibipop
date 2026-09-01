@@ -140,6 +140,9 @@ pub fn panel(
         // centring each: `DrawRun` would have to carry alignment for
         // that, which is a change to the Linux text seam and not to
         // the box model.
+        //
+        // The run, and nothing else: a reading and a marker are
+        // placed run-relative, so both draw from the pen below.
         let (origin, max_w) = match elem.align {
             Align::Trailing | Align::Center => {
                 ((elem.rect.x, painted.pen.1), elem.rect.w.max(1.0))
@@ -160,6 +163,17 @@ pub fn panel(
         // put it and at the width the
         // scene measured it at, which is
         // the element's own.
+        //
+        // Against `painted.pen` and not
+        // against `origin`, for the same
+        // reason the markers below are:
+        // [`RubyBox::x`] is run-relative
+        // and already carries its line's
+        // own alignment slack, so drawing
+        // it from an aligned element's ink
+        // box would add that slack twice
+        // and throw the furigana off the
+        // panel.
         for run in &elem.ruby {
             let span = run.styled_span(&theme.font_name);
             text.draw_run(
@@ -167,15 +181,16 @@ pub fn panel(
                     spans: &[span],
                     shifts: &[0.0],
                     max_w: elem.wrap_w,
-                    origin: (origin.0 + run.x, origin.1 + run.y),
+                    origin: (painted.pen.0 + run.x, painted.pen.1 + run.y),
                 },
                 target,
             );
         }
         // The list markers, in the
         // gutters their lists opened.
-        // Against `painted.pen` and not
-        // against `origin`: a marker box
+        // Against `painted.pen` too, and
+        // for a second reason on top of
+        // the readings': a marker box
         // hangs off the item's *content*
         // edge, which is the pen,
         // whatever the text inside the
@@ -1148,6 +1163,65 @@ mod tests {
         assert_eq!((9, 8, 7), read.one().color);
         assert_eq!(0.0, read.one().shift, "a reading is placed, not shifted");
         assert_eq!(176.0, read.max_w, "at the width the scene measured it at");
+    }
+
+    /// A reading over an *aligned* line is drawn from the element's pen,
+    /// like the marker below it and like the Windows painter.
+    ///
+    /// The run gets the ink box the scene already aligned, because a
+    /// `DrawRun` carries no alignment flag. A reading is not part of that
+    /// run: `RubyBox::x` is run-relative and already holds the line's own
+    /// alignment slack, so drawing it from the ink box adds that slack a
+    /// second time and throws the furigana off the panel.
+    ///
+    /// The numbers are 小学館例解学習国語 第十二版's 百人一首 appendix, one card's
+    /// poet line: the name is right-aligned to the card's content edge at
+    /// 403.75 and the last reading sits over 呂 at 398.59, both inside the
+    /// 424 px panel. Against the ink box that reading drew at 740.84.
+    #[test]
+    fn a_reading_over_an_aligned_line_is_drawn_from_the_pen_and_not_the_ink_box() {
+        let theme = Theme::dark();
+        let mut elem = styled_elem(
+            (20.25, 12.0),
+            Align::Trailing,
+            &[("\u{67ff}\u{672c}\u{4eba}\u{9ebb}\u{5442}", 16.5, 400, false, 0.0)],
+        );
+        elem.wrap_w = 383.5;
+        elem.rect = SceneRect { x: 362.5, y: 12.0, w: 41.25, h: 49.5 };
+        elem.ruby = vec![RubyBox {
+            text: "\u{308d}".into(),
+            x: 378.34375,
+            y: 0.0,
+            w: 2.0625,
+            h: 8.25,
+            size: 4.125,
+            color: (9, 8, 7),
+            weight: 400,
+            italic: false,
+        }];
+        let mut scene = plain_scene();
+        scene.elems = vec![elem];
+
+        let mut pix = Pixmap::new(424, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
+
+        assert_eq!(2, text.runs.len(), "the name, then its reading");
+        let name = &text.runs[0];
+        assert_eq!(362.5, name.origin.0, "the scene already right-aligned the line");
+        assert_eq!(41.25, name.max_w, "and its width is the ink box");
+
+        let read = &text.runs[1];
+        assert_eq!("\u{308d}", read.text());
+        assert_eq!((398.59375, 12.0), read.origin, "the pen plus the run-relative offset");
+        assert_eq!(383.5, read.max_w, "at the width the scene measured it at");
+        let ink = scene.elems[0].ruby[0].w;
+        assert!(
+            read.origin.0 + ink <= 424.0 - scene.origin,
+            "so the furigana stays on the panel: {} against {}",
+            read.origin.0 + ink,
+            424.0 - scene.origin,
+        );
     }
 
     /// The list marker is drawn, and drawn where the scene put it.
