@@ -3557,6 +3557,11 @@ mod tests {
         assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
     }
 
+    /// `banks.zip`, not a second copy of the library's own `terms.zip`:
+    /// two byte-identical archives are one dictionary, and `Library::load`
+    /// collapses the copy away - so an apply that added it would leave the
+    /// database holding a dictionary the library does not list, which is
+    /// what [`drifted`] reports at the end of this test.
     #[test]
     fn a_mixed_frequency_apply_reapplies_in_place() {
         let (dir, _guard) = edit_scratch("mixed_frequency");
@@ -3569,14 +3574,14 @@ mod tests {
         );
         assert_eq!(
             Some(Roles::only(&[Role::Terms])),
-            form.stage_add(&fixture("terms.zip"))
+            form.stage_add(&fixture("banks.zip"))
         );
         let (tx, rx) = mpsc::channel::<EditMsg>();
         let report =
             apply_edits_with_frequencies(&db, &library, &form, &tx).expect("the apply must work");
 
         assert_eq!(
-            vec![("FixtureTerms".to_string(), Roles::only(&[Role::Terms]))],
+            vec![("FixtureBanks".to_string(), Roles::only(&[Role::Terms]))],
             report.added
         );
         assert_eq!(vec!["FixtureFreq".to_string()], report.freq_added);
@@ -3760,7 +3765,9 @@ mod tests {
         let (dir, _guard) = edit_scratch("remove");
         let library = dir.join("library");
         let db = built_db(&dir, &library);
-        std::fs::copy(fixture("terms.zip"), library.join("extra.zip")).unwrap();
+        // Distinct bytes, because a copy of `terms.zip` would be the same
+        // dictionary under a second name and the library collapses those.
+        std::fs::copy(fixture("banks.zip"), library.join("extra.zip")).unwrap();
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.execute_batch(
