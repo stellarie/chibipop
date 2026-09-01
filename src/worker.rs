@@ -472,7 +472,7 @@ fn present_lookup(
         return LookupOutcome::Hide;
     }
 
-    let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg);
+    let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg, dict);
     presentation.sentence = Some(sentence());
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if outline_match {
@@ -526,7 +526,7 @@ fn resolve_drilldown(
     if hits.is_empty() {
         return LookupOutcome::Hide;
     }
-    let p = present::build(&hits, dicts, present_cfg);
+    let p = present::build(&hits, dicts, present_cfg, dict);
     LookupOutcome::DrillDown(Box::new(p))
 }
 
@@ -535,7 +535,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::lookup::deconj::Deconjugator;
-    use crate::lookup::model::{FakeDictionary, Sense};
+    use crate::lookup::model::FakeDictionary;
     use crate::text::layout::{Orientation, TextGeom};
     use crate::text::TextSpan;
 
@@ -547,7 +547,7 @@ mod tests {
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
             language: "ja".to_string(),
-            present_cfg: Config::default().present_config(&[], || true),
+            present_cfg: Config::default().present_config(&[]),
             scan_display: ScanDisplay { captures: false, highlight: false },
             sentence_mode: SentenceMode::Line,
             static_region: None,
@@ -677,9 +677,14 @@ mod tests {
 
     /// A cache holding these identities, and nothing else a reload cares
     /// about.
+    ///
+    /// The scope is resolved against those same identities, because that is
+    /// what a daemon does: a config naming no Dictionary enables every one
+    /// it finds, and resolving against an empty library instead would leave
+    /// every one of them switched off.
     fn state_with(dicts: Vec<DictInfo>) -> LookupState {
         LookupState {
-            present_cfg: Config::default().present_config(&[], || true),
+            present_cfg: Config::default().present_config(&dicts),
             scan_display: ScanDisplay { captures: false, highlight: false },
             sentence_mode: SentenceMode::Line,
             static_region: None,
@@ -738,16 +743,7 @@ mod tests {
         let mut d = FakeDictionary::new();
         d.add_dict(1, "FakeDict");
         d.add_term("食", Some("食"), None, "", None, 10, 1);
-        d.add_entry(
-            10,
-            1,
-            vec![Sense {
-                glosses: vec!["to eat".to_string()],
-                glosses_html: Vec::new(),
-                pos: Vec::new(),
-                misc: Vec::new(),
-            }],
-        );
+        d.add_entry(10, 1, r#"["to eat"]"#);
         d
     }
 

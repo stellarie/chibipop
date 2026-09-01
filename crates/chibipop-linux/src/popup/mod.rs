@@ -20,6 +20,10 @@ mod place;
 mod pointer;
 mod surface;
 mod text;
+// `media.rs` is the seventh file here and is deliberately *not* declared
+// from this module: the lib face owns it (`crate::lib.rs`, `#[path]`), so
+// its tests can link against a real built database. Reach it as
+// `chibipop_linux::media`.
 
 pub use demo::{canned, Demo};
 pub use place::{derive, Screen};
@@ -30,7 +34,7 @@ pub use surface::{Placed, Popup, ShowRequest};
 /// [`surface::Popup`]'s engine.
 pub use text::jp_capable;
 
-use chibipop::ui::layout::Rgb;
+use chibipop::ui::layout::StyledSpan;
 use chibipop::ui::theme::Theme;
 
 /// Panel opacity, matching Windows' `LWA_ALPHA` 230/255 exactly
@@ -43,19 +47,22 @@ pub const PANEL_ALPHA: u8 = 230;
 /// The paint half of the text stack. Core's `TextMeasure` is the
 /// measure half; the same engine implements both, so a run is never
 /// wrapped one way and painted another.
+///
+/// It carries the same ordered styled spans the seam measured, not one
+/// string, so a paragraph holding bold and normal text paints in the
+/// wrap it was measured in (ADR-0013). Colour rides on each span, and
+/// `shifts` says how far up each one sits off its line's baseline -
+/// `verticalAlign`, already resolved by the scene.
 #[derive(Debug, Clone, Copy)]
 pub struct DrawRun<'a> {
-    pub text: &'a str,
-    /// Physical pixels, already scaled.
-    pub size: f32,
-    /// The scene's weight, 100-900 on
-    /// DirectWrite's scale: cosmic-text
-    /// takes the same numbers.
-    pub weight: u16,
-    pub italic: bool,
+    /// In reading order.
+    pub spans: &'a [StyledSpan<'a>],
+    /// One per span, up positive.
+    /// Empty means every span sits on
+    /// its line's own baseline.
+    pub shifts: &'a [f32],
     /// The wrap width the scene measured this run at.
     pub max_w: f32,
-    pub color: Rgb,
     /// Top-left of the wrap box, in buffer pixels.
     pub origin: (f32, f32),
 }

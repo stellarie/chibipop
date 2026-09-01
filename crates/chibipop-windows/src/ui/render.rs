@@ -21,9 +21,11 @@
 use crate::controller::HitAction;
 use crate::present::Presentation;
 use crate::ui::layout::{
-    self, Align, ElemKind, GlyphBox, HitTarget, MeasureError, MeasureRun, Metrics,
-    PopupScene, SceneElem, SceneRequest, TextMeasure,
+    self, Align, ElemKind, GlyphBox, HitTarget, LineBox, MeasureError, MeasureRun, Measured,
+    Metrics, PopupScene, RenderSettings, SceneElem, SceneImage, SceneRect, SceneRequest, SpanBox,
+    StyledSpan, TextMeasure,
 };
+use crate::ui::media::MediaSurfaces;
 use crate::ui::theme::{Theme, SCROLLBAR_W};
 use anyhow::{Context, Result};
 use std::cell::RefCell;
@@ -101,11 +103,7 @@ impl Text {
             }
         }
 
-        let style = if italic {
-            DWRITE_FONT_STYLE_ITALIC
-        } else {
-            DWRITE_FONT_STYLE_NORMAL
-        };
+        let style = style_of(italic);
         let created = unsafe {
             self.dwrite.CreateTextFormat(
                 &HSTRING::from(font),
@@ -129,23 +127,146 @@ impl Text {
 
     /// One wrapped layout.
     ///
-    /// The one shaping call in the bin:
-    /// measure and paint both come
+    /// The one shaping call in the
+    /// bin: measure and paint both come
     /// through here, and through the
     /// same `MeasureRun`, so a run is
     /// never wrapped two ways nor
     /// painted in a weight it was not
     /// measured in.
+    ///
+    /// The whole run is one layout, so
+    /// its spans wrap as one paragraph
+    /// and a bold span can share a line
+    /// with a normal one (ADR-0013).
+    /// The first span's cached
+    /// `IDWriteTextFormat` is the base
+    /// and the rest override their own
+    /// ranges, so a one-span run makes
+    /// exactly the calls it always did.
+    /// Colour is not here: it changes
+    /// no geometry and needs a brush,
+    /// which only the paint side has.
     fn layout(&self, run: MeasureRun<'_>) -> windows::core::Result<IDWriteTextLayout> {
-        let format = self.format(run.font, run.size, run.weight, run.italic)?;
-        let wide: Vec<u16> = run.text.encode_utf16().collect();
-        unsafe { self.dwrite.CreateTextLayout(&wide, &format, run.max_w.max(1.0), f32::MAX) }
+        let base = run.spans.first().copied().unwrap_or(NO_SPAN);
+        let format = self.format(base.font, base.size, base.weight, base.italic)?;
+        let mut wide: Vec<u16> = Vec::new();
+        for span in run.spans {
+            wide.extend(span.text.encode_utf16());
+        }
+        let layout = unsafe {
+            self.dwrite
+                .CreateTextLayout(&wide, &format, run.max_w.max(1.0), f32::MAX)
+        }?;
+        for (span, range) in run.spans.iter().zip(ranges(run.spans)).skip(1) {
+            // SAFETY: each range names
+            // UTF-16 positions inside the
+            // string the layout was just
+            // built from.
+            unsafe {
+                layout.SetFontFamilyName(&HSTRING::from(span.font), range)?;
+                layout.SetFontWeight(DWRITE_FONT_WEIGHT(span.weight as i32), range)?;
+                layout.SetFontStyle(style_of(span.italic), range)?;
+                layout.SetFontSize(span.size, range)?;
+            }
+        }
+        Ok(layout)
     }
 
     /// Borrows it as a `TextMeasure`.
     fn measurer(&self) -> Measurer<'_> {
         Measurer(self)
     }
+}
+
+/// What a run with no spans formats as.
+///
+/// Core never builds one - every
+/// element it measures carries a styled
+/// span - but a layout needs a family
+/// and a size whatever its text is, and
+/// an unnamed family is DirectWrite's
+/// to refuse rather than this module's
+/// to guess at.
+const NO_SPAN: StyledSpan<'static> = StyledSpan {
+    text: "",
+    font: "",
+    size: 1.0,
+    weight: 400,
+    italic: false,
+    color: (0, 0, 0),
+};
+
+fn style_of(italic: bool) -> DWRITE_FONT_STYLE {
+    if italic {
+        DWRITE_FONT_STYLE_ITALIC
+    } else {
+        DWRITE_FONT_STYLE_NORMAL
+    }
+}
+
+/// Each span's UTF-16 range in the run.
+///
+/// The layout is one string end to end,
+/// so a span is a range in it - which
+/// is the unit both the per-range
+/// formatting and `HitTestTextRange`
+/// take.
+fn ranges<'a>(
+    spans: &'a [StyledSpan<'a>],
+) -> impl Iterator<Item = DWRITE_TEXT_RANGE> + 'a {
+    let mut start = 0u32;
+    spans.iter().map(move |span| {
+        let length = span.text.encode_utf16().count() as u32;
+        let range = DWRITE_TEXT_RANGE { startPosition: start, length };
+        start += length;
+        range
+    })
+}
+
+/// The line UTF-16 position `at` is on.
+fn line_of(lines: &[DWRITE_LINE_METRICS], at: u32) -> usize {
+    let mut end = 0u32;
+    for (i, line) in lines.iter().enumerate() {
+        end += line.length;
+        if at < end {
+            return i;
+        }
+    }
+    lines.len().saturating_sub(1)
+}
+
+/// The rects `[at, at + len)` fills.
+///
+/// One per line the range touches, and
+/// one more per bidi run on a line.
+/// `HitTestTextRange` reports how many
+/// it needed when the buffer was too
+/// small, so `hint` covers the ordinary
+/// case in one call and the retry
+/// covers the rest.
+fn hit_range(
+    layout: &IDWriteTextLayout,
+    at: u32,
+    len: u32,
+    hint: usize,
+    out: &mut Vec<DWRITE_HIT_TEST_METRICS>,
+) -> windows::core::Result<()> {
+    out.clear();
+    out.resize(hint.max(1), DWRITE_HIT_TEST_METRICS::default());
+    let mut got = 0u32;
+    // SAFETY: `at` and `len` name UTF-16
+    // positions inside the layout's own
+    // text, and the buffer is sized
+    // before each call.
+    let mut hr = unsafe { layout.HitTestTextRange(at, len, 0.0, 0.0, Some(out), &mut got) };
+    if hr.is_err() && got as usize > out.len() {
+        out.resize(got as usize, DWRITE_HIT_TEST_METRICS::default());
+        hr = unsafe { layout.HitTestTextRange(at, len, 0.0, 0.0, Some(out), &mut got) };
+    }
+    hr?;
+    out.truncate(got as usize);
+    Ok(())
 }
 
 /// `Text`, seen through the seam.
@@ -161,11 +282,87 @@ fn refused(e: windows::core::Error) -> MeasureError {
 }
 
 impl TextMeasure for Measurer<'_> {
-    fn measure(&mut self, run: MeasureRun<'_>) -> std::result::Result<Metrics, MeasureError> {
+    fn measure(
+        &mut self,
+        run: MeasureRun<'_>,
+        out: &mut Measured,
+    ) -> std::result::Result<(), MeasureError> {
+        out.clear();
         let layout = self.0.layout(run).map_err(refused)?;
+        // The aggregate is still
+        // `GetMetrics`, untouched, so a
+        // one-span run measures exactly
+        // what it did before the seam
+        // widened. Everything below is
+        // detail beside it.
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut m) }.map_err(refused)?;
-        Ok(Metrics { w: m.width, h: m.height, lines: m.lineCount })
+        out.metrics = Metrics { w: m.width, h: m.height, lines: m.lineCount };
+
+        let mut lines = vec![DWRITE_LINE_METRICS::default(); m.lineCount.max(1) as usize];
+        let mut got = 0u32;
+        unsafe { layout.GetLineMetrics(Some(&mut lines), &mut got) }.map_err(refused)?;
+        lines.truncate(got as usize);
+
+        let mut rects = Vec::new();
+        let (mut y, mut start) = (0.0f32, 0u32);
+        for line in &lines {
+            // Trailing whitespace out, so
+            // a line's width means what
+            // `GetMetrics` means by width.
+            let visible = line.length.saturating_sub(line.trailingWhitespaceLength);
+            let w = if visible == 0 {
+                0.0
+            } else {
+                hit_range(&layout, start, visible, 1, &mut rects).map_err(refused)?;
+                rects.iter().fold(0.0f32, |a, r| a.max(r.left + r.width))
+            };
+            out.lines.push(LineBox { y, w, h: line.height, baseline: line.baseline });
+            y += line.height;
+            start += line.length;
+        }
+        // A line box per counted line,
+        // whatever DirectWrite filled:
+        // core stacks the gap after an
+        // empty run either way.
+        if out.lines.is_empty() {
+            out.lines.push(LineBox { y: 0.0, w: m.width, h: m.height, baseline: m.height });
+        }
+
+        for (i, range) in ranges(run.spans).enumerate() {
+            if range.length == 0 {
+                continue;
+            }
+            hit_range(&layout, range.startPosition, range.length, lines.len(), &mut rects)
+                .map_err(refused)?;
+            for rect in &rects {
+                let line = line_of(&lines, rect.textPosition) as u32;
+                match out.spans.iter_mut().rev().find(|b| b.span == i as u32 && b.line == line) {
+                    // One box per span per
+                    // line: a bidi split
+                    // reports the same line
+                    // twice and the box is
+                    // their union.
+                    Some(b) => {
+                        let right = (b.x + b.w).max(rect.left + rect.width);
+                        b.x = b.x.min(rect.left);
+                        b.w = right - b.x;
+                    }
+                    None => out.spans.push(SpanBox {
+                        span: i as u32,
+                        line,
+                        x: rect.left,
+                        w: rect.width,
+                        // Filled below: a
+                        // span's own advance
+                        // needs its line's.
+                        h: 0.0,
+                    }),
+                }
+            }
+        }
+        span_heights(run.spans, out);
+        Ok(())
     }
 
     fn caret_boxes(
@@ -191,15 +388,61 @@ impl TextMeasure for Measurer<'_> {
     }
 }
 
+/// What each span asked its line for.
+///
+/// DirectWrite reports a line's advance
+/// but never a range's share of it:
+/// `HitTestTextRange` answers with the
+/// line's own box for every fragment on
+/// it. The share is recoverable from
+/// the line, though, because
+/// DirectWrite sizes a line at the
+/// largest of `size × the face's
+/// advance per em` over its ranges - so
+/// the tallest span on a line fixes
+/// that ratio, and every other span on
+/// it asked for its own size times the
+/// same number. Exact for one family at
+/// mixed sizes, which is what the
+/// census's 18 `fontSize` dictionaries
+/// produce; a fallback face on the same
+/// line makes it the tallest face's
+/// ratio for all of them, which is
+/// never more than the line.
+fn span_heights(spans: &[StyledSpan<'_>], out: &mut Measured) {
+    for (i, geom) in out.lines.iter().enumerate() {
+        let i = i as u32;
+        let tallest = out
+            .spans
+            .iter()
+            .filter(|b| b.line == i)
+            .filter_map(|b| spans.get(b.span as usize))
+            .fold(0.0f32, |a, s| a.max(s.size));
+        if tallest <= 0.0 {
+            continue;
+        }
+        let per_em = geom.h / tallest;
+        for b in out.spans.iter_mut().filter(|b| b.line == i) {
+            b.h = spans.get(b.span as usize).map_or(geom.h, |s| s.size * per_em);
+        }
+    }
+}
+
 /// Lays one popup out, in DIPs.
+///
+/// The box is one argument because its
+/// two halves are always resolved and
+/// passed together, which leaves room
+/// for the render settings without a
+/// seventh loose parameter.
 fn scene_of(
     text: &Text,
     p: &Presentation,
     theme: &Theme,
-    max_w: f32,
-    max_h: f32,
+    box_dip: (f32, f32),
     show_back: bool,
     side_panel: bool,
+    render: RenderSettings,
 ) -> Result<PopupScene> {
     // The Anki affordance is its own
     // window here, sized by its own
@@ -210,10 +453,11 @@ fn scene_of(
         &SceneRequest {
             presentation: p,
             theme,
-            max_w,
-            max_h,
+            max_w: box_dip.0,
+            max_h: box_dip.1,
             show_back,
             side_panel,
+            render,
             anki: None,
         },
         &mut text.measurer(),
@@ -249,20 +493,52 @@ pub struct Renderer {
     /// From the last paint pass, in
     /// DIPs, as the scene reported it.
     hits: RefCell<Vec<HitTarget>>,
+    /// The painter's decoded-asset
+    /// cache, or `None` when this build
+    /// cannot open the dictionary
+    /// database.
+    ///
+    /// `RefCell` for the same reason
+    /// `hits` and the format cache are:
+    /// `paint_once` takes `&self`, and
+    /// this window is single-threaded
+    /// by construction. `None` is a real
+    /// state and not a failure - the
+    /// popup still paints, with every
+    /// image on the `alt`-text rung.
+    media: RefCell<Option<MediaSurfaces>>,
 }
 
 impl Renderer {
     /// Factories only, no target.
-    pub fn new(hwnd: HWND) -> Result<Renderer> {
+    ///
+    /// `db` is the dictionary database, which the painter opens its own
+    /// read-only connection onto: the worker owns the dictionary on
+    /// another thread and a `rusqlite::Connection` is not `Sync`.
+    pub fn new(hwnd: HWND, db: &std::path::Path) -> Result<Renderer> {
         let d2d_factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
                 .context("D2D1CreateFactory")?;
+        // A database this build cannot open costs the panel its images and
+        // never its frame: an image node then renders its `alt` text,
+        // which is the character it stood for.
+        let media = match MediaSurfaces::open(db) {
+            Ok(cache) => Some(cache),
+            Err(e) => {
+                eprintln!(
+                    "chibipop: no dictionary media - {e:#}; image nodes will render \
+                     their alt text"
+                );
+                None
+            }
+        };
         Ok(Renderer {
             hwnd,
             d2d_factory,
             text: Text::new()?,
             target: None,
             hits: RefCell::new(Vec::new()),
+            media: RefCell::new(media),
         })
     }
 
@@ -296,25 +572,34 @@ impl Renderer {
 
     /// `(width, view_h, content_h)`.
     ///
-    /// All three in physical pixels.
+    /// All three in physical pixels,
+    /// and `box_phys` likewise - one
+    /// argument for the same reason
+    /// [`scene_of`] takes one: its two
+    /// halves are always resolved
+    /// together, and separating them
+    /// would put this over clippy's
+    /// argument cap for no gain in
+    /// clarity.
     pub fn measure(
         &mut self,
         p: &Presentation,
         theme: &Theme,
-        max_w: i32,
-        max_h: i32,
+        box_phys: (i32, i32),
         show_back: bool,
         side_panel: bool,
+        render: RenderSettings,
     ) -> Result<(i32, i32, i32)> {
+        let (max_w, max_h) = box_phys;
         let scale = self.dpi_scale();
         let scene = scene_of(
             &self.text,
             p,
             theme,
-            max_w as f32 / scale,
-            max_h as f32 / scale,
+            (max_w as f32 / scale, max_h as f32 / scale),
             show_back,
             side_panel,
+            render,
         )?;
         Ok(popup_size(&scene, scale, max_w))
     }
@@ -332,6 +617,7 @@ impl Renderer {
         scroll: i32,
         show_back: bool,
         side_panel: bool,
+        render: RenderSettings,
     ) -> Result<()> {
         let (cw, ch) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(cw, ch).context("preparing the D2D render target")?;
@@ -341,7 +627,8 @@ impl Renderer {
         let h = (ch as f32 / scale) as i32;
         let scroll = (scroll as f32 / scale) as i32;
 
-        let scene = scene_of(&self.text, p, theme, w as f32, h as f32, show_back, side_panel)?;
+        let scene =
+            scene_of(&self.text, p, theme, (w as f32, h as f32), show_back, side_panel, render)?;
         *self.hits.borrow_mut() = scene.hit_targets();
 
         if let Err(e) = self.paint_once(&scene, theme, w, h, scroll) {
@@ -445,8 +732,13 @@ impl Renderer {
                 target.DrawRoundedRectangle(&panel, &border_brush, theme.border_width, None);
             }
 
+            // One buffer for every
+            // element's spans: a rich
+            // entry costs no allocation
+            // per element per frame.
+            let mut spans: Vec<StyledSpan<'_>> = Vec::new();
             for painted in scene.visible(scroll as f32, h as f32) {
-                self.draw_elem(target, theme, painted.elem, painted.pen)?;
+                self.draw_elem(target, theme, painted.elem, painted.pen, &mut spans)?;
             }
 
             if let Some(side) = &scene.side {
@@ -464,34 +756,33 @@ impl Renderer {
                 unsafe { target.FillRectangle(&sep, &sep_brush) };
 
                 for painted in side.visible(scroll as f32, h as f32) {
-                    let brush = unsafe {
-                        target.CreateSolidColorBrush(&color_f(painted.row.color), None)
-                    }?;
-                    // One format for the
+                    // One role for the
                     // whole column, the
-                    // collapsed role's.
-                    let layout = self.text.layout(MeasureRun {
+                    // collapsed one.
+                    let span = StyledSpan {
                         text: &painted.row.text,
                         font: &theme.font_name,
                         size: theme.collapsed_size,
                         weight: theme.collapsed_weight,
                         italic: theme.collapsed_italic,
-                        max_w: side.col_w,
-                    })?;
-                    unsafe {
-                        target.DrawTextLayout(
-                            Vector2 { X: side.col_x, Y: painted.y },
-                            &layout,
-                            &brush,
-                            D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        );
-                    }
+                        color: painted.row.color,
+                    };
+                    let at = Vector2 { X: side.col_x, Y: painted.y };
+                    self.draw_spans(
+                        target,
+                        &[span],
+                        &[0.0],
+                        side.col_w,
+                        at,
+                        Align::Leading,
+                    )?;
                 }
             }
 
-            let track_h = h - 2 * theme.padding;
-            let total = scene.used_h.ceil() as i32 + 2 * theme.padding;
-            if let Some((top, thumb_h)) = layout::scrollbar_thumb(track_h, total, h, scroll) {
+            // Core derives the track and the content height off the scene
+            // itself, so this renderer, the Linux painter and the golden
+            // capture cannot disagree about what the padding does to either.
+            if let Some((top, thumb_h)) = scene.scrollbar_thumb(theme.padding, h, scroll) {
                 let brush =
                     unsafe { target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None) }?;
                 let x = (w - theme.padding / 2 - SCROLLBAR_W) as f32;
@@ -515,21 +806,16 @@ impl Renderer {
     }
 
     /// Draws one scene element.
-    ///
-    /// Re-shapes the run at the width
-    /// the scene measured it at, so
-    /// the ink lands where the hit
-    /// rects say it does.
-    fn draw_elem(
+    fn draw_elem<'a>(
         &self,
         target: &ID2D1HwndRenderTarget,
-        theme: &Theme,
-        elem: &SceneElem,
+        theme: &'a Theme,
+        elem: &'a SceneElem,
         pen: (f32, f32),
+        spans: &mut Vec<StyledSpan<'a>>,
     ) -> windows::core::Result<()> {
-        let brush = unsafe { target.CreateSolidColorBrush(&color_f(elem.color), None) }?;
-
         if elem.kind == ElemKind::Separator {
+            let brush = unsafe { target.CreateSolidColorBrush(&color_f(elem.color), None) }?;
             let rect = D2D_RECT_F {
                 left: elem.rect.x,
                 top: pen.1,
@@ -540,28 +826,388 @@ impl Renderer {
             return Ok(());
         }
 
-        let layout = self.text.layout(MeasureRun {
-            text: &elem.text,
-            font: &theme.font_name,
-            size: elem.font_size,
-            weight: elem.weight,
-            italic: elem.italic,
-            max_w: elem.wrap_w,
-        })?;
-        if elem.align == Align::Trailing {
-            unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?;
+        // Boxes first, under the text: a
+        // pill's fill is behind the label
+        // it tints, and a block's border
+        // frames the paragraph inside it.
+        // The scene resolved every rect,
+        // so this walk decides nothing -
+        // it only draws.
+        let dy = pen.1 - elem.pen.1;
+        for b in elem.boxes() {
+            self.draw_box(target, b, dy)?;
         }
+
+        // An image, and its ladder: the asset if this build can decode
+        // it, then the `alt` run the element already carries, then an
+        // outlined box. Never nothing, because nothing is a hole in a
+        // word.
+        if let Some(img) = &elem.image {
+            if self.draw_asset(target, elem, img, pen.1, theme)? {
+                return Ok(());
+            }
+            if elem.spans.is_empty() {
+                self.draw_placeholder(target, elem.rect_at(pen.1), elem.color)?;
+                return Ok(());
+            }
+        }
+        // Nothing to shape: an empty table cell draws its border and no
+        // text, and the seam takes no empty run.
+        if elem.spans.is_empty() {
+            return Ok(());
+        }
+
+        // One layout for the whole
+        // element, however many styles
+        // it holds: its spans wrap as
+        // one paragraph, so painting
+        // them one at a time would
+        // re-break the lines the scene
+        // already measured (ADR-0013).
+        spans.clear();
+        spans.extend(elem.styled_spans(&theme.font_name));
+        let shifts: Vec<f32> = elem.spans.iter().map(|s| s.shift).collect();
+        let at = Vector2 { X: pen.0, Y: pen.1 };
+        self.draw_spans(
+            target,
+            spans,
+            &shifts,
+            elem.wrap_w,
+            at,
+            elem.align,
+        )?;
+
+        // The readings, over the bases
+        // they were placed against. Not
+        // spans of the layout above: a
+        // reading takes no horizontal
+        // room from the line it sits on,
+        // so it is drawn where the scene
+        // put it and at the width the
+        // scene measured it at, which is
+        // the element's own.
+        for run in &elem.ruby {
+            let at = Vector2 { X: pen.0 + run.x, Y: pen.1 + run.y };
+            let span = [run.styled_span(&theme.font_name)];
+            self.draw_spans(target, &span, &[0.0], elem.wrap_w, at, Align::Leading)?;
+        }
+
+        // The list markers, in the
+        // gutters their lists opened.
+        // Always `Align::Leading` off
+        // the pen: a marker box hangs
+        // off the item's *content* edge,
+        // whatever the text inside the
+        // item aligns to. `textAlign`
+        // moves line boxes, and a marker
+        // box is not one.
+        for run in &elem.marker {
+            let at = Vector2 { X: pen.0 + run.x, Y: pen.1 + run.y };
+            let span = [run.styled_span(&theme.font_name)];
+            self.draw_spans(target, &span, &[0.0], elem.wrap_w, at, Align::Leading)?;
+        }
+        Ok(())
+    }
+
+    /// One scene box: its fill, then
+    /// its border.
+    ///
+    /// `dy` is the scroll the element
+    /// was drawn at, since a box's rect
+    /// is in unscrolled panel space like
+    /// every other rect the scene
+    /// reports.
+    ///
+    /// `DrawRoundedRectangle` strokes
+    /// centred on the path, so the rect
+    /// is inset by half the width and
+    /// the border sits inside the box -
+    /// which is what CSS's border box
+    /// means. Whether one stroke will
+    /// do is `BoxStyle::even_border`'s
+    /// answer, not this painter's: a
+    /// rounded corner between two
+    /// different widths has no single
+    /// path, and the only asymmetric
+    /// border in the census corpus is a
+    /// one-sided rule that a rect draws
+    /// exactly.
+    ///
+    /// Every drawn style strokes solid.
+    /// The scene carries `dashed`,
+    /// `dotted` and `double` faithfully
+    /// for a later painter; the corpus's
+    /// only observed values are `solid`
+    /// and `none`.
+    fn draw_box(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        b: &layout::ElemBox,
+        dy: f32,
+    ) -> windows::core::Result<()> {
+        let (x, y, w, h) = (b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
+        if w <= 0.0 || h <= 0.0 {
+            return Ok(());
+        }
+        let radius = b.style.radius;
+        let round = |x: f32, y: f32, w: f32, h: f32, r: f32| D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h },
+            radiusX: r.max(0.0),
+            radiusY: r.max(0.0),
+        };
+        if let Some(bg) = b.style.background {
+            let brush = unsafe { target.CreateSolidColorBrush(&color_f(bg), None) }?;
+            unsafe { target.FillRoundedRectangle(&round(x, y, w, h, radius), &brush) };
+        }
+
+        let e = b.style.border_used();
+        if e == layout::Edges::default() {
+            return Ok(());
+        }
+        let brush = unsafe { target.CreateSolidColorBrush(&color_f(b.style.border_color), None) }?;
+        if let Some(width) = b.style.even_border() {
+            let inset = width / 2.0;
+            let edge = round(x + inset, y + inset, w - width, h - width, radius - inset);
+            unsafe { target.DrawRoundedRectangle(&edge, &brush, width, None) };
+            return Ok(());
+        }
+        let side = |x: f32, y: f32, w: f32, h: f32| {
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            let rect = D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h };
+            unsafe { target.FillRectangle(&rect, &brush) };
+        };
+        side(x, y, w, e.top);
+        side(x, y + h - e.bottom, w, e.bottom);
+        side(x, y, e.left, h);
+        side(x + w - e.right, y, e.right, h);
+        Ok(())
+    }
+
+    /// One asset, composited into its resolved box. `false` means the
+    /// ladder has to fall through.
+    ///
+    /// The backing fill first, and only when the node asked for it:
+    /// Yomitan draws one behind a transparent asset, and every image node
+    /// in the census's samples turns it off. The panel's own background is
+    /// the honest backing here - a light grey behind a gaiji would be the
+    /// one opaque patch on a dark theme.
+    ///
+    /// The `ID2D1Bitmap` is created per paint rather than cached, which is
+    /// what `ui::media`'s own header reserves: a device bitmap belongs to
+    /// a render target and dies with it on device loss, while the bytes
+    /// behind it outlive that. A hover shows a handful of gaiji, so this
+    /// is a handful of uploads per damage and no re-decode.
+    fn draw_asset(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        elem: &SceneElem,
+        img: &SceneImage,
+        pen_y: f32,
+        theme: &Theme,
+    ) -> windows::core::Result<bool> {
+        let rect = elem.rect_at(pen_y);
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return Ok(false);
+        }
+        let Some(key) = img.key.as_ref() else { return Ok(false) };
+        let mut held = self.media.borrow_mut();
+        let Some(cache) = held.as_mut() else { return Ok(false) };
+        // The tint is core's decision, so both bins take the expensive
+        // path on exactly the same assets (`SceneImage::tint`).
+        let tint = img.tint(elem.rect, elem.font_size, self.dpi_scale());
+        let Ok(bitmap) = cache.bitmap(key, tint, elem.color) else {
+            return Ok(false);
+        };
+        let size = D2D_SIZE_U { width: bitmap.w, height: bitmap.h };
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        // SAFETY: `bitmap.bgra` is `w * h * 4` bytes with no row padding,
+        // which is what `stride` reports and what `size` describes.
+        let uploaded = unsafe {
+            target.CreateBitmap(size, Some(bitmap.bgra.as_ptr().cast()), bitmap.stride(), &props)
+        }?;
+        if img.background {
+            let brush = unsafe { target.CreateSolidColorBrush(&color_f(theme.background), None) }?;
+            let box_ = D2D_RECT_F {
+                left: rect.x,
+                top: rect.y,
+                right: rect.x + rect.w,
+                bottom: rect.y + rect.h,
+            };
+            unsafe { target.FillRectangle(&box_, &brush) };
+        }
+        let box_ = D2D_RECT_F {
+            left: rect.x,
+            top: rect.y,
+            right: rect.x + rect.w,
+            bottom: rect.y + rect.h,
+        };
         unsafe {
-            target.DrawTextLayout(
-                Vector2 { X: pen.0, Y: pen.1 },
-                &layout,
-                &brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
+            target.DrawBitmap(
+                &uploaded,
+                Some(&box_),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            )
+        };
+        Ok(true)
+    }
+
+    /// The last rung: an outlined box where the character should be.
+    ///
+    /// Outlined and not filled, because a solid block reads as a censored
+    /// glyph while an empty frame reads as a missing one - and because the
+    /// asset it stands in for is usually a character drawn in this very
+    /// colour.
+    fn draw_placeholder(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        rect: SceneRect,
+        color: layout::Rgb,
+    ) -> windows::core::Result<()> {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return Ok(());
+        }
+        let brush = unsafe { target.CreateSolidColorBrush(&color_f(color), None) }?;
+        let edge = D2D_RECT_F {
+            left: rect.x + PLACEHOLDER_EDGE / 2.0,
+            top: rect.y + PLACEHOLDER_EDGE / 2.0,
+            right: rect.x + rect.w - PLACEHOLDER_EDGE / 2.0,
+            bottom: rect.y + rect.h - PLACEHOLDER_EDGE / 2.0,
+        };
+        if edge.right <= edge.left || edge.bottom <= edge.top {
+            // Too small to outline: a filled speck is still visibly ink.
+            let box_ = D2D_RECT_F {
+                left: rect.x,
+                top: rect.y,
+                right: rect.x + rect.w,
+                bottom: rect.y + rect.h,
+            };
+            unsafe { target.FillRectangle(&box_, &brush) };
+            return Ok(());
+        }
+        unsafe { target.DrawRectangle(&edge, &brush, PLACEHOLDER_EDGE, None) };
+        Ok(())
+    }
+
+    /// Draws one run's spans, each in
+    /// its own colour and at its own
+    /// baseline.
+    ///
+    /// One layout - the same shaping
+    /// path the scene was measured
+    /// against - with a drawing effect
+    /// per span range. The first span's
+    /// brush is also the layout's
+    /// default, so a one-span run draws
+    /// exactly what it drew before the
+    /// seam widened. Colour is the one
+    /// styled-span field measurement
+    /// ignores (ADR-0013), and this is
+    /// where it is answered.
+    ///
+    /// `verticalAlign` costs one draw
+    /// per *distinct* shift, because
+    /// `DrawTextLayout` has no
+    /// per-range baseline: the layout
+    /// is built once, so every pass
+    /// wraps identically, and a pass
+    /// paints only the spans that share
+    /// its shift by handing the rest a
+    /// fully transparent brush. A run
+    /// with no `verticalAlign` - every
+    /// run the panel's own chrome
+    /// builds - is one pass and one
+    /// `DrawTextLayout`, exactly as
+    /// before.
+    fn draw_spans(
+        &self,
+        target: &ID2D1HwndRenderTarget,
+        spans: &[StyledSpan<'_>],
+        shifts: &[f32],
+        max_w: f32,
+        at: Vector2,
+        align: Align,
+    ) -> windows::core::Result<()> {
+        if spans.is_empty() {
+            return Ok(());
+        }
+        let layout = self.text.layout(MeasureRun { spans, max_w })?;
+        // DirectWrite aligns the whole
+        // wrap box, which is what the
+        // scene measured at: a centred
+        // paragraph that wrapped centres
+        // each of its lines, exactly as
+        // the scene's own per-line offset
+        // says it should.
+        match align {
+            Align::Leading => {}
+            Align::Center => unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER) }?,
+            Align::Trailing => {
+                unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING) }?
+            }
+        }
+        for i in 0..spans.len() {
+            let shift = shift_at(shifts, i);
+            // Each distinct shift once:
+            // the pass that draws it is
+            // the first span asking for
+            // it, so nothing paints
+            // twice.
+            if (0..i).any(|j| shift_at(shifts, j) == shift) {
+                continue;
+            }
+            let mut default = None;
+            for (j, range) in ranges(spans).enumerate() {
+                let color = match shift_at(shifts, j) == shift {
+                    true => color_f(spans[j].color),
+                    false => TRANSPARENT,
+                };
+                let brush = unsafe { target.CreateSolidColorBrush(&color, None) }?;
+                // SAFETY: the range names
+                // UTF-16 positions inside
+                // the layout's own text.
+                unsafe { layout.SetDrawingEffect(&brush, range) }?;
+                default.get_or_insert(brush);
+            }
+            let Some(default) = default else { return Ok(()) };
+            let origin = Vector2 { X: at.X, Y: at.Y - shift };
+            unsafe {
+                target.DrawTextLayout(origin, &layout, &default, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
         }
         Ok(())
     }
 }
+
+/// The baseline shift span `i` asks
+/// for. A run with no shifts at all
+/// hands in an empty slice, so every
+/// span of it sits on its own line's
+/// baseline.
+fn shift_at(shifts: &[f32], i: usize) -> f32 {
+    shifts.get(i).copied().unwrap_or(0.0)
+}
+
+/// The stroke a placeholder box is outlined with, in DIPs.
+///
+/// One DIP, which is the hairline this target strokes everything else at:
+/// the panel's own edge, a table cell's rule, and the spec's `1em / 14`
+/// cell border at base size.
+const PLACEHOLDER_EDGE: f32 = 1.0;
+
+/// A brush that paints nothing, for a
+/// span this pass is not drawing.
+const TRANSPARENT: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
 /// Ends the draw on drop.
 struct DrawScope<'a> {

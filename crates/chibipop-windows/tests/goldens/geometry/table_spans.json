@@ -1,0 +1,1525 @@
+{
+  "fixture": "table_spans",
+  "variants": {
+    "default": {
+      "anki_button": null,
+      "content": {
+        "content_w": "456.00",
+        "origin": "12.00",
+        "used_h": "218.30"
+      },
+      "elements": [
+        {
+          "advance": "0.00",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Corner",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "47.63",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "47.63",
+                "x": "0.00"
+              }
+            ],
+            "w": "47.63"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "freq 640",
+          "top_gap": "0.00",
+          "w": "47.63",
+          "wrap_w": "456.00",
+          "x": "420.37",
+          "y": "12.00"
+        },
+        {
+          "advance": "26.60",
+          "block_box": null,
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 1,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Headword",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "36.32",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "36.32",
+                "x": "0.00"
+              }
+            ],
+            "w": "36.32"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
+          "text": "飲む",
+          "top_gap": "0.00",
+          "w": "36.32",
+          "wrap_w": "400.37",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 2,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "24.48",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "24.48",
+                "x": "0.00"
+              }
+            ],
+            "w": "24.48"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "42.60",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "のむ",
+          "top_gap": "4.00",
+          "w": "24.48",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "42.60"
+        },
+        {
+          "advance": "17.29",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 3,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "156.48",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "156.48",
+                "x": "0.00"
+              }
+            ],
+            "w": "156.48"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "66.55",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 29,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "godan verb · transitive verb",
+          "top_gap": "4.00",
+          "w": "156.48",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "66.55"
+        },
+        {
+          "advance": "17.29",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 4,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "120.56",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "120.56",
+                "x": "0.00"
+              }
+            ],
+            "w": "120.56"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "93.84",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 28,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "旺文社漢字典 第四版",
+          "top_gap": "10.00",
+          "w": "120.56",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "93.84"
+        },
+        {
+          "advance": "115.16",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "115.16",
+          "i": 5,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Table",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "115.13",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "4.00",
+          "w": "164.83",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "115.13"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "28.52",
+              "w": "92.14",
+              "x": "12.00",
+              "y": "115.13"
+            },
+            "style": {
+              "background": [
+                50,
+                50,
+                56
+              ],
+              "border": [
+                "1.07",
+                "0.00",
+                "0.00",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "28.52",
+          "i": 6,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "pen_x": "16.82",
+          "pen_y": "119.96",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "92.14",
+          "wrap_w": "83.57",
+          "x": "12.00",
+          "y": "115.13"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 7,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "45.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "45.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "45.00"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "pen_x": "16.82",
+          "pen_y": "119.96",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 700
+            }
+          ],
+          "text": "活用形",
+          "top_gap": "0.00",
+          "w": "45.00",
+          "wrap_w": "83.57",
+          "x": "16.82",
+          "y": "119.96"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "28.52",
+              "w": "72.69",
+              "x": "104.14",
+              "y": "115.13"
+            },
+            "style": {
+              "background": [
+                50,
+                50,
+                56
+              ],
+              "border": [
+                "1.07",
+                "1.07",
+                "0.00",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "28.52",
+          "i": 8,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "pen_x": "108.96",
+          "pen_y": "119.96",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "72.69",
+          "wrap_w": "63.05",
+          "x": "104.14",
+          "y": "115.13"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 9,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "27.54",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "27.54",
+                "x": "0.00"
+              }
+            ],
+            "w": "27.54"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "pen_x": "108.96",
+          "pen_y": "119.96",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 700
+            }
+          ],
+          "text": "飲む",
+          "top_gap": "0.00",
+          "w": "27.54",
+          "wrap_w": "63.05",
+          "x": "108.96",
+          "y": "119.96"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "57.05",
+              "w": "38.57",
+              "x": "12.00",
+              "y": "143.66"
+            },
+            "style": {
+              "background": null,
+              "border": [
+                "1.07",
+                "0.00",
+                "0.00",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "57.05",
+          "i": 10,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              1,
+              0
+            ]
+          },
+          "pen_x": "16.82",
+          "pen_y": "148.48",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "38.57",
+          "wrap_w": "30.00",
+          "x": "12.00",
+          "y": "143.66"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 11,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "30.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "30.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "30.00"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              1,
+              0
+            ]
+          },
+          "pen_x": "16.82",
+          "pen_y": "148.48",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "五段",
+          "top_gap": "0.00",
+          "w": "30.00",
+          "wrap_w": "30.00",
+          "x": "16.82",
+          "y": "148.48"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "28.52",
+              "w": "53.57",
+              "x": "50.57",
+              "y": "143.66"
+            },
+            "style": {
+              "background": null,
+              "border": [
+                "1.07",
+                "0.00",
+                "0.00",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "28.52",
+          "i": 12,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              1,
+              1
+            ]
+          },
+          "pen_x": "55.39",
+          "pen_y": "148.48",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "53.57",
+          "wrap_w": "45.00",
+          "x": "50.57",
+          "y": "143.66"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 13,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "45.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "45.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "45.00"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              1,
+              1
+            ]
+          },
+          "pen_x": "55.39",
+          "pen_y": "148.48",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "未然形",
+          "top_gap": "0.00",
+          "w": "45.00",
+          "wrap_w": "45.00",
+          "x": "55.39",
+          "y": "148.48"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "28.52",
+              "w": "72.69",
+              "x": "104.14",
+              "y": "143.66"
+            },
+            "style": {
+              "background": null,
+              "border": [
+                "1.07",
+                "1.07",
+                "0.00",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "28.52",
+          "i": 14,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              1,
+              2
+            ]
+          },
+          "pen_x": "108.96",
+          "pen_y": "148.48",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "72.69",
+          "wrap_w": "63.05",
+          "x": "104.14",
+          "y": "143.66"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 15,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "60.24",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "60.24",
+                "x": "0.00"
+              }
+            ],
+            "w": "60.24"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              1,
+              2
+            ]
+          },
+          "pen_x": "108.96",
+          "pen_y": "148.48",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 15,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "飲ま・飲も",
+          "top_gap": "0.00",
+          "w": "60.24",
+          "wrap_w": "63.05",
+          "x": "108.96",
+          "y": "148.48"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "28.52",
+              "w": "53.57",
+              "x": "50.57",
+              "y": "172.18"
+            },
+            "style": {
+              "background": null,
+              "border": [
+                "1.07",
+                "0.00",
+                "0.00",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "28.52",
+          "i": 16,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              2,
+              0
+            ]
+          },
+          "pen_x": "55.39",
+          "pen_y": "177.00",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "53.57",
+          "wrap_w": "45.00",
+          "x": "50.57",
+          "y": "172.18"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 17,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "45.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "45.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "45.00"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              2,
+              0
+            ]
+          },
+          "pen_x": "55.39",
+          "pen_y": "177.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "連用形",
+          "top_gap": "0.00",
+          "w": "45.00",
+          "wrap_w": "45.00",
+          "x": "55.39",
+          "y": "177.00"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "28.52",
+              "w": "72.69",
+              "x": "104.14",
+              "y": "172.18"
+            },
+            "style": {
+              "background": null,
+              "border": [
+                "1.07",
+                "1.07",
+                "0.00",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "28.52",
+          "i": 18,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              2,
+              1
+            ]
+          },
+          "pen_x": "108.96",
+          "pen_y": "177.00",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "72.69",
+          "wrap_w": "63.05",
+          "x": "104.14",
+          "y": "172.18"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 19,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "63.05",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "63.05",
+                "x": "0.00"
+              }
+            ],
+            "w": "63.05"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              2,
+              1
+            ]
+          },
+          "pen_x": "108.96",
+          "pen_y": "177.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 15,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "飲み・飲ん",
+          "top_gap": "0.00",
+          "w": "63.05",
+          "wrap_w": "63.05",
+          "x": "108.96",
+          "y": "177.00"
+        },
+        {
+          "advance": "0.00",
+          "block_box": {
+            "rect": {
+              "h": "29.59",
+              "w": "164.83",
+              "x": "12.00",
+              "y": "200.70"
+            },
+            "style": {
+              "background": null,
+              "border": [
+                "1.07",
+                "1.07",
+                "1.07",
+                "1.07"
+              ],
+              "border_color": [
+                150,
+                152,
+                160
+              ],
+              "border_style": [
+                "solid",
+                "solid",
+                "solid",
+                "solid"
+              ],
+              "margin": [
+                "0.00",
+                "0.00",
+                "0.00",
+                "0.00"
+              ],
+              "padding": [
+                "3.75",
+                "3.75",
+                "3.75",
+                "3.75"
+              ],
+              "radius": "0.00"
+            }
+          },
+          "font_size": "15.00",
+          "h": "29.59",
+          "i": 20,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Cell",
+          "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              3,
+              0
+            ]
+          },
+          "pen_x": "16.82",
+          "pen_y": "205.52",
+          "ruby": [],
+          "spans": [],
+          "text": "",
+          "top_gap": "0.00",
+          "w": "164.83",
+          "wrap_w": "155.19",
+          "x": "12.00",
+          "y": "200.70"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 21,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "125.02",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "125.02",
+                "x": "0.00"
+              }
+            ],
+            "w": "125.02"
+          },
+          "origin": {
+            "dict_id": 41,
+            "entry_id": 4101,
+            "path": [
+              0,
+              0,
+              0,
+              3,
+              0
+            ]
+          },
+          "pen_x": "16.82",
+          "pen_y": "205.52",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 30,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "「飲む」は五段活用。",
+          "top_gap": "0.00",
+          "w": "125.02",
+          "wrap_w": "155.19",
+          "x": "16.82",
+          "y": "205.52"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"飲\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "table_spans",
+        "max_h": 700,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "default"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 243,
+        "total_w": 480,
+        "view_h": 243
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    }
+  }
+}

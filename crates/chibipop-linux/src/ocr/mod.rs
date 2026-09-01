@@ -228,10 +228,10 @@ fn to_ocr_lines(lines: Vec<Line>) -> Vec<OcrLine> {
 /// meikiocr reads one script pair - Japanese, with the Latin and digits
 /// that sit inside Japanese text - and has no second charset to swap to.
 ///
-/// Also the honest answer to core's `engine_runs` gate: a config carrying
-/// some other `ocr.language` (ADR-0012 hides the field on Linux, it does
-/// not clear it) gets read by meikiocr regardless, so that language's
-/// dictionary list was never drawn up for the engine doing the reading.
+/// The one caller left is [`chibipop::text::OcrEngine::set_language`]: a
+/// config carrying some other `ocr.language` (ADR-0012 hides the field on
+/// Linux, it does not clear it) gets read by meikiocr regardless, and the
+/// user is told so rather than silently handed nothing.
 pub fn serves_language(tag: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     tag == "ja" || tag.starts_with("ja-")

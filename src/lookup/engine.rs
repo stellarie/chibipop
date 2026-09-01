@@ -72,17 +72,31 @@ fn kana_bonus(c: &Candidate) -> bool {
     c.steps == 0 && c.row.surface.chars().all(is_kana)
 }
 
-/// One result slot.
+/// One term-bank row per headword form: written, reading, and the entry the
+/// row points at.
+///
+/// Not one slot per (headword, dictionary). A dictionary that matched a
+/// headword with several term-bank rows contributes every one of them - the
+/// census found 6 220 大辞林 headwords with more than one row and a worst
+/// case of eleven - and keying the slot on `dict_id` made ten of that
+/// eleven unreachable from the panel, whatever the renderer did. The rows
+/// share the ten `MAX_RESULTS` slots in the ranking order below, and the
+/// cap still applies before `entries` is called, so a hover still parses at
+/// most ten glossaries (docs/research/hover-parse-cost.md).
+///
+/// `entry_id` rather than `dict_id`: `entry.dict_id` determines the
+/// dictionary, so the third component still separates dictionaries, while
+/// one dictionary record reached through two surfaces - つま and 妻 for one
+/// Jitendex entry - remains one row.
 type GroupKey = (Option<String>, Option<String>, i64);
 
 /// Deterministic total order. Mirrors the ranking below down to `steps`: the
 /// representative kept for a group must be the parse that group would be
-/// ranked on.
+/// ranked on. No `entry_id` term, unlike the ranking: the key holds it, so
+/// every candidate in one group already shares it.
 fn is_better(new: &Candidate, existing: &Candidate) -> bool {
-    fn rank(
-        c: &Candidate,
-    ) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>, Reverse<i64>) {
-        (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process), Reverse(c.row.entry_id))
+    fn rank(c: &Candidate) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>) {
+        (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process))
     }
     rank(new) > rank(existing)
 }
@@ -132,7 +146,8 @@ impl LookupEngine {
                             continue;
                         }
                     }
-                    let key: GroupKey = (row.written.clone(), row.reading.clone(), row.dict_id);
+                    let key: GroupKey =
+                        (row.written.clone(), row.reading.clone(), row.entry_id);
                     let candidate = Candidate {
                         row,
                         match_len: prefix_len,
@@ -202,7 +217,7 @@ impl LookupEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lookup::model::{FakeDictionary, Sense};
+    use crate::lookup::model::FakeDictionary;
     use crate::lookup::rules::load_rules;
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -213,19 +228,20 @@ mod tests {
         LookupEngine::new(Deconjugator::new(load_rules(&p).unwrap()))
     }
 
-    fn sense(gloss: &str, pos: &str) -> Sense {
-        Sense {
-            glosses: vec![gloss.to_string()],
-            glosses_html: vec![],
-            pos: vec![pos.to_string()],
-            misc: vec![],
-        }
+    /// A glossary payload in the form the record stores: one
+    /// part-of-speech pill and one gloss block.
+    fn glossary(gloss: &str, pos: &str) -> String {
+        serde_json::json!([{"type": "structured-content", "content": [
+            {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": pos},
+            {"tag": "div", "content": gloss}
+        ]}])
+        .to_string()
     }
 
     fn taberu_dict() -> FakeDictionary {
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(500), 1, 1);
-        d.add_entry(1, 1, vec![sense("to eat", "v1")]);
+        d.add_entry(1, 1, &glossary("to eat", "v1"));
         d
     }
 
@@ -233,7 +249,7 @@ mod tests {
     fn exact_match_found() {
         let hits = engine().run(&taberu_dict(), "食べる").unwrap();
         assert_eq!(1, hits.len());
-        assert_eq!(vec!["to eat".to_string()], hits[0].entry.senses[0].glosses);
+        assert_eq!(vec!["to eat".to_string()], hits[0].entry.glosses());
     }
 
     #[test]
@@ -270,7 +286,7 @@ mod tests {
     fn pos_filter_rejects_mismatched_part_of_speech() {
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v5r", Some(500), 1, 1);
-        d.add_entry(1, 1, vec![sense("wrong pos", "v5r")]);
+        d.add_entry(1, 1, &glossary("wrong pos", "v5r"));
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
     }
@@ -315,7 +331,7 @@ mod tests {
         // v5k form, v5 row.
         let mut d = FakeDictionary::new();
         d.add_term("行く", Some("行く"), Some("いく"), "v5", Some(50), 1, 1);
-        d.add_entry(1, 1, vec![sense("to go", "v5")]);
+        d.add_entry(1, 1, &glossary("to go", "v5"));
         let hits = engine().run(&d, "行かなかった").unwrap();
         assert!(
             hits.iter().any(|h| h.written.as_deref() == Some("行く")),
@@ -329,7 +345,7 @@ mod tests {
         // vs-i form, vs row.
         let mut d = FakeDictionary::new();
         d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1, 1);
-        d.add_entry(1, 1, vec![sense("to do", "vs")]);
+        d.add_entry(1, 1, &glossary("to do", "vs"));
         let hits = engine().run(&d, "してしまった").unwrap();
         assert!(
             hits.iter().any(|h| h.written.as_deref() == Some("する")),
@@ -356,12 +372,12 @@ mod tests {
         for (i, written) in SHI.iter().enumerate() {
             let id = i as i64 + 1;
             d.add_term("し", Some(written), Some("し"), "", None, id, 1);
-            d.add_entry(id, 1, vec![sense("a noun read し", "")]);
+            d.add_entry(id, 1, &glossary("a noun read し", ""));
         }
         d.add_term("して", Some("仕手"), Some("して"), "", None, 90, 1);
-        d.add_entry(90, 1, vec![sense("speculator", "")]);
+        d.add_entry(90, 1, &glossary("speculator", ""));
         d.add_term("する", Some("為る"), Some("する"), "vs", None, 91, 1);
-        d.add_entry(91, 1, vec![sense("to do", "vs")]);
+        d.add_entry(91, 1, &glossary("to do", "vs"));
 
         let hits = engine().run(&d, "してしまった").unwrap();
         let shown: Vec<Option<String>> = hits.iter().map(|h| h.written.clone()).collect();
@@ -379,7 +395,7 @@ mod tests {
         // The filter must still bite.
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1, 1);
-        d.add_entry(1, 1, vec![sense("wrong pos", "v5")]);
+        d.add_entry(1, 1, &glossary("wrong pos", "v5"));
         let hits = engine().run(&d, "食べさせられた").unwrap();
         assert!(hits.is_empty());
     }
@@ -424,29 +440,29 @@ mod tests {
     fn empty_pos_column_is_never_filtered_out() {
         let mut d = FakeDictionary::new();
         d.add_term("ねこ", None, Some("ねこ"), "", None, 1, 1);
-        d.add_entry(1, 1, vec![sense("cat", "")]);
+        d.add_entry(1, 1, &glossary("cat", ""));
         assert_eq!(1, engine().run(&d, "ねこ").unwrap().len());
     }
 
     #[test]
     fn more_common_word_ranks_first() {
-        // Distinct ids: no grouping.
+        // Two entries, two rows.
         let mut d = FakeDictionary::new();
         d.add_term("はし", None, Some("はし"), "", Some(50), 1, 1);
-        d.add_entry(1, 1, vec![sense("chopsticks", "")]);
+        d.add_entry(1, 1, &glossary("chopsticks", ""));
         d.add_term("はし", None, Some("はし"), "", Some(9000), 2, 2);
-        d.add_entry(2, 2, vec![sense("bridge", "")]);
+        d.add_entry(2, 2, &glossary("bridge", ""));
         let hits = engine().run(&d, "はし").unwrap();
-        assert_eq!(vec!["chopsticks".to_string()], hits[0].entry.senses[0].glosses);
+        assert_eq!(vec!["chopsticks".to_string()], hits[0].entry.glosses());
     }
 
     #[test]
     fn longer_match_outranks_shorter() {
         let mut d = FakeDictionary::new();
         d.add_term("日本", Some("日本"), Some("にほん"), "", Some(100), 1, 1);
-        d.add_entry(1, 1, vec![sense("Japan", "")]);
+        d.add_entry(1, 1, &glossary("Japan", ""));
         d.add_term("日本語", Some("日本語"), Some("にほんご"), "", Some(900), 2, 1);
-        d.add_entry(2, 1, vec![sense("Japanese language", "")]);
+        d.add_entry(2, 1, &glossary("Japanese language", ""));
         let hits = engine().run(&d, "日本語").unwrap();
         assert_eq!(Some("日本語".to_string()), hits[0].written);
     }
@@ -455,9 +471,9 @@ mod tests {
     fn results_truncated_to_max() {
         let mut d = FakeDictionary::new();
         for i in 1..=25 {
-            // Distinct ids, else grouped.
+            // One entry each.
             d.add_term("あ", None, Some("あ"), "", Some(i), i, i);
-            d.add_entry(i, i, vec![sense("x", "")]);
+            d.add_entry(i, i, &glossary("x", ""));
         }
         assert_eq!(MAX_RESULTS, engine().run(&d, "あ").unwrap().len());
     }
@@ -470,5 +486,72 @@ mod tests {
         let before = ids.len();
         ids.dedup();
         assert_eq!(before, ids.len());
+    }
+
+    /// The rows a dictionary gives one headword all reach the panel.
+    ///
+    /// 大辞林 splits one headword's senses across separate term-bank rows -
+    /// 6 220 headwords, worst eleven - and the slot key used to hold
+    /// `dict_id`, so ten of that eleven never left the engine.
+    #[test]
+    fn every_term_bank_row_of_one_headword_survives() {
+        let mut d = FakeDictionary::new();
+        for id in 1..=3 {
+            d.add_term("ふし", Some("節"), Some("ふし"), "", Some(1000), id, 1);
+            d.add_entry(id, 1, &glossary(&format!("sense {id}"), ""));
+        }
+        let hits = engine().run(&d, "ふし").unwrap();
+        assert_eq!(3, hits.len(), "one dictionary, three rows");
+        assert_eq!(
+            vec![
+                vec!["sense 1".to_string()],
+                vec!["sense 2".to_string()],
+                vec!["sense 3".to_string()],
+            ],
+            hits.iter().map(|h| h.entry.glosses()).collect::<Vec<_>>(),
+            "in the term bank's own order, which is the dictionary's sense order"
+        );
+    }
+
+    /// The dedupe that must remain. Jitendex writes one term row per surface
+    /// form, so つま and 妻 both point at the one 妻/つま record; rendering it
+    /// twice under its own heading would be the defect, not the fix.
+    #[test]
+    fn one_record_reached_through_two_surfaces_is_one_row() {
+        let mut d = FakeDictionary::new();
+        d.add_term("つま", Some("妻"), Some("つま"), "", Some(500), 1, 1);
+        d.add_term("妻", Some("妻"), Some("つま"), "", Some(500), 1, 1);
+        d.add_entry(1, 1, &glossary("wife", ""));
+        assert_eq!(1, engine().run(&d, "つま").unwrap().len());
+        assert_eq!(1, engine().run(&d, "妻").unwrap().len());
+    }
+
+    /// The cap is inherited, not chosen: a hover renders at most ten rows
+    /// however many a headword matched, and the cap is counted in rows, not
+    /// in dictionaries.
+    #[test]
+    fn the_ten_row_cap_still_holds_when_one_dictionary_fills_it() {
+        let mut d = FakeDictionary::new();
+        for id in 1..=12 {
+            d.add_term("ふし", Some("節"), Some("ふし"), "", Some(1000), id, 1);
+            d.add_entry(id, 1, &glossary(&format!("sense {id}"), ""));
+        }
+        assert_eq!(MAX_RESULTS, engine().run(&d, "ふし").unwrap().len());
+    }
+
+    /// A headword no enabled frequency dictionary ranks keeps this fallback,
+    /// and keeping it is what makes "absent data is not counted" free at
+    /// lookup time (ADR-0015): the reindex writes `NULL` rather than a
+    /// stand-in rank, and `NULL` has always scored exactly as `DEFAULT_FREQ`
+    /// does.
+    #[test]
+    fn an_unranked_row_scores_exactly_as_a_default_frequency_one() {
+        let stand_in = Some(DEFAULT_FREQ as i64);
+        assert_eq!(score(3, None, false), score(3, stand_in, false));
+        assert_eq!(score(3, None, true), score(3, stand_in, true));
+        assert!(
+            score(3, Some(1), false) > score(3, None, false),
+            "and a ranked row still beats an unranked one"
+        );
     }
 }

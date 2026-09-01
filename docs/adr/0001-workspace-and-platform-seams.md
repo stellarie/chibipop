@@ -20,10 +20,11 @@ PipeWire) buffer internally so one weird backend absorbs the mismatch. `OcrEngin
 image in, lines with per-word geometry out. `TextMeasure` — text wrapped at a max width
 in, line metrics out; measure-only, painting is never behind it (added by ADR-0004 when a
 second measurer — cosmic-text beside DirectWrite — made the layout seam real; originally
-this ADR said "exactly two"). Each earns a trait because it genuinely varies *within* a
-binary (compositor families; benchmarked OCR candidates; per-platform text stacks).
-`TextSource` becomes the core-internal facade composing capture and OCR with the shared
-layout/hit-scan logic.
+this ADR said "exactly two"; **amended by ADR-0013**, which keeps it measure-only and one
+of three but takes styled spans rather than one string). Each earns a trait because it
+genuinely varies *within* a binary (compositor families; benchmarked OCR candidates;
+per-platform text stacks). `TextSource` becomes the core-internal facade composing
+capture and OCR with the shared layout/hit-scan logic.
 
 **Everything else is vocabulary or data, not traits.** Input (hooks / hyprctl / portals)
 and the popup surface are `Event`/`Command` variants; tray is an event source plus

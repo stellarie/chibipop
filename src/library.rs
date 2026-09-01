@@ -13,26 +13,122 @@ const MANIFEST: &str = "library.json";
 /// Not a top-level `*.zip`.
 const QUARANTINE: &str = ".removed";
 
-/// What an archive supplies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// One thing an archive supplies.
+///
+/// A fact about the archive's banks, never a preference and never a
+/// filename: `term_bank_` members mean [`Role::Terms`], `term_meta_bank_`
+/// rows tagged `"freq"` mean [`Role::Frequency`] and rows tagged `"pitch"`
+/// mean [`Role::Pitch`] (ADR-0014).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Kind {
-    Term,
+pub enum Role {
+    Terms,
     Frequency,
-    /// Listed, so it can be removed.
-    Unreadable,
+    Pitch,
 }
 
-/// What the builder calls it.
-pub fn kind_of(archive: &Path) -> Kind {
+impl Role {
+    /// Every role, in the order the settings window stacks its sections.
+    pub const EVERY: [Role; 3] = [Role::Terms, Role::Frequency, Role::Pitch];
+}
+
+/// What an archive supplies: a **set**, in any combination.
+///
+/// One archive is one library entry whatever it holds, so an archive
+/// carrying a term bank and frequency data has one row and two roles - the
+/// single-valued `Kind` this replaced made such an archive choose, and made
+/// a pitch archive pretend to be a term one.
+///
+/// The empty set is what an archive this build cannot read supplies. It
+/// stays listed - that is the whole point of listing it - so the user can
+/// remove it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Vec<Role>", into = "Vec<Role>")]
+pub struct Roles {
+    terms: bool,
+    frequency: bool,
+    pitch: bool,
+}
+
+impl Roles {
+    /// Exactly these, and nothing else.
+    pub fn only(roles: &[Role]) -> Roles {
+        roles.iter().copied().collect()
+    }
+
+    /// Does the archive supply this one?
+    pub fn has(self, role: Role) -> bool {
+        match role {
+            Role::Terms => self.terms,
+            Role::Frequency => self.frequency,
+            Role::Pitch => self.pitch,
+        }
+    }
+
+    /// Records that it supplies this one.
+    pub fn insert(&mut self, role: Role) {
+        match role {
+            Role::Terms => self.terms = true,
+            Role::Frequency => self.frequency = true,
+            Role::Pitch => self.pitch = true,
+        }
+    }
+
+    /// Nothing this build can read: an unreadable archive.
+    pub fn is_empty(self) -> bool {
+        !self.terms && !self.frequency && !self.pitch
+    }
+
+    /// The roles it does supply, in [`Role::EVERY`] order.
+    pub fn iter(self) -> impl Iterator<Item = Role> {
+        Role::EVERY.into_iter().filter(move |r| self.has(*r))
+    }
+}
+
+impl FromIterator<Role> for Roles {
+    fn from_iter<I: IntoIterator<Item = Role>>(roles: I) -> Roles {
+        let mut set = Roles::default();
+        for role in roles {
+            set.insert(role);
+        }
+        set
+    }
+}
+
+impl From<Vec<Role>> for Roles {
+    fn from(roles: Vec<Role>) -> Roles {
+        roles.into_iter().collect()
+    }
+}
+
+impl From<Roles> for Vec<Role> {
+    fn from(roles: Roles) -> Vec<Role> {
+        roles.iter().collect()
+    }
+}
+
+/// What the archive itself says it supplies.
+///
+/// Three independent questions, one per role, each asked of the banks. An
+/// archive whose `index.json` this build cannot read supplies nothing at
+/// all: the title, the stylesheet and the media paths all hang off that
+/// file, so a library entry without it is a file to be removed rather than
+/// a dictionary with roles.
+pub fn roles_of(archive: &Path) -> Roles {
     if crate::dict::archive::read_index(archive).is_err() {
-        return Kind::Unreadable;
+        return Roles::default();
     }
-    if crate::dict::archive::is_frequency_archive(archive) {
-        Kind::Frequency
-    } else {
-        Kind::Term
+    let mut roles = Roles::default();
+    if crate::dict::archive::supplies_terms(archive) {
+        roles.insert(Role::Terms);
     }
+    if crate::dict::frequency::supplies_frequency(archive) {
+        roles.insert(Role::Frequency);
+    }
+    if crate::dict::pitch::supplies_pitch(archive) {
+        roles.insert(Role::Pitch);
+    }
+    roles
 }
 
 /// One archive in the library.
@@ -40,7 +136,12 @@ pub fn kind_of(archive: &Path) -> Kind {
 pub struct Entry {
     pub file: String,
     pub name: String,
-    pub kind: Kind,
+    /// Derived state, recomputed from the file on every load, so a manifest
+    /// written before roles existed - which carries the old single-valued
+    /// `kind` and no `roles` at all - reads back as the empty set and is
+    /// corrected by `reconcile` before anything looks at it.
+    #[serde(default)]
+    pub roles: Roles,
 }
 
 /// The manifest and its files.
@@ -71,9 +172,9 @@ impl Library {
     fn reconcile(&mut self, dir: &Path) {
         restore_quarantined(dir);
         self.entries.retain(|e| dir.join(&e.file).exists());
-        // The file decides the kind.
+        // The file decides the roles.
         for e in &mut self.entries {
-            e.kind = kind_of(&dir.join(&e.file));
+            e.roles = roles_of(&dir.join(&e.file));
         }
         let mut strays: Vec<String> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
@@ -88,10 +189,77 @@ impl Library {
         strays.sort();
         for file in strays {
             let path = dir.join(&file);
-            let kind = kind_of(&path);
+            let roles = roles_of(&path);
             let index = crate::dict::archive::read_index(&path).unwrap_or(Value::Null);
-            self.entries.push(Entry { name: title_of(&index, &file), file, kind });
+            self.entries.push(Entry { name: title_of(&index, &file), file, roles });
         }
+        // Last, so the listed entries are already ahead of the strays.
+        self.collapse_duplicates(dir);
+    }
+
+    /// Collapses byte-identical archives to one entry.
+    ///
+    /// Two copies of one dictionary under two names are one dictionary, and
+    /// a library offering both builds it twice: two `dict` rows, two
+    /// stylesheets, every asset stored under two ids, and every hover
+    /// answering each headword twice. A user reported exactly that, from a
+    /// `library.json` naming one archive beside an unlisted, byte-identical
+    /// copy of it.
+    ///
+    /// **The first entry wins**, and the order this runs in is what makes
+    /// that the right rule: `reconcile` keeps the manifest's own entries in
+    /// manifest order and appends adopted strays after them, so a listed
+    /// archive always beats an unlisted copy of itself. The manifest is what
+    /// the user curated; the stray is only what happened to be in the
+    /// directory. Nothing is deleted either way - adoption is deliberate,
+    /// and a file the user put here stays where they put it.
+    ///
+    /// **What it costs.** Hashing every archive on every load is not
+    /// affordable: [`crate::dict::build::hash_file`] runs at about
+    /// 400 MiB/s, so one 38 MB dictionary costs ~95 ms and a
+    /// twelve-dictionary library costs seconds - on a path that runs every
+    /// time the settings window opens. So the hash is gated on the one
+    /// discriminator that is free and has no false negatives: byte-identical
+    /// files are the same length. A library of distinct dictionaries
+    /// therefore hashes **nothing at all**, and only a real length collision
+    /// pays - two 38 MB copies, one ~190 ms load, once.
+    fn collapse_duplicates(&mut self, dir: &Path) {
+        let sizes: Vec<u64> = self
+            .entries
+            .iter()
+            .map(|e| std::fs::metadata(dir.join(&e.file)).map(|m| m.len()).unwrap_or(0))
+            .collect();
+        // A length no other archive shares cannot be a duplicate of
+        // anything, so its bytes are never read. Length 0 is a file that
+        // would not stat; it stays listed so it can be removed.
+        let contested = |i: usize| {
+            sizes[i] > 0 && sizes.iter().enumerate().any(|(j, s)| j != i && *s == sizes[i])
+        };
+        if !(0..sizes.len()).any(contested) {
+            return;
+        }
+        let mut kept: Vec<Entry> = Vec::with_capacity(self.entries.len());
+        let mut hashes: Vec<String> = Vec::new();
+        for (i, entry) in std::mem::take(&mut self.entries).into_iter().enumerate() {
+            if !contested(i) {
+                kept.push(entry);
+                continue;
+            }
+            match crate::dict::build::hash_file(&dir.join(&entry.file)) {
+                // A copy of an archive already kept, so it is not a second
+                // dictionary.
+                Ok(hash) if hashes.contains(&hash) => {}
+                Ok(hash) => {
+                    hashes.push(hash);
+                    kept.push(entry);
+                }
+                // Unreadable is not the same thing as duplicate: it stays
+                // listed so the user can remove it, as `Kind::Unreadable`
+                // already does.
+                Err(_) => kept.push(entry),
+            }
+        }
+        self.entries = kept;
     }
 
     /// Atomic manifest write.
@@ -118,7 +286,7 @@ impl Library {
         let dest = dir.join(&file);
         std::fs::copy(source, &dest)
             .with_context(|| format!("copying {} to {}", source.display(), dest.display()))?;
-        let entry = Entry { name: title_of(&index, &file), file, kind: kind_of(&dest) };
+        let entry = Entry { name: title_of(&index, &file), file, roles: roles_of(&dest) };
         self.entries.push(entry.clone());
         Ok(entry)
     }
@@ -140,14 +308,32 @@ impl Library {
             .with_context(|| format!("moving {} to {}", from.display(), to.display()))
     }
 
-    /// Term archives, in order.
-    pub fn term_paths(&self, dir: &Path) -> Vec<PathBuf> {
-        self.paths(dir, Kind::Term)
+    /// Every archive a build installs as a Dictionary, in order.
+    ///
+    /// Every readable archive, whatever its roles: one archive is one
+    /// `dict` row, because a frequency archive owns its stored claims and a
+    /// pitch archive owns its stored accents, and both need a dictionary to
+    /// own them under (ADR-0014, ADR-0015). One that supplies no terms role
+    /// simply contributes no term rows, which is why nothing here asks
+    /// whether it has one.
+    ///
+    /// The unreadable ones are what this leaves out - they are listed so
+    /// they can be removed, and there is nothing in them to build.
+    pub fn dict_paths(&self, dir: &Path) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter(|e| !e.roles.is_empty())
+            .map(|e| dir.join(&e.file))
+            .collect()
     }
 
     /// Frequency archives, in order.
+    ///
+    /// The ones whose Reported frequencies a build loads and stores. An
+    /// archive supplying terms as well is in both this list and
+    /// [`Library::dict_paths`], and still owns exactly one `dict` row.
     pub fn freq_paths(&self, dir: &Path) -> Vec<PathBuf> {
-        self.paths(dir, Kind::Frequency)
+        self.paths(dir, Role::Frequency)
     }
 
     /// No archives recorded.
@@ -155,9 +341,9 @@ impl Library {
         self.entries.is_empty()
     }
 
-    /// Paths of one kind.
-    fn paths(&self, dir: &Path, kind: Kind) -> Vec<PathBuf> {
-        self.entries.iter().filter(|e| e.kind == kind).map(|e| dir.join(&e.file)).collect()
+    /// Paths of the archives holding one role.
+    fn paths(&self, dir: &Path, role: Role) -> Vec<PathBuf> {
+        self.entries.iter().filter(|e| e.roles.has(role)).map(|e| dir.join(&e.file)).collect()
     }
 
     /// A name that won't clobber.
@@ -335,8 +521,8 @@ mod tests {
         out
     }
 
-    fn entry(file: &str, kind: Kind) -> Entry {
-        Entry { file: file.to_string(), name: file.to_string(), kind }
+    fn entry(file: &str, roles: &[Role]) -> Entry {
+        Entry { file: file.to_string(), name: file.to_string(), roles: Roles::only(roles) }
     }
 
     #[test]
@@ -354,23 +540,48 @@ mod tests {
         assert!(Library::load(&dir).unwrap().is_empty());
     }
 
+    /// The role a filename used to decide: `freq.zip` carries nothing but a
+    /// term-meta bank of `"freq"` rows, so it supplies frequency and no
+    /// terms - and it is still one library entry, not a second class of
+    /// thing.
     #[test]
-    fn import_classifies_a_frequency_archive_by_its_index() {
-        let (dir, _guard) = scratch("freq_kind");
+    fn an_import_reads_its_roles_from_the_archives_banks() {
+        let (dir, _guard) = scratch("freq_roles");
         let mut lib = Library::default();
         let made = lib.import(&dir, &fixture("freq.zip")).unwrap();
-        assert_eq!(Kind::Frequency, made.kind);
+        assert_eq!(Roles::only(&[Role::Frequency]), made.roles);
         assert_eq!("freq.zip", made.file);
         assert!(!lib.is_empty());
     }
 
     #[test]
     fn import_classifies_a_term_archive() {
-        let (dir, _guard) = scratch("term_kind");
+        let (dir, _guard) = scratch("term_roles");
         let mut lib = Library::default();
         let made = lib.import(&dir, &fixture("terms.zip")).unwrap();
-        assert_eq!(Kind::Term, made.kind);
+        assert_eq!(Roles::only(&[Role::Terms]), made.roles);
         assert!(dir.join("terms.zip").is_file());
+    }
+
+    /// One archive, two roles, one entry - the case the single-valued
+    /// `Kind` this replaced could not express at all.
+    #[test]
+    fn an_archive_supplying_two_roles_is_one_entry_holding_both() {
+        let (dir, _guard) = scratch("both_roles");
+        let mut lib = Library::default();
+        let made = lib.import(&dir, &fixture("both.zip")).unwrap();
+        assert_eq!(Roles::only(&[Role::Terms, Role::Pitch]), made.roles);
+        assert_eq!(1, lib.entries.len());
+    }
+
+    /// And a pitch-only archive holds pitch and nothing else, where the
+    /// filename heuristic used to call it a term dictionary.
+    #[test]
+    fn a_pitch_only_archive_supplies_pitch_and_neither_other_role() {
+        let (dir, _guard) = scratch("pitch_roles");
+        let mut lib = Library::default();
+        let made = lib.import(&dir, &fixture("pitch.zip")).unwrap();
+        assert_eq!(Roles::only(&[Role::Pitch]), made.roles);
     }
 
     #[test]
@@ -507,8 +718,8 @@ mod tests {
         let lib = Library::load(&dir).unwrap();
 
         assert_eq!(2, lib.entries.len(), "it stays visible");
-        assert_eq!(Kind::Unreadable, lib.entries[0].kind, "got {:?}", lib.entries);
-        assert_eq!(vec![dir.join("terms.zip")], lib.term_paths(&dir));
+        assert!(lib.entries[0].roles.is_empty(), "got {:?}", lib.entries);
+        assert_eq!(vec![dir.join("terms.zip")], lib.dict_paths(&dir));
     }
 
     /// The file outranks the JSON.
@@ -522,18 +733,18 @@ mod tests {
 
         let loaded = Library::load(&dir).unwrap();
 
-        assert_eq!(Kind::Unreadable, loaded.entries[0].kind);
+        assert!(loaded.entries[0].roles.is_empty());
     }
 
     #[test]
-    fn the_builders_own_question_is_the_one_kind_of_asks() {
-        assert_eq!(Kind::Term, kind_of(&fixture("terms.zip")));
-        assert_eq!(Kind::Frequency, kind_of(&fixture("freq.zip")));
-        assert_eq!(Kind::Unreadable, kind_of(Path::new("nope.zip")));
+    fn the_builders_own_question_is_the_one_roles_of_asks() {
+        assert_eq!(Roles::only(&[Role::Terms]), roles_of(&fixture("terms.zip")));
+        assert_eq!(Roles::only(&[Role::Frequency]), roles_of(&fixture("freq.zip")));
+        assert!(roles_of(Path::new("nope.zip")).is_empty());
     }
 
     #[test]
-    fn save_then_load_round_trips_order_and_kind() {
+    fn save_then_load_round_trips_order_and_roles() {
         let (dir, _guard) = scratch("round_trip");
         let mut lib = Library::default();
         lib.import(&dir, &fixture("freq.zip")).unwrap();
@@ -541,24 +752,33 @@ mod tests {
         lib.save(&dir).unwrap();
         let loaded = Library::load(&dir).unwrap();
         assert_eq!(lib.entries, loaded.entries);
-        assert_eq!(Kind::Frequency, loaded.entries[0].kind);
+        assert_eq!(Roles::only(&[Role::Frequency]), loaded.entries[0].roles);
         assert_eq!("FixtureFreq", loaded.entries[0].name);
         assert_eq!("terms.zip", loaded.entries[1].file);
         assert!(!dir.join("library.json.tmp").exists());
     }
 
+    /// The build list is every readable archive, whatever it holds: a
+    /// frequency archive is a Dictionary in its own right and needs the
+    /// `dict` row its stored claims hang off, and an archive supplying both
+    /// is in both lists and still gets exactly one row.
     #[test]
-    fn term_and_freq_paths_split_by_kind_in_manifest_order() {
+    fn the_build_list_holds_every_readable_archive_and_freq_paths_the_frequency_ones() {
         let dir = Path::new("L");
         let lib = Library {
             entries: vec![
-                entry("b.zip", Kind::Term),
-                entry("f.zip", Kind::Frequency),
-                entry("a.zip", Kind::Term),
+                entry("b.zip", &[Role::Terms]),
+                entry("f.zip", &[Role::Frequency]),
+                entry("a.zip", &[Role::Terms, Role::Frequency]),
+                entry("broken.zip", &[]),
             ],
         };
-        assert_eq!(vec![dir.join("b.zip"), dir.join("a.zip")], lib.term_paths(dir));
-        assert_eq!(vec![dir.join("f.zip")], lib.freq_paths(dir));
+        assert_eq!(
+            vec![dir.join("b.zip"), dir.join("f.zip"), dir.join("a.zip")],
+            lib.dict_paths(dir),
+            "manifest order, and the unreadable one has nothing to build",
+        );
+        assert_eq!(vec![dir.join("f.zip"), dir.join("a.zip")], lib.freq_paths(dir));
     }
 
     #[test]
@@ -574,7 +794,7 @@ mod tests {
 
         assert_eq!(2, lib.entries.len(), "both strays adopted");
         assert_eq!("aa_dropped_in.zip", lib.entries[0].file, "sorted, not read_dir order");
-        assert_eq!(Kind::Frequency, lib.entries[0].kind, "classified on adoption");
+        assert_eq!(Roles::only(&[Role::Frequency]), lib.entries[0].roles, "read on adoption");
         assert_eq!("FixtureTerms", lib.entries[1].name, "title read, not the stem");
     }
 
@@ -599,5 +819,88 @@ mod tests {
         Library::default().save(&dir).unwrap();
 
         assert!(Library::load(&dir).unwrap().is_empty());
+    }
+
+    // ---- one dictionary under two names ----
+
+    /// The reported shape: `library.json` names one archive, and a
+    /// byte-identical copy of it sits unlisted beside it. Adoption makes the
+    /// copy an entry, and the build then makes it a second dictionary - two
+    /// `dict` rows, two stylesheets, and every headword answered twice.
+    ///
+    /// Built for real rather than counted, because "one dictionary" is a
+    /// claim about the database, and `dict_paths` is what the rebuild hands
+    /// the builder.
+    #[test]
+    fn two_byte_identical_archives_under_different_names_are_one_dictionary() {
+        let (dir, _guard) = scratch("identical_copy");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        lib.save(&dir).unwrap();
+        // The unlisted copy, exactly as a re-import left one behind.
+        std::fs::copy(fixture("terms.zip"), dir.join("[JA-EN] terms (2026-08-11).zip")).unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+
+        assert_eq!(1, loaded.entries.len(), "got {:?}", loaded.entries);
+        assert_eq!(
+            "terms.zip", loaded.entries[0].file,
+            "the manifest's own entry wins over an unlisted copy of it",
+        );
+        assert_eq!(vec![dir.join("terms.zip")], loaded.dict_paths(&dir));
+
+        let out = dir.join("built.sqlite");
+        crate::dict::build::build(&loaded.dict_paths(&dir), &[], &out, &|_| {}).unwrap();
+        let conn = rusqlite::Connection::open(&out).unwrap();
+        let dicts: i64 = conn.query_row("SELECT COUNT(*) FROM dict", [], |r| r.get(0)).unwrap();
+        assert_eq!(1, dicts, "one archive, however many names it wears");
+    }
+
+    /// Nothing is deleted. Adoption is deliberate and the file is the
+    /// user's; only the second *entry* goes, and it stays collapsed on every
+    /// later load rather than reappearing.
+    #[test]
+    fn collapsing_a_duplicate_leaves_the_file_where_the_user_put_it() {
+        let (dir, _guard) = scratch("keeps_the_file");
+        let mut lib = Library::default();
+        lib.import(&dir, &fixture("terms.zip")).unwrap();
+        lib.save(&dir).unwrap();
+        std::fs::copy(fixture("terms.zip"), dir.join("copy.zip")).unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+        loaded.save(&dir).unwrap();
+
+        assert!(dir.join("copy.zip").is_file(), "the archive itself is untouched");
+        assert_eq!(1, Library::load(&dir).unwrap().entries.len(), "and stays collapsed");
+    }
+
+    /// The hash decides, not the length. Two archives can be exactly as long
+    /// as each other and hold different dictionaries, and the length is only
+    /// the gate that decides whether reading them is worth it.
+    #[test]
+    fn two_equally_long_archives_with_different_contents_stay_two_dictionaries() {
+        let (dir, _guard) = scratch("same_size");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.zip");
+        let b = dir.join("b.zip");
+        std::fs::copy(fixture("terms.zip"), &a).unwrap();
+        std::fs::copy(fixture("terms.zip"), &b).unwrap();
+        // One byte flipped inside the zip comment, which every reader
+        // ignores: the same length, a different sha256, still two readable
+        // archives.
+        let mut bytes = std::fs::read(&b).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&b, &bytes).unwrap();
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().len(),
+            std::fs::metadata(&b).unwrap().len(),
+            "the gate has to actually be contested",
+        );
+        Library::default().save(&dir).unwrap();
+
+        let loaded = Library::load(&dir).unwrap();
+
+        assert_eq!(2, loaded.entries.len(), "got {:?}", loaded.entries);
     }
 }

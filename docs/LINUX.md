@@ -35,8 +35,11 @@ target.
    `ALT+F` trigger chord. Reload Hyprland or start the daemon by hand.
 
 3. **Add dictionaries.** `chibipop settings` opens the settings window (its
-   own process — a settings crash never takes the daemon down). Add your
-   Yomitan-format archives, press **Apply**.
+   own process — a settings crash never takes the daemon down). On
+   **Dictionaries**, **Browse…** opens the desktop's own file dialog and takes
+   as many Yomitan `.zip` archives as you select at once; the entry beside it
+   still takes a typed path, which is the fallback on a desktop with no
+   file-chooser portal. Adds are staged — press **Rebuild** to build them in.
 
 4. **Read.** Hold `ALT+F` and hover Japanese text anywhere on screen.
 

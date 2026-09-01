@@ -4,16 +4,26 @@
 //! `CREATE_NO_WINDOW` and reads its stdout; on Linux there is no window
 //! to suppress and no reason for a second process, so the same core
 //! builder runs on a background thread here and its progress lines go
-//! straight down a channel. `chibipop::dict::build::build` already builds
-//! into `<out>.building` and `rename`s over `out`, which is the whole
-//! crash-safety story: the daemon's open snapshot keeps reading the old
-//! inode, a dead rebuild leaves only a stray `.building`, and the
-//! rename is the single instant the switch happens.
+//! straight down a channel. `chibipop::dict::build::build` owns the whole
+//! crash-safety story: it builds into `<out>.building`, reads the finished
+//! file back before anything depends on it, clears the sidecars the
+//! database being replaced left under `<out>`'s name, and only then
+//! renames. A dead rebuild leaves a stray `.building` and nothing else,
+//! and the rename is the single instant the switch happens. The daemon's
+//! open snapshot keeps reading the old inode throughout.
 //!
-//! After a successful rename exactly one `reload` verb goes to the
-//! daemon, which is what makes it reopen. Failure sends nothing — the old
-//! database is still the live one, and telling the daemon to reopen it
-//! would be noise.
+//! After a successful promote exactly one `reload` verb goes to the
+//! daemon, and *after* rather than before on purpose: the promote is
+//! atomic and the old inode stays readable, so a daemon told to drop its
+//! handles first would only spend the build with no dictionary at all —
+//! and would have to be running for the promote to be safe, which it may
+//! not be. Reopening afterwards is both race-free and optional.
+//!
+//! That reload has **two** handles to reopen in the daemon, not one: the
+//! worker's dictionary (`worker::ReopenDict`) and, since ticket 03, the
+//! popup's own media-store connection (`Popup::reconfigure`). Failure
+//! sends nothing — the old database is still the live one, and telling
+//! the daemon to reopen it would be noise.
 
 use crate::control::{self, Verb};
 use crate::lock::{self, InstanceLock, LockError};
@@ -105,18 +115,27 @@ fn run(form: &SettingsForm, plan: &Plan, sink: &impl Fn(Progress)) -> Progress {
 /// [i] <file>` / `freq dict      <file>` spelling the Windows
 /// `build-dict` command prints: core's builder only counts rows, so the
 /// caller is what tells the user which file is being read.
+///
+/// The first list is `dict_paths`, which is every readable archive the
+/// build installs as a dictionary row - a frequency- or pitch-only
+/// archive is a dictionary in its own right now (ADR-0014), not something
+/// the term list skips. The `term dict` prefix stays because
+/// [`chibipop::dict::progress::friendly`] is what turns these into
+/// "Reading <file>…", and it parses exactly that word; the second list
+/// re-announces the archives read for their frequencies, so an archive
+/// carrying both roles is named twice on purpose.
 fn build(plan: &Plan, sink: &impl Fn(Progress)) -> anyhow::Result<(i64, i64)> {
     // Reconciled: what stage_into_library just wrote is what builds.
     let lib = Library::load(&plan.library_dir)?;
-    let terms = lib.term_paths(&plan.library_dir);
+    let dicts = lib.dict_paths(&plan.library_dir);
     let freqs = lib.freq_paths(&plan.library_dir);
-    for (i, t) in terms.iter().enumerate() {
-        sink(Progress::Line(format!("term dict  [{i}] {}", file_name(t))));
+    for (i, d) in dicts.iter().enumerate() {
+        sink(Progress::Line(format!("term dict  [{i}] {}", file_name(d))));
     }
     for f in &freqs {
         sink(Progress::Line(format!("freq dict      {}", file_name(f))));
     }
-    let counts = chibipop::dict::build::build(&terms, &freqs, &plan.out, &|line| {
+    let counts = chibipop::dict::build::build(&dicts, &freqs, &plan.out, &|line| {
         sink(Progress::Line(line.to_string()));
     })?;
     Ok((counts.entries, counts.terms))
@@ -339,9 +358,17 @@ mod tests {
             staging(&[]),
             &Library::load(&p.library_dir).unwrap(),
         );
-        // A second term archive under a free name, so the count moves.
+        // A genuinely different second dictionary, so the count moves. A
+        // copy of the first under another name would not: `Library::load`
+        // collapses byte-identical archives to one entry, because two names
+        // for one archive are one dictionary.
         let extra = dir.join("second.zip");
-        std::fs::copy(fixture("terms.zip"), &extra).unwrap();
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/media/media.zip"),
+            &extra,
+        )
+        .unwrap();
         second.stage_add(&extra).expect("staging the second archive");
         let (_, rebuilt) = drive(&second, p.clone());
         done(&rebuilt);
@@ -362,6 +389,71 @@ mod tests {
             reopened.dicts().unwrap().len() > before,
             "reopening is what serves the new dictionary"
         );
+    }
+
+    /// The reported failure, end to end, through the real rebuild.
+    ///
+    /// A user re-imported their one dictionary, rebuilt, and got no popups
+    /// at all. Their library held two byte-identical copies of the archive,
+    /// one listed in `library.json` and one not, so the build made **two**
+    /// dictionaries out of one file - their log said
+    /// `2 dictionary/ies: Jitendex.org [2026-08-11], Jitendex.org
+    /// [2026-08-11]` - and every lookup after it reported
+    /// `database disk image is malformed`.
+    ///
+    /// This is the scenario, not the mechanism: one archive under two
+    /// names has to rebuild into one dictionary, the promoted file has to be
+    /// sound, a lookup has to answer, and exactly one `reload` has to go
+    /// out. The mechanism that broke the file - a stale write-ahead log left
+    /// under the promoted file's name - has its own test beside
+    /// `dict::build::promote`, which is where the ordering that fixes it
+    /// lives.
+    #[test]
+    fn the_reported_failure_rebuilds_into_one_sound_dictionary_that_answers() {
+        let (dir, _guard) = scratch("reported");
+        let p = plan(&dir);
+        let seen = fake_daemon(&p.socket);
+        let media_zip = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/media/media.zip");
+
+        // What they had before: one dictionary, imported and built.
+        done(&drive(&staging(std::slice::from_ref(&media_zip)), p.clone()).1);
+        assert_eq!(1, SqliteDictionary::open(&p.out).unwrap().dicts().unwrap().len());
+
+        // The re-import's leftover: the same bytes, a second name, unlisted.
+        std::fs::copy(&media_zip, p.library_dir.join("[JA-EN] media (2026-08-11).zip")).unwrap();
+        let again = chibipop::settings::with_library(
+            staging(&[]),
+            &Library::load(&p.library_dir).unwrap(),
+        );
+        let reloads_before = seen.load(Ordering::SeqCst);
+
+        let (lines, rebuilt) = drive(&again, p.clone());
+        done(&rebuilt);
+
+        assert_eq!(
+            reloads_before + 1,
+            seen.load(Ordering::SeqCst),
+            "one reload, and only after the promote",
+        );
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", p.out.display()));
+            assert!(!sidecar.exists(), "{} must not outlive the promote", sidecar.display());
+        }
+
+        let reopened = SqliteDictionary::open(&p.out).expect("reopening after the promote");
+        let dicts = reopened.dicts().unwrap();
+        assert_eq!(1, dicts.len(), "one archive under two names is one dictionary: {dicts:?}");
+        assert_eq!(
+            1,
+            lines
+                .iter()
+                .filter(|l| matches!(l, Progress::Line(t) if t.starts_with("term dict")))
+                .count(),
+            "and the rebuild only ever read one archive: {lines:?}",
+        );
+        // The lookup they could not get a popup from.
+        assert_eq!(1, reopened.terms_for("ねこ").expect("the lookup must not fail").len());
     }
 
     /// A build that dies after the library was already edited: the

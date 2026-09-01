@@ -12,6 +12,7 @@ mod app;
 mod apply;
 mod autostart;
 pub mod child;
+mod filechooser;
 mod rebuild;
 mod snippets;
 mod update;
@@ -90,6 +91,7 @@ pub fn run(paths: Paths) -> Result<()> {
         add_channel: hotkey_channel(published.as_ref(), shortcuts::ShortcutId::AnkiAdd),
         library_dir,
         db_path,
+        dicts,
         runtime_dir: runtime_dir.to_path_buf(),
         autostart: autostart::Target::resolve(&env),
         home: env.home.clone(),

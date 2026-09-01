@@ -18,3 +18,14 @@
 
 #[cfg(target_os = "linux")]
 pub mod ocr;
+
+/// The popup's decoded-surface cache (ticket 03).
+///
+/// Here rather than in the bin's own `popup` tree for the reason above:
+/// the module carries its own tests against a database the real builder
+/// wrote, and cargo cannot link a test target against a bin. `#[path]`
+/// keeps the file beside the rest of the popup, which is where a reader
+/// looks for it. The bin reaches it as `chibipop_linux::media`.
+#[cfg(target_os = "linux")]
+#[path = "popup/media.rs"]
+pub mod media;

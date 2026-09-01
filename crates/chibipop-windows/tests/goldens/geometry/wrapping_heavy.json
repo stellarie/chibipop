@@ -6,16 +6,61 @@
       "content": {
         "content_w": "336.00",
         "origin": "12.00",
-        "used_h": "317.99"
+        "used_h": "313.99"
       },
       "elements": [
         {
           "advance": "0.00",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 0,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Corner",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "61.64",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "61.64",
+                "x": "0.00"
+              }
+            ],
+            "w": "61.64"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 10,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "freq 24810",
           "top_gap": "0.00",
           "w": "61.64",
@@ -25,11 +70,56 @@
         },
         {
           "advance": "26.60",
+          "block_box": null,
           "font_size": "20.00",
           "h": "26.60",
           "i": 1,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Headword",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "76.32",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "76.32",
+                "x": "0.00"
+              }
+            ],
+            "w": "76.32"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 12,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
           "text": "胡蝶の夢",
           "top_gap": "0.00",
           "w": "76.32",
@@ -39,11 +129,56 @@
         },
         {
           "advance": "19.95",
+          "block_box": null,
           "font_size": "15.00",
           "h": "19.95",
           "i": 2,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "77.16",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "77.16",
+                "x": "0.00"
+              }
+            ],
+            "w": "77.16"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "42.60",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 21,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "こちょうのゆめ",
           "top_gap": "4.00",
           "w": "77.16",
@@ -53,11 +188,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 3,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "100.51",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "100.51",
+                "x": "0.00"
+              }
+            ],
+            "w": "100.51"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "66.55",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 18,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "expression · noun",
           "top_gap": "4.00",
           "w": "100.51",
@@ -67,11 +247,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 4,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "46.77",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "46.77",
+                "x": "0.00"
+              }
+            ],
+            "w": "46.77"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "93.84",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "Jitendex",
           "top_gap": "10.00",
           "w": "46.77",
@@ -80,60 +305,284 @@
           "y": "93.84"
         },
         {
-          "advance": "79.80",
+          "advance": "119.71",
+          "block_box": null,
           "font_size": "15.00",
-          "h": "79.80",
+          "h": "119.71",
           "i": 5,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
-          "lines": 4,
-          "text": "the butterfly dream: the illusion that it is impossible to distinguish between the dreamer and the dream, between waking life and the images it leaves behind",
+          "lines": 6,
+          "marker": [],
+          "measured": {
+            "h": "119.71",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "264.81",
+                "y": "0.00"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "310.76",
+                "y": "19.95"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "290.65",
+                "y": "39.90"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "328.74",
+                "y": "59.85"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "287.25",
+                "y": "79.80"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "71.35",
+                "y": "99.76"
+              }
+            ],
+            "lines": 6,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "268.92",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 1,
+                "span": 0,
+                "w": "314.87",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 2,
+                "span": 0,
+                "w": "294.76",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 3,
+                "span": 0,
+                "w": "332.85",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 4,
+                "span": 0,
+                "w": "291.36",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 5,
+                "span": 0,
+                "w": "71.35",
+                "x": "0.00"
+              }
+            ],
+            "w": "328.74"
+          },
+          "origin": {
+            "dict_id": 0,
+            "entry_id": 0,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "115.13",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 239,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "the butterfly dream: the illusion that it is impossible to distinguish between the dreamer and the dream, between waking life and the images it leaves behind; an experience impossible to tell apart from a vivid dream of the same experience",
           "top_gap": "4.00",
-          "w": "310.76",
+          "w": "328.74",
           "wrap_w": "336.00",
           "x": "12.00",
           "y": "115.13"
         },
         {
-          "advance": "39.90",
-          "font_size": "15.00",
-          "h": "39.90",
-          "i": 6,
-          "kind": "Text",
-          "lines": 2,
-          "text": "an experience impossible to tell apart from a vivid dream of the same experience",
-          "top_gap": "4.00",
-          "w": "329.32",
-          "wrap_w": "336.00",
-          "x": "12.00",
-          "y": "198.94"
-        },
-        {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
-          "i": 7,
+          "i": 6,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "39.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "39.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "39.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "244.84",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "大辞林",
           "top_gap": "10.00",
           "w": "39.00",
           "wrap_w": "336.00",
           "x": "12.00",
-          "y": "248.84"
+          "y": "244.84"
         },
         {
           "advance": "59.85",
+          "block_box": null,
           "font_size": "15.00",
           "h": "59.85",
-          "i": 8,
+          "i": 7,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 3,
+          "marker": [],
+          "measured": {
+            "h": "59.85",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "333.03",
+                "y": "0.00"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "323.42",
+                "y": "19.95"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "232.86",
+                "y": "39.90"
+              }
+            ],
+            "lines": 3,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "333.03",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 1,
+                "span": 0,
+                "w": "323.42",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 2,
+                "span": 0,
+                "w": "232.86",
+                "x": "0.00"
+              }
+            ],
+            "w": "333.03"
+          },
+          "origin": {
+            "dict_id": 0,
+            "entry_id": 0,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "266.13",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 213,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "夢の中で胡蝶となった荘子が、夢がさめてから、自分が夢で胡蝶となったのか、胡蝶が夢で自分となっているのかと疑ったという故事。人生の儚さのたとえ。",
           "top_gap": "4.00",
           "w": "333.03",
           "wrap_w": "336.00",
           "x": "12.00",
-          "y": "270.13"
+          "y": "266.13"
         }
       ],
       "hits": [
@@ -174,9 +623,9 @@
       },
       "match_highlight": null,
       "measure": {
-        "content_h": 342,
+        "content_h": 338,
         "total_w": 360,
-        "view_h": 342
+        "view_h": 338
       },
       "scroll": {
         "max_scroll": 0,

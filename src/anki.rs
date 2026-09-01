@@ -1,5 +1,7 @@
 //! AnkiConnect v6 client.
 
+use crate::dict::gloss::{render_html, RoleFilter, Selection};
+use crate::dict::pitch::marked_morae;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -279,8 +281,11 @@ fn escape_html(s: &str) -> String {
 }
 
 /// One dict's glosses, numbered.
+///
+/// Flattened across the dictionary's matched term-bank rows, so the field a
+/// one-row block produces is unchanged.
 fn plain_dict_group(b: &crate::present::GlossBlock) -> String {
-    let numbered = b.glosses.iter()
+    let numbered = b.glosses()
         .enumerate()
         .map(|(i, g)| format!("{}. {g}", i + 1))
         .collect::<Vec<_>>()
@@ -304,10 +309,13 @@ pub fn fields_from_card(
         .map(plain_dict_group)
         .collect::<Vec<_>>()
         .join("\n\n");
-    // \n is a no-op; use <li> tags.
+    // \n is a no-op; use <li> tags. Rendered here rather than carried on the
+    // block: HTML is wanted when a card is mined, which is once, and every
+    // hover was paying for it.
     let glossary_html = blocks.iter()
         .map(|b| {
-            let items: String = b.glosses_html.iter()
+            let items: String = b.entries.iter()
+                .flat_map(|e| render_html(&e.doc, Selection::Whole, RoleFilter::CARD))
                 .map(|g| format!("<li>{g}</li>"))
                 .collect();
             format!(
@@ -326,36 +334,134 @@ pub fn fields_from_card(
     if let Some(freq) = card.freq {
         fields.insert("frequency".to_string(), freq.to_string());
     }
+    // The HTML field only, and never a plain-text one: marked kana *is*
+    // markup, and a plain-text field would have to spell the notation out
+    // in words or drop it.
+    if let Some(pitch) = pitch_html(card) {
+        fields.insert("pitch_html".to_string(), pitch);
+    }
     fields
+}
+
+/// One card's accents in the Anki community's marked-kana shape.
+///
+/// `<span>`s carrying `border-top` over the high moras and `border-right`
+/// on the mora the pitch falls after, which is what every community pitch
+/// template already styles and what Yomitan's own popup emits - so a note
+/// mined here renders in a deck built for Yomitan with no new template.
+///
+/// The moras are [`marked_morae`]'s answer, the same one the card header
+/// drew, so the field cannot disagree with the panel the user read it off.
+/// One `<li>` per accent in the pitch list's order, each naming the
+/// dictionaries that gave it - the deduplicated rows and not the raw claims.
+///
+/// `None` when the card has no accent, so a note carries no empty field.
+fn pitch_html(card: &crate::present::Card) -> Option<String> {
+    let reading = card.reading.as_deref().filter(|r| !r.is_empty())?;
+    if card.pitch.is_empty() {
+        return None;
+    }
+    let items: String = card
+        .pitch
+        .iter()
+        .map(|row| {
+            let marked: String = marked_morae(reading, &row.accent.position)
+                .into_iter()
+                .map(|mora| {
+                    let mut edges = Vec::new();
+                    if mora.high {
+                        edges.push("border-top:1px solid currentColor");
+                    }
+                    if mora.fall {
+                        edges.push("border-right:1px solid currentColor");
+                    }
+                    let text = escape_html(mora.mora.text);
+                    if edges.is_empty() {
+                        text
+                    } else {
+                        format!("<span style=\"{}\">{text}</span>", edges.join(";"))
+                    }
+                })
+                .collect();
+            let sources = row
+                .dicts
+                .iter()
+                .map(|d| escape_html(d))
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ");
+            format!(
+                "<li><span style=\"display:inline-block;white-space:nowrap\">{marked}</span> \
+                 <span style=\"opacity:0.6\">{sources}</span></li>"
+            )
+        })
+        .collect();
+    Some(format!("<ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::present::GlossBlock;
+    use serde_json::json;
+
+    /// One block from a glossary payload in the form the record stores, so
+    /// the field builder is fed by the real parser and the real renderers
+    /// rather than by hand-written strings that no dictionary could produce.
+    fn block(dict: &str, glossary: serde_json::Value) -> GlossBlock {
+        GlossBlock::parse(dict, &glossary.to_string())
+    }
+
+    /// One dictionary's block over several matched term-bank rows, which is
+    /// what a headword with more than one row now produces.
+    fn rows(dict: &str, glossaries: [serde_json::Value; 2]) -> GlossBlock {
+        let entries = glossaries
+            .into_iter()
+            .filter_map(|g| block(dict, g).entries.into_iter().next())
+            .collect();
+        GlossBlock {
+            dict_name: dict.to_string(),
+            dict_id: crate::present::NO_ROW,
+            entries,
+        }
+    }
+
+    /// The headword half of a card. The blocks are passed to
+    /// `fields_from_card` separately, so the field builder never reads this
+    /// one's own `blocks`.
+    fn card(
+        written: Option<&str>,
+        reading: Option<&str>,
+        freq: Option<i64>,
+    ) -> crate::present::Card {
+        crate::present::Card {
+            written: written.map(str::to_string),
+            reading: reading.map(str::to_string),
+            pos: vec![],
+            freq,
+            blocks: vec![],
+            match_len: 1,
+            pitch: Vec::new(),
+        }
+    }
 
     #[test]
     fn fields_from_card_formats_glossary() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: Some("ねこ".into()),
-            pos: vec![],
-            freq: Some(42),
-            blocks: vec![],
-            match_len: 1,
-        };
         let blocks = vec![
-            crate::present::GlossBlock {
-                dict_name: "大辞林".into(),
-                glosses: vec!["ネコ科の哺乳類。".into()],
-                glosses_html: vec!["ネコ科の<b>哺乳類</b>。".into()],
-            },
-            crate::present::GlossBlock {
-                dict_name: "Jitendex".into(),
-                glosses: vec!["cat".into(), "feline".into()],
-                glosses_html: vec!["cat".into(), "<i>feline</i>".into()],
-            },
+            block(
+                "大辞林",
+                json!([{"type": "structured-content", "content": [
+                    "ネコ科の", {"tag": "b", "content": "哺乳類"}, "。"
+                ]}]),
+            ),
+            block(
+                "Jitendex",
+                json!([
+                    "cat",
+                    {"type": "structured-content", "content": {"tag": "i", "content": "feline"}}
+                ]),
+            ),
         ];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks);
         assert_eq!(Some(&"猫".to_string()), f.get("expression"));
         assert_eq!(Some(&"ねこ".to_string()), f.get("reading"));
         assert_eq!(
@@ -371,20 +477,8 @@ mod tests {
 
     #[test]
     fn glossary_html_escapes_a_dictionary_name_with_markup_looking_characters() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: None,
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
-        let blocks = vec![crate::present::GlossBlock {
-            dict_name: "A & B <dict>".into(),
-            glosses: vec!["cat".into()],
-            glosses_html: vec!["cat".into()],
-        }];
-        let f = fields_from_card(&card, &blocks);
+        let blocks = vec![block("A & B <dict>", json!(["cat"]))];
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
         assert_eq!(
             Some(&"<b>A &amp; B &lt;dict&gt;</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
             f.get("glossary_html"),
@@ -393,20 +487,8 @@ mod tests {
 
     #[test]
     fn glossary_html_wraps_one_dictionary_in_a_list_with_no_divider() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: None,
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
-        let blocks = vec![crate::present::GlossBlock {
-            dict_name: "Wenlin".into(),
-            glosses: vec!["supper".into(), "dinner".into()],
-            glosses_html: vec!["supper".into(), "dinner".into()],
-        }];
-        let f = fields_from_card(&card, &blocks);
+        let blocks = vec![block("Wenlin", json!(["supper", "dinner"]))];
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
             "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li><li>dinner</li></ol>",
@@ -417,27 +499,11 @@ mod tests {
 
     #[test]
     fn glossary_html_separates_multiple_dictionaries_with_a_divider() {
-        let card = crate::present::Card {
-            written: Some("猫".into()),
-            reading: None,
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
         let blocks = vec![
-            crate::present::GlossBlock {
-                dict_name: "Wenlin".into(),
-                glosses: vec!["supper".into()],
-                glosses_html: vec!["supper".into()],
-            },
-            crate::present::GlossBlock {
-                dict_name: "CC-CEDICT".into(),
-                glosses: vec!["evening meal".into()],
-                glosses_html: vec!["evening meal".into()],
-            },
+            block("Wenlin", json!(["supper"])),
+            block("CC-CEDICT", json!(["evening meal"])),
         ];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
             "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>evening meal</li></ol>",
@@ -449,27 +515,11 @@ mod tests {
 
     #[test]
     fn glossary_separates_dictionaries_with_headers_and_dividers() {
-        let card = crate::present::Card {
-            written: Some("犬".into()),
-            reading: Some("いぬ".into()),
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
         let blocks = vec![
-            crate::present::GlossBlock {
-                dict_name: "大辞林".into(),
-                glosses: vec!["イヌ科の哺乳類。".into()],
-                glosses_html: vec!["イヌ科の哺乳類。".into()],
-            },
-            crate::present::GlossBlock {
-                dict_name: "Jitendex".into(),
-                glosses: vec!["dog".into()],
-                glosses_html: vec!["dog".into()],
-            },
+            block("大辞林", json!(["イヌ科の哺乳類。"])),
+            block("Jitendex", json!(["dog"])),
         ];
-        let f = fields_from_card(&card, &blocks);
+        let f = fields_from_card(&card(Some("犬"), Some("いぬ"), None), &blocks);
 
         let glossary = f.get("glossary").unwrap();
         assert!(glossary.contains("[大辞林]"));
@@ -484,17 +534,74 @@ mod tests {
 
     #[test]
     fn fields_falls_back_to_reading() {
-        let card = crate::present::Card {
-            written: None,
-            reading: Some("ねこ".into()),
-            pos: vec![],
-            freq: None,
-            blocks: vec![],
-            match_len: 1,
-        };
-        let f = fields_from_card(&card, &[]);
+        let f = fields_from_card(&card(None, Some("ねこ"), None), &[]);
         assert_eq!(Some(&"ねこ".to_string()), f.get("expression"));
         assert_eq!(None, f.get("frequency"));
+    }
+
+    /// Story 42: popup density and card completeness are separate choices.
+    /// Both fields come off one parsed tree in one call, so the disagreement
+    /// here is two filters, not two configurations - the popup's plain-text
+    /// summary still drops what the card keeps.
+    #[test]
+    fn an_example_the_popup_summary_drops_still_reaches_the_html_field() {
+        let blocks = vec![block(
+            "Jitendex",
+            json!([{"type": "structured-content", "content": [
+                {"tag": "span", "content": "to eat"},
+                {"tag": "div", "data": {"content": "example-sentence"}, "content": [
+                    {"tag": "span", "content": "ご飯を食べる"}
+                ]}
+            ]}]),
+        )];
+        let f = fields_from_card(&card(Some("食べる"), None, None), &blocks);
+        assert_eq!(Some(&"[Jitendex]\n1. to eat".to_string()), f.get("glossary"));
+        let html = f.get("glossary_html").expect("the html field");
+        assert!(html.contains("ご飯を食べる"), "the card keeps the example: {html}");
+    }
+
+    /// Anki has no copy of the dictionary's assets - `src/anki.rs` sends a
+    /// screenshot and nothing else - so an image mines as the character it
+    /// stands for rather than as a picture the note can never load.
+    #[test]
+    fn an_image_mines_as_its_alt_text_and_no_field_carries_a_src() {
+        let blocks = vec![block(
+            "字通",
+            json!([{"type": "structured-content", "content": [
+                {"tag": "img", "path": "gaiji/x.svg", "alt": "𠮟"},
+                {"tag": "span", "content": "to scold"}
+            ]}]),
+        )];
+        let f = fields_from_card(&card(Some("𠮟る"), None, None), &blocks);
+        let html = f.get("glossary_html").expect("the html field");
+        assert!(html.contains("𠮟<span>to scold</span>"), "the alt text stands in: {html}");
+        for (name, value) in &f {
+            assert!(!value.contains("<img"), "{name} carries an image tag: {value}");
+            assert!(!value.contains("src="), "{name} carries an unresolvable source: {value}");
+            assert!(!value.contains("gaiji/x.svg"), "{name} carries an archive path: {value}");
+        }
+    }
+
+    /// A block is one dictionary, not one matched term-bank row, so both
+    /// fields number across the rows it holds: a reader wants "sense 3 of
+    /// 大辞林", never "sense 1 of row 2" under a repeated heading.
+    #[test]
+    fn both_fields_number_a_dictionarys_matched_rows_continuously() {
+        let blocks = vec![rows("大辞林", [json!(["to run"]), json!(["to flow", "to stream"])])];
+        let f = fields_from_card(&card(Some("走る"), None, None), &blocks);
+        assert_eq!(
+            Some(&"[大辞林]\n1. to run\n2. to flow\n3. to stream".to_string()),
+            f.get("glossary"),
+        );
+        let html = f.get("glossary_html").expect("the html field");
+        assert_eq!(
+            concat!(
+                "<b>大辞林</b><ol style=\"margin:2px 0 2px 20px;padding:0\">",
+                "<li>to run</li><li>to flow</li><li>to stream</li></ol>",
+            ),
+            html,
+        );
+        assert!(!html.contains("<hr"), "one dictionary, one heading, no divider: {html}");
     }
 
     #[test]
@@ -902,5 +1009,106 @@ mod tests {
             Some("猫"),
             anki.seen()[0]["params"]["notes"][0]["fields"]["Expression"].as_str(),
         );
+    }
+
+    // ---- pitch (ticket 02) ----
+
+    /// One pitch row: an accent and the dictionaries that gave it.
+    fn pitch_row(fall: u32, dicts: &[&str]) -> crate::present::PitchRow {
+        crate::present::PitchRow {
+            accent: crate::dict::pitch::Accent {
+                position: crate::dict::pitch::Position::Downstep(fall),
+                nasal: Vec::new(),
+                devoice: Vec::new(),
+                tags: Vec::new(),
+            },
+            dicts: dicts.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    /// The community's marked-kana shape: `border-top` over the high moras
+    /// and `border-right` on the mora the pitch falls after. `ねこ` with an
+    /// atamadaka accent is one high mora that also ticks, and one bare one.
+    #[test]
+    fn a_mined_note_carries_the_html_pitch_field_in_the_community_shape() {
+        let mut mined = card(Some("猫"), Some("ねこ"), None);
+        mined.pitch = vec![pitch_row(1, &["NHK"])];
+
+        let f = fields_from_card(&mined, &[]);
+
+        let mark = "border-top:1px solid currentColor;border-right:1px solid currentColor";
+        let want = format!(
+            "<ol style=\"margin:2px 0 2px 20px;padding:0\">\
+             <li><span style=\"display:inline-block;white-space:nowrap\">\
+             <span style=\"{mark}\">ね</span>こ</span> \
+             <span style=\"opacity:0.6\">NHK</span></li></ol>"
+        );
+        assert_eq!(Some(&want), f.get("pitch_html"));
+    }
+
+    /// One row per accent in the pitch list's order, each naming its own
+    /// dictionaries - the deduplicated rows the card header drew, not the raw
+    /// claims behind them.
+    #[test]
+    fn the_pitch_field_holds_one_item_per_accent_naming_its_dictionaries() {
+        let mut mined = card(Some("白目"), Some("しろめ"), None);
+        mined.pitch =
+            vec![pitch_row(0, &["大辞林", "NHK"]), pitch_row(2, &["三省堂"])];
+
+        let f = fields_from_card(&mined, &[]);
+        let html = f.get("pitch_html").expect("a pitch field");
+
+        assert_eq!(2, html.matches("<li>").count(), "{html}");
+        assert!(html.contains("大辞林 \u{b7} NHK"), "{html}");
+        assert!(html.contains("三省堂"), "{html}");
+        assert!(
+            html.find("大辞林").unwrap() < html.find("三省堂").unwrap(),
+            "in the pitch list's order: {html}"
+        );
+    }
+
+    /// No accent, no field - a note carries no empty one. And the plain-text
+    /// fields never learn that pitch exists: marked kana *is* markup.
+    #[test]
+    fn a_card_with_no_accent_mines_no_pitch_field_and_no_plain_text_one() {
+        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), None), &[]);
+
+        assert_eq!(None, f.get("pitch_html"));
+        assert_eq!(None, f.get("pitch"));
+        assert!(!f.get("glossary").unwrap().contains("ね"), "{:?}", f.get("glossary"));
+    }
+
+    /// A card with an accent still mines the plain-text fields unchanged:
+    /// pitch reaches the HTML field only.
+    #[test]
+    fn an_accent_never_reaches_a_plain_text_field() {
+        let blocks = vec![block("Jitendex", json!(["cat"]))];
+        let mut mined = card(Some("猫"), Some("ねこ"), Some(42));
+        mined.pitch = vec![pitch_row(1, &["NHK"])];
+
+        let with_accent = fields_from_card(&mined, &blocks);
+        let without = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks);
+
+        for field in ["expression", "reading", "glossary", "glossary_html", "frequency"] {
+            assert_eq!(
+                without.get(field),
+                with_accent.get(field),
+                "{field} must be byte-identical to what it was"
+            );
+        }
+        assert!(with_accent.contains_key("pitch_html"));
+        assert!(!without.contains_key("pitch_html"));
+    }
+
+    /// A dictionary name is arbitrary text out of an archive's index.json, so
+    /// it is escaped here exactly as it is in the glossary field.
+    #[test]
+    fn a_dictionary_name_with_markup_in_it_is_escaped_in_the_pitch_field() {
+        let mut mined = card(Some("猫"), Some("ねこ"), None);
+        mined.pitch = vec![pitch_row(1, &["<b>evil</b> & co"])];
+
+        let html = fields_from_card(&mined, &[]).remove("pitch_html").expect("a pitch field");
+
+        assert!(html.contains("&lt;b&gt;evil&lt;/b&gt; &amp; co"), "{html}");
     }
 }

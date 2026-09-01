@@ -172,12 +172,36 @@ pub struct Popup {
     /// Hands out `Panel::id`; never reused.
     next_id: usize,
     text: TextEngine,
+    /// The painter's decoded-asset cache, or `None` when this build cannot
+    /// open the dictionary database.
+    ///
+    /// Its own `MediaStore` connection, on this thread, because the worker
+    /// owns the dictionary on another and a `rusqlite::Connection` is not
+    /// `Sync`. `None` is a real state and not a failure: the popup still
+    /// paints, with every image on the `alt`-text rung of its ladder.
+    media: Option<chibipop_linux::media::MediaSurfaces>,
+    /// Where the dictionary lives, kept so `reconfigure` can reopen
+    /// `media` after a rebuild.
+    ///
+    /// This is the popup's half of the reload contract and it is easy to
+    /// miss: a rebuild renames a **new file** over this path, so a
+    /// connection opened before it keeps reading the replaced inode for as
+    /// long as it is held. The worker reopens the dictionary on
+    /// `Event::ConfigReloaded` (`worker::ReopenDict`); until ticket 03 this
+    /// process held no second handle, and now it holds this one. A reload
+    /// that reopened only the worker's would leave the popup drawing the
+    /// old dictionary's gaiji at the new dictionary's ids.
+    db: std::path::PathBuf,
     /// The logical theme; every render scales a copy of it.
     theme: Theme,
     layer: Layer,
     /// Width and height caps, percent of the output.
     caps: (u8, u8),
     side_panel: bool,
+    /// How much of an entry the panel draws, re-read on every reload
+    /// (`reconfigure`) so a settings change lands on the popup already
+    /// on screen.
+    render: chibipop::ui::layout::RenderSettings,
     vis: Visibility,
     /// What is on screen, kept for a re-render at a new scale.
     current: Option<ShowRequest>,
@@ -208,7 +232,12 @@ impl Popup {
     /// An `Err` from this function therefore means something no session
     /// can work without (no `wl_compositor`, no `wl_shm`, no shared
     /// memory), which the capability report has already named as fatal.
-    pub fn bind(globals: &GlobalList, qh: &QueueHandle<App>, config: &Config) -> Result<Popup> {
+    pub fn bind(
+        globals: &GlobalList,
+        qh: &QueueHandle<App>,
+        config: &Config,
+        db: &std::path::Path,
+    ) -> Result<Popup> {
         let compositor = CompositorState::bind(globals, qh)
             .map_err(|e| anyhow!("binding wl_compositor: {e}"))?;
         let shm = Shm::bind(globals, qh).map_err(|e| anyhow!("binding wl_shm: {e}"))?;
@@ -275,6 +304,13 @@ impl Popup {
         pointer.set_script(script);
         notes.extend(script_notes);
 
+        // The painter's own decoded-asset cache, on its own read-only
+        // connection onto the media store. A database this build cannot
+        // open is one diagnostic and no images, never a popup that will
+        // not draw: an image node then renders its `alt` text, which is
+        // the character it stood for.
+        let media = open_media(db, &mut notes);
+
         Ok(Popup {
             qh: qh.clone(),
             compositor,
@@ -288,10 +324,13 @@ impl Popup {
             panels: Vec::new(),
             next_id: 0,
             text,
+            media,
+            db: db.to_path_buf(),
             theme,
             layer: layer_of(config.popup_layer()),
             caps: (config.popup.max_width_percent, config.popup.max_height_percent),
             side_panel: config.popup.side_panel,
+            render: config.popup.render_settings(),
             vis: Visibility::Hidden,
             current: None,
             pointer,
@@ -675,10 +714,20 @@ impl Popup {
         }
     }
 
-    /// Re-read the settings a reload can change. `set_layer` needs no
-    /// recreation, which is exactly why `popup.layer` is a runtime
-    /// toggle and not a restart.
+    /// Re-read the settings a reload can change, and reopen the dictionary
+    /// a rebuild replaced. `set_layer` needs no recreation, which is exactly
+    /// why `popup.layer` is a runtime toggle and not a restart.
     pub fn reconfigure(&mut self, config: &Config) {
+        // The popup's half of the reload. `reload` arrives here for two
+        // reasons at once: the settings window applied a config, and the
+        // settings window finished a rebuild - the socket carries no way to
+        // tell them apart (ADR-0005: the config file is the only truth), and
+        // nothing here needs to. Reopening on a plain config reload costs one
+        // `sqlite3_open` and an emptied cache; not reopening after a rebuild
+        // costs the popup every gaiji it draws, because a rebuild renames a
+        // new file over this path and re-numbers the `dict_id` this cache is
+        // keyed on. The worker reopens its own handle off the same event.
+        self.media = open_media(&self.db, &mut self.notes);
         let layer = layer_of(config.popup_layer());
         if layer != self.layer {
             self.layer = layer;
@@ -690,6 +739,7 @@ impl Popup {
         }
         self.caps = (config.popup.max_width_percent, config.popup.max_height_percent);
         self.side_panel = config.popup.side_panel;
+        self.render = config.popup.render_settings();
         // Windows arms its wheel hook per dispatch tick from the same
         // setting; the popup's own region has nothing to arm, so the
         // gate lives on the pointer.
@@ -750,6 +800,7 @@ impl Popup {
                 max_h: max_h as f32,
                 show_back: req.show_back,
                 side_panel: self.side_panel,
+                render: self.render,
                 anki,
             },
             &mut self.text,
@@ -895,6 +946,7 @@ impl Popup {
                     scale: pending.scale as f32,
                 },
                 &mut self.text,
+                self.media.as_mut(),
                 &mut pixmap,
             );
             to_argb(pixmap.data_mut());
@@ -999,6 +1051,29 @@ fn to_argb(data: &mut [u8]) {
     let (pixels, _) = data.as_chunks_mut::<4>();
     for px in pixels {
         px.swap(0, 2);
+    }
+}
+
+/// The painter's decoded-asset cache on a fresh connection, or `None` and a
+/// note.
+///
+/// One function for both call sites, because opening the store at bind time
+/// and reopening it after a rebuild have to answer a failure the same way:
+/// a database this build cannot open is one diagnostic and no images, never
+/// a popup that will not draw. An image node then renders its `alt` text,
+/// which is the character it stood for.
+fn open_media(
+    db: &std::path::Path,
+    notes: &mut Vec<String>,
+) -> Option<chibipop_linux::media::MediaSurfaces> {
+    match chibipop_linux::media::MediaSurfaces::open(db) {
+        Ok(cache) => Some(cache),
+        Err(e) => {
+            notes.push(format!(
+                "popup: no dictionary media - {e:#}; image nodes will render their alt text"
+            ));
+            None
+        }
     }
 }
 

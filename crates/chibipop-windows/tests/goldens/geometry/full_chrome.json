@@ -18,11 +18,56 @@
       "elements": [
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 0,
+          "image": null,
+          "inline_boxes": [],
           "kind": "BackButton",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "43.09",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "43.09",
+                "x": "0.00"
+              }
+            ],
+            "w": "43.09"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "← Back",
           "top_gap": "0.00",
           "w": "43.09",
@@ -32,11 +77,56 @@
         },
         {
           "advance": "0.00",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 1,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Corner",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "54.63",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "54.63",
+                "x": "0.00"
+              }
+            ],
+            "w": "54.63"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "29.29",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "freq 7671",
           "top_gap": "0.00",
           "w": "54.63",
@@ -46,11 +136,56 @@
         },
         {
           "advance": "26.60",
+          "block_box": null,
           "font_size": "20.00",
           "h": "26.60",
           "i": 2,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Headword",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "40.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "40.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "40.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "33.29",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
           "text": "雑談",
           "top_gap": "4.00",
           "w": "40.00",
@@ -60,11 +195,56 @@
         },
         {
           "advance": "19.95",
+          "block_box": null,
           "font_size": "15.00",
           "h": "19.95",
           "i": 3,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "46.43",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "46.43",
+                "x": "0.00"
+              }
+            ],
+            "w": "46.43"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "63.89",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 12,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "ざつだん",
           "top_gap": "4.00",
           "w": "46.43",
@@ -74,11 +254,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 4,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "93.13",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "93.13",
+                "x": "0.00"
+              }
+            ],
+            "w": "93.13"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "87.84",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 17,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "noun · suru verb",
           "top_gap": "4.00",
           "w": "93.13",
@@ -88,11 +313,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 5,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "46.77",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "46.77",
+                "x": "0.00"
+              }
+            ],
+            "w": "46.77"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "115.13",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "Jitendex",
           "top_gap": "10.00",
           "w": "46.77",
@@ -102,11 +372,62 @@
         },
         {
           "advance": "19.95",
+          "block_box": null,
           "font_size": "15.00",
           "h": "19.95",
           "i": 6,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "113.39",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "113.39",
+                "x": "0.00"
+              }
+            ],
+            "w": "113.39"
+          },
+          "origin": {
+            "dict_id": 0,
+            "entry_id": 0,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "136.43",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 19,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "chatting; idle talk",
           "top_gap": "4.00",
           "w": "113.39",
@@ -116,11 +437,21 @@
         },
         {
           "advance": "1.00",
+          "block_box": null,
           "font_size": "0.00",
           "h": "1.00",
           "i": 7,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Separator",
           "lines": 0,
+          "marker": [],
+          "measured": null,
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "166.38",
+          "ruby": [],
+          "spans": [],
           "text": "",
           "top_gap": "10.00",
           "w": "456.00",
@@ -130,11 +461,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 8,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Collapsed",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "225.37",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "225.37",
+                "x": "0.00"
+              }
+            ],
+            "w": "225.37"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "177.38",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                150,
+                152,
+                160
+              ],
+              "italic": false,
+              "len": 47,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "雑【ざつ】 — rough; crude; miscellaneous",
           "top_gap": "10.00",
           "w": "225.37",
@@ -144,11 +520,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 9,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Collapsed",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "167.13",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "167.13",
+                "x": "0.00"
+              }
+            ],
+            "w": "167.13"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "198.67",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                150,
+                152,
+                160
+              ],
+              "italic": false,
+              "len": 38,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "談【だん】 — talk; conversation",
           "top_gap": "4.00",
           "w": "167.13",

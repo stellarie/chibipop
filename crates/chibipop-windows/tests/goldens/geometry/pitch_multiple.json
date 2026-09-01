@@ -1,0 +1,922 @@
+{
+  "fixture": "pitch_multiple",
+  "variants": {
+    "default": {
+      "anki_button": null,
+      "content": {
+        "content_w": "456.00",
+        "origin": "12.00",
+        "used_h": "194.94"
+      },
+      "elements": [
+        {
+          "advance": "0.00",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 0,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Corner",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "61.64",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "61.64",
+                "x": "0.00"
+              }
+            ],
+            "w": "61.64"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 10,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "freq 31602",
+          "top_gap": "0.00",
+          "w": "61.64",
+          "wrap_w": "456.00",
+          "x": "406.36",
+          "y": "12.00"
+        },
+        {
+          "advance": "26.60",
+          "block_box": null,
+          "font_size": "20.00",
+          "h": "26.60",
+          "i": 1,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Headword",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "40.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "40.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "40.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
+          "text": "白目",
+          "top_gap": "0.00",
+          "w": "40.00",
+          "wrap_w": "386.36",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 2,
+          "image": null,
+          "inline_boxes": [
+            {
+              "rect": {
+                "h": "19.95",
+                "w": "11.43",
+                "x": "22.47",
+                "y": "42.60"
+              },
+              "style": {
+                "background": null,
+                "border": [
+                  "1.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "border_color": [
+                  170,
+                  175,
+                  185
+                ],
+                "border_style": [
+                  "solid",
+                  "none",
+                  "none",
+                  "none"
+                ],
+                "margin": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "padding": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "radius": "0.00"
+              }
+            },
+            {
+              "rect": {
+                "h": "19.95",
+                "w": "12.24",
+                "x": "33.91",
+                "y": "42.60"
+              },
+              "style": {
+                "background": null,
+                "border": [
+                  "1.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "border_color": [
+                  170,
+                  175,
+                  185
+                ],
+                "border_style": [
+                  "solid",
+                  "none",
+                  "none",
+                  "none"
+                ],
+                "margin": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "padding": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "radius": "0.00"
+              }
+            }
+          ],
+          "kind": "Pitch",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "86.15",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "34.15",
+                "x": "0.00"
+              },
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 1,
+                "w": "52.00",
+                "x": "34.15"
+              }
+            ],
+            "w": "86.15"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "42.60",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 9,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 12,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "しろめ 大辞林",
+          "top_gap": "4.00",
+          "w": "86.15",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "42.60"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 3,
+          "image": null,
+          "inline_boxes": [
+            {
+              "rect": {
+                "h": "19.95",
+                "w": "10.47",
+                "x": "12.00",
+                "y": "66.55"
+              },
+              "style": {
+                "background": null,
+                "border": [
+                  "1.00",
+                  "1.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "border_color": [
+                  170,
+                  175,
+                  185
+                ],
+                "border_style": [
+                  "solid",
+                  "solid",
+                  "none",
+                  "none"
+                ],
+                "margin": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "padding": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "radius": "0.00"
+              }
+            }
+          ],
+          "kind": "Pitch",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "86.15",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "34.15",
+                "x": "0.00"
+              },
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 1,
+                "w": "52.00",
+                "x": "34.15"
+              }
+            ],
+            "w": "86.15"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "66.55",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 9,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 12,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "しろめ 三省堂",
+          "top_gap": "4.00",
+          "w": "86.15",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "66.55"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 4,
+          "image": null,
+          "inline_boxes": [
+            {
+              "rect": {
+                "h": "19.95",
+                "w": "11.43",
+                "x": "22.47",
+                "y": "90.50"
+              },
+              "style": {
+                "background": null,
+                "border": [
+                  "1.00",
+                  "1.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "border_color": [
+                  170,
+                  175,
+                  185
+                ],
+                "border_style": [
+                  "solid",
+                  "solid",
+                  "none",
+                  "none"
+                ],
+                "margin": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "padding": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "radius": "0.00"
+              }
+            }
+          ],
+          "kind": "Pitch",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "86.15",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "34.15",
+                "x": "0.00"
+              },
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 1,
+                "w": "52.00",
+                "x": "34.15"
+              }
+            ],
+            "w": "86.15"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "90.50",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 9,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 12,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "しろめ 新明解",
+          "top_gap": "4.00",
+          "w": "86.15",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "90.50"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 5,
+          "image": null,
+          "inline_boxes": [
+            {
+              "rect": {
+                "h": "19.95",
+                "w": "11.43",
+                "x": "22.47",
+                "y": "114.46"
+              },
+              "style": {
+                "background": null,
+                "border": [
+                  "1.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "border_color": [
+                  170,
+                  175,
+                  185
+                ],
+                "border_style": [
+                  "solid",
+                  "none",
+                  "none",
+                  "none"
+                ],
+                "margin": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "padding": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "radius": "0.00"
+              }
+            },
+            {
+              "rect": {
+                "h": "19.95",
+                "w": "12.24",
+                "x": "33.91",
+                "y": "114.46"
+              },
+              "style": {
+                "background": null,
+                "border": [
+                  "1.00",
+                  "1.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "border_color": [
+                  170,
+                  175,
+                  185
+                ],
+                "border_style": [
+                  "solid",
+                  "solid",
+                  "none",
+                  "none"
+                ],
+                "margin": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "padding": [
+                  "0.00",
+                  "0.00",
+                  "0.00",
+                  "0.00"
+                ],
+                "radius": "0.00"
+              }
+            }
+          ],
+          "kind": "Pitch",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "73.64",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "34.15",
+                "x": "0.00"
+              },
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 1,
+                "w": "39.50",
+                "x": "34.15"
+              }
+            ],
+            "w": "73.64"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "114.46",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            },
+            {
+              "at": 9,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 6,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "しろめ NHK",
+          "top_gap": "4.00",
+          "w": "73.64",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "114.46"
+        },
+        {
+          "advance": "17.29",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 6,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "29.69",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "29.69",
+                "x": "0.00"
+              }
+            ],
+            "w": "29.69"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "138.41",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 4,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "noun",
+          "top_gap": "4.00",
+          "w": "29.69",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "138.41"
+        },
+        {
+          "advance": "17.29",
+          "block_box": null,
+          "font_size": "13.00",
+          "h": "17.29",
+          "i": 7,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "39.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "39.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "39.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "165.70",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
+          "text": "大辞林",
+          "top_gap": "10.00",
+          "w": "39.00",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "165.70"
+        },
+        {
+          "advance": "19.95",
+          "block_box": null,
+          "font_size": "15.00",
+          "h": "19.95",
+          "i": 8,
+          "image": null,
+          "inline_boxes": [],
+          "kind": "Text",
+          "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "149.40",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "149.40",
+                "x": "0.00"
+              }
+            ],
+            "w": "149.40"
+          },
+          "origin": {
+            "dict_id": 0,
+            "entry_id": 0,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "186.99",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 33,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "白眼。眼球の白い部分。",
+          "top_gap": "4.00",
+          "w": "149.40",
+          "wrap_w": "456.00",
+          "x": "12.00",
+          "y": "186.99"
+        }
+      ],
+      "hits": [
+        {
+          "action": "DrillDown(\"白\")",
+          "h": "26.60",
+          "i": 0,
+          "w": "20.00",
+          "x": "12.00",
+          "y": "12.00"
+        },
+        {
+          "action": "DrillDown(\"目\")",
+          "h": "26.60",
+          "i": 1,
+          "w": "20.00",
+          "x": "32.00",
+          "y": "12.00"
+        }
+      ],
+      "input": {
+        "dpi_scale": "1.00",
+        "fixture": "pitch_multiple",
+        "max_h": 486,
+        "max_w": 480,
+        "scroll_requested": 0,
+        "show_back": false,
+        "side_panel": false,
+        "variant": "default"
+      },
+      "match_highlight": null,
+      "measure": {
+        "content_h": 219,
+        "total_w": 480,
+        "view_h": 219
+      },
+      "scroll": {
+        "max_scroll": 0,
+        "scroll_used": 0,
+        "thumb": null
+      },
+      "side_panel": null
+    }
+  }
+}

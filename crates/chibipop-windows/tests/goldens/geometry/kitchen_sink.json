@@ -13,16 +13,61 @@
       "content": {
         "content_w": "321.00",
         "origin": "12.00",
-        "used_h": "290.76"
+        "used_h": "282.76"
       },
       "elements": [
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 0,
+          "image": null,
+          "inline_boxes": [],
           "kind": "BackButton",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "43.09",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "43.09",
+                "x": "0.00"
+              }
+            ],
+            "w": "43.09"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "12.00",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "← Back",
           "top_gap": "0.00",
           "w": "43.09",
@@ -32,11 +77,56 @@
         },
         {
           "advance": "0.00",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 1,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Corner",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "47.63",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "47.63",
+                "x": "0.00"
+              }
+            ],
+            "w": "47.63"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "29.29",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "freq 890",
           "top_gap": "0.00",
           "w": "47.63",
@@ -46,11 +136,56 @@
         },
         {
           "advance": "26.60",
+          "block_box": null,
           "font_size": "20.00",
           "h": "26.60",
           "i": 2,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Headword",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "26.60",
+            "line_boxes": [
+              {
+                "baseline": "21.58",
+                "h": "26.60",
+                "w": "56.32",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "26.60",
+                "line": 0,
+                "span": 0,
+                "w": "56.32",
+                "x": "0.00"
+              }
+            ],
+            "w": "56.32"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "33.29",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                240,
+                240,
+                245
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "20.00",
+              "weight": 400
+            }
+          ],
           "text": "面白い",
           "top_gap": "4.00",
           "w": "56.32",
@@ -60,11 +195,56 @@
         },
         {
           "advance": "19.95",
+          "block_box": null,
           "font_size": "15.00",
           "h": "19.95",
           "i": 3,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "19.95",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "57.67",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "57.67",
+                "x": "0.00"
+              }
+            ],
+            "w": "57.67"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "63.89",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                170,
+                175,
+                185
+              ],
+              "italic": false,
+              "len": 15,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "おもしろい",
           "top_gap": "4.00",
           "w": "57.67",
@@ -74,11 +254,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 4,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "59.15",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "59.15",
+                "x": "0.00"
+              }
+            ],
+            "w": "59.15"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "87.84",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                110,
+                112,
+                120
+              ],
+              "italic": false,
+              "len": 11,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "i-adjective",
           "top_gap": "4.00",
           "w": "59.15",
@@ -88,11 +313,56 @@
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
           "i": 5,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "46.77",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "46.77",
+                "x": "0.00"
+              }
+            ],
+            "w": "46.77"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "115.13",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 8,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "Jitendex",
           "top_gap": "10.00",
           "w": "46.77",
@@ -101,88 +371,291 @@
           "y": "115.13"
         },
         {
-          "advance": "19.95",
+          "advance": "59.85",
+          "block_box": null,
           "font_size": "15.00",
-          "h": "19.95",
+          "h": "59.85",
           "i": 6,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
-          "lines": 1,
-          "text": "interesting; fascinating; intriguing; enthralling",
+          "lines": 3,
+          "marker": [],
+          "measured": {
+            "h": "59.85",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "302.56",
+                "y": "0.00"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "262.55",
+                "y": "19.95"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "215.78",
+                "y": "39.90"
+              }
+            ],
+            "lines": 3,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "306.67",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 1,
+                "span": 0,
+                "w": "266.66",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 2,
+                "span": 0,
+                "w": "215.78",
+                "x": "0.00"
+              }
+            ],
+            "w": "302.56"
+          },
+          "origin": {
+            "dict_id": 0,
+            "entry_id": 0,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "136.43",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 125,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
+          "text": "interesting; fascinating; intriguing; enthralling; amusing; funny; comical; enjoyable; fun; entertaining; pleasant; agreeable",
           "top_gap": "4.00",
-          "w": "299.30",
+          "w": "302.56",
           "wrap_w": "321.00",
           "x": "12.00",
           "y": "136.43"
         },
         {
-          "advance": "19.95",
-          "font_size": "15.00",
-          "h": "19.95",
-          "i": 7,
-          "kind": "Text",
-          "lines": 1,
-          "text": "amusing; funny; comical",
-          "top_gap": "4.00",
-          "w": "158.96",
-          "wrap_w": "321.00",
-          "x": "12.00",
-          "y": "160.38"
-        },
-        {
-          "advance": "19.95",
-          "font_size": "15.00",
-          "h": "19.95",
-          "i": 8,
-          "kind": "Text",
-          "lines": 1,
-          "text": "enjoyable; fun; entertaining; pleasant; agreeable",
-          "top_gap": "4.00",
-          "w": "316.11",
-          "wrap_w": "321.00",
-          "x": "12.00",
-          "y": "184.33"
-        },
-        {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
-          "i": 9,
+          "i": 7,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "39.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "39.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "39.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "206.28",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 9,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "大辞林",
           "top_gap": "10.00",
           "w": "39.00",
           "wrap_w": "321.00",
           "x": "12.00",
-          "y": "214.28"
+          "y": "206.28"
         },
         {
           "advance": "39.90",
+          "block_box": null,
           "font_size": "15.00",
           "h": "39.90",
-          "i": 10,
+          "i": 8,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 2,
+          "marker": [],
+          "measured": {
+            "h": "39.90",
+            "line_boxes": [
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "309.87",
+                "y": "0.00"
+              },
+              {
+                "baseline": "16.19",
+                "h": "19.95",
+                "w": "56.12",
+                "y": "19.95"
+              }
+            ],
+            "lines": 2,
+            "span_boxes": [
+              {
+                "h": "19.95",
+                "line": 0,
+                "span": 0,
+                "w": "309.87",
+                "x": "0.00"
+              },
+              {
+                "h": "19.95",
+                "line": 1,
+                "span": 0,
+                "w": "56.12",
+                "x": "0.00"
+              }
+            ],
+            "w": "309.87"
+          },
+          "origin": {
+            "dict_id": 0,
+            "entry_id": 0,
+            "path": [
+              0
+            ]
+          },
+          "pen_x": "12.00",
+          "pen_y": "227.57",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                210,
+                212,
+                218
+              ],
+              "italic": false,
+              "len": 90,
+              "shift": "0.00",
+              "size": "15.00",
+              "weight": 400
+            }
+          ],
           "text": "心が引かれて、楽しい気持ちになるさま。興味をそそられるさま。",
           "top_gap": "4.00",
           "w": "309.87",
           "wrap_w": "321.00",
           "x": "12.00",
-          "y": "235.57"
+          "y": "227.57"
         },
         {
           "advance": "17.29",
+          "block_box": null,
           "font_size": "13.00",
           "h": "17.29",
-          "i": 11,
+          "i": 9,
+          "image": null,
+          "inline_boxes": [],
           "kind": "Text",
           "lines": 1,
+          "marker": [],
+          "measured": {
+            "h": "17.29",
+            "line_boxes": [
+              {
+                "baseline": "14.03",
+                "h": "17.29",
+                "w": "91.00",
+                "y": "0.00"
+              }
+            ],
+            "lines": 1,
+            "span_boxes": [
+              {
+                "h": "17.29",
+                "line": 0,
+                "span": 0,
+                "w": "91.00",
+                "x": "0.00"
+              }
+            ],
+            "w": "91.00"
+          },
+          "origin": null,
+          "pen_x": "12.00",
+          "pen_y": "277.47",
+          "ruby": [],
+          "spans": [
+            {
+              "at": 0,
+              "color": [
+                130,
+                170,
+                220
+              ],
+              "italic": false,
+              "len": 21,
+              "shift": "0.00",
+              "size": "13.00",
+              "weight": 400
+            }
+          ],
           "text": "新明解国語辞典",
           "top_gap": "10.00",
           "w": "91.00",
           "wrap_w": "321.00",
           "x": "12.00",
-          "y": "285.47"
+          "y": "277.47"
         }
       ],
       "hits": [
@@ -228,16 +701,16 @@
         "y": 197
       },
       "measure": {
-        "content_h": 315,
+        "content_h": 307,
         "total_w": 480,
         "view_h": 300
       },
       "scroll": {
-        "max_scroll": 15,
-        "scroll_used": 15,
+        "max_scroll": 7,
+        "scroll_used": 7,
         "thumb": {
-          "h": 262,
-          "top": 14
+          "h": 269,
+          "top": 7
         }
       },
       "side_panel": {

@@ -177,6 +177,38 @@ pub struct PopupConfig {
     /// Which layer the popup sits on, on Linux.
     #[serde(default)]
     pub layer: PopupLayer,
+    /// Compact or roomy.
+    #[serde(default)]
+    pub layout_mode: LayoutMode,
+    /// Apply a dictionary's own styling.
+    ///
+    /// Off draws every entry in the theme's own font and colours,
+    /// ignoring both the inline `style` object and a dictionary's own
+    /// `styles.css`.
+    #[serde(default = "default_dictionary_styling")]
+    pub dictionary_styling: bool,
+    /// Show example sentences.
+    #[serde(default = "default_show_examples")]
+    pub show_examples: bool,
+    /// Show attributions and footnotes.
+    ///
+    /// Independent of `show_examples`: keeping sources without keeping
+    /// three sentences per sense is its own choice.
+    #[serde(default = "default_show_attributions")]
+    pub show_attributions: bool,
+    /// Show a dictionary's images.
+    ///
+    /// Off leaves an image's `alt` text behind, because a gaiji is a
+    /// character and dropping it would leave a hole in a word.
+    #[serde(default = "default_show_images")]
+    pub show_images: bool,
+    /// Show part-of-speech labels inline.
+    ///
+    /// Off, and not for density: the labels are already the card's own
+    /// `pos` field, drawn above the glosses, so inline they read twice.
+    /// `gloss::RoleFilter::CARD` drops them for the same reason.
+    #[serde(default)]
+    pub show_part_of_speech: bool,
 }
 
 /// 25% of the monitor.
@@ -194,6 +226,34 @@ fn default_scroll_popup() -> bool {
     true
 }
 
+/// On by default: a dictionary that
+/// styled its entry meant it.
+fn default_dictionary_styling() -> bool {
+    true
+}
+
+/// On by default. A sentence showing
+/// the word in use is the reason a
+/// learner hovers it.
+fn default_show_examples() -> bool {
+    true
+}
+
+/// On by default: a licence line is
+/// what makes an entry quotable.
+fn default_show_attributions() -> bool {
+    true
+}
+
+/// On by default. An image node is a
+/// *character* far more often than an
+/// illustration - 427 786 census
+/// nodes carry a gaiji marker
+/// (`docs/research/dict-shapes.md`).
+fn default_show_images() -> bool {
+    true
+}
+
 /// `popup.layer`: which wlr layer the Linux popup sits on.
 ///
 /// `overlay` clears everything including fullscreen clients; `top` sits
@@ -206,6 +266,53 @@ pub enum PopupLayer {
     Overlay,
     /// Below fullscreen clients.
     Top,
+}
+
+/// `popup.layout_mode`: how much room an entry's own structure gets.
+///
+/// Yomitan's configurability is a small fixed set of root attributes
+/// driving a CSS decision table, and this mirrors the one attribute
+/// that changes the most: whether a glossary list stacks or reads as a
+/// single line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutMode {
+    /// One item per line, marked and indented, as a browser draws a
+    /// list. The default, because rendering an entry's structure is the
+    /// whole point of having parsed it.
+    #[default]
+    Roomy,
+    /// One paragraph, items joined by a separator - the terse popup
+    /// chibipop drew before it could do better, kept as a choice rather
+    /// than as the only option. Yomitan and Hoshi Reader both implement
+    /// compact the same way: `li { display: inline }` plus a separator
+    /// on every item after the first.
+    Compact,
+}
+
+impl PopupConfig {
+    /// The popup's render settings, as the scene builder spends them.
+    ///
+    /// The same shape as [`Config::present_config`] and for the same
+    /// reason: handing back the finished record leaves no half-way state
+    /// for a bin to forget to apply, and the six knobs are then read in
+    /// exactly one place, `ui::layout::build_elements`.
+    ///
+    /// Deliberately not the Anki card's filter. The card renderer takes
+    /// `RoleFilter::CARD` and no setting reaches it, so hiding examples
+    /// on screen leaves them on a mined card.
+    pub fn render_settings(&self) -> crate::ui::layout::RenderSettings {
+        crate::ui::layout::RenderSettings {
+            stack_items: self.layout_mode == LayoutMode::Roomy,
+            styling: self.dictionary_styling,
+            images: self.show_images,
+            roles: crate::dict::gloss::RoleFilter {
+                examples: self.show_examples,
+                attributions: self.show_attributions,
+                part_of_speech: self.show_part_of_speech,
+            },
+        }
+    }
 }
 
 /// Which platform a field is being read for.
@@ -284,13 +391,180 @@ pub fn resolve_font(
 }
 
 /// `[dictionaries]`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// One ordered array per Dictionary role plus its disabled twin, six flat
+/// arrays and no records: position in an array is priority within that
+/// role, membership of the `_disabled` twin is the checkbox, and both
+/// platforms' TOML writers round-trip the pair with no new struct
+/// (ADR-0014).
+///
+/// Every name is a Dictionary's **exact** name, matched by equality. A name
+/// no installed Dictionary answers to is kept and ignored, so unplugging
+/// the drive a library sits on does not delete the list.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DictionariesConfig {
-    /// Substrings, priority order.
-    pub display_order: Vec<String>,
-    /// Per language, ordered.
+    /// Term Dictionaries, highest priority first.
+    #[serde(default)]
+    pub terms: Vec<String>,
+    #[serde(default)]
+    pub terms_disabled: Vec<String>,
+    /// Frequency Dictionaries, highest priority first - the order
+    /// [`crate::dict::frequency::RankingStrategy::Priority`] reads.
+    #[serde(default)]
+    pub frequency: Vec<String>,
+    #[serde(default)]
+    pub frequency_disabled: Vec<String>,
+    /// Pitch Dictionaries, highest priority first.
+    #[serde(default)]
+    pub pitch: Vec<String>,
+    #[serde(default)]
+    pub pitch_disabled: Vec<String>,
+    /// The rule reducing the enabled Dictionaries' Reported frequencies to
+    /// the one Frequency rank `term.freq` carries.
+    ///
+    /// Spelled exactly as `meta.frequency_strategy` spells it, so the file
+    /// and the database cannot drift.
+    #[serde(default)]
+    pub ranking_strategy: crate::dict::frequency::RankingStrategy,
+    /// The terms one OCR language searches, in priority order.
+    ///
+    /// Term-only and keyed by OCR language: it answers "which definitions
+    /// should this language look in", and frequency and pitch have no
+    /// per-language question to answer.
     #[serde(default)]
     pub per_language: BTreeMap<String, Vec<String>>,
+    /// The pre-roles substring list, read and never written.
+    ///
+    /// `display_order` held **name substrings** matched with `contains`,
+    /// and it is the one thing in this struct a Dictionary is still named
+    /// by inexactly. [`DictionariesConfig::listed`] resolves it against the
+    /// installed names, every consumer goes through that, and
+    /// `skip_serializing` means the first save after an upgrade writes the
+    /// six arrays and drops the key. Crate-private so no bin can grow a
+    /// second reader of it.
+    #[serde(default, skip_serializing)]
+    pub(crate) display_order: Vec<String>,
+}
+
+impl DictionariesConfig {
+    /// This role's pair: the enabled array, then its disabled twin.
+    pub fn lists(&self, role: crate::library::Role) -> (&[String], &[String]) {
+        match role {
+            crate::library::Role::Terms => (&self.terms, &self.terms_disabled),
+            crate::library::Role::Frequency => (&self.frequency, &self.frequency_disabled),
+            crate::library::Role::Pitch => (&self.pitch, &self.pitch_disabled),
+        }
+    }
+
+    /// Writes one role's pair back.
+    pub fn set_lists(&mut self, role: crate::library::Role, on: Vec<String>, off: Vec<String>) {
+        match role {
+            crate::library::Role::Terms => (self.terms, self.terms_disabled) = (on, off),
+            crate::library::Role::Frequency => {
+                (self.frequency, self.frequency_disabled) = (on, off);
+            }
+            crate::library::Role::Pitch => (self.pitch, self.pitch_disabled) = (on, off),
+        }
+    }
+
+    /// Every Dictionary this role's list names, in priority order, each
+    /// with its checkbox state.
+    ///
+    /// The one place the pre-roles `display_order` is spent: a config
+    /// carrying it is a config written before roles existed, so its
+    /// substrings are resolved against `installed` and every name they
+    /// produced is enabled - a substring that matched nothing is dropped,
+    /// and one that matched two installed names contributes both, in
+    /// library order. Every other config is already exact and is read
+    /// verbatim.
+    pub fn listed(
+        &self,
+        role: crate::library::Role,
+        installed: &[crate::present::DictInfo],
+    ) -> Vec<(String, bool)> {
+        if self.is_pre_roles() {
+            return resolve_substrings(&self.display_order, installed)
+                .into_iter()
+                .map(|name| (name, true))
+                .collect();
+        }
+        let (on, off) = self.lists(role);
+        on.iter()
+            .map(|name| (name.clone(), true))
+            .chain(off.iter().map(|name| (name.clone(), false)))
+            .collect()
+    }
+
+    /// The Dictionaries this role's list enables, exact names, highest
+    /// priority first.
+    ///
+    /// An installed Dictionary the config names in neither array is new,
+    /// and lands at the bottom enabled: installing one never reorders a
+    /// curated list and never silently does nothing. An installed one the
+    /// disabled twin names is left out, and an empty answer means "search
+    /// nothing in this role" - a state the user reached by unchecking every
+    /// row, not a typo to second-guess.
+    pub fn enabled(
+        &self,
+        role: crate::library::Role,
+        installed: &[crate::present::DictInfo],
+    ) -> Vec<String> {
+        let listed = self.listed(role, installed);
+        let mut out: Vec<String> =
+            listed.iter().filter(|(_, on)| *on).map(|(name, _)| name.clone()).collect();
+        for dict in installed {
+            if !listed.iter().any(|(name, _)| *name == dict.name) {
+                out.push(dict.name.clone());
+            }
+        }
+        out
+    }
+
+    /// The terms one OCR language searches, or `None` when it has no list
+    /// of its own and the global terms list decides.
+    pub fn language_scope(
+        &self,
+        language: &str,
+        installed: &[crate::present::DictInfo],
+    ) -> Option<Vec<String>> {
+        let list = self.per_language.get(language).filter(|list| !list.is_empty())?;
+        Some(if self.is_pre_roles() {
+            resolve_substrings(list, installed)
+        } else {
+            list.clone()
+        })
+    }
+
+    /// Was this config written before Dictionaries had roles?
+    ///
+    /// The presence of the legacy key is the whole test: a migrated config
+    /// never writes it back, so this answers yes exactly once per upgrade.
+    fn is_pre_roles(&self) -> bool {
+        !self.display_order.is_empty()
+    }
+}
+
+/// A pre-roles substring list as the exact installed names it named.
+///
+/// Each substring in the order it was written contributes every installed
+/// name it matches, in library order, and a name already contributed is not
+/// contributed twice. A substring matching nothing is dropped - it named a
+/// dictionary this library does not hold, and there is no exact name to
+/// carry forward for it.
+fn resolve_substrings(
+    list: &[String],
+    installed: &[crate::present::DictInfo],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in list.iter().filter(|entry| !entry.trim().is_empty()) {
+        let needle = entry.to_lowercase();
+        for dict in installed {
+            if dict.name.to_lowercase().contains(&needle) && !out.contains(&dict.name) {
+                out.push(dict.name.clone());
+            }
+        }
+    }
+    out
 }
 
 /// `[plugins]`, optional.
@@ -420,7 +694,8 @@ pub struct FieldMapping {
 /// note's `fields` map; a row whose source is absent from that map
 /// contributes nothing to the note. `expression`, `reading`, `glossary`
 /// and `glossary_html` always come from `anki::fields_from_card`, which
-/// adds `frequency` only when the card carries one;
+/// adds `frequency` only when the card carries one and `pitch_html` only
+/// when an enabled pitch dictionary had the card's reading;
 /// `controller::note_payload` adds `sentence` when the hover produced
 /// one. `screenshot` is the odd one out: it is never a `fields` key at
 /// all, and `shot::plan` reads it straight off this list's row to learn
@@ -429,12 +704,13 @@ pub struct FieldMapping {
 /// Windows' combo prepends `"(none)"`, which is that one UI's idiom for
 /// "this field is unmapped" and is filtered out by its `row_mapping`
 /// before a save; it is never a stored value, so it is not a source.
-pub const FIELD_SOURCES: [&str; 7] = [
+pub const FIELD_SOURCES: [&str; 8] = [
     "expression",
     "reading",
     "glossary",
     "frequency",
     "glossary_html",
+    "pitch_html",
     "screenshot",
     "sentence",
 ];
@@ -708,11 +984,19 @@ impl Default for Config {
                 scroll_popup: default_scroll_popup(),
                 side_panel: false,
                 layer: PopupLayer::default(),
+                layout_mode: LayoutMode::default(),
+                dictionary_styling: default_dictionary_styling(),
+                show_examples: default_show_examples(),
+                show_attributions: default_show_attributions(),
+                show_images: default_show_images(),
+                show_part_of_speech: false,
             },
-            dictionaries: DictionariesConfig {
-                display_order: vec!["大辞林".to_string(), "Jitendex".to_string()],
-                per_language: BTreeMap::new(),
-            },
+            // Empty, and that is the whole default: a Dictionary the
+            // config names in no array is new, so a fresh install enables
+            // every dictionary it finds in library order without shipping a
+            // single name. The two names that used to sit here were
+            // substrings guessing at what the user would install.
+            dictionaries: DictionariesConfig::default(),
             plugins: PluginsConfig::default(),
             ocr: OcrConfig::default(),
             debug: DebugConfig::default(),
@@ -785,48 +1069,33 @@ impl Config {
         );
     }
 
-    /// The bridge to `present.rs`, with this OCR language's dictionary
-    /// scope resolved.
+    /// The bridge to `present.rs`, with this OCR language's term scope
+    /// resolved.
     ///
-    /// `dictionaries.per_language[ocr.language]` is the "Not searched"
-    /// split the settings window writes: naming a subset both orders the
-    /// popup and restricts the search to it. Three guards fall back to
-    /// the unrestricted `display_order`, because a popup with nothing in
-    /// it is worse than an unfiltered one:
+    /// Two lists, each of exact Dictionary names in priority order, and no
+    /// ladder behind either. The three guards this used to carry - no entry
+    /// or an empty one, a list matching nothing installed, and the
+    /// configured recogniser not being the one reading - all defended
+    /// against a substring that matched nothing and blanked the popup. An
+    /// exact name either names an installed Dictionary or does not, an
+    /// unchecked row was unchecked on purpose, and none of that reasoning
+    /// belongs on the presentation path (ADR-0014). If one of them has to
+    /// come back, the identity model is wrong rather than under-guarded.
     ///
-    /// - no entry for the language, or an empty one - it was never split;
-    /// - a list matching nothing installed - a typo, or the dictionaries
-    ///   it named are gone;
-    /// - `engine_runs()` says no - the configured recogniser for this
-    ///   language is not the one that will read the screen, so the list
-    ///   drawn up for it does not apply. Windows answers with
-    ///   language-pack availability; Linux answers whether the tag is one
-    ///   meikiocr reads (ADR-0012). Only asked when a list would
-    ///   otherwise apply, so a real probe may sit behind it.
-    ///
-    /// This is the whole rule and the only place `restrict_to_order` is
-    /// decided: returning the finished `PresentConfig` leaves no half-way
-    /// state for a caller to forget to apply.
+    /// `dictionaries.per_language[ocr.language]` still narrows the terms
+    /// list where the user gave that language one, and nothing narrows the
+    /// pitch list: pitch has no per-language question.
     pub fn present_config(
         &self,
         dicts: &[crate::present::DictInfo],
-        engine_runs: impl FnOnce() -> bool,
     ) -> crate::present::PresentConfig {
-        let scoped = self
-            .dictionaries
-            .per_language
-            .get(&self.ocr.language)
-            .filter(|list| !list.is_empty())
-            .filter(|list| {
-                crate::present::any_listed(dicts.iter().map(|d| d.name.as_str()), list)
-                    && engine_runs()
-            });
         crate::present::PresentConfig {
-            dict_order: scoped
-                .cloned()
-                .unwrap_or_else(|| self.dictionaries.display_order.clone()),
+            terms: self
+                .dictionaries
+                .language_scope(&self.ocr.language, dicts)
+                .unwrap_or_else(|| self.dictionaries.enabled(crate::library::Role::Terms, dicts)),
+            pitch: self.dictionaries.enabled(crate::library::Role::Pitch, dicts),
             summary_chars: self.popup.summary_chars,
-            restrict_to_order: scoped.is_some(),
         }
     }
 
@@ -947,8 +1216,11 @@ mod tests {
             "unbound: the control-socket verb has no compositor bind until a human writes one"
         );
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
-        assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()],
-                   c.dictionaries.display_order);
+        assert_eq!(
+            DictionariesConfig::default(),
+            c.dictionaries,
+            "no list ships: a Dictionary no array names is new and enabled",
+        );
     }
 
     /// §5.1: exclusion is opt-in.
@@ -1902,6 +2174,12 @@ mod tests {
         c.popup.scroll_popup = false;
         c.popup.side_panel = true;
         c.popup.layer = PopupLayer::Top;
+        c.popup.layout_mode = LayoutMode::Compact;
+        c.popup.dictionary_styling = false;
+        c.popup.show_examples = false;
+        c.popup.show_attributions = false;
+        c.popup.show_images = false;
+        c.popup.show_part_of_speech = true;
         c.dictionaries.per_language.insert("ja".to_string(), vec!["大辞林".to_string()]);
         c.ocr.max_ocr_passes = 3;
         c.ocr.prefer_vertical = true;
@@ -1940,7 +2218,7 @@ mod tests {
             "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n\n",
             "[anki]\nadd_key = \"d\"\n",
         )).unwrap();
-        let c = load_or_create(&p).unwrap();
+        let mut c = load_or_create(&p).unwrap();
         // Windows-rendered fields: exactly what the file said.
         assert_eq!(TriggerMode::HoldKey, c.trigger.mode);
         assert_eq!("f2", c.trigger.trigger_key);
@@ -1965,6 +2243,10 @@ mod tests {
         assert!(saved.contains("static_region_key_linux = \"\""));
         assert!(saved.contains("layer = \"overlay\""));
         assert!(saved.contains("font = \"Meiryo\""));
+        assert!(!saved.contains("display_order"), "the save retires the pre-roles key");
+        // Everything else round-trips; the substring list is the one thing a
+        // save deliberately drops, which is what migrates the file once.
+        c.dictionaries.display_order.clear();
         assert_eq!(c, load_or_create(&p).unwrap());
         let _ = std::fs::remove_file(&p);
     }
@@ -2033,6 +2315,105 @@ mod tests {
         assert_eq!(PopupLayer::Overlay, c.popup_layer());
         c.popup.layer = PopupLayer::Top;
         assert_eq!(PopupLayer::Top, c.popup_layer());
+    }
+
+    /// `popup.layout_mode` accepts exactly `roomy` and `compact`.
+    ///
+    /// The same shape as [`PopupLayer`]'s test, and the same posture: an
+    /// unreadable enum is a parse error rather than a silent fallback,
+    /// because a config naming a mode this build has never heard of is a
+    /// file from a build that knew something this one does not.
+    #[test]
+    fn layout_mode_parses_roomy_and_compact_and_rejects_garbage() {
+        let base = concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[dictionaries]\ndisplay_order = []\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"X\"\n",
+        );
+        let parse = |line: &str| toml::from_str::<Config>(&format!("{base}{line}"));
+        let mode = |line: &str| parse(line).unwrap().popup.layout_mode;
+        assert_eq!(LayoutMode::Roomy, mode("layout_mode = \"roomy\"\n"));
+        assert_eq!(LayoutMode::Compact, mode("layout_mode = \"compact\"\n"));
+        assert_eq!(LayoutMode::Roomy, mode(""), "absent takes the default");
+        assert!(parse("layout_mode = \"terse\"\n").is_err(), "garbage modes are a parse error");
+    }
+
+    /// A file predating the render settings loads at the documented
+    /// defaults, and a save writes them.
+    ///
+    /// The whole of story 34 on this side: a config from the other
+    /// platform - or from a build before this ticket - is read back
+    /// unchanged, gains the six keys, and is not corrupted by either.
+    #[test]
+    fn a_file_without_render_settings_takes_the_documented_defaults() {
+        let p = tmp("render_defaults");
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"light\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Meiryo\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"Jitendex\"]\n",
+        )).unwrap();
+        let mut c = load_or_create(&p).unwrap();
+        assert_eq!(LayoutMode::Roomy, c.popup.layout_mode);
+        assert!(c.popup.dictionary_styling);
+        assert!(c.popup.show_examples);
+        assert!(c.popup.show_attributions);
+        assert!(c.popup.show_images);
+        assert!(!c.popup.show_part_of_speech, "the card's own pos field already prints them");
+        assert_eq!("Meiryo", c.popup.font, "the stored values are untouched");
+        c.save(&p).unwrap();
+        let saved = std::fs::read_to_string(&p).unwrap();
+        assert!(saved.contains("layout_mode = \"roomy\""));
+        assert!(saved.contains("dictionary_styling = true"));
+        assert!(saved.contains("show_examples = true"));
+        assert!(saved.contains("show_attributions = true"));
+        assert!(saved.contains("show_images = true"));
+        assert!(saved.contains("show_part_of_speech = false"));
+        assert!(!saved.contains("display_order"), "the save retires the pre-roles key");
+        c.dictionaries.display_order.clear();
+        assert_eq!(c, load_or_create(&p).unwrap());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The shipped defaults resolve to the scene builder's own defaults.
+    ///
+    /// The bind that keeps a geometry fixture and a fresh install drawing
+    /// the same panel: the fixtures ask for `RenderSettings::default()`,
+    /// a fresh install asks for the config's, and a golden would move the
+    /// day those two disagreed.
+    #[test]
+    fn the_shipped_popup_resolves_to_the_default_render_settings() {
+        assert_eq!(
+            crate::ui::layout::RenderSettings::default(),
+            Config::default().popup.render_settings(),
+        );
+    }
+
+    /// Every knob reaches its slot in the resolved record, and the enum
+    /// resolves the right way round.
+    #[test]
+    fn every_render_knob_reaches_the_resolved_record() {
+        type Edit = fn(&mut PopupConfig);
+        type Want = fn(&crate::ui::layout::RenderSettings) -> bool;
+        let resolve = |edit: Edit| {
+            let mut c = Config::default();
+            edit(&mut c.popup);
+            c.popup.render_settings()
+        };
+        let cases: [(&str, Edit, Want); 7] = [
+            ("roomy stacks", |p| p.layout_mode = LayoutMode::Roomy, |r| r.stack_items),
+            ("compact joins", |p| p.layout_mode = LayoutMode::Compact, |r| !r.stack_items),
+            ("styling off", |p| p.dictionary_styling = false, |r| !r.styling),
+            ("images off", |p| p.show_images = false, |r| !r.images),
+            ("examples off", |p| p.show_examples = false, |r| !r.roles.examples),
+            ("attributions off", |p| p.show_attributions = false, |r| !r.roles.attributions),
+            ("pos on", |p| p.show_part_of_speech = true, |r| r.roles.part_of_speech),
+        ];
+        for (what, edit, want) in cases {
+            assert!(want(&resolve(edit)), "{what} did not reach the record");
+        }
     }
 
     /// Each bin reads only its own key fields.
@@ -2276,76 +2657,215 @@ mod tests {
         [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")]
     }
 
+    /// A pre-roles config, as it sat on disk before this ticket.
+    fn pre_roles(order: &[&str]) -> Config {
+        let mut cfg = Config::default();
+        cfg.dictionaries.display_order = order.iter().map(|s| (*s).to_string()).collect();
+        cfg
+    }
+
     #[test]
-    fn the_active_language_selects_its_own_list() {
+    fn the_active_language_selects_its_own_list_by_exact_name() {
         let mut cfg = Config::default();
         cfg.ocr.language = "zh-Hans-CN".to_string();
         cfg.dictionaries
             .per_language
-            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
-        let out = cfg.present_config(&installed(), || true);
-        assert_eq!(vec!["中日大辞典".to_string()], out.dict_order);
-        assert!(out.restrict_to_order);
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典　第二版".to_string()]);
+        let out = cfg.present_config(&installed());
+        assert_eq!(vec!["中日大辞典　第二版".to_string()], out.terms);
         assert!(
-            !crate::present::keeps_dict("大辞林　第四版", &out.dict_order, out.restrict_to_order),
-            "the excluded dictionary must not be searched"
+            !crate::present::keeps_dict("大辞林　第四版", &out.terms),
+            "a dictionary the language's list does not name is not searched"
         );
     }
 
     #[test]
-    fn a_language_with_no_list_falls_back_to_display_order() {
+    fn a_language_with_no_list_searches_the_enabled_terms_list() {
         let cfg = Config::default();
-        let out = cfg.present_config(&installed(), || true);
-        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
-        assert!(!out.restrict_to_order, "no entry must not restrict");
+        let out = cfg.present_config(&installed());
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "中日大辞典　第二版".to_string()],
+            out.terms,
+            "a config naming nothing enables every installed dictionary, in library order",
+        );
     }
 
     #[test]
-    fn an_empty_list_does_not_restrict() {
+    fn an_empty_language_list_leaves_the_global_list_deciding() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
         cfg.dictionaries.per_language.insert("ja".to_string(), Vec::new());
-        assert!(!cfg.present_config(&installed(), || true).restrict_to_order);
+        assert_eq!(2, cfg.present_config(&installed()).terms.len());
     }
 
-    /// A typo must not blank the popup.
+    /// The guard this replaced fell back to the unrestricted order whenever
+    /// the list matched nothing installed, because a mistyped *substring*
+    /// could blank the popup. An exact name cannot typo its way into
+    /// matching everything, so a list naming an absent dictionary searches
+    /// that dictionary and finds nothing - which is the truth about it.
     #[test]
-    fn a_list_matching_nothing_installed_falls_back() {
+    fn a_language_list_naming_nothing_installed_searches_nothing() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries
-            .per_language
-            .insert("ja".to_string(), vec!["Typoo".to_string()]);
-        let out = cfg.present_config(&installed(), || true);
-        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
-        assert!(!out.restrict_to_order, "all patterns missed, so do not restrict");
+        cfg.dictionaries.per_language.insert("ja".to_string(), vec!["Typoo".to_string()]);
+        let out = cfg.present_config(&installed());
+        assert_eq!(vec!["Typoo".to_string()], out.terms);
+        assert!(!crate::present::keeps_dict("大辞林　第四版", &out.terms));
     }
 
-    /// Wrong engine: no filter.
+    /// The user's story 3: unchecking every row is a legitimate "search
+    /// nothing", and nothing puts the dictionaries back.
     #[test]
-    fn a_recogniser_that_will_not_run_ignores_the_language_list() {
+    fn a_terms_list_with_every_row_disabled_enables_nothing() {
         let mut cfg = Config::default();
+        cfg.dictionaries.terms_disabled =
+            vec!["大辞林　第四版".to_string(), "中日大辞典　第二版".to_string()];
+        assert!(cfg.present_config(&installed()).terms.is_empty());
+    }
+
+    #[test]
+    fn an_installed_dictionary_no_array_names_lands_at_the_bottom_enabled() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.terms = vec!["中日大辞典　第二版".to_string()];
+        assert_eq!(
+            vec!["中日大辞典　第二版".to_string(), "大辞林　第四版".to_string()],
+            cfg.present_config(&installed()).terms,
+        );
+    }
+
+    /// An unplugged drive must not delete a list: the name stays in the
+    /// file, and resolution simply finds nothing answering to it.
+    #[test]
+    fn a_name_no_installed_dictionary_answers_to_is_kept_and_ignored() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.terms = vec!["On the USB stick".to_string()];
+        let out = cfg.present_config(&installed());
+        assert_eq!(
+            vec![
+                "On the USB stick".to_string(),
+                "大辞林　第四版".to_string(),
+                "中日大辞典　第二版".to_string()
+            ],
+            out.terms,
+        );
+        assert_eq!(
+            vec!["On the USB stick".to_string()],
+            cfg.dictionaries.terms,
+            "and the file still names it",
+        );
+    }
+
+    /// The migration, through the one seam that spends it: a substring
+    /// contributes every installed name it matches, in library order.
+    ///
+    /// `大辞` matching both installed names is exactly the defect the exact
+    /// model retires - a user who wrote it meant one dictionary and got two -
+    /// and migrating it to both is the honest reading of what it did.
+    #[test]
+    fn a_pre_roles_substring_resolves_to_the_exact_names_it_matched() {
+        let one = pre_roles(&["大辞林"]);
+        assert_eq!(
+            vec![("大辞林　第四版".to_string(), true)],
+            one.dictionaries.listed(crate::library::Role::Terms, &installed()),
+            "the substring named one dictionary, so it resolves to that one",
+        );
+
+        let both = pre_roles(&["大辞"]);
+        assert_eq!(
+            vec![
+                ("大辞林　第四版".to_string(), true),
+                ("中日大辞典　第二版".to_string(), true)
+            ],
+            both.dictionaries.listed(crate::library::Role::Terms, &installed()),
+            "one substring, both names it matched, in library order",
+        );
+    }
+
+    #[test]
+    fn a_pre_roles_substring_matching_nothing_is_dropped() {
+        let cfg = pre_roles(&["Typoo", "中日大辞典"]);
+        assert_eq!(
+            vec!["中日大辞典　第二版".to_string(), "大辞林　第四版".to_string()],
+            cfg.present_config(&installed()).terms,
+            "the matched substring resolved, the missed one contributed nothing, and \
+             the dictionary no substring named lands at the bottom",
+        );
+    }
+
+    #[test]
+    fn a_pre_roles_language_list_resolves_the_same_way() {
+        let mut cfg = pre_roles(&["大辞", "中日"]);
         cfg.ocr.language = "zh-Hans-CN".to_string();
         cfg.dictionaries
             .per_language
             .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
-        let out = cfg.present_config(&installed(), || false);
-        assert_eq!(cfg.dictionaries.display_order, out.dict_order);
-        assert!(!out.restrict_to_order, "the engine is not running this language");
+        assert_eq!(
+            vec!["中日大辞典　第二版".to_string()],
+            cfg.present_config(&installed()).terms,
+        );
     }
 
-    /// The gate costs nothing when no list applies.
+    /// Pitch is its own list with its own membership, and no per-language
+    /// axis narrows it.
     #[test]
-    fn the_engine_gate_is_not_asked_without_a_matching_list() {
-        let cfg = Config::default();
-        let out = cfg.present_config(&installed(), || panic!("must not probe the recogniser"));
-        assert!(!out.restrict_to_order);
+    fn the_pitch_list_is_resolved_independently_of_the_terms_list() {
+        let mut cfg = Config::default();
+        cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries.terms_disabled = vec!["大辞林　第四版".to_string()];
+        cfg.dictionaries.pitch = vec!["大辞林　第四版".to_string()];
+        cfg.dictionaries.per_language.insert("ja".to_string(), vec!["中日大辞典　第二版".into()]);
+        let out = cfg.present_config(&installed());
+        assert_eq!(vec!["中日大辞典　第二版".to_string()], out.terms);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "中日大辞典　第二版".to_string()],
+            out.pitch,
+            "disabled in terms, still leading the pitch list",
+        );
     }
 
     #[test]
     fn summary_chars_rides_along() {
         let mut cfg = Config::default();
         cfg.popup.summary_chars = 55;
-        assert_eq!(55, cfg.present_config(&[], || true).summary_chars);
+        assert_eq!(55, cfg.present_config(&[]).summary_chars);
+    }
+
+    /// Six flat arrays, and every one of them survives a round trip through
+    /// the writer the other platform saves with.
+    #[test]
+    fn all_six_arrays_and_the_strategy_round_trip_through_toml() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.terms = vec!["A".into(), "B".into()];
+        cfg.dictionaries.terms_disabled = vec!["C".into()];
+        cfg.dictionaries.frequency = vec!["D".into()];
+        cfg.dictionaries.frequency_disabled = vec!["E".into(), "F".into()];
+        cfg.dictionaries.pitch = vec!["G".into()];
+        cfg.dictionaries.pitch_disabled = vec!["H".into()];
+        cfg.dictionaries.ranking_strategy = crate::dict::frequency::RankingStrategy::Median;
+
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+
+        assert_eq!(cfg.dictionaries, back.dictionaries);
+        assert!(!text.contains("display_order"), "the retired key is not written: {text}");
+    }
+
+    /// The database records the strategy through `as_str`; the file records
+    /// it through serde. They are the same three names or a config and the
+    /// ranking it produced can disagree in silence.
+    #[test]
+    fn the_toml_spelling_is_the_one_the_database_records() {
+        use crate::dict::frequency::RankingStrategy;
+        for strategy in
+            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
+        {
+            let mut cfg = Config::default();
+            cfg.dictionaries.ranking_strategy = strategy;
+            let text = toml::to_string_pretty(&cfg).unwrap();
+            assert!(
+                text.contains(&format!("ranking_strategy = \"{}\"", strategy.as_str())),
+                "{text}",
+            );
+        }
     }
 }

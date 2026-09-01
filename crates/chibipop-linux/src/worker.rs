@@ -22,6 +22,7 @@ use crate::wayland::Advertised;
 use anyhow::{bail, Context, Result};
 use chibipop::config::{AnkiConfig, Config};
 use chibipop::geom::{PhysRect, ScanDisplay};
+use chibipop::dict::pitch::PitchClaim;
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;
 use chibipop::lookup::model::{Dictionary, Entry, TermRow};
@@ -128,6 +129,10 @@ impl Dictionary for NoDictionary {
     fn dicts(&self) -> Result<Vec<DictInfo>> {
         Ok(Vec::new())
     }
+
+    fn pitch_for(&self, _term: &str, _reading: &str) -> Vec<PitchClaim> {
+        Vec::new()
+    }
 }
 
 /// The dictionary at `db`, or the honest absence of one.
@@ -198,11 +203,11 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
         capture: CaptureSize { w: config.ocr.capture_width, h: config.ocr.capture_height },
         scan_alphanumeric: config.ocr.scan_alphanumeric,
         language: config.ocr.language.clone(),
-        // The "Not searched" split from the settings window. meikiocr is
-        // the only engine here, so the language gate is simply whether it
-        // reads the configured tag.
-        present_cfg: config
-            .present_config(dicts, || chibipop_linux::ocr::serves_language(&config.ocr.language)),
+        // The enabled terms and pitch lists from the settings window,
+        // exact names in priority order. No engine gate rides along any
+        // more: an exact name either names an installed dictionary or it
+        // does not (ADR-0014).
+        present_cfg: config.present_config(dicts),
         scan_display: ScanDisplay {
             captures: config.debug.show_scan_region,
             highlight: config.popup.highlight_match,
@@ -385,10 +390,10 @@ mod tests {
         assert_eq!(None, settings(&Config::default(), &[]).static_region);
     }
 
-    /// The whole point of ticket 08: "Not searched" in the settings
-    /// window has to reach the pipeline. `settings` is the only place the
-    /// daemon builds `WorkerSettings` (reload and spawn both go through
-    /// it), so the scoping is pinned here at that seam.
+    /// The whole point of ticket 08: an unchecked row in the settings
+    /// window's Terms section has to reach the pipeline. `settings` is the
+    /// only place the daemon builds `WorkerSettings` (reload and spawn both
+    /// go through it), so the scoping is pinned here at that seam.
     #[test]
     fn an_excluded_dictionary_is_dropped_from_the_worker_settings() {
         let dicts = vec![
@@ -400,36 +405,36 @@ mod tests {
         config
             .dictionaries
             .per_language
-            .insert("ja".to_string(), vec!["大辞林".to_string()]);
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
 
         let cfg = settings(&config, &dicts).present_cfg;
-        assert!(cfg.restrict_to_order, "the split must reach the pipeline");
-        let keeps = |name: &str| {
-            chibipop::present::keeps_dict(name, &cfg.dict_order, cfg.restrict_to_order)
-        };
+        // The scope arrives as the exact names it was written with, and
+        // it is the whole of what the pipeline searches.
+        assert_eq!(vec!["大辞林　第四版".to_string()], cfg.terms);
+        let keeps = |name: &str| chibipop::present::keeps_dict(name, &cfg.terms);
         assert!(keeps("大辞林　第四版"));
         assert!(!keeps("Jitendex.org [2026-07-09]"), "excluded, so not searched");
     }
 
     /// No split, no filter: the shipped default searches everything.
+    ///
+    /// A default config names no dictionary in either array, so every
+    /// installed one is new and lands enabled.
     #[test]
     fn a_config_with_no_split_searches_every_dictionary() {
         let dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
         let cfg = settings(&Config::default(), &dicts).present_cfg;
-        assert!(!cfg.restrict_to_order);
-        assert!(chibipop::present::keeps_dict(
-            "Jitendex.org",
-            &cfg.dict_order,
-            cfg.restrict_to_order
-        ));
+        assert_eq!(vec!["Jitendex.org".to_string()], cfg.terms);
+        assert!(chibipop::present::keeps_dict("Jitendex.org", &cfg.terms));
     }
 
     /// ADR-0012 hides `ocr.language` but keeps whatever is stored, so a
     /// config shared with a Windows install can name a language meikiocr
-    /// does not read. That language's list was drawn up for a different
-    /// engine: honour the Windows gate and search everything.
+    /// does not read. There is no engine probe left to ask about that: the
+    /// only question is whether the configured language was given a list
+    /// of its own, and if it was, that list is what gets searched.
     #[test]
-    fn a_language_meikiocr_does_not_read_keeps_every_dictionary() {
+    fn the_ocr_languages_own_list_is_searched_and_the_global_list_stands_in_without_one() {
         let dicts = vec![
             DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
             DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
@@ -439,9 +444,19 @@ mod tests {
         config
             .dictionaries
             .per_language
-            .insert("zh-Hans-CN".to_string(), vec!["大辞林".to_string()]);
+            .insert("zh-Hans-CN".to_string(), vec!["大辞林　第四版".to_string()]);
 
-        let cfg = settings(&config, &dicts).present_cfg;
-        assert!(!cfg.restrict_to_order, "the configured recogniser is not the one reading");
+        let scoped = settings(&config, &dicts).present_cfg;
+        assert_eq!(vec!["大辞林　第四版".to_string()], scoped.terms);
+
+        // The same per-language entry, under a language it is not keyed
+        // to: the global terms list decides instead, and an empty one
+        // means every installed dictionary.
+        config.ocr.language = "ja".to_string();
+        let global = settings(&config, &dicts).present_cfg;
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
+            global.terms
+        );
     }
 }
