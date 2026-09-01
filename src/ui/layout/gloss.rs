@@ -995,10 +995,35 @@ impl Paragraphs<'_> {
     /// of that link's hit target - a
     /// gaiji in a "see also" is as
     /// clickable as the word beside it.
-    /// `ruby` does not: an image is
-    /// never a ruby base, and claiming
-    /// a slot would centre a reading
-    /// over a picture.
+    ///
+    /// So does `ruby`, and only on the
+    /// [`IMAGE_SPACER`] run. An image
+    /// *is* a legal ruby base: eight
+    /// dictionaries write a reading or
+    /// a 表外字 mark over a gaiji, and a
+    /// browser lays it over the base
+    /// box whether that box is text or
+    /// replaced content. The spacer run
+    /// is the image's own horizontal
+    /// box, which is exactly what the
+    /// reading centres over
+    /// ([`place_ruby`]).
+    ///
+    /// The [`IMAGE_RISER`] is left out
+    /// of the slot. It is the image's
+    /// own filler, already sized to the
+    /// rise the asset needs above the
+    /// baseline ([`measure_images`]),
+    /// and a span that was both an
+    /// image's filler and a reading's
+    /// would have that size overwritten
+    /// by [`measure_readings`].
+    ///
+    /// [`IMAGE_SPACER`]: super::image::IMAGE_SPACER
+    /// [`IMAGE_RISER`]: super::image::IMAGE_RISER
+    /// [`measure_images`]: super::image::measure_images
+    /// [`measure_readings`]: super::ruby::measure_readings
+    /// [`place_ruby`]: super::ruby::place_ruby
     pub(super) fn raw(&mut self, text: &str, style: Inline, link: u32, image: u32, filler: bool) {
         let at = self.cur.text.len() as u32;
         self.cur.text.push_str(text);
@@ -1007,7 +1032,7 @@ impl Paragraphs<'_> {
             len: text.len() as u32,
             style,
             link,
-            ruby: NO_RUBY,
+            ruby: if filler { NO_RUBY } else { self.open_ruby },
             filler,
             image,
         });

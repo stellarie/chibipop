@@ -5236,6 +5236,89 @@ fn an_image_inside_a_link_is_part_of_its_hit_target() {
     assert_eq!(Some(img.rect.w), hit.w, "the whole asset, not a sliver");
 }
 
+/// Ticket 20: a `<ruby>` whose base is a gaiji image keeps its reading. 251
+/// nodes across eight dictionaries write this shape, and in most of them the
+/// mark is editorial rather than decorative - 三省堂 and 大辞林 put their
+/// 表外字 mark over the gaiji this way, and 岩波 puts a real reading there.
+/// A browser lays a reading over the ruby base box and an image is a legal
+/// base, so what a Yomitan reader sees is the mark above the picture.
+///
+/// Pinned to the image's own box on both axes: the reading is centred over
+/// the asset's width, and its bottom edge is the asset's top edge. A fix that
+/// drew the mark anywhere else - over the spacer's own text ascent, or off
+/// the top of the paragraph - fails here rather than passing quietly.
+#[test]
+fn a_reading_over_an_image_base_sits_on_the_assets_own_top_edge() {
+    let p = imaged(
+        concat!(
+            r#"{"tag":"ruby","content":[{"tag":"img","path":"g/x.svg","#,
+            r#""width":1.0,"height":1.0,"sizeUnits":"em"},"#,
+            r#"{"tag":"rt","content":"\u00d7"}]}"#
+        ),
+        &[("g/x.svg", recorded(MediaFormat::Svg, 30.0, 30.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+    let host = image_host(&s);
+
+    assert_eq!(
+        vec!["\u{d7}"],
+        host.ruby.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+        "the mark the dictionary wrote over the gaiji",
+    );
+    let read = &host.ruby[0];
+    assert_eq!((BOX_EM, BOX_EM), (img.rect.w, img.rect.h), "a one-em gaiji");
+    // One half-size unit of a reading, over a one-em box.
+    assert_eq!(BOX_EM * RUBY_RATIO * ADVANCE, read.w);
+    assert_eq!(BOX_EM * RUBY_RATIO * LINE_H, read.h);
+    assert_eq!(
+        img.rect.x + (img.rect.w - read.w) / 2.0,
+        host.pen.0 + read.x,
+        "centred over the asset, not over the line",
+    );
+    assert_eq!(
+        img.rect.y,
+        host.pen.1 + read.y + read.h,
+        "and its bottom edge is the asset's own top edge",
+    );
+}
+
+/// The reading is pinned to the *asset* and not to the line, so it follows
+/// the picture wherever `verticalAlign` puts it.
+///
+/// Not the ticket's distilled fragment verbatim: 岩波国語辞典 hangs `ｘ` over
+/// 赤鱏's gaiji and declares the alignment on a `span` wrapping the `img`,
+/// and `verticalAlign` is not inherited (CSS says so, and [`tag_style`]
+/// agrees), so the alignment a wrapper carries is a question for ticket 07
+/// and not for this one. What this pins is the alignment reaching the image
+/// itself, which is the shape whose geometry the reading has to follow.
+#[test]
+fn a_reading_follows_a_gaiji_its_vertical_align_moved() {
+    let p = imaged(
+        concat!(
+            r#"{"tag":"ruby","content":[{"tag":"img","path":"iwakoku8/218080.svg","#,
+            r#""width":1.0,"height":1.0,"sizeUnits":"em","#,
+            r#""style":{"verticalAlign":"text-bottom"}},"#,
+            r#"{"tag":"rt","content":"\uff58"}]}"#
+        ),
+        &[("iwakoku8/218080.svg", recorded(MediaFormat::Svg, 30.0, 30.0))],
+    );
+    let s = laid_out(&p, 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+    let host = image_host(&s);
+    let read = &host.ruby[0];
+
+    assert!(
+        img.rect.y > host.pen.1 + BOX_EM,
+        "text-bottom dropped the gaiji below where a baseline-aligned one sits",
+    );
+    assert_eq!(
+        img.rect.y,
+        host.pen.1 + read.y + read.h,
+        "and the reading went down with it",
+    );
+}
+
 // ---- render settings ----
 
 /// A scene over `p` at chosen render settings, in the box every fixture

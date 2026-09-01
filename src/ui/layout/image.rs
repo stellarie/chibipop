@@ -184,10 +184,9 @@ pub(super) fn place_images(
         // landed on, with the image's box
         // as the span height a
         // line-relative value aligns.
-        let shift = shift_on(img.style, *geom, img.h);
         let rect = SceneRect {
             x: line_at(*geom) + left,
-            y: pen.1 + geom.y + geom.baseline - shift - img.h,
+            y: pen.1 + geom.y + geom.baseline - image_rise(img, *geom),
             w: img.w,
             h: img.h,
         };
@@ -238,6 +237,32 @@ pub(super) fn place_images(
         });
     }
     out
+}
+
+/// How far above its line's baseline
+/// one image's box reaches.
+///
+/// Its own height plus whatever
+/// `verticalAlign` asked for - ticket
+/// 07's own resolution, against the
+/// line the image landed on, with the
+/// image's box as the span height a
+/// line-relative value aligns.
+///
+/// One function rather than the same
+/// two terms in two places, because
+/// two passes ask the same question of
+/// it: [`place_images`] puts the
+/// picture's bottom this far above the
+/// baseline, and [`place_ruby`] puts a
+/// reading's bottom on the top edge
+/// that leaves. A reading over a gaiji
+/// has to follow the picture, so where
+/// the picture sits is one decision.
+///
+/// [`place_ruby`]: super::ruby::place_ruby
+pub(super) fn image_rise(img: &FlowImage, line: LineBox) -> f32 {
+    img.h + shift_on(img.style, line, img.h)
 }
 
 /// One image's box, by the ladder.

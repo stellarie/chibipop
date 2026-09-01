@@ -138,28 +138,33 @@ impl<'a> Pass<'a> {
         // (ADR-0013).
         self.run.clear();
         self.run.extend(flow.styled_spans(font));
-        // The readings first, because
-        // what they measure to is what
-        // sizes the filler span that
-        // buys each one its slot - so
-        // the paragraph below is
-        // measured with the taller
-        // lines already asked for, and
-        // `met.h` counts the readings
-        // without anything after the
-        // fact touching it. A bin
-        // re-measuring these same
-        // spans gets the same lines.
-        let read = measure_readings(m, font, flow, wrap_w, &mut self.run)?;
-        // The images next, for the
-        // same reason and by the same
-        // rule: an image occupies
-        // inline space and grows the
-        // line it sits on, and the
-        // only thing that can do
-        // either is a span the
+        // The images first, because an
+        // image occupies inline space
+        // and grows the line it sits
+        // on, and the only thing that
+        // can do either is a span the
         // measurer is charged for.
         measure_images(m, font, flow, wrap_w, &mut self.run)?;
+        // The readings next, by the same
+        // rule: what a reading measures
+        // to is what sizes the filler
+        // span that buys it its slot, so
+        // the paragraph below is
+        // measured with the taller lines
+        // already asked for, and `met.h`
+        // counts the readings without
+        // anything after the fact
+        // touching it. A bin re-measuring
+        // these same spans gets the same
+        // lines.
+        //
+        // After the images and not
+        // before, because a reading over
+        // a gaiji adds its slot on top of
+        // the rise that image already
+        // asked for, and reads that rise
+        // back off the run.
+        let read = measure_readings(m, font, flow, wrap_w, &mut self.run)?;
         // Then the inline boxes, for the
         // third time on the same rule: an
         // inline box's own margin, border

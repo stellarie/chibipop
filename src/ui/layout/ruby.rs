@@ -15,7 +15,7 @@
 use crate::dict::gloss::{NodeId, Tag};
 use super::flow::{Ctx, Flow, FlowSpan, NO_LINK};
 use super::gloss::{text_of, Paragraphs};
-use super::image::NO_IMAGE;
+use super::image::{image_rise, NO_IMAGE};
 use super::measure::{MeasureError, MeasureRun, Measured, SpanBox, StyledSpan, TextMeasure};
 use super::scene::RubyBox;
 use super::style::Inline;
@@ -109,6 +109,7 @@ pub(super) fn measure_readings(
             ascent: if first.h > 0.0 { first.baseline / first.h } else { 0.0 },
         };
     }
+    let gaiji = gaiji_bases(flow, run);
     // A line of height `h` gives
     // `ascent * h` to the space above
     // its baseline, and a base of its
@@ -131,9 +132,54 @@ pub(super) fn measure_readings(
         } else {
             read.style.size
         };
-        asked.size = span.style.size + grown;
+        asked.size = span.style.size.max(gaiji[span.ruby as usize]) + grown;
     }
     Ok(out)
+}
+
+/// What a slot's *gaiji* base already
+/// asks its line for, as a span size,
+/// and zero for a slot no image base
+/// reached.
+///
+/// A text base needs nothing here: it
+/// asks its line for its own size, and
+/// the filler beside it carries that
+/// size already. An image asks through
+/// its [`IMAGE_RISER`] instead - the
+/// span it bought its rise above the
+/// baseline with, solved by
+/// [`measure_images`], which is why the
+/// image pass runs first. Take the
+/// base's *text* size for a gaiji and
+/// the slot comes out short by the
+/// difference between the asset's
+/// height and its line's text ascent,
+/// and [`place_ruby`] clamps the
+/// reading down onto the picture.
+///
+/// [`IMAGE_RISER`]: super::image::IMAGE_RISER
+/// [`measure_images`]: super::image::measure_images
+fn gaiji_bases(flow: &Flow, run: &[StyledSpan<'_>]) -> Vec<f32> {
+    let mut risers = vec![0.0f32; flow.images.len()];
+    for (span, asked) in flow.spans.iter().zip(run.iter()) {
+        if !span.filler {
+            continue;
+        }
+        if let Some(riser) = risers.get_mut(span.image as usize) {
+            *riser = riser.max(asked.size);
+        }
+    }
+    let mut out = vec![0.0f32; flow.ruby.len()];
+    for span in flow.spans.iter().filter(|s| !s.filler) {
+        let Some(riser) = risers.get(span.image as usize).copied() else {
+            continue;
+        };
+        if let Some(slot) = out.get_mut(span.ruby as usize) {
+            *slot = slot.max(riser);
+        }
+    }
+    out
 }
 
 /// The paragraph's readings, placed.
@@ -174,24 +220,47 @@ pub(super) fn place_ruby(
         let Some(geom) = measured.lines.get(line as usize) else {
             continue;
         };
-        let (left, right, tallest) = measured
+        // How far above the line's
+        // baseline each base's own ink
+        // reaches. A text base gives its
+        // ascent share of its line box; a
+        // gaiji base gives the rise
+        // `place_images` puts the picture
+        // at, which is what lands the
+        // reading on the image's own top
+        // edge and not on the ascent of
+        // the no-break spaces reserving
+        // it.
+        let rise = |b: &SpanBox| match flow
+            .spans
+            .get(b.span as usize)
+            .and_then(|s| flow.images.get(s.image as usize))
+        {
+            Some(img) => image_rise(img, *geom),
+            None => box_.ascent * b.h,
+        };
+        let (left, right, top) = measured
             .spans
             .iter()
             .filter(base)
             .filter(|b| b.line == line)
-            .fold((f32::MAX, 0.0f32, 0.0f32), |(l, r, h), b| {
-                (l.min(b.x), r.max(b.x + b.w), h.max(b.h))
+            // `f32::MIN` and not zero:
+            // a `verticalAlign` that
+            // lowers a gaiji puts its
+            // top *below* the baseline,
+            // and the reading belongs
+            // over the picture there
+            // too.
+            .fold((f32::MAX, 0.0f32, f32::MIN), |(l, r, up), b| {
+                (l.min(b.x), r.max(b.x + b.w), up.max(rise(b)))
             });
-        // Its bottom against the base's
-        // own ink top, which is the
-        // base's ascent up from the
-        // line's baseline. Clamped into
-        // the line, so a measurer that
-        // gave the line no extra room
-        // draws the reading small and
-        // high rather than off the
-        // paragraph.
-        let floor = geom.baseline - box_.ascent * tallest;
+        // Its bottom against that ink
+        // top. Clamped into the line, so
+        // a measurer that gave the line
+        // no extra room draws the reading
+        // small and high rather than off
+        // the paragraph.
+        let floor = geom.baseline - top;
         let y = geom.y + (floor - box_.h).max(0.0);
         // Centred over the base, and
         // never off the panel's left
