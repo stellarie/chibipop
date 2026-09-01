@@ -73,6 +73,11 @@ nix.workspace = true
 # xdg_toplevel, in this transient process only — the daemon never links it.
 iced.workspace = true
 fontdb.workspace = true
+# The settings window's Apply reconciles `term.freq` in place when the
+# frequency inputs change (src/settings/apply.rs), and an in-place write
+# needs a writer connection - core's lookup face only hands out read-only
+# ones. Same workspace pin as core, so both link one bundled SQLite.
+rusqlite.workspace = true
 # The meikiocr port (ADR-0009): three ONNX sessions, plus the digest check
 # over their bundled files.
 ort.workspace = true

@@ -75,8 +75,8 @@ use crate::controller::HitAction;
 use crate::present::{AnkiPopupState, Presentation};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
 use chrome::{
-    build_elements, is_kanji, measure_line, one_span, side_panel, span, text_elem, Elem,
-    CORNER_GAP, SEPARATOR_THICKNESS, SIDE_GAP, SIDE_PANEL_W,
+    build_elements, is_kanji, measure_line, one_span, pitch_elem, side_panel, span, text_elem,
+    Elem, CORNER_GAP, SEPARATOR_THICKNESS, SIDE_GAP, SIDE_PANEL_W,
 };
 use measure::measure_text;
 use pass::Pass;
@@ -265,6 +265,23 @@ pub fn scene(
                         });
                     }
                 }
+                h
+            }
+            Elem::Pitch(pitch) => {
+                let avail_w = take_avail(content_w, &mut reserved_w);
+                y += pitch.reading.top_gap;
+                let elem = pitch_elem(
+                    m,
+                    font,
+                    pitch,
+                    origin,
+                    y,
+                    avail_w,
+                    &mut pass.measured,
+                    &mut probes,
+                )?;
+                let h = elem.advance;
+                pass.out.push(elem);
                 h
             }
             Elem::Gloss(flow) => {

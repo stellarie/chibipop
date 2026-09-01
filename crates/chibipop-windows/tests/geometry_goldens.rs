@@ -239,16 +239,34 @@ fn geometry_golden_inline_image() {
     check("inline_image");
 }
 
+#[test]
+fn geometry_golden_pitch_single() {
+    check("pitch_single");
+}
+
+#[test]
+fn geometry_golden_pitch_multiple() {
+    check("pitch_multiple");
+}
+
+#[test]
+fn geometry_golden_pitch_sources() {
+    check("pitch_sources");
+}
+
 /// The ADR-0011 fixture set, pinned:
-/// exactly these thirteen, one golden
+/// exactly these sixteen, one golden
 /// file each. The first seven are the
 /// original set with its intent
-/// unchanged; the last six are the
+/// unchanged; the next six are the
 /// ones ADR-0013 requires, because the
 /// widened schema has fields no
-/// plain-string fixture can fill.
+/// plain-string fixture can fill; the
+/// last three are ticket 02's, and
+/// they are the only thing pinning the
+/// card header's pitch geometry.
 #[test]
-fn the_fixture_set_is_the_thirteen_from_adr_0011() {
+fn the_fixture_set_is_the_sixteen_from_adr_0011() {
     let names: Vec<&str> = fixtures().iter().map(|f| f.name).collect();
     assert_eq!(
         vec![
@@ -265,6 +283,9 @@ fn the_fixture_set_is_the_thirteen_from_adr_0011() {
             "table_spans",
             "ruby_run",
             "inline_image",
+            "pitch_single",
+            "pitch_multiple",
+            "pitch_sources",
         ],
         names
     );
@@ -332,6 +353,39 @@ fn every_new_fixture_carries_the_feature_it_is_named_for() {
         // node believed.
         ("inline_image", |v| {
             elems(v).any(|e| e["kind"] == "Image" && e["image"]["key"] != Value::Null)
+        }),
+        // Marked kana: a pitch element
+        // whose high moras carry an
+        // overline. A box with a top
+        // border and no fill is what
+        // the notation *is*, so a
+        // fixture without one is not
+        // drawing an accent at all.
+        ("pitch_single", |v| {
+            elems(v).any(|e| {
+                e["kind"] == "Pitch"
+                    && arr(e, "inline_boxes").iter().any(|b| {
+                        b["style"]["border_style"]
+                            .as_array()
+                            .is_some_and(|s| s.first() == Some(&Value::from("solid")))
+                    })
+            })
+        }),
+        // Four accents, four rows.
+        ("pitch_multiple", |v| elems(v).filter(|e| e["kind"] == "Pitch").count() == 4),
+        // The dedup: the `split`
+        // variant draws two rows and
+        // the `agreed` one draws a
+        // single row naming four
+        // dictionaries, so a capture
+        // that lost the collapse shows
+        // it here.
+        ("pitch_sources", |v| {
+            let rows: Vec<&Value> = elems(v).filter(|e| e["kind"] == "Pitch").collect();
+            rows.len() == 3
+                && rows.iter().any(|e| {
+                    e["text"].as_str().is_some_and(|t| t.matches('\u{b7}').count() == 3)
+                })
         }),
     ];
 

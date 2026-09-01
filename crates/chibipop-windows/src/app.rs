@@ -7,14 +7,14 @@ use crate::controller::{
 };
 use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay};
 use crate::input::hooks::Hooks;
-use crate::library::{Kind, Library, Pending};
+use crate::library::{Library, Pending, Role, Roles};
 use crate::lock::LibraryLock;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::lookup::rules::load_rules;
 use crate::lookup::sqlite::SqliteDictionary;
-use crate::plugin::manifest::{Manifest, Role};
+use crate::plugin::manifest::Manifest;
 use crate::plugin::text::PluginText;
 use crate::plugin::{discover, host};
 use crate::present::{DictInfo, Presentation, PresentConfig};
@@ -468,7 +468,9 @@ struct Removal {
     name: String,
     dict_id: Option<i64>,
     file: Option<String>,
-    kind: Option<Kind>,
+    /// What the library entry supplies; `None` when no entry answers to
+    /// the name, which is a removal with nothing left to delete.
+    roles: Option<Roles>,
 }
 
 /// What one Apply must edit.
@@ -481,7 +483,10 @@ struct EditPlan {
 /// What one Apply changed.
 #[derive(Debug, Default)]
 struct EditReport {
-    added: Vec<String>,
+    /// The roles travel with the name because registering the import in
+    /// the config needs both: one archive lands in every list its roles
+    /// name.
+    added: Vec<(String, Roles)>,
     removed: Vec<String>,
     freq_added: Vec<String>,
     freq_removed: Vec<String>,
@@ -518,6 +523,34 @@ fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Recomputes every Frequency rank from what is already stored.
+///
+/// The settings-driven half of the frequency story: which frequency
+/// dictionaries are on, in which order, reduced under which strategy, are
+/// all preferences over claims the database already holds, so nothing here
+/// opens an archive. `reapply_frequencies` is the other half, for when the
+/// library itself changed.
+///
+/// Returns the number of `term` rows restamped. Progress goes straight to
+/// the window because this runs on the pump thread - the settings-only
+/// Apply has no background flight to send it through.
+fn reindex_ranks(
+    db: &Path,
+    cfg: &Config,
+    dicts: &[DictInfo],
+    w: &SettingsWindow,
+) -> Result<u64> {
+    let mut conn = open_writer(db)?;
+    let enabled = cfg.dictionaries.enabled(Role::Frequency, dicts);
+    w.set_status("Updating frequency rankings\u{2026}");
+    crate::dict::reindex::reindex(
+        &mut conn,
+        &enabled,
+        cfg.dictionaries.ranking_strategy,
+        &|text| w.set_status(text),
+    )
+}
+
 /// Which rows and files change.
 fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPlan {
     let removals = form
@@ -529,16 +562,16 @@ fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPla
                 .iter()
                 .find(|e| &e.name == name || &e.file == name)
                 .cloned();
-            let kind = entry.as_ref().map(|e| e.kind);
+            let roles = entry.as_ref().map(|e| e.roles);
             Removal {
                 name: name.clone(),
-                dict_id: if kind == Some(Kind::Frequency) {
-                    None
-                } else {
-                    dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id)
-                },
+                // Whatever it supplies: one archive is one `dict` row, so
+                // a frequency archive has one to delete like any other and
+                // the name simply finds nothing when it does not
+                // (ADR-0014).
+                dict_id: dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id),
                 file: entry.as_ref().map(|e| e.file.clone()),
-                kind,
+                roles,
             }
         })
         .collect();
@@ -568,7 +601,8 @@ fn rebased(line: &str, base: i64) -> String {
 fn edit_status(report: &EditReport) -> String {
     let mut parts = Vec::new();
     if !report.added.is_empty() {
-        parts.push(format!("Added {}.", report.added.join(", ")));
+        let names: Vec<&str> = report.added.iter().map(|(name, _)| name.as_str()).collect();
+        parts.push(format!("Added {}.", names.join(", ")));
     }
     if !report.freq_added.is_empty() {
         parts.push(format!("Added frequency {}.", report.freq_added.join(", ")));
@@ -586,6 +620,18 @@ fn edit_status(report: &EditReport) -> String {
         return "No dictionary changed.".to_string();
     }
     parts.join(" ")
+}
+
+/// Reported frequencies and nothing else.
+///
+/// The one archive shape with no banks of its own to insert: anything
+/// supplying terms or pitch owns a `dict` row those rows hang off, while a
+/// frequency-only archive's claims are stored and dropped by the frequency
+/// pass instead (ADR-0015). Roles replaced a single-valued kind, so this
+/// is a question about the whole set - an archive carrying a term bank
+/// beside its frequency data is a term dictionary that also reports.
+fn frequency_only(roles: Roles) -> bool {
+    roles == Roles::only(&[Role::Frequency])
 }
 
 /// Edit the live database.
@@ -616,7 +662,7 @@ fn apply_edits(
     for removal in &plan.removals {
         say(format!("Removing {}\u{2026}", removal.name));
         match remove_one(&mut conn, &mut lib, dir, &mut pending, removal) {
-            Ok(()) if removal.kind == Some(Kind::Frequency) => {
+            Ok(()) if removal.roles.is_some_and(frequency_only) => {
                 report.freq_removed.push(removal.name.clone())
             }
             Ok(()) => report.removed.push(removal.name.clone()),
@@ -628,11 +674,11 @@ fn apply_edits(
     for add in &plan.additions {
         say(format!("Reading {}\u{2026}", add.name));
         match add_one(&mut conn, &mut lib, dir, &freqs, add, tx) {
-            Ok((name, Kind::Frequency)) => report.freq_added.push(name),
-            Ok((name, Kind::Term)) => report.added.push(name),
-            Ok((name, Kind::Unreadable)) => {
+            Ok((name, roles)) if roles.is_empty() => {
                 report.failed.push(format!("{}: {name} is unreadable", add.name))
             }
+            Ok((name, roles)) if frequency_only(roles) => report.freq_added.push(name),
+            Ok(added) => report.added.push(added),
             Err(e) => report.failed.push(format!("{}: {e:#}", add.name)),
         }
     }
@@ -686,7 +732,7 @@ fn validate_frequency_inputs(dir: &Path, form: &SettingsForm) -> Result<()> {
     freqs.extend(
         form.staged_adds
             .iter()
-            .filter(|add| crate::library::kind_of(&add.source) == Kind::Frequency)
+            .filter(|add| crate::library::roles_of(&add.source).has(Role::Frequency))
             .map(|add| add.source.clone()),
     );
     crate::dict::build::load_freqs(&freqs).map(|_| ())
@@ -712,7 +758,7 @@ fn remove_one(
         }
     }
     if let Some(file) = &removal.file {
-        if removal.kind == Some(Kind::Frequency) {
+        if removal.roles.is_some_and(frequency_only) {
             crate::dict::edit::forget_source(conn, &dir.join(file))?;
         }
         lib.quarantine(dir, file)
@@ -730,14 +776,14 @@ fn add_one(
     freqs: &[PathBuf],
     add: &crate::settings::StagedAdd,
     tx: &mpsc::Sender<EditMsg>,
-) -> Result<(String, Kind)> {
+) -> Result<(String, Roles)> {
     let entry = lib
         .import(dir, &add.source)
         .with_context(|| format!("importing {}", add.source.display()))?;
     let path = dir.join(&entry.file);
-    if entry.kind == Kind::Frequency {
+    if frequency_only(entry.roles) {
         return match crate::dict::edit::record_source(conn, &path) {
-            Ok(()) => Ok((entry.name, entry.kind)),
+            Ok(()) => Ok((entry.name, entry.roles)),
             Err(e) => {
                 lib.entries.retain(|x| x.file != entry.file);
                 let _ = std::fs::remove_file(&path);
@@ -752,7 +798,7 @@ fn add_one(
         }
     };
     match crate::dict::edit::add_dictionary(conn, &path, freqs, &on_progress) {
-        Ok(done) => Ok((done.name, entry.kind)),
+        Ok(done) => Ok((done.name, entry.roles)),
         Err(e) => {
             lib.entries.retain(|x| x.file != entry.file);
             let _ = std::fs::remove_file(&path);
@@ -1603,8 +1649,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 for name in &report.removed {
                                     settings::dictionary_removed(&mut updated, name);
                                 }
-                                for name in &report.added {
-                                    settings::dictionary_added(&mut updated, name);
+                                for (name, roles) in &report.added {
+                                    settings::dictionary_added(&mut updated, name, *roles);
                                 }
                                 // Spec §4: the cache was stale.
                                 dicts = report.dicts;
@@ -1612,8 +1658,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
                                 live = derive(&cfg);
-                                live.present_cfg = cfg
-                                    .present_config(&dicts, || configured_recogniser_runs(&cfg));
+                                live.present_cfg = cfg.present_config(&dicts);
                                 sync_ocr_clipboard_action(
                                     &mut action_registry,
                                     live.actions_ocr_clipboard_hotkey.as_deref(),
@@ -1676,10 +1721,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     }
                                 }
                             } else {
+                                // Before `cfg` becomes the new one: what
+                                // the frequency inputs were is half the
+                                // question.
+                                let work = settings::dictionary_work(&cfg, &updated);
                                 live = derive(&updated);
-                                live.present_cfg = updated.present_config(&dicts, || {
-                                    configured_recogniser_runs(&updated)
-                                });
+                                live.present_cfg = updated.present_config(&dicts);
                                 sync_ocr_clipboard_action(
                                     &mut action_registry,
                                     live.actions_ocr_clipboard_hotkey.as_deref(),
@@ -1713,6 +1760,28 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                         status_parts.push(notice.clone());
                                     }
                                     None => status_parts.push("Settings applied.".to_string()),
+                                }
+                                // A strategy, order or checkbox change
+                                // recomputes `term.freq` in place and never
+                                // re-reads an archive: the claims those
+                                // inputs reduce are already stored, so the
+                                // archive-driven pass belongs to a library
+                                // edit and a rebuild belongs to neither.
+                                if work == settings::DictionaryWork::Reindex {
+                                    w.set_busy(true);
+                                    let done = reindex_ranks(&db_path, &cfg, &dicts, w);
+                                    w.set_busy(false);
+                                    status_parts.push(match done {
+                                        Ok(rows) => {
+                                            format!("Reranked {rows} term rows.")
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "chibipop: reranking failed: {e:#}"
+                                            );
+                                            format!("Frequency rankings not updated: {e}")
+                                        }
+                                    });
                                 }
                                 if cfg.debug.show_engine_log {
                                     status_parts.push(engine_status_line(&cfg));
@@ -1961,7 +2030,7 @@ fn find_text_plugin<'a>(
     let m = parsed
         .as_ref()
         .map_err(|e| anyhow!("plugin \"{name}\": {e:#}"))?;
-    if !m.roles.contains(&Role::TextProvider) {
+    if !m.roles.contains(&crate::plugin::manifest::Role::TextProvider) {
         bail!("plugin \"{name}\" is not a text-provider");
     }
     Ok((dir.as_path(), m))
@@ -2553,10 +2622,11 @@ impl LiveSettings {
 fn derive(cfg: &Config) -> LiveSettings {
     LiveSettings {
         popup: cfg.popup.clone(),
-        // No dictionary identities yet - the unrestricted fallback, which
-        // is what an empty library resolves to anyway. The three callers
-        // that have them re-resolve `present_cfg` right after.
-        present_cfg: cfg.present_config(&[], || true),
+        // No dictionary identities yet, so the enabled lists resolve to
+        // the names the config itself carries and nothing is appended for
+        // an installed dictionary no list mentions. The three callers that
+        // have the identities re-resolve `present_cfg` right after.
+        present_cfg: cfg.present_config(&[]),
         scan_display: ScanDisplay {
             captures: cfg.debug.show_scan_region,
             highlight: cfg.popup.highlight_match,
@@ -2623,29 +2693,29 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
     }
 }
 
-/// The "Not searched" split, once the identities are known.
+/// The enabled terms list, once the identities are known.
 ///
-/// `Config::present_config` matches the split against the installed
-/// dictionary names, and the worker's own first read is where those names
+/// `Config::present_config` appends every installed dictionary the config
+/// does not name, and the worker's own first read is where those names
 /// come from - so the settings `Worker::spawn` was handed were resolved
-/// against an empty library and came out unrestricted. Push the real
-/// answer now that it can be computed: a fresh session must honour the
-/// setting from its first lookup, not from the first reload. Nothing to
-/// say when it did not change, which is every config with no split.
+/// against an empty library and named only what the config listed. Push
+/// the real answer now that it can be computed: a fresh session must
+/// search the right dictionaries from its first lookup, not from the first
+/// reload. Nothing to say when it did not change.
 fn rescope_lookups(
     live: &mut LiveSettings,
     cfg: &Config,
     dicts: &[DictInfo],
     trigger_tx: &mpsc::Sender<Trigger>,
 ) {
-    let resolved = cfg.present_config(dicts, || configured_recogniser_runs(cfg));
+    let resolved = cfg.present_config(dicts);
     if resolved == live.present_cfg {
         return;
     }
     println!(
         "chibipop: {} searches {} of {} dictionary/ies",
         cfg.ocr.language,
-        resolved.dict_order.len(),
+        resolved.terms.len(),
         dicts.len(),
     );
     live.present_cfg = resolved;
@@ -2791,13 +2861,6 @@ fn startup_language(
     }
 }
 
-/// Will the configured tag run?
-fn configured_recogniser_runs(cfg: &Config) -> bool {
-    let fallback = crate::config::default_ocr_language();
-    let tag = &cfg.ocr.language;
-    startup_language(tag, &fallback, || recogniser_available(tag)).is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2900,53 +2963,55 @@ mod tests {
         assert_eq!("zh-Hant", worker_settings(&live, &[]).language);
     }
 
-    /// The dictionary names the "Not searched" split is matched against
-    /// are the worker's own first read, so the spawn cannot resolve the
-    /// scope before the worker exists - it re-resolves after. Without
-    /// that, a fresh session searched every dictionary until something
-    /// sent a reload. The pump cannot be driven from a unit test, so the
-    /// decision-and-push function is pinned directly.
+    /// An installed dictionary no list names is searched, and the names
+    /// come from the worker's own first read - so the spawn cannot resolve
+    /// the enabled list before the worker exists and it re-resolves after.
+    /// Without that, a fresh session searched only what the config listed
+    /// until something sent a reload. The pump cannot be driven from a
+    /// unit test, so the decision-and-push function is pinned directly.
     #[test]
     fn a_fresh_worker_is_told_the_split_once_the_names_are_known() {
         let mut cfg = Config::default();
-        let lang = cfg.ocr.language.clone();
-        cfg.dictionaries
-            .per_language
-            .insert(lang, vec!["大辞林".to_string()]);
+        cfg.dictionaries.terms = vec!["大辞林　第四版".to_string()];
+        cfg.dictionaries.terms_disabled = vec!["Jitendex.org [2026-07-09]".to_string()];
         let mut live = derive(&cfg);
-        assert!(
-            !live.present_cfg.restrict_to_order,
-            "an empty library cannot be restricted"
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            live.present_cfg.terms,
+            "an empty library resolves to the listed names alone"
         );
         let dicts = vec![
             DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
             DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
+            DictInfo { dict_id: 3, name: "新明解国語辞典".to_string() },
         ];
         let (tx, rx) = mpsc::channel::<Trigger>();
 
         rescope_lookups(&mut live, &cfg, &dicts, &tx);
 
-        assert!(live.present_cfg.restrict_to_order, "the split resolved");
         assert_eq!(
-            vec!["大辞林".to_string()],
-            live.present_cfg.dict_order,
-            "the surviving pattern, matched against the installed names"
+            vec!["大辞林　第四版".to_string(), "新明解国語辞典".to_string()],
+            live.present_cfg.terms,
+            "the enabled name, then the installed dictionary neither list mentions"
         );
         let sent = rx.try_recv().expect("the reload must have reached the worker");
         match sent.kind {
             TriggerKind::Reload(settings) => {
                 assert_eq!(live.present_cfg, settings.present_cfg);
-                assert_eq!(2, settings.dicts.len(), "the reload carries the identities");
+                assert_eq!(3, settings.dicts.len(), "the reload carries the identities");
             }
             _ => panic!("a rescope is a reload"),
         }
     }
 
-    /// And costs nothing when there is nothing to say: the shipped
-    /// config has no split, so no reload and no log line.
+    /// And costs nothing when there is nothing to say: a config that
+    /// already names the installed dictionary in every list resolves to
+    /// itself, so no reload and no log line.
     #[test]
     fn a_worker_whose_scope_did_not_change_is_left_alone() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.dictionaries.terms = vec!["Jitendex.org".to_string()];
+        cfg.dictionaries.pitch = vec!["Jitendex.org".to_string()];
         let mut live = derive(&cfg);
         let before = live.present_cfg.clone();
         let dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
@@ -3154,7 +3219,7 @@ mod tests {
                 .map(|(file, name)| crate::library::Entry {
                     file: (*file).to_string(),
                     name: (*name).to_string(),
-                    kind: crate::library::Kind::Term,
+                    roles: Roles::only(&[Role::Terms]),
                 })
                 .collect(),
         }
@@ -3162,7 +3227,10 @@ mod tests {
 
     fn report_of(added: &[&str], removed: &[&str], failed: &[&str]) -> EditReport {
         EditReport {
-            added: added.iter().map(|s| (*s).to_string()).collect(),
+            added: added
+                .iter()
+                .map(|s| ((*s).to_string(), Roles::only(&[Role::Terms])))
+                .collect(),
             removed: removed.iter().map(|s| (*s).to_string()).collect(),
             freq_added: Vec::new(),
             freq_removed: Vec::new(),
@@ -3245,18 +3313,21 @@ mod tests {
         let db = built_db(&dir, &library);
         let mut form = settings::from_config(&Config::default(), &[]);
         assert_eq!(
-            Some(crate::library::Kind::Frequency),
+            Some(Roles::only(&[Role::Frequency])),
             form.stage_add(&fixture("freq.zip"))
         );
         assert_eq!(
-            Some(crate::library::Kind::Term),
+            Some(Roles::only(&[Role::Terms])),
             form.stage_add(&fixture("terms.zip"))
         );
         let (tx, rx) = mpsc::channel::<EditMsg>();
         let report =
             apply_edits_with_frequencies(&db, &library, &form, &tx).expect("the apply must work");
 
-        assert_eq!(vec!["FixtureTerms".to_string()], report.added);
+        assert_eq!(
+            vec![("FixtureTerms".to_string(), Roles::only(&[Role::Terms]))],
+            report.added
+        );
         assert_eq!(vec!["FixtureFreq".to_string()], report.freq_added);
         assert!(report.removed.is_empty());
         assert!(report.freq_removed.is_empty());
@@ -3406,7 +3477,10 @@ mod tests {
         let report = apply_edits(&db, &library, &form, &tx).expect("the add must apply");
         drop(tx);
 
-        assert_eq!(vec!["FixtureTerms".to_string()], report.added);
+        assert_eq!(
+            vec![("FixtureTerms".to_string(), Roles::only(&[Role::Terms]))],
+            report.added
+        );
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(2, report.dicts.len(), "{:?}", report.dicts);
         assert_eq!(2, dict_rows(&db).len());
@@ -3463,15 +3537,20 @@ mod tests {
         assert_eq!(1, report.dicts.len());
     }
 
+    /// A frequency archive is a dictionary: it is what the user orders and
+    /// enables, its own reported frequencies are stored under its own
+    /// `dict_id`, and removing it drops them through the same `DICT_KEYED`
+    /// walk every other dictionary-keyed table takes (ADR-0015). What it
+    /// still contributes is no `entry` row at all.
     #[test]
-    fn a_frequency_addition_stays_out_of_dictionary_rows() {
+    fn a_frequency_addition_owns_a_dictionary_row_and_contributes_no_entries() {
         let (dir, _guard) = edit_scratch("add_frequency");
         let library = dir.join("library");
         let db = built_db(&dir, &library);
         let before = entry_count(&db);
         let mut form = settings::from_config(&Config::default(), &[]);
         assert_eq!(
-            Some(crate::library::Kind::Frequency),
+            Some(Roles::only(&[Role::Frequency])),
             form.stage_add(&fixture("freq.zip"))
         );
 
@@ -3484,7 +3563,18 @@ mod tests {
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert!(library.join("freq.zip").exists());
         assert_eq!(before, entry_count(&db));
-        assert_eq!(1, dict_rows(&db).len());
+        assert_eq!(
+            vec![
+                (1, "FixtureTerms".to_string()),
+                (2, "FixtureFreq".to_string()),
+            ],
+            dict_rows(&db)
+        );
+        let claims: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM reported_freq WHERE dict_id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(3, claims, "and freq.zip's three claims are stored under it");
         assert_eq!(None, drifted(&library, &db).unwrap());
     }
 

@@ -1,11 +1,15 @@
 //! The schema and the writer.
 
 use crate::dict::archive::{
-    for_each_freq_row, for_each_media, for_each_row, read_index, read_styles_css, TermBanks,
+    for_each_media, for_each_meta_row, for_each_row, read_index, read_styles_css, TermBanks,
 };
-use crate::dict::frequency::{lookup_freq, merge_freq_row, FreqTable};
+use crate::dict::frequency::{
+    self, lookup_freq, merge_freq_row, FreqSource, FreqTable, RankingStrategy,
+};
 use crate::dict::gloss::{renders_text, GlossDoc, Kind, NodeId};
 use crate::dict::media::{self, Intrinsic};
+use crate::dict::pitch;
+use crate::dict::reindex;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -17,12 +21,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Bumped to 3 by ticket 02: the `entry` record now stores the dictionary's
-/// own structured-content glossary in place of two flattened vecs, and
-/// ticket 03's media table lands under the same bump. Costs every user one
-/// rebuild, once - a rebuild, not a re-import, because the library directory
-/// keeps the archives and the rebuild flow replays them.
-const SCHEMA_VERSION: i64 = 3;
+/// Bumped to 4 by the dictionary-roles work: `reported_freq` keeps each
+/// frequency dictionary's own claims per dictionary instead of merging them
+/// into one build-time global, and ticket 02's pitch table lands under the
+/// same bump. Costs every user one rebuild, once - a rebuild, not a
+/// re-import, because the library directory keeps the archives and the
+/// rebuild flow replays them.
+const SCHEMA_VERSION: i64 = 4;
 #[cfg(test)]
 const BATCH_ROWS: usize = 2;
 #[cfg(not(test))]
@@ -107,6 +112,62 @@ CREATE TABLE media (             -- one row per referenced (dictionary, path)
     -- live in their own table for exactly that reason.
     PRIMARY KEY (dict_id, path)
 ) WITHOUT ROWID;
+
+CREATE TABLE reported_freq (     -- one dictionary's own claim, per headword
+    dict_id INTEGER NOT NULL REFERENCES dict(dict_id),
+    -- The headword the frequency archive named, and the reading it scoped
+    -- the claim to, which is `FreqTable`'s key spelled out: term plus
+    -- optional reading, so `lookup_freq`'s reading-scoped-then-agnostic rule
+    -- reads back off these rows exactly as it reads off the table they came
+    -- from. NULL reading = ranked whatever the reading.
+    term    TEXT NOT NULL,
+    reading TEXT,
+    rank    INTEGER NOT NULL     -- lower = more common
+    -- Indexed on `term` alone (see `INDEXES`), and on nothing else. The
+    -- reindex and a removal both read one dictionary's claims whole and want
+    -- a scan; the only point query is the popup's, which asks what the
+    -- enabled dictionaries said about one headword and gets a handful of
+    -- rows back. `term.freq` is still the reduced Frequency rank
+    -- denormalised onto the hot row, so nothing on the term path comes here
+    -- at all (ADR-0015).
+);
+
+CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
+    dict_id  INTEGER NOT NULL REFERENCES dict(dict_id),
+    -- The headword the pitch archive named and the reading it gave the
+    -- accent for. `term` is `COALESCE(term.written, term.surface)` - the
+    -- kanji headword, or the kana one where there is no kanji - which is
+    -- how `term` above is keyed and the same expression `reported_freq` is
+    -- probed with, so a card that has a headword and a reading in hand asks
+    -- for its accents with no join. Both are NOT NULL because Yomitan skips
+    -- a pitch payload whose reading is not the headword's: an accent with
+    -- no reading applies to nothing.
+    term     TEXT NOT NULL,
+    reading  TEXT NOT NULL,
+    -- Where the pitch falls, in the two forms the schema permits, exactly
+    -- one per row. `downstep` is the 1-based count of moras before the fall
+    -- with 0 meaning heiban, which is what all 511 488 accents ticket 01
+    -- censused are; `pattern` is the `^[HL]+$` level-per-mora form, which
+    -- the schema permits and neither corpus uses. Two columns rather than
+    -- one because the two forms share no indexing origin and the string can
+    -- say things no integer can - several falls, or a word that neither
+    -- falls nor starts low.
+    downstep INTEGER,
+    pattern  TEXT,
+    -- The moras this accent marks nasal and devoiced, as JSON arrays of
+    -- 1-based mora indices, and the accent's own tags. Stored and not
+    -- drawn: ticket 06 draws the marks, 25.8% of NHK's rows carry one, and
+    -- dropping them here is exactly what would have cost that ticket a
+    -- second schema bump.
+    nasal    TEXT NOT NULL,
+    devoice  TEXT NOT NULL,
+    tags     TEXT NOT NULL
+    -- Indexed on (term, reading) (see `INDEXES`) and on nothing else: the
+    -- only read is one probe per shown card, and both columns are always
+    -- given. Nothing on the term path comes here at all - pitch is per
+    -- reading, so it cannot ride on a `term` row and must not widen one
+    -- (ADR-0014).
+);
 ";
 
 /// Every table `dict_id` keys, children before parents, and the one list
@@ -128,7 +189,8 @@ CREATE TABLE media (             -- one row per referenced (dictionary, path)
 /// checked against the schema of the database in hand
 /// ([`dict_keyed_tables`]), so a table added above and forgotten here
 /// aborts a removal by name instead of orphaning a row.
-pub const DICT_KEYED: [&str; 4] = ["term", "entry", "media", "dict_style"];
+pub const DICT_KEYED: [&str; 6] =
+    ["term", "entry", "media", "dict_style", "reported_freq", "pitch"];
 
 /// Every table in *this* database that carries a `dict_id` column.
 ///
@@ -157,6 +219,8 @@ pub fn dict_keyed_tables(conn: &Connection) -> Result<Vec<String>> {
 const INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS idx_term_surface ON term(surface);
 CREATE INDEX IF NOT EXISTS idx_term_entry_id ON term(entry_id);
+CREATE INDEX IF NOT EXISTS idx_reported_freq_term ON reported_freq(term);
+CREATE INDEX IF NOT EXISTS idx_pitch_term_reading ON pitch(term, reading);
 ";
 
 /// Row counts a build wrote.
@@ -503,7 +567,16 @@ fn build_into(
     out: &Path,
     on_progress: &dyn Fn(&str),
 ) -> Result<BuildCounts> {
-    let freq_table = load_freqs(freqs)?;
+    let sources = load_freqs(freqs)?;
+    // Every frequency dictionary is enabled and in library order in a fresh
+    // build - there is no disabled state to read and no user order yet - so
+    // the reduction is over all of them under the default strategy. A user
+    // who has chosen another one reindexes; that is what a reindex is for,
+    // and it is seconds against this function's minutes.
+    let strategy = RankingStrategy::default();
+    let names: Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
+    let tables: Vec<FreqTable> = sources.into_iter().map(|s| s.table).collect();
+    let ranks = frequency::reduce(&tables, strategy);
 
     let mut conn = Connection::open(out).with_context(|| format!("creating {}", out.display()))?;
     // The bulk load's own settings, and only its own: this is a throwaway
@@ -537,15 +610,53 @@ fn build_into(
     let mut batches = Batches::new();
 
     let tx = conn.transaction()?;
+    // Each archive with the `dict_id` it was just given, so the pitch pass
+    // below attaches an archive's accents to its own dictionary row and
+    // never finds one by name: `dict.name` is a title and two editions can
+    // share one.
+    let mut read: Vec<(i64, &Path)> = Vec::with_capacity(terms.len() + freqs.len());
     for (i, archive) in terms.iter().enumerate() {
         let slot =
             Slot { dict_id: i as i64 + 1, priority: i as i64, first_entry_id: entries + 1 };
-        let one = insert_archive(&tx, archive, &slot, &freq_table, &mut batches, on_progress)?;
+        let one = insert_archive(&tx, archive, &slot, &ranks, &mut batches, on_progress)?;
         entries += one.entries;
         term_rows += one.terms;
         media.add(one.media);
         styles.add(one.styles);
+        read.push((slot.dict_id, archive.as_path()));
     }
+
+    // The frequency dictionaries' rows. An archive supplying frequency data
+    // *and* terms is in both lists and is one Dictionary, so its claims go
+    // under the `dict_id` it was already given rather than under a second
+    // row wearing the same name - a role set means one archive can arrive
+    // twice here (ADR-0014). A frequency archive `terms` does not name gets
+    // its own row, after the term dictionaries so that a term archive's
+    // `dict_id` is still its position in `terms`. The reduction the claims
+    // were just reduced by is recorded beside them, so a reader knows which
+    // dictionaries the ranks in `term` actually came from.
+    let mut order = Vec::with_capacity(tables.len());
+    let mut appended: i64 = 0;
+    for (i, (name, table)) in names.iter().zip(&tables).enumerate() {
+        let dict_id = match read.iter().find(|(_, path)| *path == freqs[i].as_path()) {
+            Some(&(already, _)) => already,
+            None => {
+                appended += 1;
+                let dict_id = terms.len() as i64 + appended;
+                tx.execute(
+                    "INSERT INTO dict (dict_id, name, priority) VALUES (?1, ?2, ?3)",
+                    params![dict_id, name, dict_id - 1],
+                )?;
+                read.push((dict_id, freqs[i].as_path()));
+                dict_id
+            }
+        };
+        reindex::store_reported(&tx, dict_id, table)?;
+        order.push(dict_id);
+    }
+    reindex::record(&tx, &reindex::Reduction { order, strategy })?;
+
+    let accents = store_archive_pitch(&tx, &read, on_progress)?;
 
     write_meta(&tx, terms, freqs)?;
     on_progress("building  creating index");
@@ -565,22 +676,122 @@ fn build_into(
     if styles.sheets > 0 {
         on_progress(&styles.line("all dictionaries"));
     }
+    if accents > 0 {
+        on_progress(&format!("pitch     all dictionaries: {accents} accents"));
+    }
     Ok(BuildCounts { entries, terms: term_rows, media, styles })
 }
 
-/// Merges the freq archives.
-pub fn load_freqs(freqs: &[PathBuf]) -> Result<FreqTable> {
-    let mut table = FreqTable::new();
+/// Every archive's Pitch patterns, under the dictionary that gave them.
+///
+/// Over every archive the build read rather than over a list of its own,
+/// because the pitch role is what an archive's `term_meta_bank_` rows hold
+/// and not which list it arrived in: a pitch-only archive, one that also
+/// carries terms, and one that also carries frequency data all store their
+/// accents here, under the one `dict` row they already have. Which of them a
+/// reader consults and in what order is the enabled pitch list's business,
+/// which is config's and never a build input (ADR-0014) - the same split
+/// `reported_freq` takes, where every dictionary's claims are stored and the
+/// enabled list decides what they mean.
+///
+/// Returns the accents stored across every archive, for the progress line.
+fn store_archive_pitch(
+    tx: &rusqlite::Transaction,
+    read: &[(i64, &Path)],
+    on_progress: &dyn Fn(&str),
+) -> Result<usize> {
+    let mut total = 0;
+    for &(dict_id, archive) in read {
+        // The load first and the title second: an archive with no
+        // term-meta bank answers from its central directory, and asking
+        // for its title would cost a second read of its `index.json` for
+        // nothing.
+        let table = pitch::load_pitch(archive)
+            .with_context(|| format!("reading the pitch of {}", archive.display()))?;
+        if table.is_empty() {
+            continue;
+        }
+        let stored = store_pitch(tx, dict_id, &table)?;
+        total += stored;
+        on_progress(&format!(
+            "pitch     [{}] {stored} accents over {} readings",
+            dict_title(archive)?,
+            table.len(),
+        ));
+    }
+    Ok(total)
+}
+
+/// Stores one dictionary's Pitch patterns, one row per accent.
+///
+/// One row per accent rather than one per reading with a list in it: the
+/// accents of one reading are what a card header draws as its own rows, and
+/// a reader that had to split a packed column could not have used the index
+/// to find them.
+pub(crate) fn store_pitch(
+    tx: &rusqlite::Transaction,
+    dict_id: i64,
+    table: &pitch::PitchTable,
+) -> Result<usize> {
+    let mut insert = tx
+        .prepare(
+            "INSERT INTO pitch \
+             (dict_id, term, reading, downstep, pattern, nasal, devoice, tags) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .context("preparing the pitch insert")?;
+    let mut rows = 0;
+    for ((term, reading), accents) in table {
+        for accent in accents {
+            let (downstep, pattern) = match &accent.position {
+                pitch::Position::Downstep(fall) => (Some(i64::from(*fall)), None),
+                pitch::Position::Pattern(levels) => (None, Some(levels.as_str())),
+            };
+            insert
+                .execute(params![
+                    dict_id,
+                    term,
+                    reading,
+                    downstep,
+                    pattern,
+                    to_json_list(&accent.nasal)?,
+                    to_json_list(&accent.devoice)?,
+                    to_json_list(&accent.tags)?,
+                ])
+                .with_context(|| format!("storing the pitch of {term} / {reading}"))?;
+            rows += 1;
+        }
+    }
+    Ok(rows)
+}
+
+/// One accent's mora markers or tags, as the JSON array the column holds.
+///
+/// JSON rather than a separated string because a tag is an author's own text
+/// and could hold any separator; one encoding for all three columns is one
+/// reader and one writer rather than three.
+fn to_json_list<T: Serialize>(list: &[T]) -> Result<String> {
+    serde_json::to_string(list).context("encoding an accent's mora list")
+}
+
+/// Each frequency archive's own claims, in the order they were given.
+///
+/// Per archive and no further. `merge_freq_row`'s lowest-rank-wins rule is
+/// right *within* one archive and stays; across archives there is no rule to
+/// apply until a ranking strategy says which one, so this used to end in
+/// `table.extend(one)` and the last archive read silently won every key it
+/// named.
+pub fn load_freqs(freqs: &[PathBuf]) -> Result<Vec<FreqSource>> {
+    let mut sources = Vec::with_capacity(freqs.len());
     for fa in freqs {
-        // Per archive, then overwrite.
-        let mut one = FreqTable::new();
-        for_each_freq_row(fa, |row| {
-            merge_freq_row(&mut one, &row);
+        let mut table = FreqTable::new();
+        for_each_meta_row(fa, |row| {
+            merge_freq_row(&mut table, &row);
             Ok(())
         })?;
-        table.extend(one);
+        sources.push(FreqSource { name: dict_title(fa)?, table });
     }
-    Ok(table)
+    Ok(sources)
 }
 
 /// Where one archive lands.
@@ -679,11 +890,16 @@ impl Batches {
 }
 
 /// One archive into one slot.
+///
+/// `ranks` is the reduced Frequency rank per headword - every enabled
+/// frequency dictionary's claim already put through the ranking strategy
+/// ([`frequency::reduce`]) - because the strategy is applied when
+/// `term.freq` is written and never when it is read.
 pub(crate) fn insert_archive(
     tx: &rusqlite::Transaction,
     archive: &Path,
     slot: &Slot,
-    freqs: &FreqTable,
+    ranks: &FreqTable,
     batches: &mut Batches,
     on_progress: &dyn Fn(&str),
 ) -> Result<Loaded> {
@@ -699,7 +915,7 @@ pub(crate) fn insert_archive(
     let mut term_rows: i64 = 0;
     let mut assets: BTreeSet<String> = BTreeSet::new();
 
-    for_each_prepared_bank(archive, freqs, |bank| {
+    for_each_prepared_bank(archive, ranks, |bank| {
         write_bank(tx, &bank, dict_id, &mut entry_id, &mut term_rows, batches, on_progress)?;
         if assets.is_empty() {
             assets = bank.assets;
@@ -787,7 +1003,7 @@ fn write_bank(
 /// banks. Only the SQLite writes have to be serial, and they are.
 fn for_each_prepared_bank(
     archive: &Path,
-    freqs: &FreqTable,
+    ranks: &FreqTable,
     mut on_bank: impl FnMut(PreparedBank) -> Result<()>,
 ) -> Result<()> {
     let mut banks = TermBanks::open(archive)?;
@@ -799,7 +1015,7 @@ fn for_each_prepared_bank(
     if threads == 1 {
         for i in 0..count {
             let text = banks.read(i)?;
-            on_bank(prepare_bank(&text, banks.name(i), freqs)?)?;
+            on_bank(prepare_bank(&text, banks.name(i), ranks)?)?;
         }
         return Ok(());
     }
@@ -830,7 +1046,7 @@ fn for_each_prepared_bank(
                     }
                     let made = banks
                         .read(i)
-                        .and_then(|text| prepare_bank(&text, banks.name(i), freqs));
+                        .and_then(|text| prepare_bank(&text, banks.name(i), ranks));
                     // A closed channel means the writer has given up.
                     if send.send((i, made)).is_err() {
                         return;
@@ -860,7 +1076,7 @@ fn for_each_prepared_bank(
 ///
 /// The whole per-row cost of an import lives here: the row parse, the
 /// glossary parse, and the emptiness test. Nothing touches the database.
-fn prepare_bank(text: &str, name: &str, freqs: &FreqTable) -> Result<PreparedBank> {
+fn prepare_bank(text: &str, name: &str, ranks: &FreqTable) -> Result<PreparedBank> {
     let mut bank =
         PreparedBank { text: String::with_capacity(text.len()), rows: Vec::new(), assets: BTreeSet::new() };
     let mut glossary = String::new();
@@ -886,7 +1102,7 @@ fn prepare_bank(text: &str, name: &str, freqs: &FreqTable) -> Result<PreparedBan
         collect_assets(&doc, &mut bank.assets);
 
         let reading: &str = if t.reading.is_empty() { &t.term } else { &t.reading };
-        let freq = lookup_freq(freqs, &t.term, Some(reading));
+        let freq = lookup_freq(ranks, &t.term, Some(reading));
         let same = t.term == reading;
 
         let glossary = push_span(&mut bank.text, &glossary);
@@ -1967,8 +2183,14 @@ mod tests {
         assert_eq!(6, counts.entries);
         assert_eq!(10, counts.terms);
         let conn = Connection::open(&out).unwrap();
-        assert_eq!(vec![1, 2], ints(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
-        assert_eq!(vec![0, 1], ints(&conn, "SELECT priority FROM dict ORDER BY dict_id"));
+        // Two term archives, then the frequency dictionary: a term archive's
+        // `dict_id` is still its position in `terms`, and `freq.zip` follows
+        // as a dictionary in its own right.
+        assert_eq!(vec![1, 2, 3], ints(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
+        assert_eq!(vec![0, 1, 2], ints(&conn, "SELECT priority FROM dict ORDER BY dict_id"));
+        let freq_name: String =
+            conn.query_row("SELECT name FROM dict WHERE dict_id = 3", [], |r| r.get(0)).unwrap();
+        assert_eq!("FixtureFreq", freq_name);
         assert_eq!(
             vec![1, 2, 3],
             ints(&conn, "SELECT entry_id FROM entry WHERE dict_id = 1 ORDER BY entry_id")
@@ -2454,5 +2676,221 @@ mod tests {
         assert_eq!(1, counts.styles.malformed);
         drop(guard);
         let _ = std::fs::remove_file(&archive);
+    }
+
+    // ---- pitch
+
+    /// Every accent a pitch dictionary gave, as the table holds them.
+    fn stored_pitch(conn: &Connection, term: &str, reading: &str) -> Vec<(i64, Option<i64>)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT dict_id, downstep FROM pitch \
+                 WHERE term = ?1 AND reading = ?2 ORDER BY rowid",
+            )
+            .unwrap();
+        stmt.query_map(params![term, reading], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    /// The predicate reads banks and not filenames, which is the whole
+    /// reason it exists: one of the six archives named `[Pitch]` in ticket
+    /// 01's census has no `term_meta_bank_` at all.
+    #[test]
+    fn a_pitch_only_archive_supplies_the_pitch_role_and_a_term_archive_does_not() {
+        assert!(pitch::supplies_pitch(&fixture("pitch.zip")));
+        assert!(!pitch::supplies_pitch(&fixture("terms.zip")));
+        assert!(!pitch::supplies_pitch(&fixture("freq.zip")), "a freq row is the other role");
+    }
+
+    /// And a pitch-only archive supplies no terms role: its build
+    /// contributes a dictionary row and its accents, and not one `entry`.
+    #[test]
+    fn a_pitch_only_archive_contributes_accents_and_no_entries() {
+        let out = out_path("pitch_only");
+        let _guard = TempDbGuard(out.clone());
+        build(&[fixture("terms.zip"), fixture("pitch.zip")], &[], &out, &|_| {}).unwrap();
+        let conn = Connection::open(&out).unwrap();
+
+        let pitch_dict: i64 = conn
+            .query_row("SELECT dict_id FROM dict WHERE name = 'FixturePitch'", [], |r| r.get(0))
+            .expect("the pitch archive owns a dictionary row");
+        let entries: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry WHERE dict_id = ?1", [pitch_dict], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(0, entries, "no term bank, so no entry");
+        assert_eq!(vec![(pitch_dict, Some(1)), (pitch_dict, Some(0))],
+            stored_pitch(&conn, "猫", "ねこ"),
+            "the archive's two rows for one reading merged, in arrival order");
+    }
+
+    /// Both roles from one archive, which ticket 01's census has no specimen
+    /// of - 9 frequency-only and 5 pitch-only, none both. Neither role
+    /// suppresses the other and both land under one dictionary row.
+    #[test]
+    fn an_archive_supplying_terms_and_pitch_contributes_both() {
+        let out = out_path("both_roles");
+        let _guard = TempDbGuard(out.clone());
+        build(&[fixture("both.zip")], &[], &out, &|_| {}).unwrap();
+        let conn = Connection::open(&out).unwrap();
+
+        assert!(pitch::supplies_pitch(&fixture("both.zip")));
+        let dict_id: i64 = conn
+            .query_row("SELECT dict_id FROM dict WHERE name = 'FixtureBoth'", [], |r| r.get(0))
+            .unwrap();
+        let entries: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry WHERE dict_id = ?1", [dict_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(1, entries, "the term bank still builds");
+        assert_eq!(vec![(dict_id, Some(2))], stored_pitch(&conn, "犬", "いぬ"));
+    }
+
+    /// Every field the schema permits reaches the table, including the two
+    /// this ticket does not draw: dropping them would cost ticket 06 a second
+    /// schema bump.
+    #[test]
+    fn the_stored_row_carries_the_nasal_and_devoice_markers() {
+        let out = out_path("pitch_markers");
+        let _guard = TempDbGuard(out.clone());
+        build(&[fixture("terms.zip"), fixture("pitch.zip")], &[], &out, &|_| {}).unwrap();
+        let conn = Connection::open(&out).unwrap();
+
+        let nasal: String = conn
+            .query_row(
+                "SELECT nasal FROM pitch WHERE term = '合鍵' AND reading = 'あいかぎ'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!("[4]", nasal);
+        let devoice: String = conn
+            .query_row(
+                "SELECT devoice FROM pitch WHERE term = 'アーク灯' AND reading = 'アークとう'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!("[3]", devoice);
+    }
+
+    /// One row listing an accent twice stores it once (大辞泉's `一体`, 11
+    /// such rows in the census).
+    #[test]
+    fn a_row_repeating_an_accent_stores_it_once() {
+        let out = out_path("pitch_repeat");
+        let _guard = TempDbGuard(out.clone());
+        build(&[fixture("terms.zip"), fixture("pitch.zip")], &[], &out, &|_| {}).unwrap();
+        let conn = Connection::open(&out).unwrap();
+
+        let stored = stored_pitch(&conn, "一体", "いったい");
+        assert_eq!(
+            vec![Some(0), Some(1)],
+            stored.into_iter().map(|(_, d)| d).collect::<Vec<_>>()
+        );
+    }
+
+    /// The blocker ticket 01 measured, as a fixture: every one of the five
+    /// real pitch archives stores CRC-32 values that do not match its own
+    /// payload, and this reader used to refuse all of them while Yomitan
+    /// imported them cleanly.
+    #[test]
+    fn a_bank_whose_stored_checksum_is_wrong_still_reads() {
+        let table = pitch::load_pitch(&fixture("badcrc.zip"))
+            .expect("a wrong stored CRC-32 must not refuse an archive Yomitan accepts");
+
+        assert_eq!(
+            1,
+            table.len(),
+            "the payload is intact; only the checksum was ever wrong"
+        );
+        assert!(pitch::supplies_pitch(&fixture("badcrc.zip")));
+    }
+
+
+    /// End to end, which is the ticket's own goal: a user installs two pitch
+    /// dictionaries, hovers a word, and the card header carries the accents -
+    /// deduplicated where they agree, both rows where they do not.
+    ///
+    /// Build, open, look up, present. The one test that proves the storage,
+    /// the read and the reduction are wired to each other rather than each
+    /// correct alone.
+    #[test]
+    fn a_hover_on_a_built_library_carries_the_accents_its_dictionaries_gave() {
+        use crate::lookup::deconj::Deconjugator;
+        use crate::lookup::engine::LookupEngine;
+        use crate::lookup::model::Dictionary as _;
+        use crate::lookup::sqlite::SqliteDictionary;
+        use crate::present;
+
+        let out = out_path("pitch_end_to_end");
+        let _guard = TempDbGuard(out.clone());
+        build(
+            &[fixture("terms.zip"), fixture("pitch.zip"), fixture("pitch2.zip")],
+            &[],
+            &out,
+            &|_| {},
+        )
+        .unwrap();
+
+        let dict = SqliteDictionary::open(&out).expect("the built database opens");
+        let installed = dict.dicts().unwrap();
+        // A config naming nothing enables every dictionary it finds, which
+        // is what a fresh install resolves to and what this end-to-end
+        // wants: all three archives in library order.
+        let cfg = crate::config::Config::default().present_config(&installed);
+        let card = |text: &str| {
+            let hits =
+                LookupEngine::new(Deconjugator::new(Vec::new())).run(&dict, text).unwrap();
+            present::build(&hits, &dict.dicts().unwrap(), &cfg, &dict)
+                .top
+                .unwrap_or_else(|| panic!("no card for {text}"))
+        };
+
+        // 猫 / ねこ is the whole story on one card. `pitch.zip` names it
+        // twice - atamadaka in one row and heiban in another, which the
+        // parser merged - and `pitch2.zip` names the atamadaka only. So the
+        // header draws two rows: the shared accent naming both dictionaries,
+        // and the one only the first gave naming one.
+        let neko = card("猫");
+        assert_eq!(
+            vec![
+                crate::dict::pitch::Position::Downstep(1),
+                crate::dict::pitch::Position::Downstep(0)
+            ],
+            neko.pitch.iter().map(|r| r.accent.position.clone()).collect::<Vec<_>>(),
+            "{:?}",
+            neko.pitch
+        );
+        assert_eq!(
+            vec!["FixturePitch".to_string(), "FixturePitchTwo".to_string()],
+            neko.pitch[0].dicts,
+            "identical accents deduplicated, both names against the one row"
+        );
+        assert_eq!(
+            vec!["FixturePitch".to_string()],
+            neko.pitch[1].dicts,
+            "and the accent only one of them gave names only that one"
+        );
+
+        // They disagree about 食べる / たべる, so it draws two rows.
+        let taberu = card("食べる");
+        assert_eq!(
+            vec![
+                crate::dict::pitch::Position::Downstep(2),
+                crate::dict::pitch::Position::Downstep(0)
+            ],
+            taberu.pitch.iter().map(|r| r.accent.position.clone()).collect::<Vec<_>>(),
+            "a disagreement is visible rather than hidden: {:?}",
+            taberu.pitch
+        );
+
+        // And the mined note carries the same accents the header drew.
+        let fields = crate::anki::fields_from_card(&neko, &neko.blocks);
+        let html = fields.get("pitch_html").expect("an HTML pitch field");
+        assert!(html.contains("border-top"), "{html}");
+        assert!(html.contains("FixturePitch \u{b7} FixturePitchTwo"), "{html}");
     }
 }

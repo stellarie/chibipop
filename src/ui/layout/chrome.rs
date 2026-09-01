@@ -14,14 +14,19 @@
 //! request it got before the inline pass existed.
 
 use crate::dict::gloss::RoleFilter;
-use crate::present::{AnkiPopupState, Presentation};
+use crate::dict::pitch::marked_morae;
+use crate::present::{AnkiPopupState, PitchRow, Presentation};
 use crate::ui::theme::Theme;
 use super::flow::Flow;
 use super::gloss::{paragraphs, Assets, Render};
-use super::measure::{measure_text, MeasureError, Measured, Metrics, StyledSpan, TextMeasure};
+use super::measure::{
+    measure_text, GlyphBox, MeasureError, MeasureRun, Measured, Metrics, StyledSpan, TextMeasure,
+};
 use super::pass::{Boxed, Piece};
-use super::scene::{Align, ElemKind, ElemSpan, Rgb, SceneElem, SceneRect, SidePanel, SideRow};
-use super::style::Inline;
+use super::scene::{
+    Align, ElemBox, ElemKind, ElemSpan, Rgb, SceneElem, SceneRect, SidePanel, SideRow,
+};
+use super::style::{BorderStyle, BoxStyle, Edges, Inline};
 use super::table::Grid;
 
 /// Gap within a block.
@@ -43,6 +48,23 @@ pub(super) const SEPARATOR_MARGIN: f32 = 10.0;
 /// blocks, and a height cannot set the
 /// width of a vertical one.
 pub(super) const SEPARATOR_THICKNESS: f32 = 1.0;
+
+/// The overline and the downstep tick, in px.
+///
+/// The whole of marked kana's ink. One pixel is what Yomitan's own
+/// `border-top` and `border-right` draw it at, and a mark heavier than the
+/// stroke of the kana under it would read as a highlight rather than as a
+/// mark.
+pub(super) const PITCH_MARK: f32 = 1.0;
+
+/// What separates a pitch row's marked reading from the dictionaries that
+/// gave the accent.
+///
+/// U+2003 EM SPACE: one gap, no glyph. The collapsed row puts an em dash
+/// between its headword and its summary because those are two different
+/// things; a reading and its sources are one statement, so the space alone
+/// is what separates them.
+pub(super) const PITCH_SOURCE_GAP: &str = "\u{2003}";
 
 /// Fixed "See also" column width.
 pub(super) const SIDE_PANEL_W: f32 = 110.0;
@@ -268,6 +290,140 @@ pub(super) fn side_span<'a>(theme: &'a Theme, text: &'a str, color: Rgb) -> Styl
     }
 }
 
+/// One pitch row, measured and marked.
+///
+/// Two spans, where every other element the panel's own chrome builds has
+/// one: the reading draws in the card's reading style and the dictionaries
+/// that gave the accent draw dimmed beside it. The reading is the *first*
+/// span, so a UTF-16 offset into the run and a UTF-16 offset into the
+/// reading are the same number.
+///
+/// The marks come from [`TextMeasure::caret_boxes`] - the same probe the
+/// headword's per-character hit targets take - because only the measurer
+/// knows where a mora landed. Every character of the reading is probed and
+/// not only every mora's first: a mora is one or two characters, so
+/// `きょ`'s box is the union of two of them and its first alone would leave
+/// half the mora unmarked.
+///
+/// One box per marked mora rather than one per run of them. Adjacent moras
+/// abut, so a run still reads as one overline, and a reading that wrapped
+/// gets each mora's mark on the mora's own line instead of one box stretched
+/// across the break.
+///
+/// The argument list is the measurer, the text, and where to put it; there
+/// is no smaller grouping of those that is not just this function's frame
+/// spelled twice.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn pitch_elem(
+    m: &mut dyn TextMeasure,
+    font: &str,
+    pitch: &Pitch,
+    origin: f32,
+    y: f32,
+    wrap_w: f32,
+    scratch: &mut Measured,
+    probes: &mut Vec<GlyphBox>,
+) -> Result<SceneElem, MeasureError> {
+    let spans = [span(font, &pitch.reading), span(font, &pitch.sources)];
+    let run = MeasureRun { spans: &spans, max_w: wrap_w };
+    m.measure(run, scratch)?;
+    let met = scratch.metrics;
+
+    let mut at: Vec<u32> = Vec::with_capacity(pitch.reading.text.len());
+    let mut unit = 0u32;
+    for c in pitch.reading.text.chars() {
+        at.push(unit);
+        unit += c.len_utf16() as u32;
+    }
+    probes.clear();
+    m.caret_boxes(run, &at, probes)?;
+
+    let mut inline_boxes = Vec::new();
+    for mora in pitch.morae.iter().filter(|mora| mora.high) {
+        let mut covered = at
+            .iter()
+            .zip(probes.iter())
+            .filter(|(offset, _)| (mora.at..mora.at + mora.units).contains(offset))
+            .map(|(_, probed)| *probed);
+        let Some(first) = covered.next() else { continue };
+        let last = covered.next_back().unwrap_or(first);
+        inline_boxes.push(ElemBox {
+            rect: SceneRect {
+                x: origin + first.x,
+                y: origin + y + first.y,
+                w: (last.x + last.w - first.x).max(0.0),
+                h: first.h,
+            },
+            style: mark_style(pitch.reading.color, mora.fall),
+        });
+    }
+
+    let split = pitch.reading.text.len() as u32;
+    Ok(SceneElem {
+        kind: ElemKind::Pitch,
+        text: format!("{}{}", pitch.reading.text, pitch.sources.text),
+        color: pitch.reading.color,
+        font_size: pitch.reading.size,
+        weight: pitch.reading.weight,
+        italic: pitch.reading.italic,
+        top_gap: pitch.reading.top_gap,
+        wrap_w,
+        align: Align::Leading,
+        pen: (origin, origin + y),
+        rect: SceneRect { x: origin, y: origin + y, w: met.w, h: met.h },
+        lines: met.lines,
+        advance: met.h,
+        spans: vec![
+            elem_span(0, split, &pitch.reading),
+            elem_span(split, pitch.sources.text.len() as u32, &pitch.sources),
+        ],
+        ruby: Vec::new(),
+        marker: Vec::new(),
+        block_box: None,
+        inline_boxes,
+        // The panel's own chrome: an accent belongs to a reading and not to
+        // a node of anyone's tree, so it addresses none.
+        origin: None,
+        image: None,
+    })
+}
+
+/// One `Line` as a span of an element that holds several.
+fn elem_span(at: u32, len: u32, line: &Line) -> ElemSpan {
+    ElemSpan {
+        at,
+        len,
+        color: line.color,
+        size: line.size,
+        weight: line.weight,
+        italic: line.italic,
+        shift: 0.0,
+    }
+}
+
+/// The border edges one marked mora draws.
+///
+/// A top edge over every high mora, so a run of them reads as one overline,
+/// and a right edge on the mora the pitch falls after, which is the
+/// downstep tick. No padding, no margin and no background: a box that only
+/// decorates takes no room from the line it sits on, so a pitch row
+/// measures and stacks exactly as the same text would with no accent at
+/// all.
+fn mark_style(color: Rgb, fall: bool) -> BoxStyle {
+    let tick = if fall { PITCH_MARK } else { 0.0 };
+    let tick_style = if fall { BorderStyle::Solid } else { BorderStyle::None };
+    BoxStyle {
+        border: Edges { top: PITCH_MARK, right: tick, ..Edges::default() },
+        border_style: Edges {
+            top: BorderStyle::Solid,
+            right: tick_style,
+            ..Edges::default()
+        },
+        border_color: color,
+        ..BoxStyle::default()
+    }
+}
+
 /// The "See also" column's geometry.
 pub(super) fn side_panel(
     entries: &[SideEntry],
@@ -341,6 +497,41 @@ pub(super) struct Line {
     pub(super) italic: bool,
 }
 
+/// One accent, as marked kana.
+///
+/// The marks *are* the notation and not a decoration of it: an overline
+/// over every high mora, and a tick down the right edge of the mora the
+/// pitch falls after. Both are one border edge of an inline box, which is
+/// what Yomitan's own stylesheet draws them with - so chibipop draws pitch
+/// in its own text stack and needs no SVG for it.
+pub(super) struct Pitch {
+    /// The reading itself, in the card's own reading style. What the marks
+    /// are placed over, and the element's first span.
+    pub(super) reading: Line,
+    /// The dictionaries that gave this accent, dimmed, after
+    /// [`PITCH_SOURCE_GAP`]. The element's second span, so its own
+    /// `top_gap` is never read - the row's gap is the reading's.
+    pub(super) sources: Line,
+    /// The reading's moras, marked, in order.
+    pub(super) morae: Vec<Marked>,
+}
+
+/// One mora of a marked reading, in the coordinates the seam addresses.
+///
+/// A copy of what [`marked_morae`] worked out rather than a borrow of it: a
+/// mora is one or two *characters* and the measurer addresses a run by
+/// UTF-16 unit, so neither number is derivable from the other and both have
+/// to travel.
+pub(super) struct Marked {
+    /// UTF-16 offset of the mora's first unit, into the reading.
+    pub(super) at: u32,
+    /// UTF-16 units in it.
+    pub(super) units: u32,
+    pub(super) high: bool,
+    /// Does the pitch fall after this mora?
+    pub(super) fall: bool,
+}
+
 pub(super) enum Elem {
     Text(Line),
     /// Right-aligned, advances no y.
@@ -356,6 +547,14 @@ pub(super) enum Elem {
         prefix_u16: usize,
         line: Line,
     },
+    /// One accent, as marked kana.
+    ///
+    /// Two spans and a box per marked
+    /// mora, which is what makes it
+    /// the one chrome element with
+    /// more than one style
+    /// ([`Pitch`]).
+    Pitch(Pitch),
     /// One paragraph of a gloss tree.
     ///
     /// The only element the panel
@@ -462,8 +661,11 @@ pub(super) fn build_elements(
             });
         }
 
-        // Only if the headword differs.
-        if card.written.is_some() {
+        // Only if the headword differs - and only when no accent follows.
+        // A pitch row *is* the reading, in marked kana, so a plain reading
+        // line above it is the same string twice; the marked one carries
+        // everything the plain one said and more.
+        if card.written.is_some() && card.pitch.is_empty() {
             if let Some(reading) = card.reading.as_deref().filter(|r| !r.is_empty()) {
                 out.push(Elem::Text(Line {
                     text: reading.to_string(),
@@ -473,6 +675,19 @@ pub(super) fn build_elements(
                     weight: theme.reading_weight,
                     italic: theme.reading_italic,
                 }));
+            }
+        }
+
+        // Straight under the headword: marked kana repeats the reading
+        // rather than annotating a line above it, so it needs no reading
+        // line of its own to hang off - and the plain one is suppressed
+        // above precisely because these rows replace it. Nothing at all
+        // when no enabled pitch dictionary has the reading: `card.pitch`
+        // is then empty, and an empty row would say something untrue
+        // about the word.
+        if let Some(reading) = card.reading.as_deref().filter(|r| !r.is_empty()) {
+            for row in &card.pitch {
+                out.push(Elem::Pitch(pitch_line(reading, row, theme)));
             }
         }
 
@@ -621,6 +836,43 @@ pub(super) fn build_elements(
     }
 
     (out, side)
+}
+
+/// One accent as the panel draws it: the reading in marked kana, and the
+/// dictionaries that gave the accent.
+///
+/// The reading and not the headword, because a Pitch pattern is per reading
+/// and its moras are what the marks land on. The mora arithmetic is
+/// [`marked_morae`]'s and is not repeated here: the mined note's HTML field
+/// renders the same answer, so the two views of one accent cannot drift.
+fn pitch_line(reading: &str, row: &PitchRow, theme: &Theme) -> Pitch {
+    Pitch {
+        reading: Line {
+            text: reading.to_string(),
+            color: theme.reading_text,
+            size: theme.reading_size,
+            top_gap: LINE_GAP,
+            weight: theme.reading_weight,
+            italic: theme.reading_italic,
+        },
+        sources: Line {
+            text: format!("{PITCH_SOURCE_GAP}{}", row.dicts.join(" \u{b7} ")),
+            color: theme.dimmed_text,
+            size: theme.dimmed_size,
+            top_gap: 0.0,
+            weight: theme.dimmed_weight,
+            italic: theme.dimmed_italic,
+        },
+        morae: marked_morae(reading, &row.accent.position)
+            .into_iter()
+            .map(|marked| Marked {
+                at: marked.mora.at,
+                units: marked.mora.units,
+                high: marked.high,
+                fall: marked.fall,
+            })
+            .collect(),
+    }
 }
 
 /// The Anki button's label.

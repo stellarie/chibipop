@@ -76,6 +76,7 @@ pub fn canned() -> Presentation {
                 ),
             ],
             match_len: 2,
+            pitch: Vec::new(),
         }),
         collapsed: vec![
             CollapsedRow {

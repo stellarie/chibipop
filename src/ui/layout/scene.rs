@@ -76,6 +76,16 @@ pub enum ElemKind {
     Collapsed,
     /// Per-character click targets.
     Headword,
+    /// One accent, as marked kana.
+    ///
+    /// A reading whose high mora run carries an overline and whose fall
+    /// carries a tick, both of them [`inline_boxes`] with one border edge
+    /// each - which is what the notation *is*, and why it needs no SVG. Its
+    /// `text` is the reading and then the dictionaries that gave the accent,
+    /// so it has two spans where the panel's other chrome has one.
+    ///
+    /// [`inline_boxes`]: SceneElem::inline_boxes
+    Pitch,
     BackButton,
     /// One asset, composited inline.
     ///
@@ -142,6 +152,7 @@ impl ElemKind {
             ElemKind::Text => "Text",
             ElemKind::Collapsed => "Collapsed",
             ElemKind::Headword => "Headword",
+            ElemKind::Pitch => "Pitch",
             ElemKind::BackButton => "BackButton",
             ElemKind::Image => "Image",
             ElemKind::Block => "Block",

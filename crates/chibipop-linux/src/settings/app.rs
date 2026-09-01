@@ -28,13 +28,17 @@ use chibipop::config::{
     FieldMapping, LayoutMode, PopupLayer, SentenceMode, TriggerMode, FIELD_SOURCES,
     MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
 };
-use chibipop::settings::SettingsForm;
+use chibipop::dict::frequency::RankingStrategy;
+use chibipop::library::Role;
+use chibipop::present::DictInfo;
+use chibipop::settings::{DictRow, SettingsForm};
 use iced::widget::{
-    button, checkbox, column, container, pick_list, radio, row, scrollable, slider, text,
-    text_input,
+    button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
+    slider, space, stack, text, text_input,
 };
-use iced::{Element, Font, Length, Task, Theme};
+use iced::{Element, Font, Length, Point, Task, Theme};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -57,6 +61,10 @@ pub struct Init {
     pub library_dir: PathBuf,
     /// The database a rebuild renames over.
     pub db_path: PathBuf,
+    /// The dictionary identities that database holds, read once before
+    /// the window opened (`super::read_dicts`). Apply needs them to turn
+    /// the config's exact names into the enabled frequency list.
+    pub dicts: Vec<DictInfo>,
     /// Where the library flock file goes.
     pub runtime_dir: PathBuf,
     /// `None` when no XDG config root resolves; the row says so.
@@ -84,9 +92,92 @@ pub fn run(init: Init) -> anyhow::Result<()> {
                 Theme::Dark
             }
         })
+        .subscription(subscription)
         .window_size((860.0, 760.0))
         .run()
         .context("running the settings window")
+}
+
+/// The one thing the dictionary controls need from outside the widget
+/// tree: the end of a drag the tree cannot see.
+///
+/// [`mouse_area`] only reports a release the cursor is still over, so a
+/// row dragged out of the window and let go out there would leave the
+/// drag holding it for ever - an insertion line chasing a button nobody
+/// is pressing. A raw listener sees that release wherever it happens,
+/// and an unfocused window is the other way a pointer goes missing
+/// mid-drag. iced applies a frame's widget messages before the same
+/// frame's events reach a subscription, so a drop the lists did see has
+/// already committed by the time this arrives and it finds nothing left
+/// to cancel.
+fn subscription(_app: &App) -> iced::Subscription<Message> {
+    iced::event::listen_with(|event, _status, _window| match event {
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+        | iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::DictReleased),
+        _ => None,
+    })
+}
+
+/// The row the dictionary controls are pointed at, and which of the three
+/// lists it sits in.
+///
+/// One selection across all three sections rather than one each: Remove
+/// takes a Dictionary out of every list at once (ADR-0014), so a second
+/// highlighted row somewhere else would be a second answer to the
+/// question Remove asks. The role travels with the name because Move up
+/// under Frequency may never reorder Terms, and a name alone cannot say
+/// which list the user is looking at - a mixed archive is a row in two of
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Selected {
+    role: Role,
+    name: String,
+}
+
+/// The height one dictionary row is drawn at, and the gap between two.
+///
+/// Fixed rather than whatever the text and the checkbox happen to
+/// measure, because a drag has to answer "which place is the pointer
+/// over" and iced hands [`update`] no layout at all: the only geometry
+/// this window has is the geometry it insisted on.
+const ROW_HEIGHT: f32 = 28.0;
+const ROW_SPACING: f32 = 2.0;
+
+/// One row's top to the next one's.
+const ROW_PITCH: f32 = ROW_HEIGHT + ROW_SPACING;
+
+/// How far the cursor must travel before a press on a row becomes a drag
+/// of it. `pane_grid` guards its own drags with the same number
+/// (`DRAG_DEADBAND_DISTANCE`), and without it the pixel of travel a click
+/// carries would be a reorder.
+const DRAG_DEADBAND: f32 = 10.0;
+
+/// Where the cursor last was inside one of the three lists, in that
+/// list's own space.
+///
+/// Kept whether or not a button is down, because a press carries no
+/// position of its own: [`mouse_area`]'s `on_press` is a plain message,
+/// and the move it reported on the way to the row is what says where
+/// that press landed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Hover {
+    role: Role,
+    y: f32,
+}
+
+/// What the pointer is doing to a row, mirroring
+/// `pane_grid::state::Action`: the toolkit's own answer to this shape,
+/// and the only drag state machine iced 0.14 ships. There is no
+/// reorderable list widget and `mouse_area` reports presses, moves and
+/// releases but no drag, so the three are assembled here.
+///
+/// `role` travels with the held row because a drag may only reorder the
+/// list it started in, and `origin` is where in that list the press
+/// landed, which is what the deadband is measured from.
+#[derive(Debug, Clone, PartialEq)]
+enum Drag {
+    Idle,
+    Dragging { role: Role, row: String, origin: f32 },
 }
 
 struct App {
@@ -100,6 +191,7 @@ struct App {
     add_channel: HotkeyChannel,
     library_dir: PathBuf,
     db_path: PathBuf,
+    dicts: Vec<DictInfo>,
     runtime_dir: PathBuf,
     autostart: Option<autostart::Target>,
     home: Option<PathBuf>,
@@ -114,7 +206,13 @@ struct App {
     /// Text-edited numbers stay text until Apply parses them.
     capture_w: String,
     capture_h: String,
-    selected_dict: Option<String>,
+    /// Which row the three lists are pointed at, if any.
+    selected: Option<Selected>,
+    /// Where the cursor last was inside one of the three lists; see
+    /// [`Hover`].
+    hover: Option<Hover>,
+    /// The row the pointer is holding, if it is holding one.
+    drag: Drag,
     /// The path typed into the Add row. Kept beside the Browse button
     /// rather than replaced by it: the portal is not on every desktop
     /// (`filechooser::explain` says so when it is missing), and a path
@@ -150,6 +248,7 @@ impl App {
             add_channel: init.add_channel,
             library_dir: init.library_dir,
             db_path: init.db_path,
+            dicts: init.dicts,
             runtime_dir: init.runtime_dir,
             autostart_on: init.autostart.as_ref().is_some_and(autostart::Target::is_enabled),
             autostart: init.autostart,
@@ -157,7 +256,9 @@ impl App {
             exe: init.exe,
             clipboard_rung: init.clipboard_rung,
             fonts,
-            selected_dict: None,
+            selected: None,
+            hover: None,
+            drag: Drag::Idle,
             add_path: String::new(),
             picking: false,
             rebuild_progress: None,
@@ -293,7 +394,14 @@ impl App {
         if let Some(rows) = self.form.field_map.as_mut() {
             rows.retain(|mapping| !mapping.anki_field.trim().is_empty());
         }
-        match apply::apply(&self.form, &self.linux, &self.config_path, &self.socket_path) {
+        match apply::apply(
+            &self.form,
+            &self.linux,
+            &self.config_path,
+            &self.socket_path,
+            &self.db_path,
+            &self.dicts,
+        ) {
             Ok(applied) => {
                 // The file now holds the clamped truth; show it.
                 if let Ok(cfg) = chibipop::config::load_or_create(&self.config_path) {
@@ -441,9 +549,14 @@ impl App {
         };
     }
 
-    /// Stage the selected row for removal.
+    /// Stage the selected row for removal, out of every list it is in.
+    ///
+    /// One archive is one Dictionary, so a row selected in any of the
+    /// three sections names the whole thing (`stage_remove`) - including
+    /// an unreadable archive, which is listed in the terms section for
+    /// exactly this reason and has no role to be enabled for.
     fn remove_dictionary(&mut self) {
-        let Some(name) = self.selected_dict.take() else {
+        let Some(Selected { name, .. }) = self.selected.take() else {
             self.status = "Select a dictionary to remove first.".to_string();
             return;
         };
@@ -495,7 +608,7 @@ impl App {
             rebuild::Progress::Done { .. } => {
                 // The library on disk now matches the form.
                 self.form.clear_staged();
-                self.selected_dict = None;
+                self.selected = None;
             }
             // The archives went back; the form still describes what the
             // user asked for, so the staged edits stay staged.
@@ -550,11 +663,41 @@ enum Message {
     ShowAttributions(bool),
     ShowImages(bool),
     ShowPartOfSpeech(bool),
-    DictSelected(String),
-    DictUp,
-    DictDown,
-    DictExclude,
-    DictInclude,
+    /// A row pressed in one of the three lists. The role is the list it
+    /// was pressed in, because a mixed archive is a row in two of them
+    /// and the name alone could not say which.
+    ///
+    /// A press is also where a drag begins: it selects the row and takes
+    /// hold of it, and whether the hold turns out to be a drag or a click
+    /// is what the deadband decides ([`press_row`]).
+    DictSelected(Role, String),
+    /// The cursor moved over a row: which list, which row in it, and
+    /// where inside that row. [`mouse_area`] reports a point local to the
+    /// widget it wraps and the wrapped widget is one row, so the row's
+    /// index is what turns that point back into a place in the list
+    /// ([`list_y`]).
+    DictHover(Role, usize, Point),
+    /// The pointer let go over the three lists: the held row lands where
+    /// the insertion line is, or nowhere if the press never left the
+    /// deadband.
+    DictDropped,
+    /// The left button came up somewhere the lists could not see it -
+    /// over another section, or outside the window entirely. A drag that
+    /// ends there is cancelled rather than dropped, because there is no
+    /// place in a list to have released it at ([`subscription`]).
+    DictReleased,
+    /// This section's Move up. The role is the button's section, not the
+    /// selection's: a press only ever reorders the list it sits under.
+    DictUp(Role),
+    /// This section's Move down.
+    DictDown(Role),
+    /// A row's per-role checkbox. Enabling is per role, so this touches
+    /// only the list the box sits in (ADR-0014).
+    DictEnabled(Role, String, bool),
+    /// The ranking-strategy picker's label, above the Frequency list;
+    /// mapped back through [`RANKING_STRATEGIES`], never by index or by
+    /// string comparison at the call site.
+    RankingPicked(String),
     AddPath(String),
     DictAdd,
     DictRemove,
@@ -647,19 +790,24 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ShowAttributions(on) => app.form.show_attributions = on,
         Message::ShowImages(on) => app.form.show_images = on,
         Message::ShowPartOfSpeech(on) => app.form.show_part_of_speech = on,
-        Message::DictSelected(name) => app.selected_dict = Some(name),
-        Message::DictUp => move_selected(app, -1),
-        Message::DictDown => move_selected(app, 1),
-        Message::DictExclude => {
-            if let Some(name) = shift_between(&mut app.form.dict_names, &mut app.form.dict_excluded, app.selected_dict.as_deref()) {
-                app.selected_dict = Some(name);
-            }
+        Message::DictSelected(role, name) => press_row(app, role, name),
+        Message::DictHover(role, at, point) => {
+            app.hover = Some(Hover { role, y: list_y(at, point.y) });
         }
-        Message::DictInclude => {
-            if let Some(name) = shift_between(&mut app.form.dict_excluded, &mut app.form.dict_names, app.selected_dict.as_deref()) {
-                app.selected_dict = Some(name);
-            }
-        }
+        Message::DictDropped => drop_held(app),
+        // Whatever the pointer was holding, it is not holding it any
+        // more; the drop that would have committed it has already run
+        // ([`subscription`]).
+        Message::DictReleased => app.drag = Drag::Idle,
+        Message::DictUp(role) => move_selected(app, role, -1),
+        Message::DictDown(role) => move_selected(app, role, 1),
+        Message::DictEnabled(role, name, on) => set_enabled(app, role, &name, on),
+        // A strategy, an order or a checkbox in the Frequency list is
+        // what `settings::dictionary_work` reads off the saved config, so
+        // there is nothing to decide here: Apply compares the file it
+        // re-read with the one it is about to write and reindexes if any
+        // of the three moved (`super::apply`).
+        Message::RankingPicked(label) => app.form.ranking_strategy = ranking_strategy_of(&label),
         Message::AddPath(v) => app.add_path = v,
         Message::DictAdd => app.add_dictionary(),
         Message::DictRemove => app.remove_dictionary(),
@@ -802,31 +950,208 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
     Task::none()
 }
 
-/// Move the selected dictionary within whichever list holds it.
-fn move_selected(app: &mut App, delta: i32) {
-    let Some(name) = app.selected_dict.as_deref() else { return };
-    for list in [&mut app.form.dict_names, &mut app.form.dict_excluded] {
-        if let Some(at) = list.iter().position(|n| n == name) {
-            let to = at as i32 + delta;
-            if to >= 0 && (to as usize) < list.len() {
-                list.swap(at, to as usize);
-            }
-            return;
-        }
+/// Put the row at `from` at `to`, sliding everything between them one
+/// place the other way.
+///
+/// The one place a list is reordered. A move button asks for the
+/// neighbouring index and a drop asks for wherever the pointer let go, so
+/// routing both through here is what makes them mean the same thing by
+/// "moved" - two reorderings would be two answers that agree until the
+/// day they do not.
+fn move_row(app: &mut App, role: Role, from: usize, to: usize) {
+    let rows = app.form.list_mut(role);
+    if from == to || from >= rows.len() || to >= rows.len() {
+        return;
+    }
+    let row = rows.remove(from);
+    rows.insert(to, row);
+}
+
+/// Move the selected dictionary one place in this role's list.
+///
+/// `role` is the pressed button's section and not the selection's, so a
+/// press under Frequency while a terms row is highlighted moves nothing:
+/// each section's order is its own, and a row cannot cross into a list
+/// whose role it may not even have (ADR-0014).
+///
+/// One place, which leaves every other row exactly where it was, and the
+/// ends of the list have nowhere to go rather than wrapping round to the
+/// other one. This is the keyboard path and the drag never replaces it.
+fn move_selected(app: &mut App, role: Role, delta: i32) {
+    let Some(selected) = &app.selected else { return };
+    if selected.role != role {
+        return;
+    }
+    let rows = app.form.list(role);
+    let Some(at) = rows.iter().position(|row| row.name == selected.name) else { return };
+    let to = if delta < 0 {
+        at.checked_sub(1)
+    } else {
+        (at + 1 < rows.len()).then_some(at + 1)
+    };
+    if let Some(to) = to {
+        move_row(app, role, at, to);
     }
 }
 
-/// Move `selected` from one list's ranks to the other's end.
-fn shift_between(
-    from: &mut Vec<String>,
-    to: &mut Vec<String>,
-    selected: Option<&str>,
-) -> Option<String> {
-    let name = selected?;
-    let at = from.iter().position(|n| n == name)?;
-    let name = from.remove(at);
-    to.push(name.clone());
-    Some(name)
+/// Where in its list a cursor sitting `at` pixels down row `index` is.
+///
+/// [`mouse_area`] reports a point local to the widget it wraps and the
+/// wrapped widget is one row, so the row's own place in the list is what
+/// turns that point back into a position in the list.
+fn list_y(index: usize, at: f32) -> f32 {
+    index as f32 * ROW_PITCH + at
+}
+
+/// Where in a list of `len` rows a cursor `y` pixels down it would drop
+/// the row it is holding: the number of row boundaries above the cursor,
+/// so the top half of a row inserts before it and the bottom half after.
+/// Above the first row and below the last one there are no more
+/// boundaries to count, which is what clamps a drag to the ends of its
+/// own list.
+///
+/// Free of iced, so the one piece of arithmetic the gesture rests on is
+/// testable without a window, a renderer or a font behind it.
+fn drop_index(y: f32, len: usize) -> usize {
+    (y / ROW_PITCH).round().clamp(0.0, len as f32) as usize
+}
+
+/// Whether the cursor has travelled far enough from where a row was
+/// grabbed for the press to be a drag rather than a click.
+///
+/// Vertical only, because this list reorders vertically: sliding sideways
+/// across a row never changes where that row would land, so counting the
+/// sideways travel would only make a wobbly click into a reorder.
+fn past_deadband(origin: f32, cursor: f32) -> bool {
+    (cursor - origin).abs() > DRAG_DEADBAND
+}
+
+/// Whether the press that grabbed a row in `held`'s list has become a
+/// drag of it.
+///
+/// A cursor that has left that list is past any deadband by definition,
+/// and could not be measured against one anyway: two lists' heights are
+/// two different rulers.
+fn left_the_deadband(held: Role, origin: f32, hover: Hover) -> bool {
+    hover.role != held || past_deadband(origin, hover.y)
+}
+
+/// Where a cursor at `hover` would drop a row grabbed from `held`'s list
+/// of `len` rows.
+///
+/// A position in another role's list is not a position in this one, so it
+/// clamps to whichever end the cursor left through - the sections are
+/// stacked in [`Role::EVERY`] order, so a hover in a later one is this
+/// list's bottom and one in an earlier one is its top. That is the whole
+/// of "a drag never crosses into another list": the row it is holding has
+/// nowhere else it could land.
+fn drop_at(held: Role, hover: Hover, len: usize) -> usize {
+    match hover.role.cmp(&held) {
+        Ordering::Less => 0,
+        Ordering::Greater => len,
+        Ordering::Equal => drop_index(hover.y, len),
+    }
+}
+
+/// Where in its list the press that grabbed `name` landed.
+///
+/// [`mouse_area`]'s `on_press` carries no position, but the cursor cannot
+/// reach a row without that row having reported a move on the way in, so
+/// the live hover is where the press is. A press in a list this window
+/// has not seen the cursor in falls back to the middle of the row itself,
+/// which keeps the deadband measured from somewhere inside the row rather
+/// than from nowhere.
+fn grab_origin(app: &App, role: Role, name: &str) -> Option<f32> {
+    if let Some(hover) = app.hover.filter(|hover| hover.role == role) {
+        return Some(hover.y);
+    }
+    let at = app.form.list(role).iter().position(|row| row.name == name)?;
+    Some(list_y(at, ROW_HEIGHT / 2.0))
+}
+
+/// A press on a row: it becomes the selection, and the pointer takes hold
+/// of it in case the press turns out to be a drag.
+///
+/// Holding is not yet dragging: the deadband decides that, and until the
+/// cursor has crossed it there is no insertion line and a release moves
+/// nothing, so a plain click leaves only the selection behind.
+fn press_row(app: &mut App, role: Role, name: String) {
+    app.drag = match grab_origin(app, role, &name) {
+        Some(origin) => Drag::Dragging { role, row: name.clone(), origin },
+        // A name no list holds is not a row this window drew. It still
+        // selects, because that is what the name is for, and grabs
+        // nothing there is to grab.
+        None => Drag::Idle,
+    };
+    app.selected = Some(Selected { role, name });
+}
+
+/// The pointer let go of the row it was holding.
+///
+/// A press that never left the deadband was a click and moves nothing,
+/// which is what keeps a selection - or the pixel of travel a press
+/// carries - from quietly reordering the list.
+fn drop_held(app: &mut App) {
+    let Drag::Dragging { role, row, origin } = std::mem::replace(&mut app.drag, Drag::Idle) else {
+        return;
+    };
+    let Some(hover) = app.hover.filter(|hover| left_the_deadband(role, origin, *hover)) else {
+        return;
+    };
+    let rows = app.form.list(role);
+    let Some(from) = rows.iter().position(|dict| dict.name == row) else { return };
+    // An insertion index counts the boundaries above it, so lifting the
+    // row out of the list first pulls every boundary below it up by one.
+    let at = drop_at(role, hover, rows.len());
+    move_row(app, role, from, if at > from { at - 1 } else { at });
+}
+
+/// Which boundary of `role`'s list the insertion line is drawn at, or
+/// `None` when no live drag is holding a row from it.
+///
+/// The only feedback a drag gets. A floating copy of the row would be
+/// drawn with `with_translation` and `with_layer`, and neither escapes a
+/// `scrollable`'s clip rect in iced 0.14, so a row dragged towards the
+/// edge of its section would be sliced off there - worse than no preview.
+/// A line drawn inside the list cannot be clipped.
+fn drop_line(app: &App, role: Role) -> Option<usize> {
+    let Drag::Dragging { role: held, origin, .. } = &app.drag else { return None };
+    if *held != role {
+        return None;
+    }
+    let hover = app.hover.filter(|hover| left_the_deadband(role, *origin, *hover))?;
+    Some(drop_at(role, hover, app.form.list(role).len()))
+}
+
+/// How far down the list the insertion line sits for a drop before row
+/// `index` of `len`.
+///
+/// The gap between two rows is exactly the line's thickness, so a line at
+/// a boundary fills that gap and nudges no row out of place. The two ends
+/// are the exception - there is no gap outside the list - so the line
+/// sits just inside it rather than a hair outside, where the stacked
+/// layer has no room left to draw it.
+fn line_top(index: usize, len: usize) -> f32 {
+    let height = (len as f32 * ROW_PITCH - ROW_SPACING).max(0.0);
+    (index as f32 * ROW_PITCH - ROW_SPACING).clamp(0.0, (height - ROW_SPACING).max(0.0))
+}
+
+/// Turn one row's role on or off.
+///
+/// Only the list the checkbox sits in: unchecking a mixed archive's
+/// definitions must not silently kill its frequency data, so enabling is
+/// per role and never per Dictionary (ADR-0014). The row keeps its
+/// position, because order and enabling are separate questions and a
+/// dictionary that loses its place every time it is parked is one whose
+/// order the user cannot curate.
+///
+/// Named rather than indexed: the press names the row the last frame
+/// drew, and a removal or a finished rebuild can have restaged the list
+/// since.
+fn set_enabled(app: &mut App, role: Role, name: &str, on: bool) {
+    if let Some(row) = app.form.list_mut(role).iter_mut().find(|row| row.name == name) {
+        row.enabled = on;
+    }
 }
 
 fn view(app: &App) -> Element<'_, Message> {
@@ -1079,87 +1404,247 @@ fn content_section(app: &App) -> Element<'_, Message> {
     )
 }
 
+/// The ranking-strategy picker, in the order it is offered.
+///
+/// One ordered table for both halves of the UI edge, exactly as
+/// [`SENTENCE_MODES`] and [`LAYOUT_MODES`] are: the labels going out and
+/// the strategy coming back, so nothing in between gets to decide the
+/// mapping. The Windows window offers these same three labels, because a
+/// user reading both screens is reading one setting.
+const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
+    (RankingStrategy::BestRank, "Best rank — the commonest claim wins"),
+    (RankingStrategy::Priority, "Priority — the highest list that has the word"),
+    (RankingStrategy::Median, "Median — the middle of what they claim"),
+];
+
+/// The picker's items, in table order.
+fn ranking_labels() -> Vec<String> {
+    RANKING_STRATEGIES.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+/// The label a strategy is offered under. Every `RankingStrategy` is in
+/// the table, so the fallback is unreachable.
+fn ranking_strategy_label(strategy: RankingStrategy) -> &'static str {
+    RANKING_STRATEGIES
+        .iter()
+        .find(|&&(s, _)| s == strategy)
+        .map_or(RANKING_STRATEGIES[0].1, |&(_, l)| l)
+}
+
+/// The strategy a picked label names. Only labels this table handed out
+/// can come back, so the default is unreachable through the UI.
+fn ranking_strategy_of(label: &str) -> RankingStrategy {
+    RANKING_STRATEGIES
+        .iter()
+        .find(|&&(_, l)| l == label)
+        .map_or(RankingStrategy::BestRank, |&(s, _)| s)
+}
+
+/// The heading a role's list is drawn under, and what that role decides.
+///
+/// Three sentences rather than one "Dictionaries" list, because the same
+/// dictionary's checkbox means a different thing in each section and this
+/// is the only place that difference is said out loud (ADR-0014).
+fn role_caption(role: Role) -> &'static str {
+    match role {
+        Role::Terms => "Terms — the definitions a lookup searches, in priority order",
+        Role::Frequency => "Frequency — the lists a word's rank is read from",
+        Role::Pitch => "Pitch — the dictionaries a word's accent is read from",
+    }
+}
+
+/// The highlight the selected row wears.
+///
+/// A styled container and no longer a button: the row is what a drag
+/// takes hold of, and `iced_widget::button` captures the press before the
+/// [`mouse_area`] wrapped round it can see one, so a row whose name was a
+/// button could be clicked but never grabbed.
+fn picked_row(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.primary.weak.color.into()),
+        text_color: Some(palette.primary.weak.text),
+        border: iced::border::rounded(2),
+        ..container::Style::default()
+    }
+}
+
+/// The line that says where a dragged row would land.
+///
+/// The accent colour rather than the divider grey a rule wears by
+/// default: this one is a live answer to where the pointer is, not a
+/// separator, and it has to read as one at a glance down a list of thirty
+/// dictionaries.
+fn insertion_line(theme: &Theme) -> rule::Style {
+    rule::Style { color: theme.extended_palette().primary.base.color, ..rule::default(theme) }
+}
+
+/// One role's rows: the checkbox holding that role's enable flag, and the
+/// name, which is the selection and the thing a drag takes hold of.
+///
+/// Every row the list holds, in the order it holds them - including a
+/// name no installed dictionary answers to, because the row on screen is
+/// what keeps that name in the file, and an unplugged drive must not
+/// delete a list.
+///
+/// Each row is wrapped in a [`mouse_area`], which is as close to a drag
+/// as iced 0.14 comes: it reports the press that grabs a row and the
+/// moves that carry it, and [`update`] assembles those into the gesture.
+/// The checkbox keeps its own press, so a click on it toggles the row and
+/// never grabs it. `line` is where a live drag would drop what it is
+/// holding, drawn as a rule stacked over the list so that it takes no
+/// layout space and cannot shove the rows about under the cursor.
 fn dict_rows<'a>(
-    names: &'a [String],
-    selected: Option<&str>,
+    role: Role,
+    rows: &'a [DictRow],
+    selected: Option<&'a str>,
+    line: Option<usize>,
 ) -> Element<'a, Message> {
-    if names.is_empty() {
+    if rows.is_empty() {
         return text("(none)").size(14).into();
     }
-    column(names.iter().map(|name| {
-        let b = button(text(name.as_str()).size(14))
-            .on_press(Message::DictSelected(name.clone()))
-            .width(Length::Fill);
-        if Some(name.as_str()) == selected {
-            b.style(button::primary).into()
-        } else {
-            b.style(button::text).into()
-        }
+    let list = column(rows.iter().enumerate().map(|(index, dict)| {
+        let picked = Some(dict.name.as_str()) == selected;
+        let name = dict.name.clone();
+        let label = container(text(dict.name.clone()).size(14))
+            .padding([0, 6])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(iced::Center)
+            .style(if picked { picked_row } else { container::transparent });
+        mouse_area(
+            row![
+                checkbox(dict.enabled)
+                    .on_toggle(move |on| Message::DictEnabled(role, name.clone(), on)),
+                label,
+            ]
+            .spacing(8)
+            .height(ROW_HEIGHT)
+            .align_y(iced::Center),
+        )
+        .interaction(iced::mouse::Interaction::Grab)
+        .on_press(Message::DictSelected(role, dict.name.clone()))
+        .on_move(move |at| Message::DictHover(role, index, at))
+        .into()
     }))
-    .spacing(2)
+    .spacing(ROW_SPACING);
+    let Some(index) = line else { return list.into() };
+    stack![
+        list,
+        column![
+            space().height(line_top(index, rows.len())),
+            rule::horizontal(ROW_SPACING).style(insertion_line),
+        ]
+        .width(Length::Fill),
+    ]
     .into()
 }
 
-fn dictionaries_section(app: &App) -> Element<'_, Message> {
-    let selected = app.selected_dict.as_deref();
-    let lists = row![
+/// The rule the enabled frequency lists are reduced to one rank by.
+///
+/// Its own row above the list rather than a control on each row: the
+/// strategy is one fact about the whole section, and a per-row picker
+/// would read as a per-dictionary one.
+fn ranking_row(app: &App) -> Element<'_, Message> {
+    row![
+        text("Ranking").size(14),
+        pick_list(
+            ranking_labels(),
+            Some(ranking_strategy_label(app.form.ranking_strategy).to_string()),
+            Message::RankingPicked,
+        ),
+    ]
+    .spacing(10)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// One role's section: its caption, its list, and its own pair of move
+/// buttons.
+///
+/// The buttons carry the role, so a press reorders this list and nothing
+/// else - a row can never be moved into a section whose role it may not
+/// even hold. They are also the keyboard path to reordering, which is why
+/// they stay whatever else the section grows.
+///
+/// `above` is what sits between the caption and the list: the
+/// ranking-strategy picker under Frequency, nothing under the other two,
+/// because the strategy is a fact about frequency alone and this helper
+/// has no business knowing which role that is.
+fn role_section<'a>(
+    app: &'a App,
+    role: Role,
+    above: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let selected = app.selected.as_ref().filter(|s| s.role == role).map(|s| s.name.as_str());
+    let mut list = column![text(role_caption(role)).size(14)].spacing(6);
+    if let Some(above) = above {
+        list = list.push(above);
+    }
+    list = list.push(dict_rows(role, app.form.list(role), selected, drop_line(app, role)));
+    row![
+        list.width(Length::Fill),
         column![
-            text("Searched - for the selected OCR language").size(14),
-            dict_rows(&app.form.dict_names, selected),
-        ]
-        .spacing(6)
-        .width(Length::FillPortion(1)),
-        column![
-            text("Not searched").size(14),
-            dict_rows(&app.form.dict_excluded, selected),
-        ]
-        .spacing(6)
-        .width(Length::FillPortion(1)),
-        column![
-            button("Move up").on_press(Message::DictUp).width(Length::Fill),
-            button("Move down").on_press(Message::DictDown).width(Length::Fill),
-            button("Exclude").on_press(Message::DictExclude).width(Length::Fill),
-            button("Include").on_press(Message::DictInclude).width(Length::Fill),
-            // Only these two touch the library, so only these two are
-            // refused while a rebuild owns it.
-            button("Remove")
-                .on_press_maybe((!app.busy()).then_some(Message::DictRemove))
-                .width(Length::Fill),
+            button("Move up").on_press(Message::DictUp(role)).width(Length::Fill),
+            button("Move down").on_press(Message::DictDown(role)).width(Length::Fill),
         ]
         .spacing(6)
         .width(140),
     ]
-    .spacing(16);
+    .spacing(16)
+    .into()
+}
 
+fn dictionaries_section(app: &App) -> Element<'_, Message> {
     // Browse first, because it is the one that opens a picker and the
-    // entry beside it is the fallback for a desktop with no portal. Both
-    // are shut while a rebuild owns the library, and Browse is shut
+    // entry beside it is the fallback for a desktop with no portal. All
+    // three are shut while a rebuild owns the library, and Browse is shut
     // again while its own dialog is up.
-    let add = row![
+    //
+    // Remove sits on this row and not beside a section's move buttons:
+    // adding and removing are the two things that touch the library, and
+    // a removal takes the Dictionary out of every section at once, so it
+    // belongs to none of them.
+    let library = row![
         button("Browse…")
             .on_press_maybe((!app.busy() && !app.picking).then_some(Message::DictBrowse)),
         text_input("or type a path to a Yomitan .zip", &app.add_path)
             .on_input_maybe((!app.busy()).then_some(Message::AddPath))
             .width(Length::Fill),
         button("Add").on_press_maybe((!app.busy()).then_some(Message::DictAdd)),
+        button("Remove").on_press_maybe((!app.busy()).then_some(Message::DictRemove)),
     ]
     .spacing(8)
     .align_y(iced::Center);
 
-    let mut body = column![
+    // The three sections are wrapped in one release area rather than each
+    // row carrying its own: a drag clamped past the end of its list has
+    // the cursor outside every row, and letting go there has to land the
+    // row all the same. A release anywhere else - or outside the window -
+    // reaches [`subscription`] instead and cancels.
+    let lists = mouse_area(
+        column![
+            role_section(app, Role::Terms, None),
+            role_section(app, Role::Frequency, Some(ranking_row(app))),
+            role_section(app, Role::Pitch, None),
+        ]
+        .spacing(12),
+    )
+    .on_release(Message::DictDropped);
+
+    let body = column![
         lists,
-        add,
+        library,
         text(
-            "Order is matched by dictionary name. Adds and removals are staged: \
-             Rebuild imports them and rebuilds the database."
+            "Names match exactly and position is priority inside its own section. A \
+             checkbox turns a dictionary on for the section it sits in and leaves the \
+             others alone. Adds and removals are staged: Rebuild imports them and \
+             rebuilds the database."
         )
         .size(13),
+        rebuild_row(app),
     ]
-    .spacing(8);
-    if !app.form.freq_names.is_empty() {
-        body = body.push(text(format!("Frequency lists: {}", app.form.freq_names.join(", "))).size(13));
-    }
-    body = body.push(rebuild_row(app));
+    .spacing(12);
     section("Dictionaries", body)
 }
 
@@ -1794,6 +2279,7 @@ fn preview_font(selected: Option<&Cow<'static, str>>) -> Font {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chibipop::settings::DictionaryWork;
     use crate::paths::Env;
     use std::path::Path;
 
@@ -1811,6 +2297,50 @@ mod tests {
             .join(name)
     }
 
+    /// A list where every row is checked, which is what an untouched list
+    /// looks like.
+    fn rows(names: &[&str]) -> Vec<DictRow> {
+        names
+            .iter()
+            .map(|name| DictRow { name: (*name).to_string(), enabled: true })
+            .collect()
+    }
+
+    /// The names one section renders, in the order it renders them.
+    fn listed(app: &App, role: Role) -> Vec<String> {
+        app.form.list(role).iter().map(|row| row.name.clone()).collect()
+    }
+
+    /// The names one section renders with their checkbox state, which is
+    /// the whole of what a row shows.
+    fn checked(app: &App, role: Role) -> Vec<(String, bool)> {
+        app.form.list(role).iter().map(|row| (row.name.clone(), row.enabled)).collect()
+    }
+
+    /// The config the form is about to be saved as. Both the reindex seam
+    /// and the lookup pipeline read the file and not the form, so this is
+    /// where a press's real effect is asserted.
+    fn saved(app: &App) -> chibipop::config::Config {
+        chibipop::settings::apply_to(&app.form, &chibipop::config::Config::default())
+    }
+
+    /// What Apply would do beyond writing the file: ticket 03's in-place
+    /// reindex, or nothing at all. The rule is core's
+    /// (`settings::dictionary_work`), asked here of the config the window
+    /// opened with and the one a press leaves behind - which is exactly
+    /// what `super::apply` asks it (`apply.rs`).
+    fn work(opened: &chibipop::config::Config, app: &App) -> DictionaryWork {
+        chibipop::settings::dictionary_work(opened, &saved(app))
+    }
+
+    /// The cursor arriving `at` pixels down row `index` of `role`'s list,
+    /// which is exactly what that row's `mouse_area` reports on a move.
+    /// The x is arbitrary: a list reorders vertically, so nothing reads
+    /// it.
+    fn hover(app: &mut App, role: Role, index: usize, at: f32) {
+        let _ = update(app, Message::DictHover(role, index, Point::new(4.0, at)));
+    }
+
     /// The window's state without touching fontdb or the filesystem.
     fn app(dir: &Path) -> App {
         let cfg = chibipop::config::Config::default();
@@ -1825,6 +2355,7 @@ mod tests {
             add_channel: HotkeyChannel::Native,
             library_dir: dir.join("library"),
             db_path: dir.join("chibipop.sqlite"),
+            dicts: Vec::new(),
             runtime_dir: dir.join("run"),
             autostart: None,
             home: None,
@@ -1837,7 +2368,9 @@ mod tests {
             fonts: vec![Cow::Borrowed("Noto Sans")],
             capture_w: "480".to_string(),
             capture_h: "160".to_string(),
-            selected_dict: None,
+            selected: None,
+            hover: None,
+            drag: Drag::Idle,
             add_path: String::new(),
             picking: false,
             rebuild_progress: None,
@@ -2485,7 +3018,13 @@ mod tests {
         let _ = update(&mut app, Message::AddPath(fixture("terms.zip").display().to_string()));
         let _ = update(&mut app, Message::DictAdd);
 
-        assert!(app.form.dict_names.iter().any(|n| n == "FixtureTerms"), "{:?}", app.form.dict_names);
+        assert_eq!(
+            vec![("FixtureTerms".to_string(), true)],
+            checked(&app, Role::Terms),
+            "a term archive lands at the bottom of the Terms section, checked",
+        );
+        assert!(listed(&app, Role::Frequency).is_empty(), "and in no other section");
+        assert!(listed(&app, Role::Pitch).is_empty());
         assert!(app.form.has_staged(), "the add must wait for a rebuild");
         assert!(app.add_path.is_empty(), "the entry clears once the path is taken");
         assert!(app.status.contains("Rebuild"), "{}", app.status);
@@ -2624,7 +3163,7 @@ mod tests {
         let _ = update(&mut app, Message::AddPath("~/terms.zip".to_string()));
         let _ = update(&mut app, Message::DictAdd);
 
-        assert!(app.form.dict_names.iter().any(|n| n == "FixtureTerms"), "{:?}", app.form.dict_names);
+        assert_eq!(vec![("FixtureTerms".to_string(), true)], checked(&app, Role::Terms));
         assert!(app.form.has_staged(), "the add must wait for a rebuild");
         assert!(app.add_path.is_empty(), "the entry clears once the path is taken");
         assert!(app.status.contains("Rebuild"), "{}", app.status);
@@ -2675,11 +3214,11 @@ mod tests {
     fn adding_an_unreadable_path_says_so_and_stages_nothing() {
         let dir = scratch("add_bad");
         let mut app = app(&dir);
-        let before = app.form.dict_names.clone();
+        let before = app.form.terms.clone();
         let _ = update(&mut app, Message::AddPath(dir.join("nope.zip").display().to_string()));
         let _ = update(&mut app, Message::DictAdd);
 
-        assert_eq!(before, app.form.dict_names);
+        assert_eq!(before, app.form.terms);
         assert!(!app.form.has_staged());
         assert!(app.status.contains("not a readable dictionary archive"), "{}", app.status);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2699,14 +3238,659 @@ mod tests {
     fn removing_the_selected_row_stages_it_and_drops_the_selection() {
         let dir = scratch("remove");
         let mut app = app(&dir);
-        app.form.dict_names = vec!["Jitendex".to_string(), "Daijirin".to_string()];
+        app.form.terms = rows(&["Jitendex", "Daijirin"]);
 
-        let _ = update(&mut app, Message::DictSelected("Jitendex".to_string()));
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
         let _ = update(&mut app, Message::DictRemove);
 
-        assert_eq!(vec!["Daijirin".to_string()], app.form.dict_names);
+        assert_eq!(rows(&["Daijirin"]), app.form.terms);
         assert!(app.form.has_staged());
-        assert_eq!(None, app.selected_dict);
+        assert_eq!(None, app.selected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Three sections, one list each, every row reading and writing its
+    /// own role. A built widget tree is opaque, so what is asserted is the
+    /// state each section is built from plus the fact that every path
+    /// through the rows builds: a checked row, an unchecked one, the
+    /// selected one, and the placeholder an empty list gets.
+    #[test]
+    fn each_section_renders_its_own_role_s_list() {
+        let dir = scratch("sections");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin"]);
+        app.form.frequency = rows(&["JPDB"]);
+        app.form.pitch = vec![DictRow { name: "NHK".to_string(), enabled: false }];
+
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Daijirin".to_string()],
+            listed(&app, Role::Terms)
+        );
+        assert_eq!(vec!["JPDB".to_string()], listed(&app, Role::Frequency));
+        assert_eq!(vec![("NHK".to_string(), false)], checked(&app, Role::Pitch));
+
+        for role in Role::EVERY {
+            let name = listed(&app, role).remove(0);
+            let _ = update(&mut app, Message::DictSelected(role, name));
+            let _ = view(&app);
+        }
+        for role in Role::EVERY {
+            app.form.list_mut(role).clear();
+        }
+        let _ = view(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pitch archive supplies no definitions and no ranks, so it is a
+    /// row in one section only - and it reaches the file, which is the
+    /// half that had no UI at all before this ticket.
+    #[test]
+    fn a_pitch_only_import_is_a_row_in_the_pitch_section_and_nowhere_else() {
+        let dir = scratch("add_pitch");
+        let mut app = app(&dir);
+        let _ = update(&mut app, Message::AddPath(fixture("pitch.zip").display().to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+
+        assert_eq!(vec![("FixturePitch".to_string(), true)], checked(&app, Role::Pitch));
+        assert!(listed(&app, Role::Terms).is_empty(), "a pitch archive defines nothing");
+        assert!(listed(&app, Role::Frequency).is_empty());
+        assert_eq!(vec!["FixturePitch".to_string()], saved(&app).dictionaries.pitch);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An archive supplying two roles is one row in each of their
+    /// sections, once, and no row in the third's. `both.zip` carries a
+    /// term bank and pitch rows.
+    #[test]
+    fn a_mixed_import_is_one_row_in_each_of_its_sections() {
+        let dir = scratch("add_both");
+        let mut app = app(&dir);
+        let _ = update(&mut app, Message::AddPath(fixture("both.zip").display().to_string()));
+        let _ = update(&mut app, Message::DictAdd);
+
+        assert_eq!(vec!["FixtureBoth".to_string()], listed(&app, Role::Terms));
+        assert_eq!(vec!["FixtureBoth".to_string()], listed(&app, Role::Pitch));
+        assert!(listed(&app, Role::Frequency).is_empty(), "it ranks nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same dictionary in two sections holds two independent places.
+    /// The terms-and-frequency pair has no fixture archive, so the state
+    /// `stage_add` would leave for one is seeded directly; what is under
+    /// test is what the sections do with a name two of them hold.
+    #[test]
+    fn a_dictionary_in_two_sections_keeps_a_place_in_each() {
+        let dir = scratch("mixed_order");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "大辞林"]);
+        app.form.frequency = rows(&["JPDB", "大辞林"]);
+
+        let count = |names: Vec<String>| names.iter().filter(|n| *n == "大辞林").count();
+        assert_eq!(1, count(listed(&app, Role::Terms)));
+        assert_eq!(1, count(listed(&app, Role::Frequency)));
+        assert!(listed(&app, Role::Pitch).is_empty());
+
+        let _ = update(&mut app, Message::DictSelected(Role::Frequency, "大辞林".to_string()));
+        let _ = update(&mut app, Message::DictUp(Role::Frequency));
+
+        assert_eq!(
+            vec!["大辞林".to_string(), "JPDB".to_string()],
+            listed(&app, Role::Frequency)
+        );
+        assert_eq!(
+            vec!["Jitendex".to_string(), "大辞林".to_string()],
+            listed(&app, Role::Terms),
+            "its rank order is not its definition order",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A checkbox may only affect the section it sits in: unchecking a
+    /// mixed archive's definitions must not silently kill its frequency
+    /// data or its accents (ADR-0014). And it flips in place, because a
+    /// dictionary that loses its priority every time the user parks it is
+    /// one whose order the user cannot curate.
+    #[test]
+    fn a_checkbox_turns_off_only_the_role_of_its_own_section() {
+        let dir = scratch("checkbox");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "大辞林"]);
+        app.form.frequency = rows(&["大辞林"]);
+        app.form.pitch = rows(&["大辞林"]);
+
+        let _ = update(&mut app, Message::DictEnabled(Role::Terms, "大辞林".to_string(), false));
+
+        assert_eq!(
+            vec![("Jitendex".to_string(), true), ("大辞林".to_string(), false)],
+            checked(&app, Role::Terms),
+            "unchecked where it stood",
+        );
+        assert_eq!(vec![("大辞林".to_string(), true)], checked(&app, Role::Frequency));
+        assert_eq!(vec![("大辞林".to_string(), true)], checked(&app, Role::Pitch));
+
+        // And back on, in the place it never left.
+        let _ = update(&mut app, Message::DictEnabled(Role::Terms, "大辞林".to_string(), true));
+        assert_eq!(rows(&["Jitendex", "大辞林"]), app.form.terms);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Move up and Move down reorder the section they sit under, one place
+    /// at a time, and the ends of a list have nowhere to go.
+    #[test]
+    fn moving_a_row_reorders_only_its_own_section_and_stops_at_the_ends() {
+        let dir = scratch("move");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin", "Kenkyusha"]);
+        app.form.frequency = rows(&["Daijirin", "JPDB"]);
+
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Kenkyusha".to_string()));
+        let _ = update(&mut app, Message::DictUp(Role::Terms));
+
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Kenkyusha".to_string(), "Daijirin".to_string()],
+            listed(&app, Role::Terms),
+        );
+        assert_eq!(
+            vec!["Daijirin".to_string(), "JPDB".to_string()],
+            listed(&app, Role::Frequency),
+            "a terms move is not a frequency move",
+        );
+
+        // And back, so Move down is the same walk the other way.
+        let _ = update(&mut app, Message::DictDown(Role::Terms));
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Daijirin".to_string(), "Kenkyusha".to_string()],
+            listed(&app, Role::Terms),
+        );
+
+        // Both ends: a press there is a no-op, not a wrap and not a jump
+        // into the section below.
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
+        let _ = update(&mut app, Message::DictUp(Role::Terms));
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Kenkyusha".to_string()));
+        let _ = update(&mut app, Message::DictDown(Role::Terms));
+
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Daijirin".to_string(), "Kenkyusha".to_string()],
+            listed(&app, Role::Terms),
+        );
+        assert_eq!(vec!["Daijirin".to_string(), "JPDB".to_string()], listed(&app, Role::Frequency));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A section's buttons answer only to a selection inside it. One
+    /// dictionary can be a row in two sections, so a press under Frequency
+    /// while a terms row is highlighted must move nothing at all rather
+    /// than find that name in the frequency list and reorder it there.
+    #[test]
+    fn a_move_button_does_nothing_while_the_selection_is_in_another_section() {
+        let dir = scratch("move_elsewhere");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "大辞林"]);
+        app.form.frequency = rows(&["Jitendex", "JPDB"]);
+
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
+        let _ = update(&mut app, Message::DictDown(Role::Frequency));
+
+        assert_eq!(vec!["Jitendex".to_string(), "JPDB".to_string()], listed(&app, Role::Frequency));
+        assert_eq!(vec!["Jitendex".to_string(), "大辞林".to_string()], listed(&app, Role::Terms));
+
+        // The same press under the section the selection is in does move.
+        let _ = update(&mut app, Message::DictDown(Role::Terms));
+        assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()], listed(&app, Role::Terms));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The drop index is where the held row would be inserted, so it
+    /// counts the row boundaries above the cursor: the top half of a row
+    /// inserts before it, the bottom half after it, and past either end
+    /// there are no more boundaries left to count, which is what pins a
+    /// drag to the ends of its own list.
+    ///
+    /// Arithmetic only, asserted with no window, no renderer and no font
+    /// anywhere near it.
+    #[test]
+    fn the_drop_index_counts_the_row_boundaries_above_the_cursor() {
+        assert_eq!(0, drop_index(0.0, 3), "the very top of the list");
+        assert_eq!(0, drop_index(ROW_HEIGHT / 2.0 - 1.0, 3), "the top half of the first row");
+        assert_eq!(1, drop_index(ROW_PITCH / 2.0, 3), "and its bottom half");
+        assert_eq!(1, drop_index(ROW_PITCH, 3), "the boundary itself");
+        assert_eq!(2, drop_index(ROW_PITCH * 2.0, 3));
+        assert_eq!(3, drop_index(ROW_PITCH * 9.0, 3), "far below the list, at its end");
+        assert_eq!(0, drop_index(-ROW_PITCH * 9.0, 3), "far above it, at its start");
+        assert_eq!(0, drop_index(ROW_PITCH * 9.0, 0), "an empty list has one place to be");
+    }
+
+    /// The insertion line fills the gap between the two rows it separates,
+    /// so drawing it moves nothing; at the ends, where there is no gap, it
+    /// sits just inside the list rather than a hair outside it, where the
+    /// stacked layer would have no room left to draw it at all.
+    #[test]
+    fn the_insertion_line_fills_the_gap_it_marks_and_stays_inside_the_list() {
+        assert_eq!(0.0, line_top(0, 3), "the top of the list, not two pixels above it");
+        assert_eq!(ROW_HEIGHT, line_top(1, 3), "the gap under the first row");
+        assert_eq!(ROW_PITCH + ROW_HEIGHT, line_top(2, 3));
+
+        let height = 3.0 * ROW_PITCH - ROW_SPACING;
+        assert_eq!(height - ROW_SPACING, line_top(3, 3), "the end of the list, still within it");
+        assert_eq!(0.0, line_top(0, 0));
+    }
+
+    /// Without the deadband the pixel of travel a click carries would be a
+    /// reorder. A cursor that has left the list it grabbed from is past
+    /// any deadband by definition, because two lists' heights are not one
+    /// ruler and there is nothing to measure it against.
+    ///
+    /// Arithmetic only, like the drop index it guards.
+    #[test]
+    fn a_press_only_becomes_a_drag_once_the_cursor_leaves_the_deadband() {
+        assert!(!past_deadband(40.0, 40.0), "a press that has not moved at all");
+        assert!(!past_deadband(40.0, 40.0 + DRAG_DEADBAND), "nor one right on the edge");
+        assert!(past_deadband(40.0, 40.0 + DRAG_DEADBAND + 0.5));
+        assert!(past_deadband(40.0, 40.0 - DRAG_DEADBAND - 0.5), "upwards counts the same");
+
+        let terms = |y| Hover { role: Role::Terms, y };
+        assert!(!left_the_deadband(Role::Terms, 40.0, terms(44.0)));
+        assert!(left_the_deadband(Role::Terms, 40.0, terms(60.0)));
+        assert!(left_the_deadband(Role::Terms, 40.0, Hover { role: Role::Pitch, y: 40.0 }));
+    }
+
+    /// The whole gesture, one message at a time: the cursor arrives on a
+    /// row, the press grabs it, the moves carry it, and the release lands
+    /// it where the insertion line was.
+    #[test]
+    fn dragging_a_row_reorders_it_where_the_pointer_let_go() {
+        let dir = scratch("drag");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin", "Kenkyusha"]);
+
+        hover(&mut app, Role::Terms, 0, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
+        hover(&mut app, Role::Terms, 2, ROW_HEIGHT * 0.75);
+        let _ = update(&mut app, Message::DictDropped);
+
+        assert_eq!(
+            vec!["Daijirin".to_string(), "Kenkyusha".to_string(), "Jitendex".to_string()],
+            listed(&app, Role::Terms),
+        );
+        assert_eq!(Drag::Idle, app.drag, "the pointer is holding nothing after a drop");
+
+        // And back up the same way, so a drag is not a one-way trip.
+        hover(&mut app, Role::Terms, 2, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
+        hover(&mut app, Role::Terms, 0, ROW_HEIGHT * 0.15);
+        let _ = update(&mut app, Message::DictDropped);
+
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Daijirin".to_string(), "Kenkyusha".to_string()],
+            listed(&app, Role::Terms),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row dragged out of its own section has nowhere to land but the
+    /// end of the list it came from: the sections are stacked in
+    /// `Role::EVERY` order, so a cursor in a later one clamps to the
+    /// bottom and one in an earlier one to the top. The section it was
+    /// dragged over is not touched at all - a Dictionary's terms rank has
+    /// no meaning in the pitch list.
+    #[test]
+    fn a_drag_that_leaves_its_section_clamps_to_that_sections_ends() {
+        let dir = scratch("drag_out");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin", "Kenkyusha"]);
+        app.form.frequency = rows(&["JPDB", "BCCWJ", "Innocent"]);
+        app.form.pitch = rows(&["NHK", "大辞林"]);
+
+        // Down and out of Terms, past Frequency, into Pitch.
+        hover(&mut app, Role::Terms, 0, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
+        hover(&mut app, Role::Pitch, 1, ROW_HEIGHT * 0.75);
+        let _ = update(&mut app, Message::DictDropped);
+
+        assert_eq!(
+            vec!["Daijirin".to_string(), "Kenkyusha".to_string(), "Jitendex".to_string()],
+            listed(&app, Role::Terms),
+        );
+        assert_eq!(
+            vec!["NHK".to_string(), "大辞林".to_string()],
+            listed(&app, Role::Pitch),
+            "the list it was dragged over gains nothing",
+        );
+
+        // And up and out of Frequency, into Terms.
+        hover(&mut app, Role::Frequency, 2, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Frequency, "Innocent".to_string()));
+        hover(&mut app, Role::Terms, 0, ROW_HEIGHT * 0.25);
+        let _ = update(&mut app, Message::DictDropped);
+
+        assert_eq!(
+            vec!["Innocent".to_string(), "JPDB".to_string(), "BCCWJ".to_string()],
+            listed(&app, Role::Frequency),
+        );
+        assert_eq!(
+            vec!["Daijirin".to_string(), "Kenkyusha".to_string(), "Jitendex".to_string()],
+            listed(&app, Role::Terms),
+            "and the list it was dragged over is left exactly as it was",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A press and a release with barely any travel between them is a
+    /// click: it selects the row and leaves the order alone. The same
+    /// press carried far enough does move it, so what is being asserted is
+    /// the deadband and not an inert drop.
+    #[test]
+    fn a_press_and_release_inside_the_deadband_selects_and_moves_nothing() {
+        let dir = scratch("drag_deadband");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin", "Kenkyusha"]);
+
+        hover(&mut app, Role::Terms, 1, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Daijirin".to_string()));
+        hover(&mut app, Role::Terms, 1, ROW_HEIGHT / 2.0 + DRAG_DEADBAND - 1.0);
+        assert_eq!(None, drop_line(&app, Role::Terms), "no line, because this is still a click");
+        let _ = update(&mut app, Message::DictDropped);
+
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Daijirin".to_string(), "Kenkyusha".to_string()],
+            listed(&app, Role::Terms),
+        );
+        assert_eq!(
+            Some(Selected { role: Role::Terms, name: "Daijirin".to_string() }),
+            app.selected,
+            "a click is still a selection",
+        );
+
+        // The same grab, carried past the deadband, does reorder.
+        hover(&mut app, Role::Terms, 1, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Daijirin".to_string()));
+        hover(&mut app, Role::Terms, 2, ROW_HEIGHT * 0.75);
+        let _ = update(&mut app, Message::DictDropped);
+
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Kenkyusha".to_string(), "Daijirin".to_string()],
+            listed(&app, Role::Terms),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A checkbox keeps its own press - `iced_widget::checkbox` captures
+    /// it before the row's `mouse_area` is offered it - so toggling a role
+    /// off never grabs the row, and the release that follows finds nothing
+    /// to drop. The row stays exactly where it stood.
+    #[test]
+    fn toggling_a_checkbox_never_grabs_or_moves_its_row() {
+        let dir = scratch("drag_checkbox");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin", "Kenkyusha"]);
+
+        hover(&mut app, Role::Terms, 1, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictEnabled(Role::Terms, "Daijirin".to_string(), false));
+        let _ = update(&mut app, Message::DictReleased);
+
+        assert_eq!(
+            vec![
+                ("Jitendex".to_string(), true),
+                ("Daijirin".to_string(), false),
+                ("Kenkyusha".to_string(), true),
+            ],
+            checked(&app, Role::Terms),
+            "unchecked where it stood",
+        );
+        assert_eq!(Drag::Idle, app.drag, "a checkbox press never took hold of anything");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A release the lists never see - outside the window, or anywhere
+    /// else in it - ends the drag without moving anything. Otherwise the
+    /// window would be left drawing an insertion line for a button nobody
+    /// is pressing.
+    #[test]
+    fn a_drag_released_outside_the_window_cancels_and_moves_nothing() {
+        let dir = scratch("drag_escape");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin", "Kenkyusha"]);
+
+        hover(&mut app, Role::Terms, 0, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
+        hover(&mut app, Role::Terms, 2, ROW_HEIGHT * 0.75);
+        assert_eq!(Some(3), drop_line(&app, Role::Terms), "the line is at the end of the list");
+
+        let _ = update(&mut app, Message::DictReleased);
+
+        assert_eq!(Drag::Idle, app.drag);
+        assert_eq!(None, drop_line(&app, Role::Terms), "and the line goes with it");
+        assert_eq!(
+            vec!["Jitendex".to_string(), "Daijirin".to_string(), "Kenkyusha".to_string()],
+            listed(&app, Role::Terms),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The only feedback a drag gets, and it belongs to one section: the
+    /// list holding the row draws the line, the other two draw nothing,
+    /// and the whole window still builds with it.
+    #[test]
+    fn the_insertion_line_marks_the_drop_position_in_the_held_rows_section() {
+        let dir = scratch("drag_line");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "Daijirin", "Kenkyusha"]);
+        app.form.frequency = rows(&["JPDB", "BCCWJ"]);
+
+        hover(&mut app, Role::Terms, 0, ROW_HEIGHT / 2.0);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
+        hover(&mut app, Role::Terms, 1, ROW_HEIGHT * 0.75);
+
+        assert_eq!(Some(2), drop_line(&app, Role::Terms), "under the second row");
+        assert_eq!(None, drop_line(&app, Role::Frequency));
+        assert_eq!(None, drop_line(&app, Role::Pitch));
+        let _ = view(&app);
+
+        // Dragged out of its section, the line pins itself to the end it
+        // left through and still belongs to the section it came from.
+        hover(&mut app, Role::Frequency, 1, ROW_HEIGHT / 2.0);
+        assert_eq!(Some(3), drop_line(&app, Role::Terms));
+        assert_eq!(None, drop_line(&app, Role::Frequency), "the list it is over is not its list");
+        let _ = view(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing about the gesture is per role: the same three messages over
+    /// the same three rows leave the same order behind in every section.
+    #[test]
+    fn every_section_drags_the_same_way() {
+        let dir = scratch("drag_every");
+        for role in Role::EVERY {
+            let mut app = app(&dir);
+            *app.form.list_mut(role) = rows(&["one", "two", "three"]);
+
+            hover(&mut app, role, 0, ROW_HEIGHT / 2.0);
+            let _ = update(&mut app, Message::DictSelected(role, "one".to_string()));
+            hover(&mut app, role, 2, ROW_HEIGHT * 0.75);
+            let _ = update(&mut app, Message::DictDropped);
+
+            assert_eq!(
+                vec!["two".to_string(), "three".to_string(), "one".to_string()],
+                listed(&app, role),
+                "{role:?} reorders like the other two",
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One archive is one Dictionary, so a row selected in any section
+    /// names the whole thing.
+    #[test]
+    fn removing_a_dictionary_drops_it_from_every_section() {
+        let dir = scratch("remove_all");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "大辞林"]);
+        app.form.frequency = rows(&["大辞林", "JPDB"]);
+        app.form.pitch = rows(&["大辞林"]);
+
+        let _ = update(&mut app, Message::DictSelected(Role::Pitch, "大辞林".to_string()));
+        let _ = update(&mut app, Message::DictRemove);
+
+        assert_eq!(vec!["Jitendex".to_string()], listed(&app, Role::Terms));
+        assert_eq!(vec!["JPDB".to_string()], listed(&app, Role::Frequency));
+        assert!(listed(&app, Role::Pitch).is_empty());
+        assert!(app.form.has_staged());
+        assert_eq!(None, app.selected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An archive this build cannot read supplies no role at all, so it
+    /// belongs to no section - and it is listed in Terms regardless
+    /// (`settings::with_library`), because being listed is the only way
+    /// the user can get rid of it. It reaches neither config array while
+    /// it sits there.
+    #[test]
+    fn an_unreadable_archive_is_listed_in_terms_and_can_still_be_removed() {
+        let dir = scratch("unreadable_row");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex"]);
+        app.form.terms.push(DictRow { name: "broken.zip".to_string(), enabled: false });
+        app.form.unreadable = vec!["broken.zip".to_string()];
+
+        assert_eq!(
+            vec![("Jitendex".to_string(), true), ("broken.zip".to_string(), false)],
+            checked(&app, Role::Terms),
+        );
+        let cfg = saved(&app);
+        assert_eq!(vec!["Jitendex".to_string()], cfg.dictionaries.terms);
+        assert!(cfg.dictionaries.terms_disabled.is_empty(), "a listed file is not a Dictionary");
+        let _ = view(&app);
+
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "broken.zip".to_string()));
+        let _ = update(&mut app, Message::DictRemove);
+
+        assert_eq!(vec!["Jitendex".to_string()], listed(&app, Role::Terms));
+        assert!(app.form.has_staged(), "the removal waits for a rebuild");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_ranking_strategy_round_trips_through_its_own_label() {
+        for strategy in
+            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
+        {
+            let label = ranking_strategy_label(strategy);
+            assert_eq!(strategy, ranking_strategy_of(label), "{label}");
+        }
+        assert_eq!(RANKING_STRATEGIES.len(), ranking_labels().len());
+    }
+
+    /// The picker above the Frequency list writes the form field the
+    /// reindex reduces by, and it is the whole of what that control does.
+    #[test]
+    fn picking_a_ranking_strategy_stages_it_on_the_form() {
+        let dir = scratch("ranking");
+        let mut app = app(&dir);
+        assert_eq!(RankingStrategy::BestRank, app.form.ranking_strategy, "the shipped default");
+
+        let _ = update(
+            &mut app,
+            Message::RankingPicked(ranking_strategy_label(RankingStrategy::Median).to_string()),
+        );
+
+        assert_eq!(RankingStrategy::Median, app.form.ranking_strategy);
+        assert_eq!(RankingStrategy::Median, saved(&app).dictionaries.ranking_strategy);
+        let _ = view(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reordering the frequency list makes every stored rank stale, so
+    /// Apply recomputes them in place before the `reload`.
+    #[test]
+    fn reordering_the_frequency_list_reaches_the_reindex_seam() {
+        let dir = scratch("seam_order");
+        let mut app = app(&dir);
+        app.form.frequency = rows(&["JPDB", "Innocent"]);
+        let opened = saved(&app);
+
+        let _ = update(&mut app, Message::DictSelected(Role::Frequency, "Innocent".to_string()));
+        let _ = update(&mut app, Message::DictUp(Role::Frequency));
+
+        assert_eq!(DictionaryWork::Reindex, work(&opened, &app));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_frequency_checkbox_reaches_the_reindex_seam() {
+        let dir = scratch("seam_check");
+        let mut app = app(&dir);
+        app.form.frequency = rows(&["JPDB", "Innocent"]);
+        let opened = saved(&app);
+
+        let _ =
+            update(&mut app, Message::DictEnabled(Role::Frequency, "Innocent".into(), false));
+
+        assert_eq!(DictionaryWork::Reindex, work(&opened, &app));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn choosing_a_ranking_strategy_reaches_the_reindex_seam() {
+        let dir = scratch("seam_strategy");
+        let mut app = app(&dir);
+        app.form.frequency = rows(&["JPDB"]);
+        let opened = saved(&app);
+
+        let _ = update(
+            &mut app,
+            Message::RankingPicked(ranking_strategy_label(RankingStrategy::Priority).to_string()),
+        );
+
+        assert_eq!(DictionaryWork::Reindex, work(&opened, &app));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other side of the same seam: a terms or pitch edit is a config
+    /// write plus the `reload` the window already sends, and recomputing
+    /// every rank for it would be minutes of work for nothing.
+    #[test]
+    fn a_terms_or_pitch_change_never_reaches_the_reindex_seam() {
+        let dir = scratch("seam_none");
+        let mut app = app(&dir);
+        app.form.terms = rows(&["Jitendex", "大辞林"]);
+        app.form.frequency = rows(&["JPDB"]);
+        app.form.pitch = rows(&["NHK", "Kanjium"]);
+        let opened = saved(&app);
+
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "大辞林".to_string()));
+        let _ = update(&mut app, Message::DictUp(Role::Terms));
+        let _ = update(&mut app, Message::DictEnabled(Role::Terms, "Jitendex".into(), false));
+        let _ = update(&mut app, Message::DictSelected(Role::Pitch, "Kanjium".to_string()));
+        let _ = update(&mut app, Message::DictUp(Role::Pitch));
+        let _ = update(&mut app, Message::DictEnabled(Role::Pitch, "NHK".into(), false));
+
+        let after = saved(&app);
+        assert_ne!(opened.dictionaries.terms, after.dictionaries.terms, "the edits landed");
+        assert_ne!(opened.dictionaries.pitch, after.dictionaries.pitch);
+        assert_eq!(DictionaryWork::None, work(&opened, &app));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point of the checkbox, end to end: the form goes back
+    /// onto the config and the config is what the lookup pipeline reads.
+    /// An exact name, and no substring ladder behind it.
+    #[test]
+    fn an_unchecked_terms_row_never_reaches_the_lookup_pipeline() {
+        let dir = scratch("unchecked_terms");
+        let mut app = app(&dir);
+        let installed = vec![
+            chibipop::present::DictInfo { dict_id: 1, name: "Jitendex".to_string() },
+            chibipop::present::DictInfo { dict_id: 2, name: "Daijirin".to_string() },
+        ];
+        app.form.terms = rows(&["Jitendex", "Daijirin"]);
+
+        let _ = update(&mut app, Message::DictEnabled(Role::Terms, "Daijirin".into(), false));
+        let present = saved(&app).present_config(&installed);
+
+        assert_eq!(vec!["Jitendex".to_string()], present.terms);
+        assert!(chibipop::present::keeps_dict("Jitendex", &present.terms));
+        assert!(!chibipop::present::keeps_dict("Daijirin", &present.terms), "parked, so not read");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2733,8 +3917,8 @@ mod tests {
     fn a_finished_rebuild_clears_the_staged_edits_and_reopens_the_controls() {
         let dir = scratch("done");
         let mut app = app(&dir);
-        app.form.dict_names = vec!["Jitendex".to_string()];
-        let _ = update(&mut app, Message::DictSelected("Jitendex".to_string()));
+        app.form.terms = rows(&["Jitendex"]);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
         let _ = update(&mut app, Message::DictRemove);
         app.rebuild_progress = Some("Creating search index…".to_string());
 
@@ -2758,8 +3942,8 @@ mod tests {
     fn a_failed_rebuild_keeps_the_staged_edits() {
         let dir = scratch("failed");
         let mut app = app(&dir);
-        app.form.dict_names = vec!["Jitendex".to_string()];
-        let _ = update(&mut app, Message::DictSelected("Jitendex".to_string()));
+        app.form.terms = rows(&["Jitendex"]);
+        let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
         let _ = update(&mut app, Message::DictRemove);
         app.rebuild_progress = Some("Creating search index…".to_string());
 
@@ -2808,6 +3992,7 @@ mod tests {
             add_channel: HotkeyChannel::Native,
             library_dir: config_home.join("library"),
             db_path: config_home.join("chibipop.sqlite"),
+            dicts: Vec::new(),
             runtime_dir: config_home.join("run"),
             autostart: autostart::Target::resolve(&env),
             home: env.home.clone(),

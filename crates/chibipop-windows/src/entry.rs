@@ -288,7 +288,8 @@ pub fn run() -> Result<()> {
                     let presentation = chibipop::present::build(
                         &hits,
                         &all_dicts,
-                        &chibipop::config::Config::default().present_config(&all_dicts, || true),
+                        &chibipop::config::Config::default().present_config(&all_dicts),
+                        &dictionary,
                     );
                     match chibipop::present::match_highlight(&r.span, presentation.top.as_ref()) {
                         Some(m) => {
@@ -463,30 +464,51 @@ pub fn run() -> Result<()> {
             // Python sorts case-folded.
             archives.sort_by_key(|p| (p.to_string_lossy().to_lowercase(), p.clone()));
 
-            let mut term_archives = Vec::new();
+            // One archive is one Dictionary, so the two lists are not a
+            // partition: the first is every archive the build installs as a
+            // dictionary row and the second is the subset whose reported
+            // frequencies it also loads. An archive carrying a term bank
+            // beside its frequency data is named in both, on purpose
+            // (ADR-0014).
+            let mut dict_archives = Vec::new();
             let mut freq_archives = Vec::new();
+            let mut unreadable = Vec::new();
             for a in archives {
-                if chibipop::dict::archive::is_frequency_archive(&a) {
-                    freq_archives.push(a);
-                } else {
-                    term_archives.push(a);
+                let roles = chibipop::library::roles_of(&a);
+                if roles.is_empty() {
+                    unreadable.push(a);
+                    continue;
                 }
+                if roles.has(chibipop::library::Role::Frequency) {
+                    freq_archives.push(a.clone());
+                }
+                dict_archives.push(a);
             }
 
-            for (i, t) in term_archives.iter().enumerate() {
+            // The `term dict` spelling stays because
+            // `chibipop::dict::progress::friendly` is what turns these into
+            // "Reading <file>…", and it parses exactly that word.
+            for (i, t) in dict_archives.iter().enumerate() {
                 println!("term dict  [{i}] {}", file_name(t));
             }
             for f in &freq_archives {
                 println!("freq dict      {}", file_name(f));
             }
+            // Named even though nothing reads it: a file the user put in
+            // the library going unmentioned is how a half-finished download
+            // comes to look like a missing dictionary. `friendly` swallows
+            // this line, as it swallows `wrote`.
+            for u in &unreadable {
+                println!("skipped        {} - chibipop cannot read it", file_name(u));
+            }
 
             // A typo is not a rebuild.
-            if term_archives.is_empty() {
-                anyhow::bail!("no term archives in {}", library.display());
+            if dict_archives.is_empty() {
+                anyhow::bail!("no readable archives in {}", library.display());
             }
 
             let counts = chibipop::dict::build::build(
-                &term_archives,
+                &dict_archives,
                 &freq_archives,
                 &out,
                 &|line| println!("{line}"),

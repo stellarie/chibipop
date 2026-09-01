@@ -550,6 +550,7 @@ dependencies = [
  "nix",
  "ort",
  "png",
+ "rusqlite",
  "serde_json",
  "sha2",
  "smithay-client-toolkit 0.21.1",

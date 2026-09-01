@@ -33,6 +33,7 @@ use anyhow::{Context, Result};
 use chibipop::lookup::deconj::{Deconjugator, Form};
 use chibipop::lookup::engine::{clean_input, LookupEngine, MAX_LOOKUP_CHARS, MAX_RESULTS};
 use chibipop::dict::gloss::GlossDoc;
+use chibipop::dict::pitch::PitchClaim;
 use chibipop::lookup::model::{Dictionary, Entry, TermRow};
 use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
@@ -401,6 +402,12 @@ impl Dictionary for Probe<'_> {
     fn dicts(&self) -> Result<Vec<DictInfo>> {
         self.inner.dicts()
     }
+
+    /// Untimed: this benchmark measures the term hot path, and a pitch read
+    /// is once per card rather than once per surface probe.
+    fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
+        self.inner.pitch_for(term, reading)
+    }
 }
 
 /// Untimed twin of `Probe`: records which surfaces the engine probed and
@@ -427,6 +434,9 @@ impl Dictionary for Collect<'_> {
     }
     fn dicts(&self) -> Result<Vec<DictInfo>> {
         self.inner.dicts()
+    }
+    fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
+        self.inner.pitch_for(term, reading)
     }
 }
 

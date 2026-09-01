@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use crate::dict::gloss::GlossDoc;
 use crate::dict::media::Intrinsic;
+use crate::dict::pitch::Accent;
 
 use crate::geom::PhysRect;
-use crate::lookup::model::Hit;
+use crate::lookup::model::{Dictionary, Hit};
 use crate::text::layout::union_chars;
 use crate::text::TextSpan;
 
@@ -29,11 +30,52 @@ pub struct Card {
     pub written: Option<String>,
     pub reading: Option<String>,
     pub pos: Vec<String>,
+    /// The Reported frequency of this card's headword: the number the
+    /// highest-ordered enabled frequency dictionary that has it published,
+    /// drawn as `freq {n}` in the card's corner.
+    ///
+    /// One dictionary's own claim, never the reduced Frequency rank that
+    /// ordered these results (ADR-0015): the figure on screen is always
+    /// something a real dictionary said, so a reader can look it up and check
+    /// it, and switching ranking strategy does not change it.
     pub freq: Option<i64>,
     /// In display order.
     pub blocks: Vec<GlossBlock>,
     /// Input chars, not bytes.
     pub match_len: usize,
+    /// The Pitch patterns the enabled pitch dictionaries give this card's
+    /// reading, deduplicated, in the pitch list's order.
+    ///
+    /// One row per *distinct* accent and not one per dictionary: ticket 01's
+    /// census found that over the readings two or more pitch dictionaries
+    /// both know, 379 288 accent claims reduce to 123 140 - a 67.5% collapse -
+    /// so without the dedup a three-dictionary user would read the same accent
+    /// three times on nearly every card.
+    ///
+    /// Empty when no enabled pitch dictionary has the reading, and the card
+    /// then draws no pitch row at all rather than an empty one.
+    pub pitch: Vec<PitchRow>,
+}
+
+/// One accent a card draws, and the dictionaries that gave it.
+///
+/// The accents are compared by their **position** alone, because the
+/// position is the whole of what this card draws: the nasal and devoiced
+/// moras ride along unread until ticket 06 draws them, and comparing with
+/// them would put NHK's marked heiban on a second row beside 三省堂's
+/// unmarked one - two rows that look identical, which is the failure the
+/// dedup exists to prevent (`docs/research/pitch-accent-shapes.md`).
+///
+/// So `accent` is the one the highest-ordered dictionary that claimed this
+/// position published, markers and tags included - priority-first-wins,
+/// exactly as [`Card::freq`] reports one real dictionary's number rather
+/// than a computed one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PitchRow {
+    pub accent: Accent,
+    /// The dictionaries that gave this accent, in the pitch list's order,
+    /// each named once.
+    pub dicts: Vec<String>,
 }
 
 /// One dict's contribution to a card, plus the trees it came from.
@@ -140,9 +182,15 @@ pub struct CollapsedRow {
 }
 
 /// A dictionary's identity.
+///
+/// Identity only, and deliberately no roles: what an archive supplies is
+/// read from its banks and lives on its library entry
+/// ([`crate::library::Roles`]), while the database has no index that could
+/// answer "does this dictionary have term rows" without scanning `entry`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DictInfo {
     pub dict_id: i64,
+    /// The exact name every Dictionary list names it by (ADR-0014).
     pub name: String,
 }
 
@@ -190,12 +238,19 @@ impl AnkiPopupState {
 /// Presentation knobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresentConfig {
-    /// Name substrings, in order.
-    pub dict_order: Vec<String>,
+    /// The enabled terms Dictionaries, by exact name, highest priority
+    /// first.
+    ///
+    /// Both the filter and the order, and there is nothing behind it: a
+    /// name either names an installed Dictionary or does not, and an empty
+    /// list is a user who turned every one of them off, not a typo to
+    /// second-guess (ADR-0014).
+    pub terms: Vec<String>,
+    /// The enabled pitch Dictionaries, by exact name, highest priority
+    /// first. The same filter and the same order, over accents.
+    pub pitch: Vec<String>,
     /// Summary cap, in chars.
     pub summary_chars: usize,
-    /// Order also excludes?
-    pub restrict_to_order: bool,
 }
 
 /// One headword group.
@@ -206,11 +261,19 @@ struct Group<'a> {
 }
 
 /// `hits` must be rank-ordered.
-pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentation {
+///
+/// `dict` is read once per card, for that card's own reading, and for
+/// nothing else here: a Pitch pattern is per reading, so it is neither on
+/// the term path nor on a `Hit`.
+pub fn build(
+    hits: &[Hit],
+    dicts: &[DictInfo],
+    cfg: &PresentConfig,
+    dict: &dyn Dictionary,
+) -> Presentation {
     let mut groups: Vec<Group> = Vec::new();
     for hit in hits {
-        let dict_name = dict_name_for(hit.entry.dict_id, dicts);
-        if !keeps_dict(&dict_name, &cfg.dict_order, cfg.restrict_to_order) {
+        if !enabled_for(hit.entry.dict_id, dicts, &cfg.terms) {
             continue;
         }
         match groups
@@ -228,7 +291,7 @@ pub fn build(hits: &[Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Presentat
 
     let all_cards: Vec<Card> = groups
         .into_iter()
-        .map(|g| card_from_group(g, dicts, cfg))
+        .map(|g| card_from_group(g, dicts, cfg, dict))
         .collect();
     let top = all_cards.first().cloned();
     let collapsed = all_cards
@@ -252,7 +315,12 @@ pub fn match_highlight(span: &TextSpan, top: Option<&Card>) -> Option<PhysRect> 
     union_chars(&span.geom, from, top.match_len, HIGHLIGHT_PAD)
 }
 
-fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Card {
+fn card_from_group(
+    group: Group,
+    dicts: &[DictInfo],
+    cfg: &PresentConfig,
+    dict: &dyn Dictionary,
+) -> Card {
     // Pre-ranked: first is best.
     let best = group.hits[0];
     let pos = definition_tags(&best.entry.pos);
@@ -261,14 +329,70 @@ fn card_from_group(group: Group, dicts: &[DictInfo], cfg: &PresentConfig) -> Car
     // first dictionary heading: printing the same set again one line later
     // tells a reader nothing.
     dedupe_tags(&mut blocks, pos.clone());
+    let pitch = pitch_rows(&group, dicts, cfg, dict);
     Card {
         written: group.written,
         reading: group.reading,
         pos,
-        freq: best.freq,
+        freq: best.entry.reported_freq,
         blocks,
         match_len: best.match_len,
+        pitch,
     }
+}
+
+/// The pitch rows one card draws: every enabled pitch dictionary's accents
+/// for this card's reading, in the pitch list's order, identical accents
+/// collapsed onto one row that names all of them.
+///
+/// One read, for one (headword, reading) pair - `term` is the kanji
+/// headword or, where there is none, the reading itself, which is the
+/// expression a Yomitan pitch archive names. A card with no reading has no
+/// accent to draw and runs no query at all.
+///
+/// Ordering and enabling are the **pitch** list's, spent here the same way
+/// [`ordered_blocks`] spends the terms list over dictionaries: a dictionary
+/// the list does not name contributes nothing, and one it names ranks where
+/// it names it, `dict_id` breaking a tie so two dictionaries at the same
+/// position still order the same way twice. The two lists are independent,
+/// so a dictionary may lead the pitch list while sitting disabled in terms.
+fn pitch_rows(
+    group: &Group,
+    dicts: &[DictInfo],
+    cfg: &PresentConfig,
+    dict: &dyn Dictionary,
+) -> Vec<PitchRow> {
+    let Some(reading) = group.reading.as_deref().filter(|r| !r.is_empty()) else {
+        return Vec::new();
+    };
+    let term = group.written.as_deref().unwrap_or(reading);
+
+    let mut ranked: Vec<(usize, i64, String, Accent)> = Vec::new();
+    for claim in dict.pitch_for(term, reading) {
+        if !enabled_for(claim.dict_id, dicts, &cfg.pitch) {
+            continue;
+        }
+        let name = dict_name_for(claim.dict_id, dicts);
+        let rank = list_rank(&name, &cfg.pitch).unwrap_or(usize::MAX);
+        ranked.push((rank, claim.dict_id, name, claim.accent));
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    let mut out: Vec<PitchRow> = Vec::new();
+    for (_, _, name, accent) in ranked {
+        // By position alone, which is the whole of what a row draws (see
+        // `PitchRow`). The first claimant's accent is the one kept, so its
+        // markers are the highest-ordered dictionary's.
+        match out.iter_mut().find(|row| row.accent.position == accent.position) {
+            Some(row) => {
+                if !row.dicts.contains(&name) {
+                    row.dicts.push(name);
+                }
+            }
+            None => out.push(PitchRow { accent, dicts: vec![name] }),
+        }
+    }
+    out
 }
 
 /// Card back to a one-liner.
@@ -309,9 +433,8 @@ pub fn swap_top(p: &mut Presentation, collapsed_index: usize, summary_chars: usi
 /// Per dict, not per hit.
 ///
 /// Grouping is by `dict_id`, the dictionary's identity, and a group's rank
-/// comes from the first row that named it, so the existing name-substring
-/// ordering and the `dict_id` tie-break are untouched: only the number of
-/// blocks changes. Rows keep their arrival order inside a group because the
+/// is its dictionary's position in the enabled terms list, `dict_id`
+/// breaking a tie. Rows keep their arrival order inside a group because the
 /// sort is stable and `hits` arrives rank-ordered.
 fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec<GlossBlock> {
     let mut ranked: Vec<(usize, i64, GlossBlock)> = Vec::new();
@@ -328,7 +451,7 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
             Some((_, _, block)) => block.entries.push(entry),
             None => {
                 let dict_name = dict_name_for(dict_id, dicts);
-                let rank = dict_order_rank(&dict_name, &cfg.dict_order).unwrap_or(usize::MAX);
+                let rank = list_rank(&dict_name, &cfg.terms).unwrap_or(usize::MAX);
                 ranked.push((
                     rank,
                     dict_id,
@@ -383,26 +506,41 @@ fn dict_name_for(dict_id: i64, dicts: &[DictInfo]) -> String {
         .unwrap_or_else(|| format!("dict {dict_id}"))
 }
 
-/// `None` sorts last.
-pub fn dict_order_rank(dict_name: &str, dict_order: &[String]) -> Option<usize> {
-    let lower = dict_name.to_lowercase();
-    // Blank matches everything.
-    dict_order
-        .iter()
-        .position(|s| !s.trim().is_empty() && lower.contains(&s.to_lowercase()))
-}
-
-/// Does the list name one?
-pub fn any_listed<'a>(names: impl IntoIterator<Item = &'a str>, list: &[String]) -> bool {
-    names.into_iter().any(|n| dict_order_rank(n, list).is_some())
-}
-
-/// Searched for this language?
-pub fn keeps_dict(dict_name: &str, dict_order: &[String], restrict: bool) -> bool {
-    if !restrict || dict_order.is_empty() {
-        return true;
+/// Does the list enable the dictionary this row came from?
+///
+/// A `dict_id` no [`DictInfo`] names is **kept**. The identities are a
+/// snapshot the caller took, and a row from a dictionary that snapshot
+/// predates is a reload the pipeline has not seen yet, not a dictionary the
+/// user switched off - a list cannot have an opinion about a name it has
+/// never been told. Nothing a user can type reaches this arm, which is what
+/// makes it different in kind from the guards ADR-0014 deleted.
+fn enabled_for(dict_id: i64, dicts: &[DictInfo], list: &[String]) -> bool {
+    match dicts.iter().find(|d| d.dict_id == dict_id) {
+        Some(known) => keeps_dict(&known.name, list),
+        None => true,
     }
-    dict_order_rank(dict_name, dict_order).is_some()
+}
+
+/// This Dictionary's position in one Dictionary list, or `None` when the
+/// list does not name it.
+///
+/// Equality on the exact name, which is the whole of identity now
+/// (ADR-0014): the substring `contains` this replaced could not tell two
+/// editions of one dictionary apart, so ordering or excluding one of them
+/// silently did the same to the other.
+pub fn list_rank(dict_name: &str, list: &[String]) -> Option<usize> {
+    list.iter().position(|listed| listed == dict_name)
+}
+
+/// Does this list enable the Dictionary?
+///
+/// Membership and nothing else. A list that names none of the installed
+/// dictionaries enables none of them, and an empty list enables nothing at
+/// all - "search nothing in this role" is a state the user can reach on
+/// purpose, and the guards that used to talk it out of that were insurance
+/// against a substring matching nothing.
+pub fn keeps_dict(dict_name: &str, list: &[String]) -> bool {
+    list.iter().any(|listed| listed == dict_name)
 }
 
 /// Chars, not bytes.
@@ -429,7 +567,35 @@ fn one_line(s: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lookup::model::{Entry, Hit};
+    use crate::dict::pitch::Position;
+    use crate::lookup::model::{Entry, FakeDictionary, Hit};
+
+    /// A library with no pitch dictionary in it, which is what every test
+    /// below but the pitch ones is about.
+    fn no_pitch() -> FakeDictionary {
+        FakeDictionary::new()
+    }
+
+    /// A library whose pitch dictionaries claim what the caller says, in the
+    /// order the caller lists them - which is the order the stored rows come
+    /// back in, not the order the pitch list puts them in.
+    fn with_pitch(claims: &[(i64, &str, &str, Accent)]) -> FakeDictionary {
+        let mut dict = FakeDictionary::new();
+        for (dict_id, term, reading, accent) in claims {
+            dict.add_pitch(term, reading, *dict_id, accent.clone());
+        }
+        dict
+    }
+
+    /// One accent with no markers and no tags, which is 96% of the corpus.
+    fn downstep(fall: u32) -> Accent {
+        Accent {
+            position: Position::Downstep(fall),
+            nasal: Vec::new(),
+            devoice: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
 
     fn dicts() -> Vec<DictInfo> {
         vec![
@@ -440,9 +606,9 @@ mod tests {
 
     fn cfg() -> PresentConfig {
         PresentConfig {
-            dict_order: vec!["大辞林".into(), "Jitendex".into()],
+            terms: vec!["大辞林　第四版".into(), "Jitendex.org [2026-07-09]".into()],
+            pitch: vec!["大辞林　第四版".into(), "Jitendex.org [2026-07-09]".into()],
             summary_chars: 40,
-            restrict_to_order: false,
         }
     }
 
@@ -504,7 +670,7 @@ mod tests {
             hit("昨日", "きのう", 2, "過ぎ去った日。"),
             hit("昨日", "きのう", 2, "近い過去。"),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         let blocks = &p.top.as_ref().unwrap().blocks;
         assert_eq!(1, blocks.len(), "one dictionary, one block");
         assert_eq!(3, blocks[0].entries.len(), "one entry per matched row");
@@ -524,7 +690,7 @@ mod tests {
             hit("昨日", "きのう", 2, "今日の一日前の日。"),
             hit("昨日", "きのう", 2, "過ぎ去った日。"),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         let blocks = &p.top.as_ref().unwrap().blocks;
         assert_eq!(2, blocks.len(), "two dictionaries, two blocks");
         assert!(blocks[0].dict_name.contains("大辞林"), "got {:?}", blocks[0].dict_name);
@@ -544,7 +710,7 @@ mod tests {
             hit_tagged("昨日", "きのう", 2, "c", &["adverb"]),
             hit_tagged("昨日", "きのう", 2, "d", &["adverb"]),
         ];
-        let card = build(&hits, &dicts(), &cfg()).top.expect("a top card");
+        let card = build(&hits, &dicts(), &cfg(), &no_pitch()).top.expect("a top card");
         assert_eq!(vec!["noun".to_string()], card.pos, "the card's own tag line");
         let printed: Vec<Vec<String>> =
             card.blocks[0].entries.iter().map(|e| e.tags.clone()).collect();
@@ -565,53 +731,60 @@ mod tests {
             hit_tagged("昨日", "きのう", 2, "b", &["\u{ff12}", "adverb"]),
             hit_tagged("昨日", "きのう", 2, "c", &["\u{2462}"]),
         ];
-        let card = build(&hits, &dicts(), &cfg()).top.expect("a top card");
+        let card = build(&hits, &dicts(), &cfg(), &no_pitch()).top.expect("a top card");
         assert_eq!(vec!["noun".to_string()], card.pos, "not \"1 · noun\"");
         let printed: Vec<Vec<String>> =
             card.blocks[0].entries.iter().map(|e| e.tags.clone()).collect();
         assert_eq!(vec![vec![], vec!["adverb".to_string()], vec![]], printed);
     }
 
+    /// The trap the substring model could not escape: two editions sharing
+    /// a name can be enabled independently, because the list names one of
+    /// them and equality answers about that one only.
     #[test]
-    fn restrict_drops_a_dictionary_outside_the_order() {
-        assert!(!keeps_dict("Jitendex.org", &["大辞林".to_string()], true));
-        assert!(keeps_dict("大辞林　第四版", &["大辞林".to_string()], true));
+    fn two_dictionaries_sharing_a_substring_are_enabled_independently() {
+        let list = vec!["大辞林　第四版".to_string()];
+        assert!(keeps_dict("大辞林　第四版", &list));
+        assert!(!keeps_dict("大辞林　第三版", &list));
+        assert!(!keeps_dict("大辞林", &list), "the shared prefix names nothing on its own");
+    }
+
+    /// The guard that used to stand here read an empty list as "no
+    /// restriction" and searched everything. There is nothing to guard
+    /// against now: an empty enabled list is a user who unchecked every row.
+    #[test]
+    fn an_empty_terms_list_searches_nothing() {
+        let hits = vec![hit("猫", "ねこ", 1, "cat"), hit("犬", "いぬ", 2, "dog")];
+        let cfg = PresentConfig { terms: Vec::new(), pitch: Vec::new(), summary_chars: 40 };
+        let p = build(&hits, &dicts(), &cfg, &no_pitch());
+        assert!(p.all_cards.is_empty(), "no dictionary is enabled, so nothing is searched");
+        assert!(p.top.is_none());
     }
 
     #[test]
-    fn without_restrict_an_unranked_dictionary_is_kept() {
-        assert!(keeps_dict("Jitendex.org", &["大辞林".to_string()], false));
-    }
-
-    #[test]
-    fn restrict_with_an_empty_order_keeps_everything() {
-        assert!(keeps_dict("Jitendex.org", &[], true));
-    }
-
-    #[test]
-    fn an_excluded_dictionary_contributes_no_card() {
+    fn a_disabled_dictionary_contributes_no_card() {
         let hits = vec![hit("猫", "ねこ", 1, "cat"), hit("犬", "いぬ", 2, "dog")];
         let cfg = PresentConfig {
-            dict_order: vec!["大辞林".to_string()],
+            terms: vec!["大辞林　第四版".to_string()],
+            pitch: Vec::new(),
             summary_chars: 40,
-            restrict_to_order: true,
         };
-        let p = build(&hits, &dicts(), &cfg);
-        assert_eq!(1, p.all_cards.len(), "the excluded dictionary makes no card");
-        assert!(p.all_cards[0].blocks.iter().all(|b| b.dict_name.contains("大辞林")));
+        let p = build(&hits, &dicts(), &cfg, &no_pitch());
+        assert_eq!(1, p.all_cards.len(), "the disabled dictionary makes no card");
+        assert!(p.all_cards[0].blocks.iter().all(|b| b.dict_name == "大辞林　第四版"));
         assert!(!p.all_cards[0].blocks.is_empty(), "and the card is not hollow");
     }
 
     #[test]
     fn empty_hits_yield_nothing() {
-        let p = build(&[], &dicts(), &cfg());
+        let p = build(&[], &dicts(), &cfg(), &no_pitch());
         assert!(p.top.is_none());
         assert!(p.collapsed.is_empty());
     }
 
     #[test]
     fn a_single_hit_becomes_the_top_card_with_no_rows() {
-        let p = build(&[hit("昨日", "きのう", 1, "yesterday")], &dicts(), &cfg());
+        let p = build(&[hit("昨日", "きのう", 1, "yesterday")], &dicts(), &cfg(), &no_pitch());
         assert_eq!(Some("昨日".to_string()), p.top.as_ref().unwrap().written);
         assert!(p.collapsed.is_empty());
     }
@@ -622,7 +795,7 @@ mod tests {
             hit("昨日", "きのう", 1, "yesterday"),
             hit("昨日", "きのう", 2, "今日の一日前の日。"),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         assert!(p.collapsed.is_empty(), "the two must merge, not collapse");
         assert_eq!(2, p.top.as_ref().unwrap().blocks.len());
     }
@@ -633,7 +806,7 @@ mod tests {
             hit("昨日", "きのう", 1, "yesterday"),
             hit("昨日", "きのう", 2, "今日の一日前の日。"),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         let blocks = &p.top.as_ref().unwrap().blocks;
         assert!(blocks[0].dict_name.contains("大辞林"), "got {:?}", blocks[0].dict_name);
         assert!(blocks[1].dict_name.contains("Jitendex"));
@@ -645,7 +818,7 @@ mod tests {
             hit("昨日", "きのう", 1, "yesterday"),
             hit("昨日", "さくじつ", 1, "yesterday"),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         assert_eq!(1, p.collapsed.len());
         assert_eq!(Some("さくじつ".to_string()), p.collapsed[0].reading);
     }
@@ -657,7 +830,7 @@ mod tests {
             hit("昨", "さく", 1, "last (year)"),
             hit("昨日", "きのう", 2, "今日の一日前の日。"),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         assert_eq!(Some("昨日".to_string()), p.top.as_ref().unwrap().written);
         assert_eq!(1, p.collapsed.len());
         assert_eq!(Some("昨".to_string()), p.collapsed[0].written);
@@ -670,7 +843,7 @@ mod tests {
             hit("A", "あ", 1, "short"),
             hit("B", "い", 1, &long),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         let s = &p.collapsed[0].summary;
         assert!(s.ends_with('…'));
         assert_eq!(41, s.chars().count(), "40 chars plus the ellipsis");
@@ -679,33 +852,36 @@ mod tests {
     #[test]
     fn a_short_summary_is_not_marked() {
         let hits = vec![hit("A", "あ", 1, "short"), hit("B", "い", 1, "also short")];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         assert_eq!("also short", p.collapsed[0].summary);
     }
 
-    /// One predicate, two readers.
+    /// Position in the list is priority, and a name the list is silent
+    /// about has none - which is what sorts it last.
     #[test]
-    fn any_listed_answers_for_the_whole_library() {
-        let all = dicts();
-        let names = || all.iter().map(|d| d.name.as_str());
-        assert!(any_listed(names(), &["大辞林".to_string()]));
-        assert!(!any_listed(names(), &["Daijirin".to_string()]));
-        assert!(!any_listed(names(), &[]));
-        assert!(!any_listed(std::iter::empty(), &["大辞林".to_string()]));
+    fn a_list_ranks_the_names_it_holds_and_no_others() {
+        let list = vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()];
+        assert_eq!(Some(0), list_rank("大辞林　第四版", &list));
+        assert_eq!(Some(1), list_rank("Jitendex.org [2026-07-09]", &list));
+        assert_eq!(None, list_rank("Jitendex", &list), "a prefix is not the name");
+        assert_eq!(None, list_rank("大辞林　第四版", &[]));
     }
 
+    /// The blank entry that used to match everything is now just a name no
+    /// dictionary has.
     #[test]
-    fn a_blank_order_entry_ranks_nothing() {
-        let blank = vec![String::new()];
-        assert_eq!(None, dict_order_rank("Jitendex.org", &blank));
-        let with_blank = vec![String::new(), "Jitendex".to_string()];
-        assert_eq!(Some(1), dict_order_rank("Jitendex.org", &with_blank));
+    fn a_blank_list_entry_names_nothing() {
+        let with_blank = vec![String::new(), "Jitendex.org".to_string()];
+        assert!(!keeps_dict("", &["Jitendex.org".to_string()]));
+        assert_eq!(Some(1), list_rank("Jitendex.org", &with_blank));
     }
 
+    /// A stale identity snapshot must not blank the popup: the list cannot
+    /// have an opinion about a dictionary it has never been told exists.
     #[test]
-    fn an_unknown_dictionary_still_produces_a_block() {
+    fn a_row_from_a_dictionary_no_identity_names_still_produces_a_block() {
         let hits = vec![hit("猫", "ねこ", 99, "cat")];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         assert_eq!(1, p.top.as_ref().unwrap().blocks.len());
     }
 
@@ -717,6 +893,7 @@ mod tests {
             freq: None,
             blocks: vec![],
             match_len,
+            pitch: Vec::new(),
         }
     }
 
@@ -777,7 +954,7 @@ mod tests {
         long.match_len = 3;
         let mut short = hit("可哀想", "かわいそう", 2, "気の毒なさま。");
         short.match_len = 3;
-        let p = build(&[long, short], &dicts(), &cfg());
+        let p = build(&[long, short], &dicts(), &cfg(), &no_pitch());
         assert_eq!(3, p.top.as_ref().unwrap().match_len);
     }
 
@@ -787,7 +964,7 @@ mod tests {
             hit("昨日", "きのう", 1, "yesterday"),
             hit("昨", "さく", 1, "last (year)"),
         ];
-        let p = build(&hits, &dicts(), &cfg());
+        let p = build(&hits, &dicts(), &cfg(), &no_pitch());
         assert_eq!(2, p.all_cards.len());
         assert_eq!(Some("昨日".to_string()), p.all_cards[0].written);
         assert_eq!(Some("昨".to_string()), p.all_cards[1].written);
@@ -802,6 +979,7 @@ mod tests {
             freq: Some(100),
             blocks: vec![strings("Test", &["cat", "feline"])],
             match_len: 1,
+            pitch: Vec::new(),
         };
         let row = collapsed_from_card(&card, 40);
         assert_eq!(Some("猫".to_string()), row.written);
@@ -819,6 +997,7 @@ mod tests {
             freq: None,
             blocks: vec![strings("D", &[&long])],
             match_len: 1,
+            pitch: Vec::new(),
         };
         let row = collapsed_from_card(&card, 40);
         assert!(row.summary.ends_with('…'));
@@ -843,6 +1022,7 @@ mod tests {
             freq: None,
             blocks: vec![strings("D", &["to run\nto flow"])],
             match_len: 1,
+            pitch: Vec::new(),
         };
         let row = collapsed_from_card(&card, 40);
         assert_eq!("to run; to flow", row.summary);
@@ -860,6 +1040,7 @@ mod tests {
             freq: None,
             blocks: vec![strings("D", &[&format!("{}\n{}", "あ".repeat(30), "い".repeat(30))])],
             match_len: 1,
+            pitch: Vec::new(),
         };
         let row = collapsed_from_card(&card, 40);
         assert!(!row.summary.contains('\n'));
@@ -873,7 +1054,7 @@ mod tests {
             hit("昨", "さく", 1, "last (year)"),
             hit("日", "にち", 1, "day"),
         ];
-        let mut p = build(&hits, &dicts(), &cfg());
+        let mut p = build(&hits, &dicts(), &cfg(), &no_pitch());
         assert_eq!(Some("昨日".to_string()), p.top.as_ref().unwrap().written);
 
         swap_top(&mut p, 0, 40);
@@ -886,7 +1067,7 @@ mod tests {
     #[test]
     fn swap_top_out_of_range_is_a_no_op() {
         let hits = vec![hit("猫", "ねこ", 1, "cat")];
-        let mut p = build(&hits, &dicts(), &cfg());
+        let mut p = build(&hits, &dicts(), &cfg(), &no_pitch());
         let before = p.clone();
         swap_top(&mut p, 0, 40);
         assert_eq!(before, p);
@@ -898,7 +1079,7 @@ mod tests {
             hit("昨日", "きのう", 1, "yesterday"),
             hit("昨", "さく", 1, "last (year)"),
         ];
-        let mut p = build(&hits, &dicts(), &cfg());
+        let mut p = build(&hits, &dicts(), &cfg(), &no_pitch());
         let originals: Vec<String> = p
             .all_cards
             .iter()
@@ -924,7 +1105,7 @@ mod tests {
             hit("昨日", "きのう", 1, "yesterday"),
             hit("昨", "さく", 1, "last (year)"),
         ];
-        let mut p = build(&hits, &dicts(), &cfg());
+        let mut p = build(&hits, &dicts(), &cfg(), &no_pitch());
         let original_top = p.top.clone();
 
         swap_top(&mut p, 0, 40);
@@ -935,7 +1116,7 @@ mod tests {
 
     #[test]
     fn build_leaves_sentence_unset() {
-        let p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg());
+        let p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg(), &no_pitch());
         assert!(p.sentence.is_none());
     }
 
@@ -943,11 +1124,205 @@ mod tests {
     /// hand-rolled copy of it.
     #[test]
     fn sentence_source_appears_in_fields_when_set() {
-        let mut p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg());
+        let mut p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg(), &no_pitch());
         p.sentence = Some("その猫はかわいい。".to_string());
 
         let (_, fields) = crate::controller::note_payload(&p, false);
 
         assert_eq!(Some(&"その猫はかわいい。".to_string()), fields.get("sentence"));
+    }
+
+    // ---- pitch
+
+    /// The dedup, which ticket 01's census makes the visible part of pitch
+    /// rather than a refinement: 81.4% of the readings two or more pitch
+    /// dictionaries both know get an identical accent set from all of them.
+    #[test]
+    fn two_dictionaries_giving_one_accent_draw_one_row_naming_both() {
+        let dict = with_pitch(&[
+            (1, "昨日", "きのう", downstep(1)),
+            (2, "昨日", "きのう", downstep(1)),
+        ]);
+
+        let card = build(&[hit("昨日", "きのう", 1, "yesterday")], &dicts(), &cfg(), &dict)
+            .top
+            .expect("a top card");
+
+        assert_eq!(1, card.pitch.len(), "one accent, one row: {:?}", card.pitch);
+        assert_eq!(Position::Downstep(1), card.pitch[0].accent.position);
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
+            card.pitch[0].dicts,
+            "both names against the one row, in the pitch list's order"
+        );
+    }
+
+    /// The 18.7% of readings that are not unanimous, which the user story
+    /// asks to see rather than hide.
+    #[test]
+    fn two_dictionaries_giving_different_accents_draw_two_rows_in_list_order() {
+        // Seeded lowest-priority first, so a reader that kept the stored
+        // order rather than the pitch list's fails here.
+        let dict = with_pitch(&[
+            (1, "昨日", "きのう", downstep(0)),
+            (2, "昨日", "きのう", downstep(1)),
+        ]);
+
+        let card = build(&[hit("昨日", "きのう", 1, "yesterday")], &dicts(), &cfg(), &dict)
+            .top
+            .expect("a top card");
+
+        assert_eq!(
+            vec![Position::Downstep(1), Position::Downstep(0)],
+            card.pitch.iter().map(|r| r.accent.position.clone()).collect::<Vec<_>>(),
+            "大辞林 leads the configured order, so its accent leads"
+        );
+        assert_eq!(vec!["大辞林　第四版".to_string()], card.pitch[0].dicts);
+        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], card.pitch[1].dicts);
+    }
+
+    /// The census's `合縁奇縁`: three dictionaries share one accent and one
+    /// dissents, so the header draws two rows and names three against one.
+    #[test]
+    fn a_majority_and_a_dissenter_draw_two_rows_with_the_names_split_between_them() {
+        let mut dict = FakeDictionary::new();
+        for id in [1, 2, 3] {
+            dict.add_pitch("合縁奇縁", "あいえんきえん", id, downstep(5));
+        }
+        dict.add_pitch("合縁奇縁", "あいえんきえん", 4, downstep(0));
+        let named = vec![
+            DictInfo { dict_id: 1, name: "NHK".into() },
+            DictInfo { dict_id: 2, name: "三省堂".into() },
+            DictInfo { dict_id: 3, name: "新明解".into() },
+            DictInfo { dict_id: 4, name: "大辞泉".into() },
+        ];
+        let hits = vec![hit("合縁奇縁", "あいえんきえん", 1, "a happy match")];
+        let listed: Vec<String> = named.iter().map(|d| d.name.clone()).collect();
+        let cfg = PresentConfig {
+            terms: listed.clone(),
+            pitch: listed,
+            summary_chars: 40,
+        };
+
+        let card = build(&hits, &named, &cfg, &dict).top.expect("a top card");
+
+        assert_eq!(2, card.pitch.len());
+        assert_eq!(3, card.pitch[0].dicts.len(), "{:?}", card.pitch[0].dicts);
+        assert_eq!(vec!["大辞泉".to_string()], card.pitch[1].dicts);
+    }
+
+    /// The comparison is the position alone, because the position is the
+    /// whole of what a card draws. NHK is the only dictionary in the corpus
+    /// with markers, so comparing with them would put its marked heiban on a
+    /// second row that looks exactly like the unmarked one beside it.
+    #[test]
+    fn one_accent_marked_by_one_dictionary_and_bare_by_another_is_still_one_row() {
+        let marked = Accent {
+            position: Position::Downstep(0),
+            nasal: vec![4],
+            devoice: vec![2],
+            tags: Vec::new(),
+        };
+        let dict = with_pitch(&[
+            (2, "合鍵", "あいかぎ", marked.clone()),
+            (1, "合鍵", "あいかぎ", downstep(0)),
+        ]);
+
+        let card = build(&[hit("合鍵", "あいかぎ", 1, "spare key")], &dicts(), &cfg(), &dict)
+            .top
+            .expect("a top card");
+
+        assert_eq!(1, card.pitch.len(), "{:?}", card.pitch);
+        assert_eq!(
+            marked, card.pitch[0].accent,
+            "the markers kept are the highest-ordered dictionary's, so ticket 06 has them"
+        );
+        assert_eq!(2, card.pitch[0].dicts.len());
+    }
+
+    #[test]
+    fn a_reading_no_pitch_dictionary_has_draws_nothing() {
+        let dict = with_pitch(&[(1, "昨日", "きのう", downstep(1))]);
+
+        let card = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg(), &dict)
+            .top
+            .expect("a top card");
+
+        assert!(card.pitch.is_empty(), "no row, and not an empty one");
+    }
+
+    /// A kana-only headword has no `written`, and the expression a pitch
+    /// archive names it by is the reading itself.
+    #[test]
+    fn a_kana_only_headword_is_looked_up_by_its_reading() {
+        let mut dict = FakeDictionary::new();
+        dict.add_pitch("ねこ", "ねこ", 1, downstep(1));
+        let hits = vec![Hit {
+            written: None,
+            reading: Some("ねこ".to_string()),
+            ..hit("猫", "ねこ", 1, "cat")
+        }];
+
+        let card = build(&hits, &dicts(), &cfg(), &dict).top.expect("a top card");
+
+        assert_eq!(1, card.pitch.len());
+        assert_eq!(Position::Downstep(1), card.pitch[0].accent.position);
+    }
+
+    /// A disabled dictionary is not a source, and the pitch list is the
+    /// only list that answers: the terms list here still names both, so
+    /// what silences one of them is its absence from `pitch` and nothing
+    /// else.
+    #[test]
+    fn a_dictionary_the_pitch_list_excludes_contributes_no_accent() {
+        let dict = with_pitch(&[
+            (1, "昨日", "きのう", downstep(0)),
+            (2, "昨日", "きのう", downstep(1)),
+        ]);
+        let cfg = PresentConfig {
+            pitch: vec!["大辞林　第四版".to_string()],
+            ..cfg()
+        };
+
+        let card = build(&[hit("昨日", "きのう", 2, "yesterday")], &dicts(), &cfg, &dict)
+            .top
+            .expect("a top card");
+
+        assert_eq!(1, card.pitch.len(), "{:?}", card.pitch);
+        assert_eq!(vec!["大辞林　第四版".to_string()], card.pitch[0].dicts);
+    }
+
+    /// A card with no reading has no moras to mark, so it runs no query at
+    /// all rather than one that cannot match.
+    #[test]
+    fn a_card_with_no_reading_draws_no_pitch() {
+        let mut dict = FakeDictionary::new();
+        dict.add_pitch("昨日", "きのう", 1, downstep(1));
+        let hits = vec![Hit { reading: None, ..hit("昨日", "きのう", 1, "yesterday") }];
+
+        let card = build(&hits, &dicts(), &cfg(), &dict).top.expect("a top card");
+
+        assert!(card.pitch.is_empty());
+    }
+
+    /// Every card gets its own accents and not just the top one, because
+    /// [`swap_top`] promotes a collapsed row without a store to ask.
+    #[test]
+    fn a_promoted_card_already_carries_its_own_accents() {
+        let dict = with_pitch(&[
+            (1, "昨日", "きのう", downstep(1)),
+            (1, "昨", "さく", downstep(0)),
+        ]);
+        let hits = vec![
+            hit("昨日", "きのう", 1, "yesterday"),
+            hit("昨", "さく", 1, "previous"),
+        ];
+
+        let mut p = build(&hits, &dicts(), &cfg(), &dict);
+        swap_top(&mut p, 0, 40);
+
+        let promoted = p.top.expect("a promoted card");
+        assert_eq!(Some("昨".to_string()), promoted.written);
+        assert_eq!(vec![Position::Downstep(0)], promoted.pitch.iter().map(|r| r.accent.position.clone()).collect::<Vec<_>>());
     }
 }

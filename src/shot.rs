@@ -200,6 +200,7 @@ mod tests {
                 freq: None,
                 blocks: Vec::new(),
                 match_len: 1,
+                pitch: Vec::new(),
             }),
             collapsed: Vec::new(),
             all_cards: Vec::new(),

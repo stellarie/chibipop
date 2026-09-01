@@ -2199,16 +2199,17 @@ impl App {
         }
     }
 
-    /// The "Not searched" split, once the identities are known.
+    /// The terms list, once the identities are known.
     ///
-    /// `Config::present_config` matches the split against the installed
-    /// dictionary names, and the pipeline's own first read is where those
-    /// names come from - so the settings `spawn_worker` handed over were
-    /// resolved against an empty library and came out unrestricted. Push
-    /// the real answer now that it can be computed: a fresh daemon must
-    /// honour the setting from its first lookup, not from the first
-    /// reload. Nothing to say when it did not change, which is every
-    /// respawn and every config with no split.
+    /// `Config::present_config` resolves the terms list against the
+    /// installed dictionary names - the enabled ones the config names,
+    /// plus every installed one it names in neither array - and the
+    /// pipeline's own first read is where those names come from. So the
+    /// settings `spawn_worker` handed over were resolved against an empty
+    /// library and named nothing to search. Push the real answer now that
+    /// it can be computed: a fresh daemon must honour the setting from its
+    /// first lookup, not from the first reload. Nothing to say when it did
+    /// not change, which is every respawn.
     fn rescope_lookups(&mut self, sent: &chibipop::present::PresentConfig) {
         let settings = worker::settings(&self.config, &self.dicts);
         if settings.present_cfg == *sent {
@@ -2217,7 +2218,7 @@ impl App {
         self.log.diag(&format!(
             "worker: {} searches {} of {} dictionary/ies",
             self.config.ocr.language,
-            settings.present_cfg.dict_order.len(),
+            settings.present_cfg.terms.len(),
             self.dicts.len(),
         ));
         self.send_trigger(TriggerKind::Reload(Box::new(settings)), RequestId(0));
@@ -3346,6 +3347,10 @@ mod tests {
         let mut app = test_app(&dir, &log_file, &event_loop);
         let (worker, _log) = fake_worker(None, None);
         app.worker = Some(worker);
+        // The save below pushes a reload, and a reload rebuilds
+        // `WorkerSettings` from `self.dicts` - so the finished spawn this
+        // stands in for has to have left the identity behind.
+        app.dicts = fake_dicts();
         // The user already picked Static in the settings window; the box
         // is what is still missing.
         app.config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
@@ -4145,7 +4150,10 @@ mod tests {
         let log = seams();
         let capture_log = log.clone();
         let ocr_log = log.clone();
-        let settings = worker::settings(&chibipop::config::Config::default(), &[]);
+        // Named, not `&[]`: an empty terms list searches nothing
+        // (ADR-0014), so a pipeline built without its own identity would
+        // read every lookup and present none of it.
+        let settings = worker::settings(&chibipop::config::Config::default(), &fake_dicts());
         let (worker, _dicts) = Worker::spawn(
             settings,
             move || {
@@ -4167,6 +4175,14 @@ mod tests {
         )
         .expect("the fake pipeline must start");
         (worker, log)
+    }
+
+    /// The identity `fake_worker`'s dictionary reports, which is what the
+    /// real `spawn_worker` learns from the pipeline's first read and puts
+    /// in `App::dicts`. A test that installs a fake Worker is standing in
+    /// for a finished spawn, so it stands in for this too.
+    fn fake_dicts() -> Vec<DictInfo> {
+        vec![DictInfo { dict_id: 1, name: "FakeDict".to_string() }]
     }
 
     /// One answer off a calloop channel, or a test failure.
@@ -4316,12 +4332,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The dictionary names the "Not searched" split is matched against
-    /// are the pipeline's own first read, so `spawn_worker` cannot
-    /// resolve the scope before the pipeline exists - it re-resolves
-    /// after. Without that, a fresh daemon searched every dictionary
-    /// until something sent `reload`, which is the ticket-08 defect one
-    /// step further in.
+    /// The names the terms list is resolved against are the pipeline's
+    /// own first read, so `spawn_worker` cannot resolve the list before
+    /// the pipeline exists - it re-resolves after. Without that, a fresh
+    /// daemon searched an empty list until something sent `reload`, which
+    /// is the ticket-08 defect one step further in.
     #[test]
     fn a_fresh_pipeline_is_told_the_split_once_the_names_are_known() {
         let dir = scratch("rescope");
@@ -4329,13 +4344,15 @@ mod tests {
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
         app.config.ocr.language = "ja".to_string();
-        app.config
-            .dictionaries
-            .per_language
-            .insert("ja".to_string(), vec!["大辞林".to_string()]);
-        // What `spawn_worker` handed over: no identities, no restriction.
+        // An unchecked row in the settings window's Terms section, as the
+        // config stores it: one exact name in the disabled twin. The other
+        // installed dictionary is named nowhere, so it is new and searched.
+        app.config.dictionaries.terms_disabled =
+            vec!["Jitendex.org [2026-07-09]".to_string()];
+        // What `spawn_worker` handed over: no identities, so nothing was
+        // new and the list came out empty.
         let sent = worker::settings(&app.config, &[]).present_cfg;
-        assert!(!sent.restrict_to_order, "an empty library cannot be restricted");
+        assert!(sent.terms.is_empty(), "an empty library names nothing to search");
 
         let (worker, _seams) = fake_worker(None, None);
         app.worker = Some(worker);
@@ -4351,8 +4368,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// And costs nothing when there is nothing to say: the shipped
-    /// config has no split, and every respawn already holds the names.
+    /// And costs nothing when there is nothing to say: every respawn
+    /// already holds the names, so re-resolving answers what was sent.
     #[test]
     fn a_pipeline_whose_scope_did_not_change_is_left_alone() {
         let dir = scratch("norescope");
@@ -4362,7 +4379,9 @@ mod tests {
         let (worker, _seams) = fake_worker(None, None);
         app.worker = Some(worker);
         app.dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
-        let sent = worker::settings(&app.config, &[]).present_cfg;
+        // A respawn: the identities were known when `spawn_worker`
+        // resolved the list, so re-resolving has nothing new to say.
+        let sent = worker::settings(&app.config, &app.dicts).present_cfg;
 
         app.rescope_lookups(&sent);
 
@@ -4780,6 +4799,7 @@ mod tests {
                         freq: None,
                         blocks: Vec::new(),
                         match_len: 1,
+                        pitch: Vec::new(),
                     }),
                     collapsed: Vec::new(),
                     all_cards: Vec::new(),

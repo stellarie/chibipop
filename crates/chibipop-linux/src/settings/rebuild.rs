@@ -115,18 +115,27 @@ fn run(form: &SettingsForm, plan: &Plan, sink: &impl Fn(Progress)) -> Progress {
 /// [i] <file>` / `freq dict      <file>` spelling the Windows
 /// `build-dict` command prints: core's builder only counts rows, so the
 /// caller is what tells the user which file is being read.
+///
+/// The first list is `dict_paths`, which is every readable archive the
+/// build installs as a dictionary row - a frequency- or pitch-only
+/// archive is a dictionary in its own right now (ADR-0014), not something
+/// the term list skips. The `term dict` prefix stays because
+/// [`chibipop::dict::progress::friendly`] is what turns these into
+/// "Reading <file>…", and it parses exactly that word; the second list
+/// re-announces the archives read for their frequencies, so an archive
+/// carrying both roles is named twice on purpose.
 fn build(plan: &Plan, sink: &impl Fn(Progress)) -> anyhow::Result<(i64, i64)> {
     // Reconciled: what stage_into_library just wrote is what builds.
     let lib = Library::load(&plan.library_dir)?;
-    let terms = lib.term_paths(&plan.library_dir);
+    let dicts = lib.dict_paths(&plan.library_dir);
     let freqs = lib.freq_paths(&plan.library_dir);
-    for (i, t) in terms.iter().enumerate() {
-        sink(Progress::Line(format!("term dict  [{i}] {}", file_name(t))));
+    for (i, d) in dicts.iter().enumerate() {
+        sink(Progress::Line(format!("term dict  [{i}] {}", file_name(d))));
     }
     for f in &freqs {
         sink(Progress::Line(format!("freq dict      {}", file_name(f))));
     }
-    let counts = chibipop::dict::build::build(&terms, &freqs, &plan.out, &|line| {
+    let counts = chibipop::dict::build::build(&dicts, &freqs, &plan.out, &|line| {
         sink(Progress::Line(line.to_string()));
     })?;
     Ok((counts.entries, counts.terms))

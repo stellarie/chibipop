@@ -2,6 +2,8 @@
 
 use crate::dict::gloss::{GlossDoc, Kind, NodeId};
 use crate::dict::media::{self, Intrinsic, MediaFormat, MediaKey, Missing, Surface};
+use crate::dict::pitch::{Accent, PitchClaim, Position};
+use crate::dict::reindex;
 use crate::dict::sheet::{self, Sheet};
 use crate::lookup::model::{Dictionary, Entry, TermRow};
 use crate::present::DictInfo;
@@ -26,10 +28,21 @@ pub struct SqliteDictionary {
     /// dictionary without a stylesheet costs one query for the whole
     /// process rather than one per hover.
     sheets: RefCell<HashMap<i64, Option<Rc<Sheet>>>>,
+    /// The enabled frequency dictionaries, highest priority first, exactly as
+    /// the database records the reduction its Frequency ranks came from
+    /// ([`reindex::Reduction`]).
+    ///
+    /// Read from the file rather than from config, so the Reported frequency
+    /// the popup prints comes from a dictionary the ranking in this file
+    /// actually consulted. Read once: it is a handful of ids, and a reindex
+    /// commits and the daemon reloads, so it cannot change under an open
+    /// reader. Empty means no frequency dictionary is enabled, and then no
+    /// Reported frequency is looked up at all.
+    freq_order: Vec<i64>,
 }
 
 /// Must match `dict::build::SCHEMA_VERSION`.
-const EXPECTED_SCHEMA_VERSION: i64 = 3;
+const EXPECTED_SCHEMA_VERSION: i64 = 4;
 
 /// Parsed trees the cache keeps.
 ///
@@ -49,17 +62,30 @@ const GLOSS_CACHE_ENTRIES: usize = 256;
 /// push per miss instead of a touch per hit.
 #[derive(Default)]
 struct GlossCache {
-    by_id: HashMap<i64, (i64, Arc<GlossDoc>)>,
+    by_id: HashMap<i64, Cached>,
     order: VecDeque<i64>,
 }
 
+/// One cached record: the dictionary it belongs to, its headword's Reported
+/// frequency, and the tree.
+///
+/// The Reported frequency rides along because it is read with the record and
+/// is as stable as the record is: it changes when a reindex commits, and a
+/// reindex is followed by a reload.
+#[derive(Clone)]
+struct Cached {
+    dict_id: i64,
+    reported_freq: Option<i64>,
+    doc: Arc<GlossDoc>,
+}
+
 impl GlossCache {
-    fn get(&self, entry_id: i64) -> Option<(i64, Arc<GlossDoc>)> {
-        self.by_id.get(&entry_id).map(|(dict_id, doc)| (*dict_id, Arc::clone(doc)))
+    fn get(&self, entry_id: i64) -> Option<Cached> {
+        self.by_id.get(&entry_id).cloned()
     }
 
-    fn put(&mut self, entry_id: i64, dict_id: i64, doc: Arc<GlossDoc>) {
-        if self.by_id.insert(entry_id, (dict_id, doc)).is_none() {
+    fn put(&mut self, entry_id: i64, record: Cached) {
+        if self.by_id.insert(entry_id, record).is_none() {
             self.order.push_back(entry_id);
             while self.order.len() > GLOSS_CACHE_ENTRIES {
                 if let Some(evicted) = self.order.pop_front() {
@@ -73,10 +99,12 @@ impl GlossCache {
 impl SqliteDictionary {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = open_checked(path)?;
+        let freq_order = reindex::recorded(&conn)?.order;
         Ok(SqliteDictionary {
             conn,
             gloss: RefCell::new(GlossCache::default()),
             sheets: RefCell::new(HashMap::new()),
+            freq_order,
         })
     }
 
@@ -226,10 +254,12 @@ impl MediaStore {
 
 /// Opens read-only and refuses a database this build does not understand.
 ///
-/// The version gate is the whole contract: `schema_version` 3 means the
-/// `entry` record holds raw glossary JSON, the media tables exist, *and*
-/// `dict_style` holds the `styles.css` of each dictionary that ships one. So
-/// a store that passes here has all three, and no reader below has to ask.
+/// The version gate is the whole contract: `schema_version` 4 means the
+/// `entry` record holds raw glossary JSON, the media tables exist,
+/// `dict_style` holds the `styles.css` of each dictionary that ships one,
+/// `reported_freq` holds each frequency dictionary's own claims, *and*
+/// `pitch` holds each pitch dictionary's own accents. So a store that
+/// passes here has all five, and no reader below has to ask.
 fn open_checked(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
@@ -296,6 +326,121 @@ fn read_sheet(conn: &Connection, dict_id: i64) -> Option<Sheet> {
     Some(Sheet::compile(&css?))
 }
 
+/// One headword's Reported frequency, found from the entry that records it.
+///
+/// Priority-first-wins over what the enabled frequency dictionaries stored:
+/// among the ones that have this headword, whichever the frequency list puts
+/// first, and within one dictionary its reading-scoped claim ahead of its
+/// reading-agnostic one - `dict::frequency::lookup_freq`'s own rule, spelled
+/// in SQL rather than in a `HashMap`. It is that rule whichever ranking
+/// strategy the Frequency ranks were reduced under, because the popup's job
+/// is to report a number a reader can look up, and a median of three sources
+/// is not one (ADR-0015).
+///
+/// One query per rendered entry, both sides of it index probes, and cached
+/// beside the tree it belongs to - so a repeated hover costs nothing and a
+/// fresh entry costs this next to a glossary parse. The term path itself is
+/// untouched: the rank `score` orders by is still read off the hot `term` row
+/// with no join, which is the whole reason it is denormalised there.
+///
+/// `None` for a headword no enabled dictionary ranks, and for a database with
+/// no frequency dictionary enabled - which is asked first, so a library with
+/// no frequency data runs no query at all.
+fn read_reported_freq(conn: &Connection, order: &[i64], entry_id: i64) -> Result<Option<i64>> {
+    if order.is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT r.dict_id, r.reading IS NULL, r.rank \
+         FROM term t JOIN reported_freq r \
+           ON r.term = COALESCE(t.written, t.surface) \
+         WHERE t.entry_id = ?1 AND (r.reading = t.reading OR r.reading IS NULL)",
+    )?;
+    let claims = stmt
+        .query_map([entry_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, r.get::<_, i64>(2)?))
+        })
+        .with_context(|| format!("reading the reported frequency of entry {entry_id}"))?;
+
+    let mut best: Option<((usize, bool), i64)> = None;
+    for claim in claims {
+        let (dict_id, agnostic, rank) = claim
+            .with_context(|| format!("reading a reported frequency of entry {entry_id}"))?;
+        // A dictionary the frequency list does not name is disabled, and a
+        // disabled dictionary is not a data point.
+        let Some(position) = order.iter().position(|id| *id == dict_id) else { continue };
+        let ranked_by = (position, agnostic);
+        if best.as_ref().is_none_or(|(seen, _)| ranked_by < *seen) {
+            best = Some((ranked_by, rank));
+        }
+    }
+    Ok(best.map(|(_, rank)| rank))
+}
+
+/// Every stored Pitch pattern for one headword and reading.
+///
+/// One index probe per shown card, on `(term, reading)`, and every claim
+/// this database holds for that reading whichever dictionary made it: which
+/// of them are enabled and in what order is the pitch list's question, and
+/// the pitch list is config's (ADR-0014). A handful of rows come back - the
+/// census bounds a reading at four distinct accents over five dictionaries -
+/// so the reduction costs less than a second query would.
+///
+/// The hot term statement is untouched and cannot come here: pitch is per
+/// reading, and a `term` row is per surface. This is read once per card the
+/// popup builds, not once per entry and not once per surface probe.
+fn read_pitch(conn: &Connection, term: &str, reading: &str) -> Result<Vec<PitchClaim>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT dict_id, downstep, pattern, nasal, devoice, tags \
+         FROM pitch WHERE term = ?1 AND reading = ?2",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![term, reading], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })
+        .with_context(|| format!("reading the pitch of {term} / {reading}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (dict_id, downstep, pattern, nasal, devoice, tags) =
+            row.with_context(|| format!("reading a pitch pattern of {term} / {reading}"))?;
+        // Exactly one of the two position columns is written, so a row with
+        // neither is a row no mora can be indexed by and there is nothing to
+        // draw from it.
+        let position = match (downstep, pattern) {
+            (Some(fall), _) => Position::Downstep(u32::try_from(fall).unwrap_or(0)),
+            (None, Some(levels)) => Position::Pattern(levels),
+            (None, None) => continue,
+        };
+        out.push(PitchClaim {
+            dict_id,
+            accent: Accent {
+                position,
+                nasal: mora_list(&nasal),
+                devoice: mora_list(&devoice),
+                tags: serde_json::from_str(&tags).unwrap_or_default(),
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// One stored mora list, as the indices it names.
+///
+/// Total, like the rest of this read: a column this build cannot decode
+/// costs the accent its markers - which this ticket does not draw anyway -
+/// and never the card.
+fn mora_list(json: &str) -> Vec<u32> {
+    serde_json::from_str(json).unwrap_or_default()
+}
+
 impl Dictionary for SqliteDictionary {
     fn terms_for(&self, surface: &str) -> Result<Vec<TermRow>> {
         let mut stmt = self.conn.prepare_cached(
@@ -329,9 +474,15 @@ impl Dictionary for SqliteDictionary {
             .conn
             .prepare_cached("SELECT dict_id, glossary FROM entry WHERE entry_id = ?1")?;
         for &id in ids {
-            if let Some((dict_id, doc)) = self.gloss.borrow().get(id) {
-                let media = self.media_sizes(dict_id, &doc);
-                out.push(Entry::new(id, dict_id, doc, media));
+            if let Some(cached) = self.gloss.borrow().get(id) {
+                let media = self.media_sizes(cached.dict_id, &cached.doc);
+                out.push(Entry::new(
+                    id,
+                    cached.dict_id,
+                    cached.doc,
+                    media,
+                    cached.reported_freq,
+                ));
                 continue;
             }
             let mut rows = stmt.query([id])?;
@@ -344,9 +495,13 @@ impl Dictionary for SqliteDictionary {
                 let mut parsed = GlossDoc::parse(raw);
                 self.style(dict_id, &mut parsed);
                 let doc = Arc::new(parsed);
-                self.gloss.borrow_mut().put(id, dict_id, Arc::clone(&doc));
+                let reported_freq = read_reported_freq(&self.conn, &self.freq_order, id)?;
+                self.gloss.borrow_mut().put(
+                    id,
+                    Cached { dict_id, reported_freq, doc: Arc::clone(&doc) },
+                );
                 let media = self.media_sizes(dict_id, &doc);
-                out.push(Entry::new(id, dict_id, doc, media));
+                out.push(Entry::new(id, dict_id, doc, media, reported_freq));
             }
         }
         Ok(out)
@@ -359,6 +514,14 @@ impl Dictionary for SqliteDictionary {
             Ok(DictInfo { dict_id: r.get(0)?, name: r.get(1)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Total, and that is the ladder the trait states: a store fault costs
+    /// the card its pitch row and never the hover. Nothing below the header
+    /// depends on it, so there is nothing to fall back to and nothing worth
+    /// losing a lookup over.
+    fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
+        read_pitch(&self.conn, term, reading).unwrap_or_default()
     }
 }
 
@@ -396,7 +559,16 @@ mod tests {
                                freq INTEGER, entry_id INTEGER, dict_id INTEGER);
              CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
              CREATE TABLE dict_style(dict_id INTEGER PRIMARY KEY, css TEXT NOT NULL);
-             CREATE INDEX idx_term_surface ON term(surface);",
+             CREATE TABLE reported_freq(dict_id INTEGER NOT NULL, term TEXT NOT NULL,
+                                        reading TEXT, rank INTEGER NOT NULL);
+             CREATE TABLE pitch(dict_id INTEGER NOT NULL, term TEXT NOT NULL,
+                                reading TEXT NOT NULL, downstep INTEGER, pattern TEXT,
+                                nasal TEXT NOT NULL, devoice TEXT NOT NULL,
+                                tags TEXT NOT NULL);
+             CREATE INDEX idx_term_surface ON term(surface);
+             CREATE INDEX idx_term_entry_id ON term(entry_id);
+             CREATE INDEX idx_reported_freq_term ON reported_freq(term);
+             CREATE INDEX idx_pitch_term_reading ON pitch(term, reading);",
         )
         .unwrap();
         conn.execute_batch(seed_sql).unwrap();
@@ -415,7 +587,7 @@ mod tests {
                   \"content\":\"v1\"},\
                  {\"tag\":\"div\",\"content\":\"to eat\"}]}]');
              INSERT INTO term VALUES ('食べる','食べる','たべる','v1',500,1,1);
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','4');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -445,7 +617,7 @@ mod tests {
             &path,
             "INSERT INTO dict VALUES (1,'d',0);
              INSERT INTO entry VALUES (1,1,'[\"to eat\"]');
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','4');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -468,7 +640,7 @@ mod tests {
             "INSERT INTO dict VALUES (2,'d',0);
              INSERT INTO entry VALUES (2,2,'[\"very\"]');
              INSERT INTO term VALUES ('とても',NULL,'とても','',NULL,2,2);
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','4');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -483,23 +655,23 @@ mod tests {
         assert_eq!(2, rows[0].dict_id);
     }
 
-    /// A version-2 database is the one every existing user has, and it must
-    /// fail loudly with the rebuild message rather than mis-reading the
-    /// renamed column.
+    /// A version-3 database is the one every existing user has, and it must
+    /// fail loudly with the rebuild message rather than reading a file that
+    /// has neither a `reported_freq` nor a `pitch` table in it.
     #[test]
-    fn opening_a_version_two_database_fails_with_the_rebuild_message() {
-        let path = fixture_path("opening_a_version_two_database_fails");
+    fn opening_a_version_three_database_fails_with_the_rebuild_message() {
+        let path = fixture_path("opening_a_version_three_database_fails");
         let _guard = TempDbGuard(path.clone());
 
-        seed_fixture_db(&path, "INSERT INTO meta VALUES ('schema_version','2');");
+        seed_fixture_db(&path, "INSERT INTO meta VALUES ('schema_version','3');");
 
         // No Debug on the Ok type.
         let err = SqliteDictionary::open(&path)
             .err()
-            .expect("opening a version-2 database should fail");
+            .expect("opening a version-3 database should fail");
         let msg = err.to_string();
-        assert!(msg.contains("schema_version is 2"), "{msg}");
-        assert!(msg.contains("expects 3"), "{msg}");
+        assert!(msg.contains("schema_version is 3"), "{msg}");
+        assert!(msg.contains("expects 4"), "{msg}");
         assert!(msg.to_lowercase().contains("rebuild"), "{msg}");
     }
 
@@ -655,7 +827,7 @@ mod tests {
              INSERT INTO term VALUES ('書く','書く','かく','v5k',10,1,1);
              INSERT INTO dict_style VALUES (1,'span[data-sc-fbox] { \
                  padding: 0.1em; border-radius: 0.2em; border-style: solid }');
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','4');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -697,7 +869,7 @@ mod tests {
             "INSERT INTO dict VALUES (1,'d',0);
              INSERT INTO entry VALUES (1,1,'[{\"type\":\"structured-content\",\"content\":[\
                  {\"tag\":\"span\",\"data\":{\"fbox\":\"1\"},\"content\":\"x\"}]}]');
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','4');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -723,7 +895,7 @@ mod tests {
              INSERT INTO entry VALUES (2,1,'[{\"type\":\"structured-content\",\
                  \"content\":{\"tag\":\"span\",\"data\":{\"a\":\"1\"},\"content\":\"two\"}}]');
              INSERT INTO dict_style VALUES (1,'span[data-sc-a] { margin-top: 3px }');
-             INSERT INTO meta VALUES ('schema_version','3');",
+             INSERT INTO meta VALUES ('schema_version','4');",
         );
 
         let d = SqliteDictionary::open(&path).unwrap();
@@ -741,5 +913,121 @@ mod tests {
             );
         }
         assert_eq!(1, d.sheets.borrow().len(), "one compile for one dictionary");
+    }
+
+    // ---- pitch (ticket 02) ----
+
+    /// Every field the table holds comes back, markers included, and the
+    /// claims come back with the dictionary that made them rather than
+    /// filtered or ordered: which are enabled and in what order is the pitch
+    /// list's question, and the pitch list is config's (ADR-0014).
+    #[test]
+    fn a_pitch_read_returns_every_claim_with_its_dictionary_and_its_markers() {
+        let path = fixture_path("a_pitch_read_returns_every_claim");
+        let _guard = TempDbGuard(path.clone());
+
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'NHK',0);
+             INSERT INTO dict VALUES (2,'Sanseido',1);
+             INSERT INTO pitch VALUES (1,'合鍵','あいかぎ',0,NULL,'[4]','[2]','[\"名\"]');
+             INSERT INTO pitch VALUES (2,'合鍵','あいかぎ',3,NULL,'[]','[]','[]');
+             INSERT INTO meta VALUES ('schema_version','4');",
+        );
+
+        let d = SqliteDictionary::open(&path).unwrap();
+        let claims = d.pitch_for("合鍵", "あいかぎ");
+
+        assert_eq!(2, claims.len());
+        assert_eq!(1, claims[0].dict_id);
+        assert_eq!(Position::Downstep(0), claims[0].accent.position);
+        assert_eq!(vec![4], claims[0].accent.nasal);
+        assert_eq!(vec![2], claims[0].accent.devoice);
+        assert_eq!(vec!["名".to_string()], claims[0].accent.tags);
+        assert_eq!(2, claims[1].dict_id);
+        assert_eq!(Position::Downstep(3), claims[1].accent.position);
+        assert!(claims[1].accent.nasal.is_empty());
+    }
+
+    /// The `^[HL]+$` form, which the schema permits and no archive in either
+    /// of ticket 01's corpora writes. Stored in its own column because the
+    /// two forms of `position` share no indexing origin.
+    #[test]
+    fn a_stored_pattern_comes_back_as_a_pattern_and_not_as_a_downstep() {
+        let path = fixture_path("a_stored_pattern_comes_back");
+        let _guard = TempDbGuard(path.clone());
+
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'d',0);
+             INSERT INTO pitch VALUES (1,'例','れい',NULL,'LHHL','[]','[]','[]');
+             INSERT INTO meta VALUES ('schema_version','4');",
+        );
+
+        let d = SqliteDictionary::open(&path).unwrap();
+        let claims = d.pitch_for("例", "れい");
+
+        assert_eq!(Position::Pattern("LHHL".to_string()), claims[0].accent.position);
+    }
+
+    /// The reading has to match: Yomitan skips a payload whose reading is
+    /// not the headword's, and 122 rows in the census carry a reading no
+    /// term dictionary emits.
+    #[test]
+    fn a_pitch_read_for_another_reading_finds_nothing() {
+        let path = fixture_path("a_pitch_read_for_another_reading");
+        let _guard = TempDbGuard(path.clone());
+
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'d',0);
+             INSERT INTO pitch VALUES (1,'扱い','〜あつかい',2,NULL,'[]','[]','[]');
+             INSERT INTO meta VALUES ('schema_version','4');",
+        );
+
+        let d = SqliteDictionary::open(&path).unwrap();
+
+        assert!(d.pitch_for("扱い", "あつかい").is_empty());
+        assert_eq!(1, d.pitch_for("扱い", "〜あつかい").len(), "the odd row is still there");
+    }
+
+    /// The hot term statement must not grow a join or a column for pitch:
+    /// it runs roughly 25 times per hover and a Pitch pattern is per
+    /// reading, read once per shown card instead. Asserted as the plan
+    /// SQLite makes of it, which is what "no join" actually means - one
+    /// table, one index probe, and neither of the two per-dictionary tables
+    /// anywhere in it (ADR-0014).
+    #[test]
+    fn the_term_statement_still_plans_as_one_index_probe_with_no_join() {
+        let path = fixture_path("the_term_statement_still_plans");
+        let _guard = TempDbGuard(path.clone());
+
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'d',0);
+             INSERT INTO meta VALUES ('schema_version','4');",
+        );
+        let d = SqliteDictionary::open(&path).unwrap();
+
+        let mut stmt = d
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT surface, written, reading, pos, freq, entry_id, dict_id \
+                 FROM term WHERE surface = ?1",
+            )
+            .unwrap();
+        let steps: Vec<String> = stmt
+            .query_map(["食べる"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(1, steps.len(), "one step is no join: {steps:?}");
+        assert!(steps[0].contains("idx_term_surface"), "{steps:?}");
+        assert!(
+            !steps.iter().any(|s| s.contains("pitch") || s.contains("reported_freq")),
+            "the per-dictionary tables are off the term path entirely: {steps:?}"
+        );
     }
 }

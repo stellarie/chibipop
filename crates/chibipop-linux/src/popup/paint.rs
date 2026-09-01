@@ -974,6 +974,7 @@ mod tests {
                 freq: None,
                 blocks: vec![chibipop::present::GlossBlock::parse("d", body)],
                 match_len: 1,
+                pitch: Vec::new(),
             }),
             collapsed: Vec::new(),
             all_cards: Vec::new(),

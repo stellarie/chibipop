@@ -1,7 +1,8 @@
 //! Editing a live database.
 
 use crate::dict::build::DICT_KEYED;
-use crate::dict::frequency::lookup_freq;
+use crate::dict::frequency::{reduce, FreqTable};
+use crate::dict::reindex;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -43,18 +44,30 @@ pub struct Added {
 /// Inserts one dictionary.
 ///
 /// Ids come from MAX + 1.
+///
+/// Any archive, whatever it supplies: a Dictionary holds a set of roles, so
+/// one with frequency data and no term bank simply contributes no term rows
+/// and still gets the `dict` row its stored claims and accents hang off
+/// (ADR-0014). The refusal that used to stand here rejected an archive for
+/// being called something with `Freq` in it.
 pub fn add_dictionary(
     conn: &mut Connection,
     archive: &Path,
     freqs: &[PathBuf],
     on_progress: &dyn Fn(&str),
 ) -> Result<Added> {
-    if crate::dict::archive::is_frequency_archive(archive) {
-        anyhow::bail!("{} is a frequency archive, not a dictionary", archive.display());
-    }
-    let table = crate::dict::build::load_freqs(freqs)?;
+    let sources = crate::dict::build::load_freqs(freqs)?;
+    let tables: Vec<FreqTable> = sources.into_iter().map(|s| s.table).collect();
 
     let tx = conn.transaction().context("opening the addition transaction")?;
+    // Reduced under the strategy this database's other ranks were reduced
+    // under, so an added dictionary is ranked the way the built ones are.
+    // From the archives the caller lists rather than from what is stored,
+    // because the archives in effect are what the caller is asserting: a
+    // frequency change reconciles storage separately
+    // ([`reapply_frequencies`]) and no term addition is a frequency change.
+    let strategy = reindex::recorded(&tx)?.strategy;
+    let ranks = reduce(&tables, strategy);
     let dict_id = next_dict_id(&tx)?;
     let slot = crate::dict::build::Slot {
         dict_id,
@@ -67,11 +80,23 @@ pub fn add_dictionary(
         &tx,
         archive,
         &slot,
-        &table,
+        &ranks,
         &mut batches,
         on_progress,
     )?;
     // `insert_archive` writes every bank it reads before it returns.
+    //
+    // The archive's own Pitch patterns go in under the same `dict_id`,
+    // because an archive supplies roles rather than being one thing: an
+    // import that stored only the terms would leave a pitch dictionary
+    // silent until the next full rebuild, and one that carries both would
+    // land half of itself.
+    let table = crate::dict::pitch::load_pitch(archive)
+        .with_context(|| format!("reading the pitch of {}", archive.display()))?;
+    let accents = crate::dict::build::store_pitch(&tx, dict_id, &table)?;
+    if accents > 0 {
+        on_progress(&format!("pitch     [{}] {accents} accents", made.name));
+    }
     record_source(&tx, archive)?;
     refresh_stats(&tx)?;
 
@@ -85,65 +110,30 @@ pub fn add_dictionary(
     })
 }
 
-/// Updates every term rank.
+/// Brings the stored Reported frequencies back in line with the frequency
+/// archives the library holds, then recomputes every Frequency rank.
+///
+/// The archive-driven entry point, for an import or a removal: `freqs` is
+/// every frequency archive in effect, so a dictionary it names gets its
+/// `dict` row and its claims stored and one it no longer names loses them.
+/// The strategy already recorded is preserved - only the archives changed.
+/// A settings change reads no archive and goes through
+/// [`crate::dict::reindex::reindex`] instead.
+///
+/// Returns the number of `term` rows restamped.
 pub fn reapply_frequencies(
     conn: &mut Connection,
     freqs: &[PathBuf],
     on_progress: &dyn Fn(&str),
 ) -> Result<u64> {
-    let table = crate::dict::build::load_freqs(freqs)?;
+    let sources = crate::dict::build::load_freqs(freqs)?;
     let tx = conn
         .transaction()
         .context("opening the frequency update transaction")?;
 
-    if table.is_empty() {
-        let changed = tx
-            .execute("UPDATE term SET freq = NULL WHERE freq IS NOT NULL", [])
-            .context("clearing term frequencies")?;
-        let changed = u64::try_from(changed).context("frequency update count overflowed")?;
-        refresh_stats(&tx)?;
-        tx.commit().context("committing frequency updates")?;
-        return Ok(changed);
-    }
+    let reduction = reindex::sync_reported(&tx, &sources)?;
+    let processed = reindex::restamp_from_stored(&tx, &reduction, on_progress)?;
 
-    let rows: Vec<(i64, String, Option<String>, Option<String>)> = {
-        let mut query = tx
-            .prepare("SELECT rowid, surface, written, reading FROM term")
-            .context("preparing the term frequency query")?;
-        let mapped = query
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                ))
-            })
-            .context("querying term frequencies")?;
-        mapped
-            .collect::<rusqlite::Result<_>>()
-            .context("reading term frequencies")?
-    };
-    let mut update = tx
-        .prepare("UPDATE term SET freq = ?1 WHERE rowid = ?2")
-        .context("preparing the frequency update")?;
-    let mut processed = 0_u64;
-
-    for (rowid, surface, written, reading) in rows {
-        let term = written.as_deref().unwrap_or(&surface);
-        let rank = lookup_freq(&table, term, reading.as_deref());
-        update
-            .execute(params![rank, rowid])
-            .with_context(|| format!("updating term row {rowid}"))?;
-        processed = processed
-            .checked_add(1)
-            .context("frequency update count overflowed")?;
-        if processed.is_multiple_of(1000) {
-            on_progress(&format!("Updated {processed} frequency rows…"));
-        }
-    }
-
-    drop(update);
     refresh_stats(&tx)?;
     tx.commit().context("committing frequency updates")?;
     Ok(processed)
@@ -403,6 +393,14 @@ mod tests {
         .unwrap();
     }
 
+    /// The synthetic dictionary these tests add beside the built ones.
+    ///
+    /// Above every id the fixture build allocates, and that is now two: one
+    /// for `terms.zip` and one for `freq.zip`, because a frequency dictionary
+    /// is a dictionary - it is what the user orders and enables, and its
+    /// claims are stored under its own `dict_id`.
+    const SECOND: i64 = 3;
+
     fn add_entry(conn: &Connection, entry_id: i64, dict_id: i64) {
         conn.execute(
             "INSERT INTO entry (entry_id, dict_id, glossary) VALUES (?1, ?2, '[]')",
@@ -426,14 +424,14 @@ mod tests {
         .unwrap();
     }
 
-    /// dict 2: 2 entries, 3 terms.
+    /// dict SECOND: 2 entries, 3 terms.
     fn add_second_dictionary(conn: &Connection) {
-        add_dict(conn, 2);
-        add_entry(conn, 4, 2);
-        add_entry(conn, 5, 2);
-        add_term(conn, "ねずみ", 4, 2);
-        add_term(conn, "いぬ", 5, 2);
-        add_term(conn, "うま", 5, 2);
+        add_dict(conn, SECOND);
+        add_entry(conn, 4, SECOND);
+        add_entry(conn, 5, SECOND);
+        add_term(conn, "ねずみ", 4, SECOND);
+        add_term(conn, "いぬ", 5, SECOND);
+        add_term(conn, "うま", 5, SECOND);
     }
 
     fn ids(conn: &Connection, sql: &str) -> Vec<i64> {
@@ -494,7 +492,7 @@ mod tests {
     fn the_fixture_starts_where_the_builder_left_off() {
         let (conn, _guard) = fixture_db("fixture_baseline");
         assert_eq!(4, next_entry_id(&conn).unwrap());
-        assert_eq!(2, next_dict_id(&conn).unwrap());
+        assert_eq!(3, next_dict_id(&conn).unwrap(), "terms.zip is 1 and freq.zip is 2");
     }
 
     #[test]
@@ -514,7 +512,10 @@ mod tests {
     #[test]
     fn an_empty_table_reads_null_and_allocates_the_base() {
         let (conn, _guard) = fixture_db("empty_allocates_base");
-        conn.execute_batch("DELETE FROM term; DELETE FROM entry; DELETE FROM dict;").unwrap();
+        conn.execute_batch(
+            "DELETE FROM reported_freq; DELETE FROM term; DELETE FROM entry; DELETE FROM dict;",
+        )
+        .unwrap();
 
         let max_entry: Option<i64> =
             conn.query_row("SELECT MAX(entry_id) FROM entry", [], |r| r.get(0)).unwrap();
@@ -541,7 +542,7 @@ mod tests {
         let entries: Vec<i64> = ids(&conn, "SELECT entry_id FROM entry ORDER BY entry_id");
         let dicts: Vec<i64> = ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id");
         assert_eq!(vec![1, 3, 41], entries);
-        assert_eq!(vec![1, 7], dicts);
+        assert_eq!(vec![1, 2, 7], dicts);
 
         assert_eq!(42, next_entry_id(&conn).unwrap());
         assert_eq!(8, next_dict_id(&conn).unwrap());
@@ -608,19 +609,19 @@ mod tests {
         let before = snapshot(&conn, 1);
         assert_eq!(9, before.len(), "1 dict + 3 entry + 5 term rows");
 
-        remove_dictionary(&mut conn, 2, Path::new("other.zip")).unwrap();
+        remove_dictionary(&mut conn, SECOND, Path::new("other.zip")).unwrap();
 
         assert_eq!(before, snapshot(&conn, 1), "the survivor's bytes must not move");
         assert_eq!(3, count(&conn, "SELECT COUNT(*) FROM entry"));
         assert_eq!(5, count(&conn, "SELECT COUNT(*) FROM term"));
-        assert_eq!(vec![1], ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
+        assert_eq!(vec![1, 2], ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
     }
 
     #[test]
     fn a_removal_deletes_the_terms_the_entries_and_the_dict_row() {
         let (mut conn, _guard) = fixture_db("removal_deletes_all_three");
         add_second_dictionary(&conn);
-        let survivor = snapshot(&conn, 2);
+        let survivor = snapshot(&conn, SECOND);
 
         let gone = remove_dictionary(&mut conn, 1, Path::new("terms.zip")).unwrap();
 
@@ -631,7 +632,7 @@ mod tests {
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM term WHERE dict_id = 1"));
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM entry WHERE dict_id = 1"));
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM dict WHERE dict_id = 1"));
-        assert_eq!(survivor, snapshot(&conn, 2), "dict 2 must be untouched");
+        assert_eq!(survivor, snapshot(&conn, SECOND), "the synthetic dict must be untouched");
     }
 
     #[test]
@@ -661,7 +662,7 @@ mod tests {
         let (mut conn, _guard) = fixture_db("absent_dict_is_a_no_op");
         add_second_dictionary(&conn);
         let one = snapshot(&conn, 1);
-        let two = snapshot(&conn, 2);
+        let two = snapshot(&conn, SECOND);
         let sources = source_names(&conn);
 
         let gone = remove_dictionary(&mut conn, 99, Path::new("terms.zip"))
@@ -672,7 +673,7 @@ mod tests {
         assert_eq!(0, gone.terms());
         assert_eq!(0, gone.sources);
         assert_eq!(one, snapshot(&conn, 1));
-        assert_eq!(two, snapshot(&conn, 2));
+        assert_eq!(two, snapshot(&conn, SECOND));
         assert_eq!(sources, source_names(&conn), "a no-op must not edit meta");
     }
 
@@ -685,6 +686,62 @@ mod tests {
 
         assert_eq!(1, gone.sources);
         assert_eq!(vec!["freq.zip"], source_names(&conn), "only the removed archive goes");
+    }
+
+    /// Removing a pitch dictionary takes its accents with it, through the
+    /// same [`DICT_KEYED`] walk every other dict-keyed table takes - and the
+    /// dictionary beside it keeps its own.
+    #[test]
+    fn removing_a_pitch_dictionary_removes_its_accents() {
+        let dir = std::env::temp_dir().join("chibipop_edit_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join(format!("t_{}_pitch_removal.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let _guard = TempDbGuard(out.clone());
+        crate::dict::build::build(
+            &[fixture("terms.zip"), fixture("pitch.zip"), fixture("pitch2.zip")],
+            &[],
+            &out,
+            &|_| {},
+        )
+        .unwrap();
+        let mut conn = Connection::open(&out).unwrap();
+
+        let first: i64 = conn
+            .query_row("SELECT dict_id FROM dict WHERE name = 'FixturePitch'", [], |r| r.get(0))
+            .unwrap();
+        let before = count(&conn, "SELECT COUNT(*) FROM pitch");
+        let mine = count(&conn, &format!("SELECT COUNT(*) FROM pitch WHERE dict_id = {first}"));
+        assert!(mine > 0 && before > mine, "two pitch dictionaries: {before} rows, {mine} its");
+
+        let gone = remove_dictionary(&mut conn, first, Path::new("pitch.zip")).unwrap();
+
+        assert_eq!(mine as usize, gone.rows_in("pitch"), "counted through DICT_KEYED");
+        assert_eq!(
+            0,
+            count(&conn, &format!("SELECT COUNT(*) FROM pitch WHERE dict_id = {first}"))
+        );
+        assert_eq!(
+            before - mine,
+            count(&conn, "SELECT COUNT(*) FROM pitch"),
+            "the other pitch dictionary keeps every accent it gave"
+        );
+    }
+
+    /// An import stores the archive's accents too, so a pitch dictionary
+    /// added from the settings window works without a rebuild.
+    #[test]
+    fn adding_a_pitch_archive_stores_its_accents_under_the_new_dictionary() {
+        let (mut conn, _guard) = fixture_db("adding_pitch");
+
+        let added = add_dictionary(&mut conn, &fixture("pitch.zip"), &[], &|_| {}).unwrap();
+
+        assert_eq!(0, added.entries, "a pitch-only archive contributes no entry");
+        let mine = count(
+            &conn,
+            &format!("SELECT COUNT(*) FROM pitch WHERE dict_id = {}", added.dict_id),
+        );
+        assert!(mine > 0, "its accents went in under its own dictionary row");
     }
 
     #[test]
@@ -706,7 +763,7 @@ mod tests {
         let (mut conn, _guard) = fixture_db("unlisted_archive");
         add_second_dictionary(&conn);
 
-        let gone = remove_dictionary(&mut conn, 2, Path::new("never-built-from.zip")).unwrap();
+        let gone = remove_dictionary(&mut conn, SECOND, Path::new("never-built-from.zip")).unwrap();
 
         assert_eq!(1, gone.dicts);
         assert_eq!(0, gone.sources);
@@ -735,7 +792,7 @@ mod tests {
     #[test]
     fn a_removal_refreshes_grossly_stale_planner_statistics() {
         let (mut conn, _guard) = fixture_db("stats_are_refreshed");
-        add_bulk_dictionary(&conn, 2, 3_000);
+        add_bulk_dictionary(&conn, SECOND, 3_000);
         assert_eq!("5 2", term_stat(&conn), "the build's ANALYZE saw 5 term rows");
 
         remove_dictionary(&mut conn, 1, Path::new("terms.zip")).unwrap();
@@ -751,7 +808,7 @@ mod tests {
         let (mut conn, _guard) = fixture_db("failure_rolls_back");
         add_second_dictionary(&conn);
         assert_eq!(1, count(&conn, "PRAGMA foreign_keys"), "the rollback needs foreign keys");
-        add_term(&conn, "orphan", 1, 2);
+        add_term(&conn, "orphan", 1, SECOND);
         let before = snapshot(&conn, 1);
         let sources = source_names(&conn);
 
@@ -799,16 +856,19 @@ mod tests {
         let (mut conn, _guard) = fixture_db("add_leaves_others_intact");
         add_second_dictionary(&conn);
         let one = snapshot(&conn, 1);
-        let two = snapshot(&conn, 2);
+        let two = snapshot(&conn, SECOND);
 
         let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
 
         assert_eq!(one, snapshot(&conn, 1), "the built dictionary's bytes must not move");
-        assert_eq!(two, snapshot(&conn, 2), "nor the synthetic one's");
+        assert_eq!(two, snapshot(&conn, SECOND), "nor the synthetic one's");
         assert_eq!(3, made.entries);
         assert_eq!(5, made.terms);
-        assert_eq!(3, count(&conn, "SELECT COUNT(*) FROM entry WHERE dict_id = 3"));
-        assert_eq!(5, count(&conn, "SELECT COUNT(*) FROM term WHERE dict_id = 3"));
+        let of_added = |table: &str| {
+            count(&conn, &format!("SELECT COUNT(*) FROM {table} WHERE dict_id = {}", made.dict_id))
+        };
+        assert_eq!(3, of_added("entry"));
+        assert_eq!(5, of_added("term"));
     }
 
     #[test]
@@ -935,7 +995,10 @@ mod tests {
     #[test]
     fn adding_to_an_emptied_database_starts_at_the_builders_base() {
         let (mut conn, _guard) = fixture_db("add_to_an_empty_database");
-        conn.execute_batch("DELETE FROM term; DELETE FROM entry; DELETE FROM dict;").unwrap();
+        conn.execute_batch(
+            "DELETE FROM reported_freq; DELETE FROM term; DELETE FROM entry; DELETE FROM dict;",
+        )
+        .unwrap();
 
         let made = add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
 
@@ -945,17 +1008,30 @@ mod tests {
         assert_eq!(0, count(&conn, "SELECT priority FROM dict WHERE dict_id = 1"));
     }
 
+    /// A Dictionary holds a set of roles, so an archive with frequency data
+    /// and no term bank is added like any other and simply contributes no
+    /// term rows - the `dict` row is what its stored claims and accents hang
+    /// off. The refusal this replaced turned that archive away for being
+    /// called something with `Freq` in it.
     #[test]
-    fn a_frequency_archive_is_refused_rather_than_added_as_an_empty_dictionary() {
-        let (mut conn, _guard) = fixture_db("add_refuses_a_freq_archive");
-        let sources = source_names(&conn);
+    fn a_frequency_archive_is_added_as_a_dictionary_that_contributes_no_entries() {
+        let (mut conn, _guard) = fixture_db("add_a_freq_archive");
 
-        let err = add_dictionary(&mut conn, &fixture("freq.zip"), &[], &|_| {})
-            .expect_err("a frequency archive is not a dictionary");
+        let made = add_dictionary(&mut conn, &fixture("freq.zip"), &[], &|_| {})
+            .expect("an archive supplying frequency is still a Dictionary");
 
-        assert!(format!("{err:#}").contains("frequency"), "got: {err:#}");
-        assert_eq!(vec![1], ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
-        assert_eq!(sources, source_names(&conn));
+        assert_eq!("FixtureFreq", made.name);
+        assert_eq!(0, made.entries, "no term bank, so no entry");
+        assert_eq!(0, made.terms);
+        assert_eq!(
+            vec![1, 2, made.dict_id],
+            ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"),
+        );
+        assert!(
+            source_names(&conn).contains(&"freq.zip".to_string()),
+            "and the build records what it read: {:?}",
+            source_names(&conn),
+        );
     }
 
     #[test]
@@ -973,7 +1049,7 @@ mod tests {
             .expect_err("an aborted insert must fail the addition");
 
         assert!(format!("{err:#}").contains("burst"), "got: {err:#}");
-        assert_eq!(vec![1], ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"),
+        assert_eq!(vec![1, 2], ids(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"),
                    "the dict row goes in first and must roll back with the rest");
         assert_eq!(3, count(&conn, "SELECT COUNT(*) FROM entry"));
         assert_eq!(5, count(&conn, "SELECT COUNT(*) FROM term"));
@@ -984,7 +1060,7 @@ mod tests {
     #[test]
     fn an_addition_refreshes_grossly_stale_planner_statistics() {
         let (mut conn, _guard) = fixture_db("add_refreshes_stats");
-        add_bulk_dictionary(&conn, 2, 3_000);
+        add_bulk_dictionary(&conn, SECOND, 3_000);
         assert_eq!("5 2", term_stat(&conn), "the build's ANALYZE saw 5 term rows");
 
         add_dictionary(&mut conn, &terms_zip(), &freq_zip(), &|_| {}).unwrap();
@@ -1141,8 +1217,25 @@ mod tests {
     fn a_removal_leaves_no_row_keyed_on_the_removed_dictionary_in_any_table() {
         let (archive, _aguard) = complete_archive("no_rows_left");
         let (mut conn, _guard) = db_from("no_rows_left", &archive);
+        // Until a dictionary's roles are a set, the builder cannot give one
+        // `dict_id` both a term bank and reported frequencies: a frequency
+        // archive gets a dict row of its own. So the claim goes in directly,
+        // because the precondition below is the point - a check against an
+        // empty table proves nothing. The accent goes in the same way and
+        // for the same reason: this fixture archive ships no pitch bank.
+        conn.execute(
+            "INSERT INTO reported_freq (dict_id, term, reading, rank) VALUES (1, 'ねこ', NULL, 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pitch (dict_id, term, reading, downstep, pattern, nasal, devoice, tags) \
+             VALUES (1, 'ねこ', 'ねこ', 1, NULL, '[]', '[]', '[]')",
+            [],
+        )
+        .unwrap();
         let keyed = crate::dict::build::dict_keyed_tables(&conn).unwrap();
-        assert!(keyed.len() >= 5, "the schema's dict-keyed tables: {keyed:?}");
+        assert!(keyed.len() >= 6, "the schema's dict-keyed tables: {keyed:?}");
         for table in &keyed {
             let held = count(&conn, &format!("SELECT COUNT(*) FROM {table} WHERE dict_id = 1"));
             assert!(held > 0, "{table} has no row for dict 1, so checking it proves nothing");

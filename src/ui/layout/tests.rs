@@ -420,6 +420,7 @@ fn one_card(pos: &[&str], freq: Option<i64>) -> Presentation {
         freq,
         blocks: vec![block("Jitendex", &["chatting"])],
         match_len: 2,
+        pitch: Vec::new(),
     };
     Presentation {
         top: Some(card.clone()),
@@ -437,6 +438,7 @@ fn with_collapsed() -> Presentation {
         freq: None,
         blocks: vec![block("Jitendex", &["chatting"])],
         match_len: 2,
+        pitch: Vec::new(),
     };
     Presentation {
         top: Some(card.clone()),
@@ -503,6 +505,7 @@ fn card_with(blocks: Vec<GlossBlock>) -> Presentation {
         freq: None,
         blocks,
         match_len: 2,
+        pitch: Vec::new(),
     };
     Presentation {
         top: Some(card.clone()),
@@ -597,6 +600,7 @@ fn a_run_too_wide_for_the_column_wraps_onto_more_lines() {
             freq: None,
             blocks: vec![block("Jitendex", &[&long])],
             match_len: 1,
+            pitch: Vec::new(),
         }),
         collapsed: vec![],
         all_cards: vec![],
@@ -624,6 +628,7 @@ fn a_run_that_exactly_fills_the_column_stays_on_one_line() {
             freq: None,
             blocks: vec![block("Jitendex", &[&exact])],
             match_len: 1,
+            pitch: Vec::new(),
         }),
         collapsed: vec![],
         all_cards: vec![],
@@ -911,6 +916,7 @@ fn a_kana_only_headword_drills_nowhere() {
             freq: None,
             blocks: vec![],
             match_len: 2,
+            pitch: Vec::new(),
         }),
         collapsed: vec![],
         all_cards: vec![],
@@ -1169,6 +1175,7 @@ fn rich(glossary: &str) -> Presentation {
         freq: None,
         blocks: vec![tree("Jitendex", glossary)],
         match_len: 4,
+        pitch: Vec::new(),
     };
     Presentation {
         top: Some(card.clone()),
@@ -3769,6 +3776,7 @@ fn a_table_wider_than_the_panel_never_widens_the_panel() {
             freq: None,
             blocks: vec![tree("Jitendex", &sc(&glossary))],
             match_len: 4,
+            pitch: Vec::new(),
         };
         Presentation {
             top: Some(card.clone()),
@@ -6811,4 +6819,307 @@ fn a_reading_at_a_line_end_is_pulled_back_to_the_content_edge() {
     // The element's own ink box grew to cover the reading, so it reports the
     // same edge rather than a width its furigana exceeds.
     assert_eq!(edge, gloss.rect.x + gloss.rect.w, "the ink box ends there too");
+}
+
+// ---- pitch (ticket 02) ----
+
+/// One accent with no markers, which is 96% of ticket 01's corpus.
+fn accent(fall: u32) -> crate::dict::pitch::Accent {
+    crate::dict::pitch::Accent {
+        position: crate::dict::pitch::Position::Downstep(fall),
+        nasal: Vec::new(),
+        devoice: Vec::new(),
+        tags: Vec::new(),
+    }
+}
+
+/// One pitch row: an accent and the dictionaries that gave it.
+fn pitch_row(fall: u32, dicts: &[&str]) -> crate::present::PitchRow {
+    crate::present::PitchRow {
+        accent: accent(fall),
+        dicts: dicts.iter().map(|d| d.to_string()).collect(),
+    }
+}
+
+/// The `one_card` card with the accents the caller lists.
+fn card_with_pitch(reading: &str, pitch: Vec<crate::present::PitchRow>) -> Presentation {
+    let card = Card {
+        written: Some("雑談".into()),
+        reading: Some(reading.into()),
+        pos: vec![],
+        freq: None,
+        blocks: vec![block("Jitendex", &["chatting"])],
+        match_len: 2,
+        pitch,
+    };
+    Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+    }
+}
+
+/// Every pitch element in the scene, in draw order.
+fn pitch_elems(s: &PopupScene) -> Vec<&SceneElem> {
+    s.elems.iter().filter(|e| e.kind == ElemKind::Pitch).collect()
+}
+
+/// The advance one kana of the reading buys from `FakeMeasure`.
+const READING_UNIT: f32 = 15.0 * ADVANCE;
+
+/// Heiban is 48.0% of the corpus's accents and the shape a renderer has to
+/// get right first: the first mora low, every later one high, and no tick -
+/// the rise carries into the particle that follows the word.
+#[test]
+fn a_heiban_accent_overlines_every_mora_but_the_first_and_draws_no_tick() {
+    let p = card_with_pitch("ざつだん", vec![pitch_row(0, &["Jitendex"])]);
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let rows = pitch_elems(&s);
+    assert_eq!(1, rows.len(), "one accent, one row: {:?}", texts(&s));
+    let row = rows[0];
+    assert_eq!("ざつだん\u{2003}Jitendex", row.text);
+
+    // The headword is 2 kana at 20 px, so 40 px of line; the pitch row
+    // follows it after a 4 px gap, and no plain reading line sits between
+    // them - the marked kana is that reading. `origin` is the 12 px padding.
+    assert_eq!((12.0, 12.0 + 40.0 + 4.0), row.pen);
+    assert_eq!(LINE_GAP, row.top_gap);
+
+    // Three boxes, one per high mora, abutting so the run reads as one
+    // overline. None of them ticks: heiban falls nowhere.
+    assert_eq!(3, row.inline_boxes.len(), "{:?}", row.inline_boxes);
+    for (i, drawn) in row.inline_boxes.iter().enumerate() {
+        let mora = i as f32 + 1.0;
+        assert_eq!(12.0 + mora * READING_UNIT, drawn.rect.x, "mora {mora}");
+        assert_eq!(READING_UNIT, drawn.rect.w, "mora {mora}");
+        assert_eq!(row.pen.1, drawn.rect.y, "on the row's own line");
+        assert_eq!(BorderStyle::Solid, drawn.style.border_style.top);
+        assert_eq!(
+            BorderStyle::None,
+            drawn.style.border_style.right,
+            "heiban draws no downstep tick"
+        );
+    }
+}
+
+/// Atamadaka: the first mora alone is high, and the tick is at its right
+/// edge.
+#[test]
+fn an_atamadaka_accent_overlines_the_first_mora_and_ticks_after_it() {
+    let p = card_with_pitch("ざつだん", vec![pitch_row(1, &["Jitendex"])]);
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let row = pitch_elems(&s)[0];
+    assert_eq!(1, row.inline_boxes.len());
+    let drawn = &row.inline_boxes[0];
+    assert_eq!(12.0, drawn.rect.x, "the first mora starts at the content edge");
+    assert_eq!(READING_UNIT, drawn.rect.w);
+    assert_eq!(BorderStyle::Solid, drawn.style.border_style.top);
+    assert_eq!(BorderStyle::Solid, drawn.style.border_style.right, "the tick");
+    assert_eq!(PITCH_MARK, drawn.style.border.right);
+}
+
+/// Nakadaka: the moras between the first and the downstep are high, and the
+/// tick sits after the last of them rather than at the end of the word.
+#[test]
+fn a_nakadaka_accent_ticks_inside_the_word() {
+    let p = card_with_pitch("ざつだん", vec![pitch_row(3, &["Jitendex"])]);
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let boxes = &pitch_elems(&s)[0].inline_boxes;
+    assert_eq!(2, boxes.len(), "moras two and three: {boxes:?}");
+    assert_eq!(12.0 + READING_UNIT, boxes[0].rect.x);
+    assert_eq!(BorderStyle::None, boxes[0].style.border_style.right);
+    assert_eq!(12.0 + 2.0 * READING_UNIT, boxes[1].rect.x);
+    assert_eq!(BorderStyle::Solid, boxes[1].style.border_style.right);
+}
+
+/// A mora is one or two characters, so its mark has to span both: probing
+/// only the mora's first character would leave half of `きょ` unmarked.
+#[test]
+fn a_two_character_mora_is_marked_by_one_box_spanning_both_of_them() {
+    let p = card_with_pitch("きょうと", vec![pitch_row(0, &["Jitendex"])]);
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let boxes = &pitch_elems(&s)[0].inline_boxes;
+    // Three moras - きょ, う, と - so heiban marks the last two.
+    assert_eq!(2, boxes.len(), "{boxes:?}");
+    assert_eq!(12.0 + 2.0 * READING_UNIT, boxes[0].rect.x, "う, after a two-unit mora");
+    assert_eq!(READING_UNIT, boxes[0].rect.w);
+
+    // And the mora itself, when it is the marked one: atamadaka over きょ.
+    let p = card_with_pitch("きょうと", vec![pitch_row(1, &["Jitendex"])]);
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+    let boxes = &pitch_elems(&s)[0].inline_boxes;
+    assert_eq!(1, boxes.len());
+    assert_eq!(12.0, boxes[0].rect.x);
+    assert_eq!(2.0 * READING_UNIT, boxes[0].rect.w, "both characters of きょ");
+}
+
+/// Two dictionaries disagreeing draw two rows, stacked, in the order the
+/// pitch list put them in - which `present::build` has already applied.
+#[test]
+fn two_accents_draw_two_pitch_rows_stacked_under_the_reading() {
+    let p = card_with_pitch(
+        "ざつだん",
+        vec![pitch_row(0, &["Jitendex"]), pitch_row(3, &["NHK"])],
+    );
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let rows = pitch_elems(&s);
+    assert_eq!(2, rows.len());
+    assert_eq!("ざつだん\u{2003}Jitendex", rows[0].text);
+    assert_eq!("ざつだん\u{2003}NHK", rows[1].text);
+    // 30 px of line plus the 4 px gap between them.
+    assert_eq!(rows[0].pen.1 + 30.0 + LINE_GAP, rows[1].pen.1);
+}
+
+/// The dedup's visible half: one row, both names, and it is the row's own
+/// text that says so.
+#[test]
+fn one_row_naming_two_dictionaries_prints_both_against_that_row() {
+    let p = card_with_pitch("ざつだん", vec![pitch_row(0, &["\u{5927}\u{8f9e}\u{6797}", "NHK"])]);
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let row = pitch_elems(&s)[0];
+    assert_eq!("ざつだん\u{2003}\u{5927}\u{8f9e}\u{6797} \u{b7} NHK", row.text);
+    // Two spans: the reading in the card's reading style, the sources
+    // dimmed. Every other chrome element has one.
+    assert_eq!(2, row.spans.len());
+    assert_eq!(15.0, row.spans[0].size);
+    assert_eq!(13.0, row.spans[1].size);
+    assert_eq!("ざつだん".len() as u32, row.spans[0].len);
+}
+
+/// Nothing at all when no enabled pitch dictionary has the reading. Not an
+/// empty row, and not a placeholder: an empty row would say something untrue
+/// about the word.
+#[test]
+fn a_card_with_no_accent_draws_no_pitch_element() {
+    let s = laid_out(&one_card(&[], None), 480.0, 800.0, false, false);
+
+    assert!(pitch_elems(&s).is_empty(), "{:?}", texts(&s));
+}
+
+/// Straight under the headword and above the part of speech - and the plain
+/// reading line is gone, because the marked kana already is that reading.
+#[test]
+fn the_pitch_row_replaces_the_reading_line_and_sits_above_the_part_of_speech() {
+    let card = Card {
+        written: Some("雑談".into()),
+        reading: Some("ざつだん".into()),
+        pos: vec!["noun".into()],
+        freq: None,
+        blocks: vec![block("Jitendex", &["chatting"])],
+        match_len: 2,
+        pitch: vec![pitch_row(0, &["Jitendex"])],
+    };
+    let p = Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+    };
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let order: Vec<&str> = s.elems.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        vec!["Headword", "Pitch", "Text", "Text", "Text"],
+        order,
+        "{:?}",
+        texts(&s)
+    );
+    assert!(
+        !texts(&s).iter().any(|t| *t == "ざつだん"),
+        "the bare reading is never drawn beside its own marked kana: {:?}",
+        texts(&s)
+    );
+    assert_eq!("noun", s.elems[2].text, "the part of speech, after the accent");
+}
+
+/// A kana-only headword draws no reading line of its own, and the marked
+/// kana still lands directly under the headword.
+#[test]
+fn a_kana_only_headword_draws_its_accent_under_the_headword() {
+    let card = Card {
+        written: None,
+        reading: Some("ざつだん".into()),
+        pos: vec![],
+        freq: None,
+        blocks: vec![],
+        match_len: 4,
+        pitch: vec![pitch_row(1, &["Jitendex"])],
+    };
+    let p = Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+    };
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let order: Vec<&str> = s.elems.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(vec!["Headword", "Pitch"], order);
+    // The headword is the reading, 4 kana at 20 px, so 40 px of line.
+    assert_eq!(12.0 + 40.0 + LINE_GAP, s.elems[1].pen.1);
+}
+
+/// The mark decorates and never spaces: a pitch row measures and stacks
+/// exactly as the same text would with no accent on it, so a box that took
+/// room would move every element below it.
+#[test]
+fn the_marks_take_no_room_from_the_line_they_sit_on() {
+    let plain = laid_out(
+        &card_with_pitch("ざつだん", vec![pitch_row(0, &["Jitendex"])]),
+        480.0,
+        800.0,
+        false,
+        false,
+    );
+    let ticked = laid_out(
+        &card_with_pitch("ざつだん", vec![pitch_row(1, &["Jitendex"])]),
+        480.0,
+        800.0,
+        false,
+        false,
+    );
+
+    let row = |s: &PopupScene| {
+        let e = pitch_elems(s)[0];
+        (e.rect, e.advance, e.pen)
+    };
+    assert_eq!(row(&plain), row(&ticked));
+    assert_eq!(plain.content_h, ticked.content_h);
+}
+
+/// The frequency corner narrows the one element after it, and the accent is
+/// that element when the card has no reading line and no part of speech - so
+/// the reservation has to reach this arm like every other stacking one.
+#[test]
+fn a_pitch_row_after_the_frequency_corner_takes_the_narrowed_width() {
+    let card = Card {
+        written: None,
+        reading: Some("ざつだん".into()),
+        pos: vec![],
+        freq: Some(42),
+        blocks: vec![],
+        match_len: 4,
+        pitch: vec![pitch_row(0, &["Jitendex"])],
+    };
+    let p = Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+    };
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    // The corner narrows the headword, and the accent below it gets the full
+    // column back.
+    let head = find(&s, ElemKind::Headword);
+    let row = pitch_elems(&s)[0];
+    assert!(head.wrap_w < s.content_w, "the corner narrowed the headword");
+    assert_eq!(s.content_w, row.wrap_w, "and only the one after it");
 }

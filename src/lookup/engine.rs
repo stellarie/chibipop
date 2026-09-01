@@ -538,4 +538,20 @@ mod tests {
         }
         assert_eq!(MAX_RESULTS, engine().run(&d, "ふし").unwrap().len());
     }
+
+    /// A headword no enabled frequency dictionary ranks keeps this fallback,
+    /// and keeping it is what makes "absent data is not counted" free at
+    /// lookup time (ADR-0015): the reindex writes `NULL` rather than a
+    /// stand-in rank, and `NULL` has always scored exactly as `DEFAULT_FREQ`
+    /// does.
+    #[test]
+    fn an_unranked_row_scores_exactly_as_a_default_frequency_one() {
+        let stand_in = Some(DEFAULT_FREQ as i64);
+        assert_eq!(score(3, None, false), score(3, stand_in, false));
+        assert_eq!(score(3, None, true), score(3, stand_in, true));
+        assert!(
+            score(3, Some(1), false) > score(3, None, false),
+            "and a ranked row still beats an unranked one"
+        );
+    }
 }

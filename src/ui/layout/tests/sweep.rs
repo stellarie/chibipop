@@ -30,7 +30,7 @@ use anyhow::Context as _;
 
 use super::*;
 use crate::config::MAX_WIDTH_RANGE;
-use crate::dict::archive::{for_each_term, is_frequency_archive, read_index, read_styles_css};
+use crate::dict::archive::{for_each_term, read_index, read_styles_css, supplies_terms};
 use crate::dict::gloss::{plain_items, renders_text, GlossDoc, Kind, NodeId, NodePath, StyleKey};
 use crate::dict::sheet::{self, Sheet};
 use crate::present::Presentation;
@@ -1158,6 +1158,7 @@ fn stack_of(kind: ElemKind) -> Option<Stack> {
         | ElemKind::Text
         | ElemKind::Collapsed
         | ElemKind::Headword
+        | ElemKind::Pitch
         | ElemKind::BackButton => Some(Stack::Flow),
         ElemKind::Image => Some(Stack::Assets),
         ElemKind::Corner | ElemKind::Block | ElemKind::Table | ElemKind::Cell => None,
@@ -1900,6 +1901,7 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
             }],
         }],
         match_len: r.term.chars().count(),
+        pitch: Vec::new(),
     };
     Presentation {
         top: Some(card.clone()),
@@ -2103,15 +2105,17 @@ fn archive_title(zip: &Path) -> String {
 
 /// Every term archive in a corpus directory, in a stable order.
 ///
-/// Frequency archives are skipped by the same test the builder uses: they
-/// carry no glossary, so there is nothing in one to render.
+/// The terms role is what makes an archive sweepable: one supplying only
+/// frequency data or only Pitch patterns carries no glossary, so there is
+/// nothing in it to render. Asked of the archive's own banks, exactly as
+/// the library asks it.
 fn corpus_archives(dir: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("reading the corpus at {}: {e}", dir.display()))
         .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
-        .filter(|p| !is_frequency_archive(p))
+        .filter(|p| supplies_terms(p))
         .collect();
     // `read_dir` order is not defined, and a sweep numbers its dictionaries.
     out.sort();

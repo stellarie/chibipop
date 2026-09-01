@@ -116,7 +116,24 @@ fn dict_named(name: &str) -> FakeDictionary {
     d
 }
 
+/// Every Dictionary name the fakes here answer to, spelled the way the
+/// config has to spell it.
+///
+/// A list under `[dictionaries]` names a Dictionary by its whole name and
+/// is matched by equality, and an enabled terms list naming none of the
+/// installed Dictionaries searches nothing - there is no ladder behind it
+/// to widen the scope back out (ADR-0014). A fixture that never names
+/// itself therefore presents an empty popup, so every identity these
+/// tests expect a card from is listed: the one `dict()` installs, the two
+/// a reopen swaps between, and the one a reload renames it to.
+/// `WhatTheBinKnew` is deliberately absent - it is the stale name the
+/// reopened file's own identities beat, and a card wearing it is the bug
+/// that test pins.
+const SEARCHED: [&str; 4] = ["FakeDict", "Renamed", "BeforeTheRebuild", "AfterTheRebuild"];
+
 fn settings() -> WorkerSettings {
+    let mut cfg = chibipop::config::Config::default();
+    cfg.dictionaries.terms = SEARCHED.iter().map(|name| (*name).to_string()).collect();
     WorkerSettings {
         max_passes: 1,
         upscale: 2,
@@ -124,7 +141,7 @@ fn settings() -> WorkerSettings {
         capture: CaptureSize::default(),
         scan_alphanumeric: true,
         language: "ja".to_string(),
-        present_cfg: chibipop::config::Config::default().present_config(&[], || true),
+        present_cfg: cfg.present_config(&[]),
         scan_display: ScanDisplay { captures: false, highlight: false },
         sentence_mode: chibipop::config::SentenceMode::Line,
         static_region: None,

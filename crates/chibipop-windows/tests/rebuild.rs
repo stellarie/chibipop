@@ -66,9 +66,12 @@ fn a_fixture_library_builds_and_reports_done() {
 
     let db = SqliteDictionary::open(&out).unwrap();
     assert_eq!(3, db.entries(&[1, 2, 3, 4]).unwrap().len(), "3 entries built");
-    let dicts = db.dicts().unwrap();
-    assert_eq!(1, dicts.len());
-    assert_eq!("FixtureTerms", dicts[0].name);
+    // One archive is one dictionary whatever it supplies, so the
+    // frequency archive owns a `dict` row of its own now (ADR-0014).
+    let mut names: Vec<String> =
+        db.dicts().unwrap().into_iter().map(|d| d.name).collect();
+    names.sort();
+    assert_eq!(vec!["FixtureFreq".to_string(), "FixtureTerms".to_string()], names);
     assert!(!tmp_of(&out).exists(), "the .tmp is renamed away, not left");
 }
 
@@ -116,14 +119,16 @@ fn every_archive_line_renders_as_a_name_and_the_last_line_does_not() {
         })
         .collect();
     let shown: Vec<String> = lines.iter().filter_map(|l| friendly(l)).collect();
+    // freq.zip is named twice on purpose: it is one of the dictionaries
+    // the build installs *and* an archive whose reported frequencies it
+    // loads, so it is in both of `build-dict`'s lists (ADR-0014). The
+    // archives are announced case-folded, which puts it first.
+    let read: Vec<&String> = shown.iter().filter(|s| s.starts_with("Reading ")).collect();
     assert_eq!(
-        vec![
-            "Reading terms.zip…".to_string(),
-            "Reading freq.zip…".to_string(),
-            "Creating search index…".to_string(),
-        ],
-        shown
+        vec!["Reading freq.zip…", "Reading terms.zip…", "Reading freq.zip…"],
+        read
     );
+    assert!(shown.iter().any(|s| s == "Creating search index…"), "{shown:?}");
     assert_eq!(lines.len(), shown.len() + 1, "the wrote line is swallowed: {lines:?}");
     assert!(!shown.iter().any(|s| s.contains(".tmp")), "{shown:?}");
 }
@@ -143,10 +148,14 @@ fn a_failed_build_leaves_an_existing_output_byte_identical() {
         panic!("expected Failed last, got {msgs:?}");
     };
     assert!(why.contains("the builder failed"), "a real child ran: {why}");
-    assert!(why.contains("Zip"), "the child's own error is reported: {why}");
+    // An archive this build cannot read is not a dictionary and is not
+    // built (ADR-0014), so a library holding only one is a library holding
+    // nothing to build - and the child says so itself.
+    assert!(why.contains("no readable archives"), "the child's own error: {why}");
     assert!(
         msgs.iter().any(|m| matches!(m, Progress::Line(l) if l.contains("broken.zip"))),
-        "stdout was drained even on the failing path: {msgs:?}"
+        "stdout was drained even on the failing path, and the file it skipped \
+         is still named: {msgs:?}"
     );
     assert_eq!(known, std::fs::read(&out).unwrap().as_slice(), "untouched");
     assert!(!tmp_of(&out).exists(), "no .tmp left behind");
@@ -202,7 +211,8 @@ fn a_quarantined_archive_is_invisible_to_the_real_builder() {
         "the held archive was read anyway: {msgs:?}"
     );
     assert!(held.join("terms.zip").is_file(), "and it is still there");
-    assert_eq!(1, SqliteDictionary::open(&out).unwrap().dicts().unwrap().len());
+    // freq.zip survives the quarantine and is a dictionary of its own.
+    assert_eq!(2, SqliteDictionary::open(&out).unwrap().dicts().unwrap().len());
 }
 
 /// All held is still empty.

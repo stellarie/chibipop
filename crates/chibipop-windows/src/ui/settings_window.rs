@@ -4,29 +4,43 @@
 //! Numbers are combos, not spins.
 
 use crate::config::{LayoutMode, SentenceMode, FIELD_SOURCES};
-use crate::library::Kind;
-use crate::settings::{SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE};
+use crate::dict::frequency::RankingStrategy;
+use crate::library::Role;
+use crate::settings::{
+    DictRow, SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
+};
 use crate::text::ocr::tag_matches;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, GetMonitorInfoW,
-    MonitorFromWindow, ReleaseDC, COLOR_BTNFACE, ENUMLOGFONTEXW, HFONT, LOGFONTW, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET, TEXTMETRICW,
+    CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, GetMonitorInfoW, GetSysColor,
+    MonitorFromWindow, PtInRect, ReleaseDC, ScreenToClient, COLOR_BTNFACE, COLOR_WINDOWTEXT,
+    ENUMLOGFONTEXW, HFONT, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET,
+    TEXTMETRICW,
 };
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, ICC_TAB_CLASSES,
+    InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
+    LIST_VIEW_ITEM_STATE_FLAGS, NMLISTVIEW, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, LVCF_WIDTH,
+    LVIF_TEXT, LVIM_AFTER, LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVIS_STATEIMAGEMASK,
+    LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_GETITEMRECT,
+    LVM_GETITEMSTATE, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETINSERTMARK, LVM_SETINSERTMARKCOLOR,
+    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_SELECTED, LVN_BEGINDRAG, LVN_ITEMCHANGED,
+    LVSCW_AUTOSIZE_USEHEADER, LVS_EX_CHECKBOXES, LVS_EX_FULLROWSELECT, LVS_NOCOLUMNHEADER,
+    LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, WC_LISTVIEW,
 };
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
     OFN_NOCHANGEDIR, OPENFILENAMEW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, ReleaseCapture, SetCapture, SetFocus,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -69,14 +83,16 @@ const ID_SUMMARY: i32 = 107;
 const ID_HIGHLIGHT: i32 = 108;
 const ID_SCROLL: i32 = 109;
 const ID_EXCLUDE: i32 = 110;
-const ID_DICTS: i32 = 111;
-const ID_DICT_UP: i32 = 112;
-const ID_DICT_DOWN: i32 = 113;
+/// The Terms list.
+const ID_TERMS: i32 = 111;
+const ID_TERMS_UP: i32 = 112;
+const ID_TERMS_DOWN: i32 = 113;
 const ID_PASSES: i32 = 114;
 const ID_SHOW_SCAN: i32 = 115;
 const ID_QUIT: i32 = 116;
-const ID_DICT_ADD: i32 = 117;
-const ID_DICT_REMOVE: i32 = 118;
+const ID_TERMS_ADD: i32 = 117;
+const ID_TERMS_REMOVE: i32 = 118;
+/// The Frequency list.
 const ID_FREQS: i32 = 119;
 const ID_FREQ_ADD: i32 = 120;
 const ID_FREQ_REMOVE: i32 = 121;
@@ -99,8 +115,8 @@ const ID_CAPTURE_H: i32 = 137;
 const ID_SCAN_ALNUM: i32 = 138;
 const ID_PER_CHAR: i32 = 139;
 const ID_OCR_LANG: i32 = 140;
-/// 141 was Include / exclude.
-const ID_DICTS_OFF: i32 = 142;
+// 141 was Include / exclude,
+// 142 the Not-searched box.
 /// Clips the page content.
 const ID_VIEWPORT: i32 = 143;
 /// Holds the page content.
@@ -147,6 +163,22 @@ const ID_SHOW_ATTRIBUTIONS: i32 = 166;
 const ID_SHOW_IMAGES: i32 = 167;
 /// Show-part-of-speech checkbox.
 const ID_SHOW_POS: i32 = 168;
+/// Frequency move-up button.
+const ID_FREQ_UP: i32 = 169;
+/// Frequency move-down button.
+const ID_FREQ_DOWN: i32 = 170;
+/// The Pitch list.
+const ID_PITCH: i32 = 171;
+/// Pitch move-up button.
+const ID_PITCH_UP: i32 = 172;
+/// Pitch move-down button.
+const ID_PITCH_DOWN: i32 = 173;
+/// Pitch Add button.
+const ID_PITCH_ADD: i32 = 174;
+/// Pitch Remove button.
+const ID_PITCH_REMOVE: i32 = 175;
+/// Ranking-strategy combo, Dictionaries tab.
+const ID_RANKING: i32 = 176;
 
 /// First field-map combo id.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -220,6 +252,31 @@ fn layout_mode_at(selection: isize) -> LayoutMode {
         .map_or(LayoutMode::Roomy, |&(mode, _)| mode)
 }
 
+/// The ranking-strategy combo, in the order it is filled.
+///
+/// The same one-table-per-edge rule as [`SENTENCE_MODES`], and for the
+/// same reason: a Win32 combo answers with the index it was filled at, so
+/// the labels going in and the strategy coming back out are two halves of
+/// this one table. The Linux window's `RANKING_STRATEGIES` carries the
+/// same three labels; the kebab-case TOML spellings are
+/// [`RankingStrategy`]'s own and never these.
+const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
+    (RankingStrategy::BestRank, "Best rank \u{2014} the commonest claim wins"),
+    (RankingStrategy::Priority, "Priority \u{2014} the highest list that has the word"),
+    (RankingStrategy::Median, "Median \u{2014} the middle of what they claim"),
+];
+
+/// The strategy a combo selection names.
+///
+/// No selection (`-1`, a combo that lost it) reads as the default, which
+/// is the item `build` selects when it finds none.
+fn ranking_strategy_at(selection: isize) -> RankingStrategy {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| RANKING_STRATEGIES.get(i))
+        .map_or(RankingStrategy::BestRank, |&(strategy, _)| strategy)
+}
+
 /// First plugin-enable id.
 const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
 /// First plugin-configure id.
@@ -257,21 +314,28 @@ struct TcItemW {
 }
 
 /// What an Apply disables.
-const WHILE_BUSY: [i32; 16] = [
+const WHILE_BUSY: [i32; 23] = [
     ID_APPLY,
     ID_QUIT,
     ID_OCR_LANG,
     ID_ENGINE,
     ID_ENGINE_CONFIGURE,
-    ID_DICTS,
-    ID_DICTS_OFF,
-    ID_DICT_UP,
-    ID_DICT_DOWN,
-    ID_DICT_ADD,
-    ID_DICT_REMOVE,
+    ID_RANKING,
+    ID_TERMS,
+    ID_TERMS_UP,
+    ID_TERMS_DOWN,
+    ID_TERMS_ADD,
+    ID_TERMS_REMOVE,
     ID_FREQS,
+    ID_FREQ_UP,
+    ID_FREQ_DOWN,
     ID_FREQ_ADD,
     ID_FREQ_REMOVE,
+    ID_PITCH,
+    ID_PITCH_UP,
+    ID_PITCH_DOWN,
+    ID_PITCH_ADD,
+    ID_PITCH_REMOVE,
     ID_ANKI_TEST,
     ID_CHECK_UPDATE,
 ];
@@ -315,20 +379,21 @@ const WHEEL_LINES: i32 = 3;
 
 // ---- Dictionaries tab ----
 
-/// One line above each box.
+/// One line above each list.
 const DICT_CAP_H: i32 = 18;
-const DICT_BOX_H: i32 = 64;
-/// Four 15px rows plus border.
-const _: () = assert!((DICT_BOX_H - 2) / 15 >= 4);
-/// One line under both boxes.
-const DICT_HINT_H: i32 = 20;
+/// Beside a four-button column.
+const DICT_LIST_H: i32 = 3 * BTN_PITCH + ROW_H;
+/// Six 17px rows plus border.
+const _: () = assert!((DICT_LIST_H - 2) / 17 >= 6);
 
-/// Dictionaries group height.
+/// One section's group height.
 ///
-/// Budgeted against the one-box
-/// layout it replaces: 218.
-fn dict_group_h() -> i32 {
-    20 + 2 * (DICT_CAP_H + DICT_BOX_H) + ROW_GAP + DICT_HINT_H + 8
+/// The strategy row is Frequency's alone: it is the rule that reduces
+/// *that* list, and drawing it anywhere else would claim it reduces the
+/// other two as well (ADR-0014).
+fn role_group_h(role: Role) -> i32 {
+    let strategy = if role == Role::Frequency { ROW_H + ROW_GAP } else { 0 };
+    20 + DICT_CAP_H + strategy + DICT_LIST_H + 8
 }
 
 // ---- field-map columns ----
@@ -349,19 +414,105 @@ const PLUGIN_STATUS_H: i32 = ROW_H + 16;
 /// One plugin row's own height.
 const PLUGIN_ROW_H: i32 = 2 * ROW_H + PLUGIN_STATUS_H;
 
-/// Which list a button acts on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Target {
-    Dicts,
-    Freqs,
+/// One role's section, as the ids it owns.
+///
+/// The three sections differ only in which controls they own, and a Win32
+/// control is reached by its id, so this table *is* the section: `build`
+/// creates from it, `WM_NOTIFY` routes a notification back through it, and
+/// `move_selected` and `update_list_buttons` act on it. A second list that
+/// merely agreed with this one today would act on the wrong section the
+/// day either gained a control.
+struct Section {
+    role: Role,
+    /// The ListView.
+    list: i32,
+    up: i32,
+    down: i32,
+    add: i32,
+    remove: i32,
+    /// The group box's own caption.
+    group: &'static str,
+    /// One line above the list.
+    hint: &'static str,
+}
+
+/// The three sections, stacked in [`Role::EVERY`] order.
+///
+/// One list per role, each with its own order and its own checkbox: a
+/// mixed archive is a row in every section it has data for, and unticking
+/// its definitions may not silently kill its frequency data (ADR-0014).
+const SECTIONS: [Section; 3] = [
+    Section {
+        role: Role::Terms,
+        list: ID_TERMS,
+        up: ID_TERMS_UP,
+        down: ID_TERMS_DOWN,
+        add: ID_TERMS_ADD,
+        remove: ID_TERMS_REMOVE,
+        group: "Terms \u{2014} the definitions a lookup shows",
+        hint: "Topmost first, for the selected OCR language. Untick to skip one.",
+    },
+    Section {
+        role: Role::Frequency,
+        list: ID_FREQS,
+        up: ID_FREQ_UP,
+        down: ID_FREQ_DOWN,
+        add: ID_FREQ_ADD,
+        remove: ID_FREQ_REMOVE,
+        group: "Frequency data \u{2014} how common each word is",
+        hint: "Topmost first. Untick to leave a list out of the ranking.",
+    },
+    Section {
+        role: Role::Pitch,
+        list: ID_PITCH,
+        up: ID_PITCH_UP,
+        down: ID_PITCH_DOWN,
+        add: ID_PITCH_ADD,
+        remove: ID_PITCH_REMOVE,
+        group: "Pitch accent \u{2014} how each word is said",
+        hint: "Topmost first. Untick to hide a dictionary's accents.",
+    },
+];
+
+/// The section a list id names.
+fn section_of_list(id: i32) -> Option<&'static Section> {
+    SECTIONS.iter().find(|s| s.list == id)
+}
+
+/// The section a Move button belongs to, and the way it moves.
+fn move_button(id: i32) -> Option<(&'static Section, bool)> {
+    SECTIONS.iter().find_map(|s| {
+        if s.up == id {
+            Some((s, true))
+        } else if s.down == id {
+            Some((s, false))
+        } else {
+            None
+        }
+    })
+}
+
+/// The section a Remove button belongs to.
+fn remove_button(id: i32) -> Option<&'static Section> {
+    SECTIONS.iter().find(|s| s.remove == id)
+}
+
+/// Does this id name an Add button?
+///
+/// One answer for all three, because an import lands in the lists its
+/// roles name and never in the one whose button was pressed: the button is
+/// per section only so the user need not leave the section to import.
+fn is_add_button(id: i32) -> bool {
+    SECTIONS.iter().any(|s| s.add == id)
 }
 
 /// A click to service.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    /// The file picks the list.
+    /// The archive's roles pick the lists.
     Add,
-    Remove(Target),
+    /// Out of every list, whichever section asked.
+    Remove(Role),
     ConfigureEngine,
 }
 
@@ -582,14 +733,11 @@ thread_local! {
     // Pending OCR-language switch.
     static LANG_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
 
-    // Unreadable rows, by `HWND`.
-    static UNREADABLE: RefCell<Option<(isize, Vec<String>)>> = const { RefCell::new(None) };
-
     // Plugin dirs, by `HWND`.
     static PLUGIN_DIRS: RefCell<Option<(isize, Vec<PathBuf>)>> = const { RefCell::new(None) };
 
-    // Last box selected, by `HWND`.
-    static DICT_BOX: Cell<Option<(isize, DictBox)>> = const { Cell::new(None) };
+    // The row being dragged, by `HWND`.
+    static DRAG: Cell<Option<Drag>> = const { Cell::new(None) };
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -613,18 +761,6 @@ fn record_click(hwnd: HWND, click: SettingsClick) {
 
 fn record_field_map_toggle(hwnd: HWND) {
     FIELD_MAP_TOGGLE.with(|c| c.set(Some(hwnd.0 as isize)));
-}
-
-fn remember_unreadable(hwnd: HWND, files: &[String]) {
-    UNREADABLE.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, files.to_vec())));
-}
-
-/// Rows carrying no name.
-fn unreadable_rows(hwnd: HWND) -> Vec<String> {
-    UNREADABLE.with(|c| match &*c.borrow() {
-        Some((h, u)) if *h == hwnd.0 as isize => u.clone(),
-        _ => Vec::new(),
-    })
 }
 
 fn remember_plugin_dirs(hwnd: HWND, dirs: Vec<PathBuf>) {
@@ -719,31 +855,6 @@ unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
     path.parent().map(|p| p.to_path_buf())
 }
 
-fn record_dict_box(hwnd: HWND, which: DictBox) {
-    DICT_BOX.with(|c| c.set(Some((hwnd.0 as isize, which))));
-}
-
-/// Last box to report a change.
-fn tracked_dict_box(hwnd: HWND) -> Option<DictBox> {
-    DICT_BOX.with(|c| c.get()).and_then(|(h, b)| (h == hwnd.0 as isize).then_some(b))
-}
-
-/// Which box the buttons act on.
-fn acting_box(searched_sel: bool, not_searched_sel: bool, last: Option<DictBox>) -> DictBox {
-    match (searched_sel, not_searched_sel) {
-        (true, false) => DictBox::Searched,
-        (false, true) => DictBox::NotSearched,
-        _ => last.unwrap_or(DictBox::Searched),
-    }
-}
-
-fn dict_box_id(which: DictBox) -> i32 {
-    match which {
-        DictBox::Searched => ID_DICTS,
-        DictBox::NotSearched => ID_DICTS_OFF,
-    }
-}
-
 fn record_language_change(hwnd: HWND) {
     LANG_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
     // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
@@ -798,16 +909,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let notify = (wparam.0 >> 16) as u16;
             // Any click cancels capture.
             unsafe { cancel_capture(hwnd) };
-            // Or Move buttons go stale.
-            if (id == ID_DICTS || id == ID_DICTS_OFF || id == ID_FREQS)
-                && notify == LBN_SELCHANGE as u16
-            {
-                if id == ID_DICTS {
-                    record_dict_box(hwnd, DictBox::Searched);
-                } else if id == ID_DICTS_OFF {
-                    record_dict_box(hwnd, DictBox::NotSearched);
-                }
-                unsafe { update_list_buttons(hwnd) };
+            // A role list reports through WM_NOTIFY, so nothing a list
+            // itself does arrives here any more. Its buttons still do, and
+            // which section each one belongs to is `SECTIONS`' answer
+            // rather than a second table of ids that would have to agree.
+            if let Some((section, up)) = move_button(id) {
+                unsafe { move_selected(hwnd, section, up) };
+                return LRESULT(0);
+            }
+            if let Some(section) = remove_button(id) {
+                record_action(hwnd, Action::Remove(section.role));
+                return LRESULT(0);
+            }
+            if is_add_button(id) {
+                record_action(hwnd, Action::Add);
                 return LRESULT(0);
             }
             if id == ID_OCR_LANG && notify == CBN_SELCHANGE as u16 {
@@ -832,12 +947,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // Escape. X goes via WM_CLOSE.
                 2 => record_outcome(hwnd, SettingsOutcome::Cancel),
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
-                ID_DICT_UP => unsafe { move_selected(hwnd, true) },
-                ID_DICT_DOWN => unsafe { move_selected(hwnd, false) },
-                ID_DICT_ADD => record_action(hwnd, Action::Add),
-                ID_DICT_REMOVE => record_action(hwnd, Action::Remove(Target::Dicts)),
-                ID_FREQ_ADD => record_action(hwnd, Action::Add),
-                ID_FREQ_REMOVE => record_action(hwnd, Action::Remove(Target::Freqs)),
                 ID_ENGINE_CONFIGURE => record_action(hwnd, Action::ConfigureEngine),
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
@@ -870,6 +979,49 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 };
                 TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
             }
+            // Both halves of a row arrive as this one notification: the
+            // arrows and a click move the selection, and the space bar and
+            // a click on the box move the checkbox. Only the selection can
+            // stale a Move button, but re-greying off either is one branch
+            // instead of two, and a tick needs no bookkeeping of its own -
+            // the control is where a row's enabled flag lives until `read`
+            // asks for it.
+            if nmhdr.code == LVN_ITEMCHANGED
+                && section_of_list(nmhdr.id_from as i32).is_some()
+            {
+                unsafe { update_list_buttons(hwnd) };
+            }
+            // A drag starts here and is tracked below: the control decides
+            // that a press has become a drag and then tracks nothing
+            // itself, so from this notification on the gesture is this
+            // window's. Which section it belongs to is `SECTIONS`' answer,
+            // and it is the *only* list the drop can land in.
+            if nmhdr.code == LVN_BEGINDRAG {
+                if let Some(section) = section_of_list(nmhdr.id_from as i32) {
+                    // SAFETY: LVN_BEGINDRAG's `lparam` is an NMLISTVIEW,
+                    // whose first member is the NMHDR just read; the
+                    // control guarantees this for the notification it
+                    // names.
+                    let nm = unsafe { &*(lparam.0 as *const NMLISTVIEW) };
+                    let origin = (nm.ptAction.x, nm.ptAction.y);
+                    unsafe { begin_drag(hwnd, section, nm.iItem, origin) };
+                }
+            }
+            LRESULT(0)
+        }
+        // The three below only exist while a row is being dragged, so each
+        // is claimed only then: with no drag in progress they are the
+        // default handler's, unchanged.
+        WM_MOUSEMOVE if drag_of(hwnd).is_some() => {
+            unsafe { track_drag(hwnd) };
+            LRESULT(0)
+        }
+        WM_LBUTTONUP if drag_of(hwnd).is_some() => {
+            unsafe { finish_drag(hwnd) };
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED if drag_of(hwnd).is_some() => {
+            unsafe { cancel_drag(hwnd) };
             LRESULT(0)
         }
         WM_SIZE => {
@@ -1192,132 +1344,655 @@ unsafe fn panes(root: HWND) -> WinResult<(HWND, HWND)> {
     }
 }
 
-/// A box's own selected row.
-unsafe fn box_selection(hwnd: HWND, which: DictBox) -> isize {
-    // SAFETY: both ids name live descendants of `hwnd`, created in `build`;
-    // a missing one yields `Err` here rather than a dangling handle.
-    unsafe {
-        dlg_item(hwnd, dict_box_id(which))
-            .map(|l| SendMessageW(l, LB_GETCURSEL, None, None).0)
-            .unwrap_or(-1)
-    }
-}
-
-/// The box the buttons act on.
-unsafe fn active_dict_box(hwnd: HWND) -> DictBox {
-    // SAFETY: `box_selection` states its own contract.
-    unsafe {
-        acting_box(
-            box_selection(hwnd, DictBox::Searched) >= 0,
-            box_selection(hwnd, DictBox::NotSearched) >= 0,
-            tracked_dict_box(hwnd),
-        )
-    }
-}
-
-/// Refill both, select one row.
+/// The shift that turns a state-image index into item state.
 ///
-/// The other box is cleared, so
-/// one row only is highlighted.
-unsafe fn select_dict_row(
-    hwnd: HWND,
-    searched: &[String],
-    not_searched: &[String],
-    to: DictBox,
-    at: usize,
-) {
-    // SAFETY: both ids name live descendants of `hwnd`, created in `build`;
-    // `fill_dict_list` states its own contract. LB_SETCURSEL with -1 is the
-    // documented way to clear a single-selection listbox.
+/// A ListView has no check field: the checkbox *is* the item's state
+/// image, index 1 for clear and 2 for ticked, moved into the high nibble
+/// `LVIS_STATEIMAGEMASK` covers. The SDK spells this
+/// `INDEXTOSTATEIMAGEMASK`, which is a macro and so has no symbol the
+/// `windows` crate could re-export.
+const LV_STATE_IMAGE_SHIFT: u32 = 12;
+
+/// The state image a ticked or a clear row carries.
+fn check_state(checked: bool) -> u32 {
+    let index: u32 = if checked { 2 } else { 1 };
+    index << LV_STATE_IMAGE_SHIFT
+}
+
+/// Does this item state say ticked?
+///
+/// Anything else reads as clear, including the 0 carried by a row that
+/// predates the extended style: a row with no box drawn on it has not
+/// been ticked.
+fn state_is_checked(state: u32) -> bool {
+    state & LVIS_STATEIMAGEMASK.0 == check_state(true)
+}
+
+/// One role's list, empty and ready to fill.
+///
+/// Report view with one nameless column, because report is the only view
+/// `LVS_EX_CHECKBOXES` draws a box in and the row text lives in column 0.
+/// The extended style is applied before any row is inserted: comctl32
+/// builds the state image list when that style arrives, and a row that
+/// predates it gets state image 0 and no box at all.
+unsafe fn make_role_list(
+    parent: HWND,
+    y: i32,
+    w: i32,
+    id: i32,
+    font: Option<HFONT>,
+) -> WinResult<HWND> {
+    // SAFETY: `parent` is a live pane owned by the caller and `child`
+    // states its own contract; every message below goes to the control it
+    // just returned, and each struct is fully initialised by `..Default`.
     unsafe {
-        for (which, rows) in
-            [(DictBox::Searched, searched), (DictBox::NotSearched, not_searched)]
-        {
-            let Ok(list) = dlg_item(hwnd, dict_box_id(which)) else { continue };
-            fill_dict_list(list, rows);
-            let sel: isize = if which == to { at as isize } else { -1 };
-            SendMessageW(list, LB_SETCURSEL, Some(WPARAM(sel as usize)), None);
+        let style = LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER;
+        let list = child(parent, WC_LISTVIEW, "", WINDOW_STYLE(style) | WS_TABSTOP | WS_BORDER,
+            PAD, y, w, DICT_LIST_H, id, font)?;
+        let extended = (LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT) as isize;
+        SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, Some(WPARAM(extended as usize)),
+            Some(LPARAM(extended)));
+        let column = LVCOLUMNW { mask: LVCF_WIDTH, ..Default::default() };
+        SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(0)),
+            Some(LPARAM(&column as *const _ as isize)));
+        // The only column, so this is "take the whole client width" -
+        // otherwise a long dictionary name is clipped at zero.
+        SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(0)),
+            Some(LPARAM(LVSCW_AUTOSIZE_USEHEADER as isize)));
+        // The drag's insertion mark is drawn by the control, in whatever
+        // colour it was last told; the default is a fixed one and would
+        // vanish against a dark row. The rows' own text colour is the one
+        // that follows the user's theme by definition.
+        SendMessageW(list, LVM_SETINSERTMARKCOLOR, None,
+            Some(LPARAM(GetSysColor(COLOR_WINDOWTEXT) as isize)));
+        Ok(list)
+    }
+}
+
+/// One row's own name.
+///
+/// A ListView has no "how long is this row" message, so the buffer is
+/// grown until the control stops filling it. Guessing one size and
+/// truncating would be a real bug rather than a cosmetic one: a dictionary
+/// is identified by its exact name now (ADR-0014), so a shortened name is
+/// a different dictionary.
+unsafe fn lv_text(list: HWND, index: i32) -> String {
+    // SAFETY: `list` is a live ListView owned by the caller; `item` is
+    // fully initialised and its `pszText` points at `buf`, which outlives
+    // the call and is described by `cchTextMax` - the contract
+    // LVM_GETITEMTEXTW writes against.
+    unsafe {
+        let mut buf = vec![0u16; 256];
+        loop {
+            let mut item = LVITEMW {
+                iSubItem: 0,
+                pszText: PWSTR(buf.as_mut_ptr()),
+                cchTextMax: buf.len() as i32,
+                ..Default::default()
+            };
+            let copied = SendMessageW(
+                list,
+                LVM_GETITEMTEXTW,
+                Some(WPARAM(index as usize)),
+                Some(LPARAM(&mut item as *mut _ as isize)),
+            )
+            .0
+            .clamp(0, buf.len() as isize) as usize;
+            // A full buffer may have been truncated, so it is not an
+            // answer; 64Ki wide chars is, because no dictionary title is
+            // that long and looping forever is worse than a clipped name.
+            if copied + 1 < buf.len() || buf.len() >= 1 << 16 {
+                return String::from_utf16_lossy(&buf[..copied]);
+            }
+            buf = vec![0u16; buf.len() * 2];
         }
-        record_dict_box(hwnd, to);
     }
 }
 
-/// Reorder, crossing at edges.
-///
-/// Selection follows the item.
-unsafe fn move_selected(hwnd: HWND, up: bool) {
-    // SAFETY: `list_rows`, `box_selection` and `select_dict_row` each state
-    // their own contract, and every handle they take is checked.
+/// Is this row ticked?
+unsafe fn lv_checked(list: HWND, index: i32) -> bool {
+    // SAFETY: `list` is a live ListView owned by the caller;
+    // LVM_GETITEMSTATE takes the row in `wparam` and the mask in `lparam`
+    // and answers with the masked state, carrying no pointer either way.
     unsafe {
-        let Some(mut searched) = list_rows(hwnd, ID_DICTS) else { return };
-        let Some(mut not_searched) = list_rows(hwnd, ID_DICTS_OFF) else { return };
-        let from = active_dict_box(hwnd);
-        let cur = box_selection(hwnd, from);
-        if cur < 0 {
+        let state = SendMessageW(
+            list,
+            LVM_GETITEMSTATE,
+            Some(WPARAM(index as usize)),
+            Some(LPARAM(LVIS_STATEIMAGEMASK.0 as isize)),
+        )
+        .0;
+        state_is_checked(state as u32)
+    }
+}
+
+/// How many rows a list holds.
+unsafe fn lv_count(list: HWND) -> i32 {
+    // SAFETY: `list` is a live ListView owned by the caller;
+    // LVM_GETITEMCOUNT carries no payload.
+    unsafe { SendMessageW(list, LVM_GETITEMCOUNT, None, None).0 as i32 }
+}
+
+/// The selected row, or -1.
+unsafe fn lv_selection(list: HWND) -> i32 {
+    // SAFETY: `list` is a live ListView owned by the caller;
+    // LVM_GETNEXTITEM takes the row to search after in `wparam` - all ones
+    // for "from the top" - and answers with a row index or -1.
+    unsafe {
+        SendMessageW(
+            list,
+            LVM_GETNEXTITEM,
+            Some(WPARAM(usize::MAX)),
+            Some(LPARAM(LVNI_SELECTED as isize)),
+        )
+        .0 as i32
+    }
+}
+
+/// One row: name and checkbox.
+unsafe fn lv_row(list: HWND, index: i32) -> DictRow {
+    // SAFETY: `lv_text` and `lv_checked` state their own contracts.
+    unsafe { DictRow { name: lv_text(list, index), enabled: lv_checked(list, index) } }
+}
+
+/// Every row of a role's list, or `None` if the control is gone.
+unsafe fn lv_rows(hwnd: HWND, id: i32) -> Option<Vec<DictRow>> {
+    // SAFETY: `id` names a descendant of `hwnd`; a missing one yields
+    // `Err` here rather than a dangling handle, and `lv_row` states its
+    // own contract.
+    unsafe {
+        let list = dlg_item(hwnd, id).ok()?;
+        Some((0..lv_count(list).max(0)).map(|i| lv_row(list, i)).collect())
+    }
+}
+
+/// The row holding `name`, if the list has one.
+///
+/// Compared for equality rather than asked of LVM_FINDITEMW, whose string
+/// search is the control's own and not the exact-name rule the config now
+/// keys on (ADR-0014).
+unsafe fn lv_find(list: HWND, name: &str) -> Option<i32> {
+    // SAFETY: `list` is a live ListView owned by the caller; `lv_text`
+    // states its own contract.
+    unsafe { (0..lv_count(list).max(0)).find(|&i| lv_text(list, i) == name) }
+}
+
+/// Overwrite one row in place.
+///
+/// Text and checkbox both, because a move trades two whole rows: swapping
+/// the names alone would leave each dictionary wearing the other's tick.
+unsafe fn lv_set(list: HWND, index: i32, row: &DictRow) {
+    // SAFETY: `list` is a live ListView owned by the caller; `item` is
+    // fully initialised and its `pszText` points at a buffer that outlives
+    // the call, which copies the text. `lv_check` states its own contract.
+    unsafe {
+        let mut text = wide(&row.name);
+        let item = LVITEMW {
+            iSubItem: 0,
+            pszText: PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        SendMessageW(list, LVM_SETITEMTEXTW, Some(WPARAM(index as usize)),
+            Some(LPARAM(&item as *const _ as isize)));
+        lv_check(list, index, row.enabled);
+    }
+}
+
+/// Tick or clear one row.
+///
+/// Always after the row exists, never folded into inserting it: with
+/// `LVS_EX_CHECKBOXES` comctl32 stamps state image 1 on a new item itself,
+/// so an `LVIF_STATE` an insert carried is overwritten and every imported
+/// dictionary would arrive unticked.
+unsafe fn lv_check(list: HWND, index: i32, checked: bool) {
+    // SAFETY: `list` is a live ListView owned by the caller; `item` is
+    // fully initialised and carries no pointer of its own.
+    unsafe {
+        let item = LVITEMW {
+            state: LIST_VIEW_ITEM_STATE_FLAGS(check_state(checked)),
+            stateMask: LVIS_STATEIMAGEMASK,
+            ..Default::default()
+        };
+        SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(index as usize)),
+            Some(LPARAM(&item as *const _ as isize)));
+    }
+}
+
+/// Append one row; returns its index.
+unsafe fn lv_append(list: HWND, row: &DictRow) -> i32 {
+    // SAFETY: `list` is a live ListView owned by the caller; `item` is
+    // fully initialised and its `pszText` points at a buffer that outlives
+    // the call, which copies the text. `lv_check` states its own contract.
+    unsafe {
+        let mut text = wide(&row.name);
+        let item = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: lv_count(list),
+            iSubItem: 0,
+            pszText: PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        let at = SendMessageW(list, LVM_INSERTITEMW, None,
+            Some(LPARAM(&item as *const _ as isize))).0 as i32;
+        if at >= 0 {
+            lv_check(list, at, row.enabled);
+        }
+        at
+    }
+}
+
+/// Select and scroll to `index`, or clear the selection when it is < 0.
+///
+/// Every row is cleared first: LVM_SETITEMSTATE with row -1 is the
+/// documented way to reach them all at once, and a list holding two
+/// selected rows would give the Move buttons two answers.
+unsafe fn lv_select(list: HWND, index: i32) {
+    // SAFETY: `list` is a live ListView owned by the caller; both structs
+    // are fully initialised and neither carries a pointer of its own.
+    unsafe {
+        let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+        let clear = LVITEMW { stateMask: both, ..Default::default() };
+        SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(usize::MAX)),
+            Some(LPARAM(&clear as *const _ as isize)));
+        if index < 0 {
             return;
         }
-        let landed = dict_move(
-            &mut searched,
-            &mut not_searched,
-            &unreadable_rows(hwnd),
-            from,
-            cur as usize,
-            up,
-        );
-        let Some((to, at)) = landed else { return };
-        select_dict_row(hwnd, &searched, &not_searched, to, at);
+        let set = LVITEMW { state: both, stateMask: both, ..Default::default() };
+        SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(index as usize)),
+            Some(LPARAM(&set as *const _ as isize)));
+        SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(index as usize)), None);
+    }
+}
+
+/// Refill, selecting `at` or the last row if the list is shorter.
+unsafe fn fill_role_list(list: HWND, rows: &[DictRow], at: i32) {
+    // SAFETY: `list` is a live ListView owned by the caller; `lv_append`
+    // and `lv_select` state their own contracts.
+    unsafe {
+        SendMessageW(list, LVM_DELETEALLITEMS, None, None);
+        for row in rows {
+            lv_append(list, row);
+        }
+        lv_select(list, at.min(rows.len() as i32 - 1));
+    }
+}
+
+/// Where a move inside one list would land.
+///
+/// One list per role makes a move a trade with the neighbour and nothing
+/// else: there is no second box to cross into, and an empty enabled list
+/// is a legitimate "search nothing" rather than a state to defend against
+/// (ADR-0014), so no row is pinned in place to keep one non-empty.
+fn move_target(len: usize, index: usize, up: bool) -> Option<usize> {
+    if index >= len {
+        return None;
+    }
+    if up {
+        index.checked_sub(1)
+    } else {
+        Some(index + 1).filter(|next| *next < len)
+    }
+}
+
+/// Can a section's Move button act?
+///
+/// `count` and `selection` are the ListView's own answers, and a selection
+/// is negative when the list has none - which is what an emptied list
+/// reports, and what greys both Move buttons.
+fn can_move(count: i32, selection: i32, up: bool) -> bool {
+    match (usize::try_from(count), usize::try_from(selection)) {
+        (Ok(len), Ok(index)) => move_target(len, index, up).is_some(),
+        _ => false,
+    }
+}
+
+/// Reorder inside one section.
+///
+/// The two rows are traded in place rather than the list refilled, and the
+/// selection follows the row the user is aiming: a refill empties the list
+/// for an instant, `update_list_buttons` would then see nothing selected,
+/// and the focus would come off the very Move button being pressed.
+unsafe fn move_selected(hwnd: HWND, section: &Section, up: bool) {
+    // SAFETY: `section.list` names a live descendant of `hwnd`, created in
+    // `build`; a missing one yields `Err` rather than a dangling handle,
+    // and each `lv_*` helper states its own contract.
+    unsafe {
+        let Ok(list) = dlg_item(hwnd, section.list) else { return };
+        let cur = lv_selection(list);
+        let (Ok(index), Ok(len)) =
+            (usize::try_from(cur), usize::try_from(lv_count(list)))
+        else {
+            return;
+        };
+        let Some(at) = move_target(len, index, up) else { return };
+        let here = lv_row(list, cur);
+        let there = lv_row(list, at as i32);
+        lv_set(list, cur, &there);
+        lv_set(list, at as i32, &here);
+        lv_select(list, at as i32);
         update_list_buttons(hwnd);
     }
 }
 
 /// Disable what cannot act.
+///
+/// Focus is moved onto the list a button belongs to *before* that button is
+/// disabled. A disabled control keeps the focus Windows gave it and the
+/// keyboard then talks to nothing, so pressing Move up until the row
+/// reaches the top would strand the user on a dead button - and reaching
+/// these buttons by keyboard is the whole point of the tab order.
 unsafe fn update_list_buttons(hwnd: HWND) {
-    // SAFETY: every id below is a live descendant of `hwnd`, created
-    // in `build`, and each `dlg_item` result is checked before use.
+    // SAFETY: every id below is a live descendant of `hwnd`, created in
+    // `build`, and each `dlg_item` result is checked before use.
     unsafe {
-        let freqs = dlg_item(hwnd, ID_FREQS).unwrap_or_default();
-        let (Some(searched), Some(not_searched)) =
-            (list_rows(hwnd, ID_DICTS), list_rows(hwnd, ID_DICTS_OFF))
-        else {
-            return;
-        };
-        if freqs.is_invalid() {
-            return;
-        }
-        let from = active_dict_box(hwnd);
-        let Ok(dicts) = dlg_item(hwnd, dict_box_id(from)) else { return };
-        let cur = box_selection(hwnd, from);
-        let freq_cur = SendMessageW(freqs, LB_GETCURSEL, None, None).0;
-        let unreadable = unreadable_rows(hwnd);
-        let picked = cur >= 0;
-        // One predicate, two callers.
-        let can_move = |up: bool| {
-            picked
-                && dict_move_target(
-                    &searched,
-                    &not_searched,
-                    &unreadable,
-                    from,
-                    cur as usize,
-                    up,
-                )
-                .is_some()
-        };
-        // Focus must not be orphaned.
+        // Read once: one control holds the focus, so no later button can
+        // match a handle this loop has already moved it off.
         let focused = GetFocus();
-        for (id, list, enable) in [
-            (ID_DICT_UP, dicts, can_move(true)),
-            (ID_DICT_DOWN, dicts, can_move(false)),
-            (ID_DICT_REMOVE, dicts, picked),
-            (ID_FREQ_REMOVE, freqs, freq_cur >= 0),
-        ] {
-            if let Ok(btn) = dlg_item(hwnd, id) {
-                if !enable && focused == btn {
-                    let _ = SetFocus(Some(list));
+        for section in &SECTIONS {
+            let Ok(list) = dlg_item(hwnd, section.list) else { continue };
+            let count = lv_count(list);
+            let cur = lv_selection(list);
+            for (id, enable) in [
+                (section.up, can_move(count, cur, true)),
+                (section.down, can_move(count, cur, false)),
+                // A row is all Remove needs: an unreadable archive is a
+                // row with no roles at all, listed in Terms precisely so
+                // it can still be removed (ADR-0014).
+                (section.remove, cur >= 0),
+            ] {
+                if let Ok(btn) = dlg_item(hwnd, id) {
+                    if !enable && focused == btn {
+                        let _ = SetFocus(Some(list));
+                    }
+                    let _ = EnableWindow(btn, enable);
                 }
-                let _ = EnableWindow(btn, enable);
             }
         }
+    }
+}
+
+/// A drag in progress: the row, the list it came out of, and where the
+/// press landed.
+///
+/// `origin` is `NMLISTVIEW::ptAction`, the point the button went down at,
+/// in that list's own client coordinates - the frame every later reading
+/// is taken in, because a drop position is only meaningful against the
+/// list the row started in. The section is carried rather than looked up
+/// again so a drag cannot end in a list it did not begin in.
+#[derive(Clone, Copy)]
+struct Drag {
+    window: isize,
+    section: &'static Section,
+    from: i32,
+    origin: (i32, i32),
+}
+
+/// Shortest travel that turns a press into a reorder, px.
+///
+/// Every row carries a checkbox, so a press on a row is as likely to be a
+/// tick as the start of a drag: without a floor the wobble in a click on
+/// that box would flash an insertion line and could land as a one-row
+/// move. comctl32 applies its own `SM_CXDRAG` before it sends
+/// `LVN_BEGINDRAG` and `drop_gap`'s rounding needs half a row before it
+/// answers differently, so this floor is a third guard - and the only one
+/// that is this module's own, holds whatever those two do next, and can be
+/// asserted with no mouse in the room. `action::selection` sets the same
+/// kind of floor on the region overlay's drag.
+const DRAG_DEADBAND_PX: i32 = 5;
+
+/// Has the cursor left the point the press landed on?
+///
+/// Either axis clears it, as `selection::meets_drag_threshold` reads a
+/// selection rect. Both axes would refuse a drag straight down the list,
+/// which is the gesture itself, and a purely sideways drag needs no
+/// refusing: it answers with the row's own position.
+fn clears_drag_deadband(origin: (i32, i32), now: (i32, i32)) -> bool {
+    (now.0 - origin.0).abs() >= DRAG_DEADBAND_PX
+        || (now.1 - origin.1).abs() >= DRAG_DEADBAND_PX
+}
+
+/// The gap between rows a cursor sits over, `0..=rows`.
+///
+/// `top` is row 0's own top in the list's client coordinates, so a
+/// scrolled list needs no second question, and the nearest boundary wins
+/// because a gap is what the insertion mark is drawn on. The clamp is what
+/// confines a drag to its own section: a cursor above or below this list -
+/// including one over another role's list - answers with this list's first
+/// or last gap and never with another list's row. Each role's order is its
+/// own and a row has no meaning in a list it holds no role for (ADR-0014).
+fn drop_gap(y: i32, top: i32, row_h: i32, rows: i32) -> i32 {
+    if row_h <= 0 || rows <= 0 {
+        return 0;
+    }
+    // Rounded, not truncated: above row 0 the offset goes negative and
+    // integer division truncates towards zero, which would read a cursor a
+    // row and a half above the list as the gap below its first row.
+    let offset = y - top;
+    (offset * 2 + row_h).div_euclid(row_h * 2).clamp(0, rows)
+}
+
+/// The row a drag from `from` lands on when it is dropped in `gap`.
+///
+/// The row vacates its own place on the way, so every gap below it loses
+/// one: `rows` reads as "last", and every gap above `from` reads as the
+/// row it sits over.
+fn drop_target(from: i32, gap: i32) -> i32 {
+    if gap > from {
+        gap - 1
+    } else {
+        gap
+    }
+}
+
+/// The insertion mark a gap names: the row, and the side of it.
+///
+/// The control marks a gap as a row plus a side, so every gap is "before
+/// this row" except the one past the end, which is "after the last".
+fn insert_mark_at(gap: i32, rows: i32) -> (i32, u32) {
+    if gap >= rows {
+        (rows - 1, LVIM_AFTER)
+    } else {
+        (gap, 0)
+    }
+}
+
+/// Row 0's top and one row's height, in the list's client coordinates.
+///
+/// Both come off row 0's own bounds, because that top *is* the scroll
+/// offset and every row of a report-view ListView is the same height.
+/// `None` when the list holds no rows, which is the one case the control
+/// refuses to answer - and also the one case no drag can have started in.
+unsafe fn lv_row_metrics(list: HWND) -> Option<(i32, i32)> {
+    // SAFETY: `list` is a live ListView owned by the caller; `rect` is
+    // writable stack storage that outlives the call, and LVM_GETITEMRECT
+    // reads the wanted part out of `left` before it overwrites the rect.
+    unsafe {
+        let mut rect = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+        let got = SendMessageW(
+            list,
+            LVM_GETITEMRECT,
+            Some(WPARAM(0)),
+            Some(LPARAM(&mut rect as *mut _ as isize)),
+        );
+        if got.0 == 0 {
+            return None;
+        }
+        let row_h = rect.bottom - rect.top;
+        (row_h > 0).then_some((rect.top, row_h))
+    }
+}
+
+/// The cursor, in one control's client coordinates.
+///
+/// Asked of the mouse rather than decoded out of a message's `lparam`, as
+/// `selection::cursor_point` does: a captured drag reports in the
+/// capturing window's frame, and the only frame a drop position means
+/// anything in is the dragged list's own.
+unsafe fn cursor_in(ctrl: HWND) -> (i32, i32) {
+    // SAFETY: `pt` is writable stack storage for both calls, and `ctrl` is
+    // a live control owned by the caller. A failed `GetCursorPos` leaves
+    // `pt` at the origin, which reads as the top of the list.
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let _ = ScreenToClient(ctrl, &mut pt);
+        (pt.x, pt.y)
+    }
+}
+
+/// Draw the insertion mark at `at`, or take it away.
+unsafe fn lv_insert_mark(list: HWND, at: Option<(i32, u32)>) {
+    // SAFETY: `list` is a live ListView owned by the caller; `mark` is
+    // fully initialised, declares its own size, and carries no pointer.
+    unsafe {
+        // Row -1 is the documented "no mark", so an absent gap and a
+        // finished drag are the same message.
+        let (item, flags) = at.unwrap_or((-1, 0));
+        let mark = LVINSERTMARK {
+            cbSize: std::mem::size_of::<LVINSERTMARK>() as u32,
+            dwFlags: flags,
+            iItem: item,
+            dwReserved: 0,
+        };
+        SendMessageW(list, LVM_SETINSERTMARK, None,
+            Some(LPARAM(&mark as *const _ as isize)));
+    }
+}
+
+/// The drag this window has in progress.
+fn drag_of(hwnd: HWND) -> Option<Drag> {
+    DRAG.with(|c| c.get()).filter(|d| d.window == hwnd.0 as isize)
+}
+
+/// Take the row and take the mouse.
+///
+/// Capture goes on the settings window rather than on the list, mirroring
+/// the region overlay (`action::selection`): whoever holds it gets the
+/// moves and the button-up, and this window's wndproc is where they are
+/// answered and where every other piece of its pending state already
+/// lives. comctl32 sends `LVN_BEGINDRAG` and then tracks nothing itself,
+/// so the gesture from here on is this module's.
+unsafe fn begin_drag(hwnd: HWND, section: &'static Section, from: i32, origin: (i32, i32)) {
+    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
+    // live for the duration of this call, which is all `SetCapture` needs.
+    unsafe {
+        if from < 0 {
+            return;
+        }
+        let window = hwnd.0 as isize;
+        DRAG.with(|c| c.set(Some(Drag { window, section, from, origin })));
+        SetCapture(hwnd);
+    }
+}
+
+/// Move the mark to where a drop would land.
+unsafe fn track_drag(hwnd: HWND) {
+    // SAFETY: `drag.section.list` names a live descendant of `hwnd`,
+    // created in `build`; a missing one yields `Err` rather than a
+    // dangling handle, and each helper states its own contract.
+    unsafe {
+        let Some(drag) = drag_of(hwnd) else { return };
+        let Ok(list) = dlg_item(hwnd, drag.section.list) else { return };
+        let now = cursor_in(list);
+        let rows = lv_count(list);
+        // Below the floor the gesture is still a click, so nothing is
+        // marked: a press on a row's checkbox that wobbles must read as a
+        // tick, and a mark would promise a move it is not going to make.
+        let at = if clears_drag_deadband(drag.origin, now) {
+            lv_row_metrics(list)
+                .map(|(top, row_h)| insert_mark_at(drop_gap(now.1, top, row_h, rows), rows))
+        } else {
+            None
+        };
+        lv_insert_mark(list, at);
+    }
+}
+
+/// Give the mouse back without reordering.
+///
+/// Losing the capture - a menu, a task switch, anything that takes the
+/// mouse - ends the gesture, so the mark goes and the row stays.
+unsafe fn cancel_drag(hwnd: HWND) {
+    // SAFETY: as `track_drag`. No `ReleaseCapture` here: this runs because
+    // the mouse has already gone somewhere else.
+    unsafe {
+        let Some(drag) = drag_of(hwnd) else { return };
+        DRAG.with(|c| c.set(None));
+        if let Ok(list) = dlg_item(hwnd, drag.section.list) {
+            lv_insert_mark(list, None);
+        }
+    }
+}
+
+/// Commit the drop, or abandon it, and give the mouse back.
+///
+/// Released outside the window the gesture is abandoned, because leaving
+/// the window is the way out of a drag; released outside only the *list*
+/// it lands on that list's first or last position, which is `drop_gap`'s
+/// clamp and never another role's list.
+unsafe fn finish_drag(hwnd: HWND) {
+    // SAFETY: as `track_drag`; `ReleaseCapture` has no preconditions and
+    // `released_inside` states its own contract.
+    unsafe {
+        let Some(drag) = drag_of(hwnd) else { return };
+        // Cleared before the capture goes: `ReleaseCapture` sends this
+        // window its own WM_CAPTURECHANGED, and `cancel_drag` would
+        // otherwise abandon the very drop this call is committing.
+        DRAG.with(|c| c.set(None));
+        let _ = ReleaseCapture();
+        let Ok(list) = dlg_item(hwnd, drag.section.list) else { return };
+        lv_insert_mark(list, None);
+        // The cheap veto first: off the window there is nothing to read a
+        // drop position for.
+        if !released_inside(hwnd) {
+            return;
+        }
+        let now = cursor_in(list);
+        if !clears_drag_deadband(drag.origin, now) {
+            return;
+        }
+        let rows = lv_count(list);
+        let Some((top, row_h)) = lv_row_metrics(list) else { return };
+        let to = drop_target(drag.from, drop_gap(now.1, top, row_h, rows));
+        if to == drag.from {
+            return;
+        }
+        // One `move_selected` per row crossed, so a drop and a Move button
+        // are the same mutation and there is one implementation of what a
+        // move means: trading with the neighbour, repeated, is exactly
+        // lifting the row out and putting it back at `to`, and the
+        // selection and the buttons follow because that one path already
+        // carries them. That same path moves whatever is *selected*, so the
+        // dragged row has to become the selection first, and a row the list
+        // no longer holds cannot.
+        lv_select(list, drag.from);
+        if lv_selection(list) != drag.from {
+            return;
+        }
+        for _ in 0..(to - drag.from).abs() {
+            move_selected(hwnd, drag.section, to < drag.from);
+        }
+    }
+}
+
+/// Is the cursor still on the window?
+///
+/// The whole window rect, frame and all: releasing on the title bar is
+/// still releasing on the settings window.
+unsafe fn released_inside(hwnd: HWND) -> bool {
+    // SAFETY: `hwnd` is the live settings window; `rect` and `pt` are
+    // writable stack storage that outlives every call. A window whose rect
+    // cannot be read holds no drop.
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return false;
+        }
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        PtInRect(&rect, pt).as_bool()
     }
 }
 
@@ -1372,54 +2047,6 @@ unsafe fn update_static_controls(hwnd: HWND) {
         if let Ok(c) = dlg_item(hwnd, ID_STATIC_CAPTURE_HINT) {
             let _ = ShowWindow(c, cmd);
         }
-    }
-}
-
-/// One row's text.
-unsafe fn list_row(list: HWND, index: isize) -> Option<String> {
-    // SAFETY: `list` is a live listbox owned by the caller; the buffer is
-    // sized to the length LB_GETTEXTLEN itself reported for this row, which
-    // is the contract LB_GETTEXT writes against.
-    unsafe {
-        let len = SendMessageW(list, LB_GETTEXTLEN, Some(WPARAM(index as usize)), None).0;
-        if len <= 0 {
-            return None;
-        }
-        let mut buf = vec![0u16; len as usize + 1];
-        SendMessageW(
-            list,
-            LB_GETTEXT,
-            Some(WPARAM(index as usize)),
-            Some(LPARAM(buf.as_mut_ptr() as isize)),
-        );
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
-    }
-}
-
-/// Every row, or None if gone.
-unsafe fn list_rows(hwnd: HWND, id: i32) -> Option<Vec<String>> {
-    // SAFETY: `id` names a descendant of `hwnd`; a missing one yields
-    // `Err` here rather than a dangling handle, and `list_row` states
-    // its own contract.
-    unsafe {
-        let list = dlg_item(hwnd, id).ok()?;
-        let count = SendMessageW(list, LB_GETCOUNT, None, None).0;
-        Some((0..count.max(0)).filter_map(|i| list_row(list, i)).collect())
-    }
-}
-
-/// Refill, selecting the top.
-unsafe fn fill_dict_list(list: HWND, rows: &[String]) {
-    // SAFETY: `list` is a live listbox owned by the caller; each string is
-    // copied by `LB_ADDSTRING` during the call, so every temporary outlives
-    // its only use.
-    unsafe {
-        SendMessageW(list, LB_RESETCONTENT, None, None);
-        for row in rows {
-            SendMessageW(list, LB_ADDSTRING, None,
-                Some(LPARAM(wide(row).as_ptr() as isize)));
-        }
-        SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
     }
 }
 
@@ -1826,9 +2453,10 @@ pub struct SettingsWindow {
 impl SettingsWindow {
     /// Create and show the window, populated from `form`.
     ///
-    /// `stale` are `display_order` entries matching no installed dictionary
-    /// (spec D6a); when non-empty a warning naming them is shown, because that
-    /// is what a dictionary rename looks like from in here.
+    /// `stale` are names the config's dictionary lists carry that no
+    /// installed dictionary answers to (spec D6a); when non-empty a warning
+    /// naming them is shown, because that is what a dictionary rename looks
+    /// like from in here.
     ///
     /// `mode` words the Apply button.
     pub fn open(
@@ -1893,8 +2521,6 @@ impl SettingsWindow {
                 current_tab: Cell::new(0),
                 apply_mode: mode,
             };
-            // `build` greys from these.
-            remember_unreadable(hwnd, &form.unreadable);
             // `build` reports where its layout actually ended; the window is
             // then sized to that rather than to a guess. The first version of
             // this file passed a hand-tuned height straight to
@@ -2027,7 +2653,7 @@ impl SettingsWindow {
         // its own contract.
         unsafe {
             match action {
-                Action::Remove(target) => self.remove_selected(target),
+                Action::Remove(role) => self.remove_selected(role),
                 Action::Add => {
                     // D9: the picker pumps too.
                     before_blocking();
@@ -2190,41 +2816,28 @@ impl SettingsWindow {
         if prev == next {
             return;
         }
-        // SAFETY: both list ids are live descendants of `self.hwnd`, made
-        // in `build`; `list_rows` and `select_dict_row` state their contracts
+        // SAFETY: `ID_TERMS` names a live descendant of `self.hwnd`, made in
+        // `build`; `lv_rows` and `fill_role_list` state their own contracts
         // and every handle is checked before it is used.
         unsafe {
-            let (Some(active), Some(excluded)) =
-                (list_rows(self.hwnd, ID_DICTS), list_rows(self.hwnd, ID_DICTS_OFF))
-            else {
-                return;
-            };
-            staged.dict_names = active;
-            staged.dict_excluded = excluded;
+            let Some(rows) = lv_rows(self.hwnd, ID_TERMS) else { return };
+            staged.terms = rows;
             staged.ocr_language = prev.clone();
             if crate::settings::is_scoped(&staged) {
-                let existing = staged.per_language.get(&prev).cloned().unwrap_or_default();
-                let keyed = crate::settings::scoped_entry(
-                    &staged.dict_names, &staged.unreadable, &existing);
-                if let Some(keys) = keyed {
+                if let Some(keys) = crate::settings::scoped_entry(
+                    &staged.terms, &staged.unreadable) {
                     staged.per_language.insert(prev, keys);
                 }
             }
-            let all: Vec<String> =
-                staged.dict_names.iter().chain(staged.dict_excluded.iter()).cloned().collect();
+            let all: Vec<String> = staged.terms.iter().map(|row| row.name.clone()).collect();
             let list = staged.per_language.get(&next).cloned().unwrap_or_default();
-            let (active, excluded) = scope_rows(&all, &list, &staged.unreadable);
-            staged.dict_names = active;
-            staged.dict_excluded = excluded;
+            let scoped = scope_rows(&all, &list, &staged.unreadable);
+            staged.terms = scoped;
             staged.dict_list_language = next.clone();
             staged.ocr_language = next;
-            select_dict_row(
-                self.hwnd,
-                &staged.dict_names,
-                &staged.dict_excluded,
-                DictBox::Searched,
-                0,
-            );
+            if let Ok(terms) = dlg_item(self.hwnd, ID_TERMS) {
+                fill_role_list(terms, &staged.terms, 0);
+            }
             update_list_buttons(self.hwnd);
         }
     }
@@ -2542,31 +3155,31 @@ impl SettingsWindow {
         self.reset_scroll();
     }
 
-    /// Drop the selected row.
-    unsafe fn remove_selected(&self, target: Target) {
-        // SAFETY: the id below names a live descendant of `self.hwnd`;
-        // `list_row`, `active_dict_box` and `update_list_buttons` state
-        // their own contracts. Either box may hold the selection.
+    /// Drop the selected row, out of every section.
+    ///
+    /// One archive is one library entry, so removing it is not a change to
+    /// one list: `stage_remove` drops the name from all three roles
+    /// (ADR-0014) and the controls have to say the same thing. `role` only
+    /// names the section that asked, and so which selection names the row.
+    unsafe fn remove_selected(&self, role: Role) {
+        // SAFETY: every `section.list` names a live descendant of
+        // `self.hwnd`, created in `build`; a missing one yields `Err` here
+        // rather than a dangling handle, and each `lv_*` helper and
+        // `update_list_buttons` states its own contract.
         unsafe {
-            let id = match target {
-                Target::Dicts => dict_box_id(active_dict_box(self.hwnd)),
-                Target::Freqs => ID_FREQS,
-            };
-            let Ok(list) = dlg_item(self.hwnd, id) else {
-                return;
-            };
-            let cur = SendMessageW(list, LB_GETCURSEL, None, None).0;
+            let Some(asked) = SECTIONS.iter().find(|s| s.role == role) else { return };
+            let Ok(list) = dlg_item(self.hwnd, asked.list) else { return };
+            let cur = lv_selection(list);
             if cur < 0 {
                 return;
             }
-            let Some(name) = list_row(list, cur) else {
-                return;
-            };
-            SendMessageW(list, LB_DELETESTRING, Some(WPARAM(cur as usize)), None);
-            let left = SendMessageW(list, LB_GETCOUNT, None, None).0;
-            if left > 0 {
-                let next = cur.min(left - 1);
-                SendMessageW(list, LB_SETCURSEL, Some(WPARAM(next as usize)), None);
+            let name = lv_text(list, cur);
+            for section in &SECTIONS {
+                let Ok(list) = dlg_item(self.hwnd, section.list) else { continue };
+                let Some(at) = lv_find(list, &name) else { continue };
+                SendMessageW(list, LVM_DELETEITEM, Some(WPARAM(at as usize)), None);
+                // The row under the deleted one, or none left to select.
+                lv_select(list, at.min(lv_count(list) - 1));
             }
             self.staged.borrow_mut().stage_remove(&name);
             update_list_buttons(self.hwnd);
@@ -2577,14 +3190,14 @@ impl SettingsWindow {
     /// Stage whatever was picked.
     unsafe fn add_picked(&self) {
         // SAFETY: `pick_archives` owns every buffer it hands the dialog;
-        // every id names a live descendant of `self.hwnd`, and the string each
-        // `LB_ADDSTRING` copies outlives that call. `list_rows` and
-        // `select_dict_row` each state their own contract.
+        // every `section.list` names a live descendant of `self.hwnd`, and
+        // `lv_append` and `lv_select` each state their own contract.
         unsafe {
             let picked = pick_archives(self.hwnd);
             for path in picked {
-                // The file picks the list.
-                let Some(kind) = self.staged.borrow_mut().stage_add(&path) else {
+                // The archive's roles pick the lists, and one archive can
+                // land in more than one of them.
+                let Some(roles) = self.staged.borrow_mut().stage_add(&path) else {
                     eprintln!(
                         "chibipop: {} is already listed, or is not a dictionary chibipop can read.",
                         path.display()
@@ -2596,25 +3209,16 @@ impl SettingsWindow {
                 else {
                     continue;
                 };
-                if kind == Kind::Frequency {
-                    let Ok(list) = dlg_item(self.hwnd, ID_FREQS) else {
-                        continue;
-                    };
-                    SendMessageW(list, LB_ADDSTRING, None,
-                        Some(LPARAM(wide(&name).as_ptr() as isize)));
-                    if SendMessageW(list, LB_GETCURSEL, None, None).0 < 0 {
-                        SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
-                    }
-                    continue;
+                // The bottom of each of its role lists, ticked, leaving
+                // every row the user curated where it already is
+                // (ADR-0014).
+                let row = DictRow { name, enabled: true };
+                for section in SECTIONS.iter().filter(|s| roles.has(s.role)) {
+                    let Ok(list) = dlg_item(self.hwnd, section.list) else { continue };
+                    let at = lv_append(list, &row);
+                    // Or an import lands below the fold, unseen.
+                    lv_select(list, at);
                 }
-                let (Some(mut searched), Some(not_searched)) =
-                    (list_rows(self.hwnd, ID_DICTS), list_rows(self.hwnd, ID_DICTS_OFF))
-                else {
-                    continue;
-                };
-                // LB_SETCURSEL scrolls it in.
-                let at = add_dict(&mut searched, &name);
-                select_dict_row(self.hwnd, &searched, &not_searched, DictBox::Searched, at);
             }
             update_list_buttons(self.hwnd);
             self.refresh_apply();
@@ -2705,10 +3309,10 @@ impl SettingsWindow {
         // its children. Windows destroys a child with its parent, so every
         // handle taken here lives until `h` is destroyed.
         unsafe {
-            // Tabs need comctl init.
+            // Tabs and the role lists need comctl init.
             let icex = INITCOMMONCONTROLSEX {
                 dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-                dwICC: ICC_TAB_CLASSES,
+                dwICC: ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES,
             };
             let _ = InitCommonControlsEx(&icex);
 
@@ -2970,88 +3574,100 @@ impl SettingsWindow {
             let y_general = y;
 
             // ---- Dictionaries ----
+            //
+            // One section per role, each listing every installed
+            // dictionary that holds that role with a checkbox for it, and
+            // each ordered on its own. A mixed archive is a row in every
+            // section it has data for, because enabled is per role:
+            // unticking its definitions may not silently kill its
+            // frequency data (ADR-0014).
             y = 0;
             let bx = WIN_W - PAD - BTN_W - 8;
             let list_w = bx - 2 * PAD + 4;
-            dict.push(group("Dictionaries — topmost is shown first", y, dict_group_h())?);
-            y += 20;
-            // Beside both boxes.
-            let btn_y = y + DICT_CAP_H;
-            for (caption, id) in
-                [("Searched — for the selected OCR language", ID_DICTS),
-                 ("Not searched", ID_DICTS_OFF)]
-            {
-                dict.push(child(page, w!("STATIC"), caption,
-                    WINDOW_STYLE(0), PAD, y, list_w, DICT_CAP_H, 0, f)?);
+            let hint_w = WIN_W - 2 * PAD - 20;
+            for (n, section) in SECTIONS.iter().enumerate() {
+                if n > 0 {
+                    y += GROUP_GAP;
+                }
+                // WS_GROUP ends the preceding one, so only the first box
+                // may go without it.
+                let box_h = role_group_h(section.role);
+                dict.push(if n == 0 {
+                    group(section.group, y, box_h)?
+                } else {
+                    group_start(section.group, y, box_h)?
+                });
+                y += 20;
+                dict.push(child(page, w!("STATIC"), section.hint,
+                    WINDOW_STYLE(0), PAD, y, hint_w, DICT_CAP_H, 0, f)?);
                 y += DICT_CAP_H;
-                dict.push(child(page, w!("LISTBOX"), "",
-                    WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
-                    PAD, y, list_w, DICT_BOX_H, id, f)?);
-                y += DICT_BOX_H;
+                if section.role == Role::Frequency {
+                    // Above this list and no other: the rule reduces the
+                    // dictionaries in it and says nothing about the rest.
+                    dict.push(child(page, w!("STATIC"), "Combine ranks by",
+                        WINDOW_STYLE(0), PAD, y + 4, 110, ROW_H, 0, f)?);
+                    let ranking = child(page, w!("COMBOBOX"), "",
+                        WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                        PAD + 114, y, list_w - 114, 120, ID_RANKING, f)?;
+                    dict.push(ranking);
+                    for (at, (strategy, text)) in RANKING_STRATEGIES.iter().enumerate() {
+                        SendMessageW(ranking, CB_ADDSTRING, None,
+                            Some(LPARAM(wide(text).as_ptr() as isize)));
+                        if *strategy == form.ranking_strategy {
+                            SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(at)), None);
+                        }
+                    }
+                    // The default is the item `ranking_strategy_at` reads
+                    // a lost selection as, so the two cannot disagree.
+                    if SendMessageW(ranking, CB_GETCURSEL, None, None).0 < 0 {
+                        SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(0)), None);
+                    }
+                    y += ROW_H + ROW_GAP;
+                }
+                let list = make_role_list(page, y, list_w, section.list, f)?;
+                dict.push(list);
+                fill_role_list(list, form.list(section.role), 0);
+                for (row, (text, id)) in [
+                    ("Move up", section.up),
+                    ("Move down", section.down),
+                    ("Add\u{2026}", section.add),
+                    ("Remove", section.remove),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    dict.push(child(page, w!("BUTTON"), text, WS_TABSTOP,
+                          bx, y + row as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?);
+                }
+                y += DICT_LIST_H + 8;
             }
-            select_dict_row(h, &form.dict_names, &form.dict_excluded, DictBox::Searched, 0);
-            for (i, (text, id)) in [
-                ("Move up", ID_DICT_UP),
-                ("Move down", ID_DICT_DOWN),
-                ("Add…", ID_DICT_ADD),
-                ("Remove", ID_DICT_REMOVE),
-            ]
-            .iter()
-            .enumerate()
-            {
-                dict.push(child(page, w!("BUTTON"), text, WS_TABSTOP,
-                      bx, btn_y + i as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?);
-            }
-            y += ROW_GAP;
-            dict.push(child(page, w!("STATIC"),
-                "Order is matched by dictionary name. Check both lists after a change.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, DICT_HINT_H, 0, f)?);
-            y += DICT_HINT_H + 8;
+            y += GROUP_GAP;
 
             // A rebuild is library-only.
-            if form.library_empty && !form.dict_names.is_empty() {
+            if form.library_empty && !form.terms.is_empty() {
                 dict.push(child(page, w!("STATIC"),
                     "chibipop is using a dictionary built outside the app. Adding or \
                      removing here rebuilds from this list only — import your original \
                      .zip files first.",
-                    WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 44, 0, f)?);
+                    WINDOW_STYLE(0), PAD, y, hint_w, 44, 0, f)?);
                 y += 48;
             }
 
-            // Spec D6a: name the entry, because the visible symptom of a
-            // stale one is a dictionary silently sorting last.
+            // Spec D6a: name the entry, because a config name matching
+            // nothing installed is also what a renamed archive looks like.
+            // Its place is kept rather than dropped, so an unplugged drive
+            // does not quietly rewrite the lists (ADR-0014).
             if !stale.is_empty() {
                 let msg = format!(
-                    "\"{}\" no longer matches any dictionary — it may have been renamed or \
-                     removed. Dictionaries it used to order are now sorted last.",
+                    "\"{}\" names no installed dictionary — it may have been renamed, or \
+                     live on a drive that is not plugged in. Its place is kept; remove \
+                     the row if it is gone for good.",
                     stale.join("\", \"")
                 );
                 dict.push(child(page, w!("STATIC"), &msg, WINDOW_STYLE(0),
-                      PAD, y, WIN_W - 2 * PAD - 20, 32, 0, f)?);
+                      PAD, y, hint_w, 32, 0, f)?);
                 y += 36;
             }
-            y += GROUP_GAP;
-
-            // ---- Frequency data ----
-            // WS_GROUP ends the last one.
-            let freq_span = BTN_PITCH + ROW_H;
-            let freq_h = 20 + freq_span + 8;
-            dict.push(group_start("Frequency data — how common each word is", y, freq_h)?);
-            y += 20;
-            let freqs = child(page, w!("LISTBOX"), "",
-                WINDOW_STYLE(LBS_NOTIFY as u32) | WS_TABSTOP | WS_BORDER | WS_VSCROLL,
-                PAD, y, list_w, freq_span, ID_FREQS, f)?;
-            dict.push(freqs);
-            for name in &form.freq_names {
-                SendMessageW(freqs, LB_ADDSTRING, None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)));
-            }
-            SendMessageW(freqs, LB_SETCURSEL, Some(WPARAM(0)), None);
-            dict.push(child(page, w!("BUTTON"), "Add…", WS_TABSTOP,
-                  bx, y, BTN_W, ROW_H, ID_FREQ_ADD, f)?);
-            dict.push(child(page, w!("BUTTON"), "Remove", WS_TABSTOP,
-                  bx, y + BTN_PITCH, BTN_W, ROW_H, ID_FREQ_REMOVE, f)?);
-            y += freq_span + 8 + GROUP_GAP;
             let y_dict = y;
 
             // ---- OCR / Debug ----
@@ -3420,13 +4036,17 @@ impl SettingsWindow {
             let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
             // Empty is not missing.
-            let (dict_names, dict_excluded) =
-                match (list_rows(h, ID_DICTS), list_rows(h, ID_DICTS_OFF)) {
-                    (Some(a), Some(b)) => (a, b),
-                    _ => (template.dict_names.clone(), template.dict_excluded.clone()),
-                };
-            let freq_names =
-                list_rows(h, ID_FREQS).unwrap_or_else(|| template.freq_names.clone());
+            //
+            // A role's list *is* its control: a row's position is that
+            // role's priority and its checkbox is that role's enabled
+            // flag, so a read is what the ListView holds. The template
+            // answers only for a control that is not there.
+            let role_rows = |id: i32, fallback: &[DictRow]| -> Vec<DictRow> {
+                lv_rows(h, id).unwrap_or_else(|| fallback.to_vec())
+            };
+            let terms = role_rows(ID_TERMS, &template.terms);
+            let frequency = role_rows(ID_FREQS, &template.frequency);
+            let pitch = role_rows(ID_PITCH, &template.pitch);
             let staged = self.staged.borrow();
 
             let theme = if combo_index(ID_THEME) == 1 { "light" } else { "dark" };
@@ -3515,8 +4135,10 @@ impl SettingsWindow {
                 show_images: checked(ID_SHOW_IMAGES),
                 show_part_of_speech: checked(ID_SHOW_POS),
                 exclude_from_capture: checked(ID_EXCLUDE),
-                dict_names,
-                dict_excluded,
+                terms,
+                frequency,
+                pitch,
+                ranking_strategy: ranking_strategy_at(combo_index(ID_RANKING)),
                 dict_list_language: staged.dict_list_language.clone(),
                 per_language: staged.per_language.clone(),
                 max_ocr_passes: pick(&self.passes, ID_PASSES,
@@ -3531,7 +4153,6 @@ impl SettingsWindow {
                 show_scan_region: checked(ID_SHOW_SCAN),
                 show_engine_log: checked(ID_ENGINE_LOG),
                 show_adapter_log: checked(ID_ADAPTER_LOG),
-                freq_names,
                 freq_changed: staged.freq_changed,
                 staged_adds: staged.staged_adds.clone(),
                 staged_removes: staged.staged_removes.clone(),
@@ -3636,18 +4257,7 @@ impl Drop for SettingsWindow {
                 c.set(None);
             }
         });
-        DICT_BOX.with(|c| {
-            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
-                c.set(None);
-            }
-        });
         CAPTURE_PREV.with(|c| {
-            let mut slot = c.borrow_mut();
-            if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
-                *slot = None;
-            }
-        });
-        UNREADABLE.with(|c| {
             let mut slot = c.borrow_mut();
             if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
                 *slot = None;
@@ -3657,6 +4267,14 @@ impl Drop for SettingsWindow {
             let mut slot = c.borrow_mut();
             if slot.as_ref().is_some_and(|(h, _)| *h == self.hwnd.0 as isize) {
                 *slot = None;
+            }
+        });
+        // A window destroyed mid-drag: the OS releases the capture it held,
+        // and this drops the row it was carrying so no later window's
+        // button-up can find it.
+        DRAG.with(|c| {
+            if c.get().is_some_and(|d| d.window == self.hwnd.0 as isize) {
+                c.set(None);
             }
         });
         // SAFETY: the window is this struct's own, still live, and destroyed
@@ -3671,110 +4289,27 @@ impl Drop for SettingsWindow {
     }
 }
 
-/// Re-split for one language.
-fn scope_rows(
-    all: &[String],
-    list: &[String],
-    unreadable: &[String],
-) -> (Vec<String>, Vec<String>) {
+/// Re-tick and re-order the terms list for one OCR language.
+///
+/// `list` is that language's own `per_language` entry, so it names the
+/// dictionaries it searches in priority order: those rows come first,
+/// ticked and in the list's order, and every other installed name follows
+/// unticked. `per_language` is term-only (ADR-0014), so this is the Terms
+/// section's alone.
+fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<DictRow> {
     let readable = |n: &String| !unreadable.iter().any(|u| u == n);
-    let installed = all.iter().filter(|n| readable(n)).map(String::as_str);
-    if !crate::present::any_listed(installed, list) {
-        return (all.to_vec(), Vec::new());
+    // A list naming nothing that is installed belongs to some other
+    // library, and hiding every dictionary is not what it asked for.
+    let named = |n: &String| crate::present::keeps_dict(n, list);
+    let row = |name: &String, enabled: bool| DictRow { name: name.clone(), enabled };
+    if !all.iter().filter(|n| readable(n)).any(named) {
+        return all.iter().map(|n| row(n, true)).collect();
     }
-    let keep = |n: &String| !readable(n) || crate::present::dict_order_rank(n, list).is_some();
-    let mut active: Vec<String> = all.iter().filter(|n| keep(n)).cloned().collect();
-    active.sort_by_key(|n| crate::present::dict_order_rank(n, list).unwrap_or(usize::MAX));
-    (active, all.iter().filter(|n| !keep(n)).cloned().collect())
-}
-
-/// Which listbox a row is in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DictBox {
-    Searched,
-    NotSearched,
-}
-
-/// Never search nothing.
-fn another_readable_row(searched: &[String], unreadable: &[String], index: usize) -> bool {
-    let readable = |n: &String| !unreadable.iter().any(|u| u == n);
-    searched.iter().enumerate().any(|(j, n)| j != index && readable(n))
-}
-
-/// Where a move would land.
-fn dict_move_target(
-    searched: &[String],
-    not_searched: &[String],
-    unreadable: &[String],
-    from: DictBox,
-    index: usize,
-    up: bool,
-) -> Option<(DictBox, usize)> {
-    match (from, up) {
-        (DictBox::Searched, true) => {
-            if index > 0 && index < searched.len() {
-                Some((DictBox::Searched, index - 1))
-            } else {
-                None
-            }
-        }
-        (DictBox::Searched, false) => {
-            if index + 1 < searched.len() {
-                Some((DictBox::Searched, index + 1))
-            } else if index < searched.len()
-                && another_readable_row(searched, unreadable, index)
-            {
-                Some((DictBox::NotSearched, 0))
-            } else {
-                None
-            }
-        }
-        (DictBox::NotSearched, true) => {
-            if index == 0 && !not_searched.is_empty() {
-                Some((DictBox::Searched, searched.len()))
-            } else if index < not_searched.len() {
-                Some((DictBox::NotSearched, index - 1))
-            } else {
-                None
-            }
-        }
-        (DictBox::NotSearched, false) => {
-            if index + 1 < not_searched.len() {
-                Some((DictBox::NotSearched, index + 1))
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// Move; returns the landing.
-fn dict_move(
-    searched: &mut Vec<String>,
-    not_searched: &mut Vec<String>,
-    unreadable: &[String],
-    from: DictBox,
-    index: usize,
-    up: bool,
-) -> Option<(DictBox, usize)> {
-    let landed = dict_move_target(searched, not_searched, unreadable, from, index, up)?;
-    match (from, landed.0) {
-        (DictBox::Searched, DictBox::Searched) => searched.swap(index, landed.1),
-        (DictBox::NotSearched, DictBox::NotSearched) => not_searched.swap(index, landed.1),
-        (DictBox::Searched, DictBox::NotSearched) => {
-            not_searched.insert(landed.1, searched.remove(index));
-        }
-        (DictBox::NotSearched, DictBox::Searched) => {
-            searched.insert(landed.1, not_searched.remove(index));
-        }
-    }
-    Some(landed)
-}
-
-/// Append; returns its index.
-fn add_dict(searched: &mut Vec<String>, name: &str) -> usize {
-    searched.push(name.to_string());
-    searched.len() - 1
+    let keep = |n: &String| !readable(n) || named(n);
+    let mut rows: Vec<DictRow> = all.iter().filter(|n| keep(n)).map(|n| row(n, true)).collect();
+    rows.sort_by_key(|r| crate::present::list_rank(&r.name, list).unwrap_or(usize::MAX));
+    rows.extend(all.iter().filter(|n| !keep(n)).map(|n| row(n, false)));
+    rows
 }
 
 #[cfg(test)]
@@ -4512,316 +5047,903 @@ mod tests {
         assert!(should_show_configure(3));
     }
 
-    // ---- re-scoping ----
+    // ---- the section table ----
+
+    #[test]
+    fn every_role_has_exactly_one_section() {
+        assert_eq!(Role::EVERY.len(), SECTIONS.len());
+        for role in Role::EVERY {
+            assert_eq!(
+                1,
+                SECTIONS.iter().filter(|s| s.role == role).count(),
+                "{role:?} needs exactly one section"
+            );
+        }
+    }
+
+    /// Two sections sharing an id would make `dlg_item` hand back the
+    /// wrong control, and one list would answer for two sections.
+    #[test]
+    fn no_two_dictionary_controls_share_an_id() {
+        let mut ids: Vec<i32> = SECTIONS
+            .iter()
+            .flat_map(|s| [s.list, s.up, s.down, s.add, s.remove])
+            .chain([ID_RANKING])
+            .collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(total, ids.len(), "every dictionary control needs its own id");
+    }
+
+    /// A Move button acts on the section it sits in, never on whichever
+    /// list was touched last: that ambiguity is what three independent
+    /// lists remove.
+    #[test]
+    fn each_move_button_names_its_own_section_and_direction() {
+        for section in &SECTIONS {
+            let (up_owner, up) = move_button(section.up).expect("a Move up button");
+            assert_eq!(section.role, up_owner.role);
+            assert!(up, "{:?}'s up button must move up", section.role);
+            let (down_owner, down) = move_button(section.down).expect("a Move down button");
+            assert_eq!(section.role, down_owner.role);
+            assert!(!down, "{:?}'s down button must move down", section.role);
+        }
+        assert!(move_button(ID_APPLY).is_none());
+    }
+
+    #[test]
+    fn each_remove_button_names_its_own_section() {
+        for section in &SECTIONS {
+            assert_eq!(Some(section.role), remove_button(section.remove).map(|s| s.role));
+        }
+        assert!(remove_button(ID_QUIT).is_none());
+    }
+
+    /// One Add per section so the user need not leave it, one meaning for
+    /// all three: the archive's roles pick the lists.
+    #[test]
+    fn every_section_has_an_add_button_and_no_other_control_is_one() {
+        for section in &SECTIONS {
+            assert!(is_add_button(section.add));
+            assert!(!is_add_button(section.list));
+            assert!(!is_add_button(section.remove));
+        }
+        assert!(!is_add_button(ID_RANKING));
+    }
+
+    #[test]
+    fn a_list_id_names_its_own_section() {
+        for section in &SECTIONS {
+            assert_eq!(Some(section.role), section_of_list(section.list).map(|s| s.role));
+        }
+        assert!(section_of_list(ID_RANKING).is_none());
+    }
+
+    // ---- the checkbox is a state image ----
+
+    /// The two indices comctl32 draws, in the nibble
+    /// `LVIS_STATEIMAGEMASK` covers: 1 clear, 2 ticked.
+    #[test]
+    fn a_ticked_row_carries_state_image_two_and_a_clear_one_carries_one() {
+        assert_eq!(0x2000, check_state(true));
+        assert_eq!(0x1000, check_state(false));
+    }
+
+    #[test]
+    fn a_ticked_state_reads_back_ticked_and_a_clear_one_does_not() {
+        assert!(state_is_checked(check_state(true)));
+        assert!(!state_is_checked(check_state(false)));
+    }
+
+    /// Selection and focus share the state word with the checkbox, so a
+    /// selected clear row must not read as ticked - the bug that would
+    /// silently enable every row the user clicked on.
+    #[test]
+    fn selection_and_focus_bits_do_not_read_as_a_tick() {
+        let live = LVIS_SELECTED.0 | LVIS_FOCUSED.0;
+        assert!(!state_is_checked(live));
+        assert!(!state_is_checked(check_state(false) | live));
+        assert!(state_is_checked(check_state(true) | live));
+    }
+
+    /// A row that predates the extended style has no state image at all,
+    /// and a row with no box drawn on it has not been ticked.
+    #[test]
+    fn a_row_with_no_state_image_reads_as_clear() {
+        assert!(!state_is_checked(0));
+    }
+
+    // ---- moving inside one section ----
+
+    #[test]
+    fn up_trades_with_the_row_above() {
+        assert_eq!(Some(1), move_target(3, 2, true));
+    }
+
+    #[test]
+    fn down_trades_with_the_row_below() {
+        assert_eq!(Some(1), move_target(3, 0, false));
+    }
+
+    #[test]
+    fn up_on_the_top_row_refuses() {
+        assert_eq!(None, move_target(3, 0, true));
+    }
+
+    #[test]
+    fn down_on_the_bottom_row_refuses() {
+        assert_eq!(None, move_target(3, 2, false));
+    }
+
+    /// A selection index the list has outgrown cannot reorder it.
+    #[test]
+    fn a_move_from_beyond_the_last_row_refuses() {
+        assert_eq!(None, move_target(2, 2, true));
+        assert_eq!(None, move_target(2, 5, false));
+        assert_eq!(None, move_target(0, 0, true));
+    }
+
+    /// There is no second box to cross into and no row worth pinning in
+    /// place: an empty enabled list is a legitimate "search nothing"
+    /// (ADR-0014), so a section's only row simply cannot move.
+    #[test]
+    fn the_only_row_in_a_section_can_move_neither_way() {
+        assert_eq!(None, move_target(1, 0, true));
+        assert_eq!(None, move_target(1, 0, false));
+    }
+
+    /// Greying is the same question as moving, asked without moving.
+    #[test]
+    fn the_move_buttons_die_at_that_sections_own_ends() {
+        assert!(!can_move(3, 0, true), "the top row cannot go up");
+        assert!(can_move(3, 0, false));
+        assert!(can_move(3, 2, true));
+        assert!(!can_move(3, 2, false), "the bottom row cannot go down");
+    }
+
+    #[test]
+    fn nothing_selected_greys_both_move_buttons() {
+        assert!(!can_move(3, -1, true));
+        assert!(!can_move(3, -1, false));
+    }
+
+    /// A negative count is what a control that is not there reports.
+    #[test]
+    fn an_absent_list_greys_both_move_buttons() {
+        assert!(!can_move(-1, 0, true));
+        assert!(!can_move(-1, 0, false));
+    }
+
+    // ---- dragging a row into place ----
+
+    /// The floor is what keeps a click on a row's checkbox a click: press
+    /// and release land on one pixel, and no reorder may come out of that.
+    #[test]
+    fn a_press_and_release_on_one_pixel_is_a_click_and_not_a_drag() {
+        assert!(!clears_drag_deadband((40, 30), (40, 30)));
+    }
+
+    #[test]
+    fn travel_short_of_the_floor_is_still_a_click() {
+        let stop = DRAG_DEADBAND_PX - 1;
+        assert!(!clears_drag_deadband((40, 30), (40 + stop, 30 + stop)));
+        assert!(!clears_drag_deadband((40, 30), (40 - stop, 30 - stop)));
+    }
+
+    /// Either axis and either way: a list is dragged up as often as down.
+    #[test]
+    fn travel_of_the_floor_on_one_axis_becomes_a_drag() {
+        assert!(clears_drag_deadband((40, 30), (40, 30 + DRAG_DEADBAND_PX)));
+        assert!(clears_drag_deadband((40, 30), (40, 30 - DRAG_DEADBAND_PX)));
+        assert!(clears_drag_deadband((40, 30), (40 + DRAG_DEADBAND_PX, 30)));
+        assert!(clears_drag_deadband((40, 30), (40 - DRAG_DEADBAND_PX, 30)));
+    }
+
+    /// A row is 17px tall (see `DICT_LIST_H`), so a three-row list has its
+    /// boundaries at 0, 17, 34 and 51 and each row answers with whichever
+    /// of its own two is nearer - the one the mark would be drawn on.
+    #[test]
+    fn a_cursor_over_a_row_reads_the_nearer_of_its_two_boundaries() {
+        assert_eq!(0, drop_gap(0, 0, 17, 3));
+        assert_eq!(0, drop_gap(8, 0, 17, 3), "row 0's upper half");
+        assert_eq!(1, drop_gap(9, 0, 17, 3), "row 0's lower half");
+        assert_eq!(1, drop_gap(17, 0, 17, 3), "the boundary itself");
+        assert_eq!(1, drop_gap(25, 0, 17, 3), "row 1's upper half");
+        assert_eq!(2, drop_gap(26, 0, 17, 3), "row 1's lower half");
+        assert_eq!(3, drop_gap(51, 0, 17, 3), "under the last row");
+    }
+
+    /// The clamp *is* the confinement: a cursor dragged out of this list -
+    /// over another role's list, or off the window entirely - answers with
+    /// this list's own first or last gap, so a row can never cross into a
+    /// list it holds no role for (ADR-0014).
+    #[test]
+    fn a_cursor_outside_the_list_clamps_to_that_lists_own_ends() {
+        assert_eq!(0, drop_gap(-9, 0, 17, 3), "a row and a half above it");
+        assert_eq!(0, drop_gap(-4000, 0, 17, 3), "far above the window");
+        assert_eq!(3, drop_gap(4000, 0, 17, 3), "far below the window");
+    }
+
+    /// Row 0's top *is* the scroll offset, so a scrolled list needs no
+    /// second one: every gap moves with it and the row under the cursor
+    /// stays the row the user is looking at.
+    #[test]
+    fn a_scrolled_list_reads_its_gaps_from_row_zeros_own_top() {
+        assert_eq!(2, drop_gap(0, -34, 17, 6));
+        assert_eq!(3, drop_gap(17, -34, 17, 6));
+    }
+
+    /// A control with no rows has no gap to drop into, and one that
+    /// answered nothing about its row height must not divide by it.
+    #[test]
+    fn a_list_with_no_rows_or_no_height_reads_the_first_gap() {
+        assert_eq!(0, drop_gap(80, 0, 17, 0));
+        assert_eq!(0, drop_gap(80, 0, 0, 3));
+    }
+
+    /// The dragged row vacates its own place on the way, so the gap just
+    /// below it is the place it already holds and every gap further down
+    /// loses one.
+    #[test]
+    fn a_gap_below_the_dragged_row_loses_the_place_that_row_vacates() {
+        assert_eq!(0, drop_target(0, 0));
+        assert_eq!(0, drop_target(0, 1), "the gap under row 0 is row 0's own");
+        assert_eq!(1, drop_target(0, 2));
+        assert_eq!(2, drop_target(0, 3));
+        assert_eq!(0, drop_target(2, 0));
+        assert_eq!(2, drop_target(2, 2));
+        assert_eq!(2, drop_target(2, 3));
+    }
+
+    /// The mark is a row and a side of it, and only the gap past the last
+    /// row is on the far side of one.
+    #[test]
+    fn the_insertion_mark_sits_above_a_gaps_row_except_past_the_last() {
+        assert_eq!((0, 0), insert_mark_at(0, 3));
+        assert_eq!((1, 0), insert_mark_at(1, 3));
+        assert_eq!((2, 0), insert_mark_at(2, 3));
+        assert_eq!((2, LVIM_AFTER), insert_mark_at(3, 3));
+    }
+
+    /// The acceptance criterion as arithmetic: a cursor below the list
+    /// lands its row last and one above it lands the row first, and both
+    /// answers are positions in the list the drag started in.
+    #[test]
+    fn a_drag_off_either_end_lands_the_row_at_that_end_of_its_own_list() {
+        assert_eq!(2, drop_target(0, drop_gap(4000, 0, 17, 3)));
+        assert_eq!(0, drop_target(2, drop_gap(-4000, 0, 17, 3)));
+    }
+
+    /// One implementation of what a move means: a drop is the Move button
+    /// pressed once per row crossed, and that walk has to equal lifting the
+    /// row out of the list and putting it back at the drop position. Every
+    /// row against every gap, so neither direction nor either end is left
+    /// untried.
+    #[test]
+    fn a_drop_reorders_a_list_exactly_as_repeated_move_buttons_do() {
+        let names = ["A", "B", "C", "D"];
+        for from in 0..names.len() {
+            for gap in 0..=names.len() {
+                let to = drop_target(from as i32, gap as i32) as usize;
+                let mut walked = names.to_vec();
+                let mut at = from;
+                while at != to {
+                    let next = move_target(walked.len(), at, to < at)
+                        .expect("a neighbour to trade with");
+                    walked.swap(at, next);
+                    at = next;
+                }
+                let mut lifted = names.to_vec();
+                let row = lifted.remove(from);
+                lifted.insert(to, row);
+                assert_eq!(lifted, walked, "row {from} dropped in gap {gap}");
+            }
+        }
+    }
+
+    /// The centre of one row, in screen coordinates.
+    ///
+    /// A drag is driven by moving the real cursor, because that is what
+    /// `track_drag` and `finish_drag` read: a captured drag reports in the
+    /// capturing window's frame, and only the list's own frame means
+    /// anything to a drop.
+    unsafe fn row_centre(list: HWND, index: i32) -> POINT {
+        // SAFETY: `list` is a live ListView owned by the caller; `rect` and
+        // `pt` are writable stack storage that outlives every call.
+        unsafe {
+            let mut rect = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+            SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(index as usize)),
+                Some(LPARAM(&mut rect as *mut _ as isize)));
+            let mut pt = POINT {
+                x: (rect.left + rect.right) / 2,
+                y: (rect.top + rect.bottom) / 2,
+            };
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(list, &mut pt);
+            pt
+        }
+    }
+
+    /// The notification the control sends once a press has become a drag,
+    /// with the cursor's own point as the one the button went down at.
+    unsafe fn send_begin_drag(hwnd: HWND, list: HWND, id: i32, item: i32) {
+        // SAFETY: `hwnd` and `list` are live windows owned by the caller,
+        // and `nm` is fully initialised stack storage that outlives the
+        // send - which is the contract WM_NOTIFY's `lparam` carries.
+        unsafe {
+            let (x, y) = cursor_in(list);
+            let nm = NMLISTVIEW {
+                hdr: windows::Win32::UI::Controls::NMHDR {
+                    hwndFrom: list,
+                    idFrom: id as usize,
+                    code: LVN_BEGINDRAG,
+                },
+                iItem: item,
+                ptAction: POINT { x, y },
+                ..Default::default()
+            };
+            SendMessageW(hwnd, WM_NOTIFY, Some(WPARAM(id as usize)),
+                Some(LPARAM(&nm as *const _ as isize)));
+        }
+    }
+
+    /// Move the cursor and tell the window, which is what it sees while it
+    /// holds the capture.
+    unsafe fn drag_cursor_to(hwnd: HWND, pt: POINT) {
+        // SAFETY: `hwnd` is a live window owned by the caller; neither
+        // message carries a pointer.
+        unsafe {
+            let _ = SetCursorPos(pt.x, pt.y);
+            SendMessageW(hwnd, WM_MOUSEMOVE, None, None);
+        }
+    }
+
+    /// Three rows in every section, so a drag has somewhere to go in each.
+    fn three_of_each() -> SettingsForm {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.terms = rows(&[("Terms A", true), ("Terms B", true), ("Terms C", true)]);
+        form.frequency = rows(&[("Freq A", true), ("Freq B", true), ("Freq C", true)]);
+        form.pitch = rows(&[("Pitch A", true), ("Pitch B", true), ("Pitch C", true)]);
+        form
+    }
+
+    /// The gesture end to end on real controls: the notification the
+    /// ListView sends starts it, the cursor decides where the row lands,
+    /// and the button-up commits through the very path the Move buttons
+    /// use - so the selection follows the row that was dragged.
+    ///
+    /// The insertion mark itself is not asserted here: wine's comctl32
+    /// answers 0 to both `LVM_SETINSERTMARK` and `LVM_GETINSERTMARK`, so it
+    /// has neither, and this test's whole value would be lost to that gap.
+    /// What decides where the mark goes is `drop_gap` and `insert_mark_at`,
+    /// pinned above with no control at all.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn a_row_dragged_onto_the_first_row_becomes_the_first_row() {
+        let form = three_of_each();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: `h` is the window just opened, live for this whole test;
+        // `ID_TERMS` names the list `build` created inside it, and every
+        // helper here states its own contract.
+        let (order, selected) = unsafe {
+            let list = dlg_item(h, ID_TERMS).expect("the terms list");
+            drag_cursor_to(h, row_centre(list, 2));
+            send_begin_drag(h, list, ID_TERMS, 2);
+            drag_cursor_to(h, row_centre(list, 0));
+            SendMessageW(h, WM_LBUTTONUP, None, None);
+            (lv_rows(h, ID_TERMS), lv_selection(list))
+        };
+
+        assert_eq!(
+            Some(rows(&[("Terms C", true), ("Terms A", true), ("Terms B", true)])),
+            order
+        );
+        assert_eq!(0, selected, "the selection follows the row that was dragged");
+    }
+
+    /// Each role's order is its own, so a drag has nowhere to go but its
+    /// own list: released over another section it lands on the end of the
+    /// list it started in, and that other section does not move a row
+    /// (ADR-0014). Both ways, because the sections are stacked and a drag
+    /// leaves through the top as easily as the bottom.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn a_drag_over_another_roles_list_clamps_to_its_own_end_and_leaves_that_list_alone() {
+        let form = three_of_each();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: as above; all three ids name lists `build` created.
+        let (terms, freqs, pitch) = unsafe {
+            let terms = dlg_item(h, ID_TERMS).expect("the terms list");
+            let freqs = dlg_item(h, ID_FREQS).expect("the frequency list");
+            let pitch = dlg_item(h, ID_PITCH).expect("the pitch list");
+            // Down and out of Terms, releasing on a Frequency row.
+            drag_cursor_to(h, row_centre(terms, 0));
+            send_begin_drag(h, terms, ID_TERMS, 0);
+            drag_cursor_to(h, row_centre(freqs, 1));
+            SendMessageW(h, WM_LBUTTONUP, None, None);
+            // Up and out of Pitch, releasing on a Terms row.
+            drag_cursor_to(h, row_centre(pitch, 2));
+            send_begin_drag(h, pitch, ID_PITCH, 2);
+            drag_cursor_to(h, row_centre(terms, 0));
+            SendMessageW(h, WM_LBUTTONUP, None, None);
+            (lv_rows(h, ID_TERMS), lv_rows(h, ID_FREQS), lv_rows(h, ID_PITCH))
+        };
+
+        assert_eq!(
+            Some(rows(&[("Terms B", true), ("Terms C", true), ("Terms A", true)])),
+            terms,
+            "the terms row lands at the terms list's own end, and the second \
+             drag released over this list moved nothing in it"
+        );
+        assert_eq!(
+            Some(rows(&[("Pitch C", true), ("Pitch A", true), ("Pitch B", true)])),
+            pitch,
+            "the pitch row lands at the pitch list's own start"
+        );
+        assert_eq!(Some(form.frequency.clone()), freqs, "frequency was asked for nothing");
+    }
+
+    /// A row carries a checkbox, so a press on a row is as often a tick as
+    /// the start of a drag: the tick lands and the row stays where it is.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn a_click_on_a_rows_checkbox_ticks_it_and_moves_nothing() {
+        let form = three_of_each();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: as above; `lv_check` states its own contract.
+        let order = unsafe {
+            let list = dlg_item(h, ID_TERMS).expect("the terms list");
+            let on_the_box = row_centre(list, 0);
+            lv_check(list, 0, false);
+            drag_cursor_to(h, on_the_box);
+            // The control read the press as a drag after all; the hand that
+            // made it moved two pixels, which is not a reorder.
+            send_begin_drag(h, list, ID_TERMS, 0);
+            drag_cursor_to(h, POINT { x: on_the_box.x + 1, y: on_the_box.y + 2 });
+            SendMessageW(h, WM_LBUTTONUP, None, None);
+            lv_rows(h, ID_TERMS)
+        };
+
+        assert_eq!(
+            Some(rows(&[("Terms A", false), ("Terms B", true), ("Terms C", true)])),
+            order
+        );
+    }
+
+    /// Leaving the window is the way out of a drag: the row stays where it
+    /// was, the mouse goes back, and nothing is left holding it.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn a_drag_released_outside_the_window_changes_nothing_and_gives_the_mouse_back() {
+        let form = three_of_each();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: as above; `GetWindowRect`, `GetCursorPos` and `PtInRect`
+        // all write into or read from stack storage that outlives them.
+        let (off_window, order, captured, dragging) = unsafe {
+            let list = dlg_item(h, ID_TERMS).expect("the terms list");
+            drag_cursor_to(h, row_centre(list, 0));
+            send_begin_drag(h, list, ID_TERMS, 0);
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(h, &mut rect);
+            // Beside the window rather than under it: it is far taller than
+            // it is wide, so the room is at the sides.
+            let middle = (rect.top + rect.bottom) / 2;
+            let beside = if rect.left > 40 { rect.left - 40 } else { rect.right + 40 };
+            drag_cursor_to(h, POINT { x: beside, y: middle });
+            // The premise, read back rather than assumed: the desktop
+            // clamps a cursor to its own bounds.
+            let mut landed = POINT::default();
+            let _ = GetCursorPos(&mut landed);
+            let off = !PtInRect(&rect, landed).as_bool();
+            SendMessageW(h, WM_LBUTTONUP, None, None);
+            let held = windows::Win32::UI::Input::KeyboardAndMouse::GetCapture();
+            (off, lv_rows(h, ID_TERMS), held, drag_of(h).is_some())
+        };
+
+        assert!(off_window, "the release has to land off the window to mean anything");
+        assert_eq!(Some(form.terms.clone()), order, "an abandoned drag reorders nothing");
+        assert_ne!(h, captured, "the capture has to go back");
+        assert!(!dragging, "and no row may still be in the air");
+    }
+
+    /// Anything may take the mouse mid-drag - a menu, a task switch - and
+    /// when it does the gesture is over: a row left in the air would be
+    /// dropped by the next stray button-up, wherever the cursor had got to.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn a_stolen_capture_ends_the_drag_and_leaves_no_row_in_the_air() {
+        let form = three_of_each();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: as above; the capture is taken by a live control of this
+        // same window and handed straight back.
+        let (dragging, order) = unsafe {
+            let list = dlg_item(h, ID_TERMS).expect("the terms list");
+            drag_cursor_to(h, row_centre(list, 0));
+            send_begin_drag(h, list, ID_TERMS, 0);
+            // Far enough that a commit here would really move the row.
+            drag_cursor_to(h, row_centre(list, 2));
+            SetCapture(list);
+            let dragging = drag_of(h).is_some();
+            let _ = ReleaseCapture();
+            // The button-up that would otherwise have committed the drop.
+            SendMessageW(h, WM_LBUTTONUP, None, None);
+            (dragging, lv_rows(h, ID_TERMS))
+        };
+
+        assert!(!dragging, "the steal has to end the gesture");
+        assert_eq!(Some(form.terms.clone()), order, "and no drop may follow it");
+    }
+
+    /// The part of the shared path a drag must not route around: a drop
+    /// that lands a row at the top grounds Move up, and a disabled control
+    /// keeps the focus Windows gave it - so the focus comes off first or
+    /// the keyboard is left talking to nothing.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn a_drop_at_the_top_greys_move_up_and_takes_the_focus_off_it() {
+        let form = three_of_each();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: as above; `IsWindowEnabled`, `GetFocus` and `SetFocus`
+        // read and move the focus between live controls of this window.
+        let (parked, order, live, focused) = unsafe {
+            let list = dlg_item(h, ID_TERMS).expect("the terms list");
+            let up = dlg_item(h, ID_TERMS_UP).expect("the terms Move up button");
+            // Row 1 can go up, so the button is live and worth focusing.
+            lv_select(list, 1);
+            update_list_buttons(h);
+            let _ = SetFocus(Some(up));
+            let parked = GetFocus() == up;
+            drag_cursor_to(h, row_centre(list, 1));
+            send_begin_drag(h, list, ID_TERMS, 1);
+            drag_cursor_to(h, row_centre(list, 0));
+            SendMessageW(h, WM_LBUTTONUP, None, None);
+            let live = windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(up);
+            (parked, lv_rows(h, ID_TERMS), live.as_bool(), GetFocus() == list)
+        };
+
+        assert!(parked, "the test needs the focus on the button it is about to ground");
+        assert_eq!(
+            Some(rows(&[("Terms B", true), ("Terms A", true), ("Terms C", true)])),
+            order
+        );
+        assert!(!live, "the top row cannot go up, so Move up has to be dead");
+        assert!(focused, "and the focus has to be back on the list");
+    }
+
+    // ---- the ranking-strategy combo ----
+
+    /// The table is both halves of the edge, so every label the combo was
+    /// filled with reads back as the strategy that put it there.
+    #[test]
+    fn the_ranking_combo_reads_back_the_strategy_at_each_index() {
+        for (at, (strategy, _)) in RANKING_STRATEGIES.iter().enumerate() {
+            assert_eq!(*strategy, ranking_strategy_at(at as isize));
+        }
+    }
+
+    /// `build` selects item 0 when it matches nothing, so a lost selection
+    /// has to read as whatever item 0 is.
+    #[test]
+    fn a_ranking_combo_with_no_selection_reads_the_item_build_would_select() {
+        assert_eq!(RANKING_STRATEGIES[0].0, ranking_strategy_at(-1));
+        assert_eq!(RANKING_STRATEGIES[0].0, ranking_strategy_at(99));
+        assert_eq!(RankingStrategy::default(), ranking_strategy_at(-1));
+    }
+
+    /// A strategy the combo cannot offer is one the user cannot pick.
+    #[test]
+    fn the_ranking_combo_offers_every_strategy_once() {
+        for strategy in
+            [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
+        {
+            assert_eq!(
+                1,
+                RANKING_STRATEGIES.iter().filter(|(s, _)| *s == strategy).count(),
+                "{strategy:?}"
+            );
+        }
+    }
+
+    // ---- re-scoping the terms list ----
 
     fn installed_two() -> Vec<String> {
         vec!["Jitendex.org [2026-07-09]".to_string(), "大辞林　第四版".to_string()]
     }
 
-    /// No list: everything searched.
+    fn names(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|r| r.to_string()).collect()
+    }
+
+    fn rows(named: &[(&str, bool)]) -> Vec<DictRow> {
+        named
+            .iter()
+            .map(|(name, enabled)| DictRow { name: (*name).to_string(), enabled: *enabled })
+            .collect()
+    }
+
+    /// No list: every row ticked.
     #[test]
-    fn an_empty_language_list_leaves_every_row_active() {
+    fn an_empty_language_list_leaves_every_row_ticked() {
         assert_eq!(
-            (installed_two(), Vec::new()),
+            rows(&[("Jitendex.org [2026-07-09]", true), ("大辞林　第四版", true)]),
             scope_rows(&installed_two(), &[], &[])
         );
     }
 
-    /// Substrings, not live names.
+    /// Exact names, never a prefix of one.
     #[test]
-    fn a_language_list_splits_and_orders_the_rows() {
-        let (active, excluded) =
-            scope_rows(&installed_two(), &["大辞林".to_string()], &[]);
-        assert_eq!(vec!["大辞林　第四版".to_string()], active);
-        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], excluded);
+    fn a_language_list_ticks_and_orders_the_rows_it_names() {
+        assert_eq!(
+            rows(&[("大辞林　第四版", true), ("Jitendex.org [2026-07-09]", false)]),
+            scope_rows(&installed_two(), &names(&["大辞林　第四版"]), &[])
+        );
     }
 
     #[test]
     fn the_list_order_wins_over_the_row_order() {
-        let list = vec!["大辞林".to_string(), "Jitendex".to_string()];
-        let (active, excluded) = scope_rows(&installed_two(), &list, &[]);
+        let list = names(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         assert_eq!(
-            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
-            active
+            rows(&[("大辞林　第四版", true), ("Jitendex.org [2026-07-09]", true)]),
+            scope_rows(&installed_two(), &list, &[])
         );
-        assert!(excluded.is_empty());
     }
 
-    /// Stale list: nothing hidden.
+    /// Stale list: nothing unticked. A name that is only part of an
+    /// installed one is stale like any other - the substring match this
+    /// replaced is what made a rename look like a deliberate scope.
     #[test]
-    fn a_list_matching_nothing_installed_leaves_every_row_active() {
-        let list = vec!["Daijirin".to_string()];
+    fn a_list_matching_nothing_installed_leaves_every_row_ticked() {
         assert_eq!(
-            (installed_two(), Vec::new()),
-            scope_rows(&installed_two(), &list, &[])
+            rows(&[("Jitendex.org [2026-07-09]", true), ("大辞林　第四版", true)]),
+            scope_rows(&installed_two(), &names(&["大辞林"]), &[])
         );
     }
 
     /// Blanks pin nothing.
     #[test]
-    fn a_blank_only_list_leaves_every_row_active() {
-        let list = vec![String::new()];
+    fn a_blank_only_list_leaves_every_row_ticked() {
         assert_eq!(
-            (installed_two(), Vec::new()),
-            scope_rows(&installed_two(), &list, &[])
+            rows(&[("Jitendex.org [2026-07-09]", true), ("大辞林　第四版", true)]),
+            scope_rows(&installed_two(), &[String::new()], &[])
         );
     }
 
     /// Unreadable rows cannot scope.
     #[test]
-    fn a_list_naming_only_an_unreadable_row_leaves_every_row_active() {
-        let mut rows = installed_two();
-        rows.push("broken.zip".to_string());
-        let unreadable = vec!["broken.zip".to_string()];
-        let list = vec!["broken".to_string()];
+    fn a_list_naming_only_an_unreadable_row_leaves_every_row_ticked() {
+        let mut all = installed_two();
+        all.push("broken.zip".to_string());
         assert_eq!(
-            (rows.clone(), Vec::new()),
-            scope_rows(&rows, &list, &unreadable)
+            rows(&[
+                ("Jitendex.org [2026-07-09]", true),
+                ("大辞林　第四版", true),
+                ("broken.zip", true),
+            ]),
+            scope_rows(&all, &names(&["broken.zip"]), &names(&["broken.zip"]))
         );
     }
 
-    /// It must stay removable.
+    /// It must stay removable, and Terms is the one section an empty role
+    /// set is listed in at all (ADR-0014).
     #[test]
-    fn an_unreadable_row_stays_on_the_searched_side() {
-        let mut rows = installed_two();
-        rows.push("broken.zip".to_string());
-        let unreadable = vec!["broken.zip".to_string()];
-        let (active, excluded) =
-            scope_rows(&rows, &["大辞林".to_string()], &unreadable);
+    fn an_unreadable_row_survives_a_re_scope_so_it_can_still_be_removed() {
+        let mut all = installed_two();
+        all.push("broken.zip".to_string());
         assert_eq!(
-            vec!["大辞林　第四版".to_string(), "broken.zip".to_string()],
-            active
+            rows(&[
+                ("大辞林　第四版", true),
+                ("broken.zip", true),
+                ("Jitendex.org [2026-07-09]", false),
+            ]),
+            scope_rows(&all, &names(&["大辞林　第四版"]), &names(&["broken.zip"]))
         );
-        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], excluded);
-    }
-
-    // ---- the two-box move ----
-
-    fn names(rows: &[&str]) -> Vec<String> {
-        rows.iter().map(|r| r.to_string()).collect()
-    }
-
-    #[test]
-    fn up_on_the_top_of_not_searched_crosses_to_the_bottom_of_searched() {
-        let mut searched = names(&["A", "B"]);
-        let mut not = names(&["C", "D"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 0, true);
-        assert_eq!(Some((DictBox::Searched, 2)), landed);
-        assert_eq!(names(&["A", "B", "C"]), searched);
-        assert_eq!(names(&["D"]), not);
-    }
-
-    #[test]
-    fn down_on_the_bottom_of_searched_crosses_to_the_top_of_not_searched() {
-        let mut searched = names(&["A", "B"]);
-        let mut not = names(&["C"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 1, false);
-        assert_eq!(Some((DictBox::NotSearched, 0)), landed);
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["B", "C"]), not);
-    }
-
-    #[test]
-    fn up_on_the_top_of_searched_does_nothing() {
-        let mut searched = names(&["A", "B"]);
-        let mut not = names(&["C"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 0, true);
-        assert_eq!(None, landed);
-        assert_eq!(names(&["A", "B"]), searched);
-        assert_eq!(names(&["C"]), not);
-    }
-
-    #[test]
-    fn down_on_the_bottom_of_not_searched_does_nothing() {
-        let mut searched = names(&["A"]);
-        let mut not = names(&["B", "C"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 1, false);
-        assert_eq!(None, landed);
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["B", "C"]), not);
-    }
-
-    /// Never search nothing.
-    #[test]
-    fn the_last_searched_row_will_not_cross_down() {
-        let mut searched = names(&["A"]);
-        let mut not = names(&["B"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 0, false);
-        assert_eq!(None, landed);
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["B"]), not);
-    }
-
-    /// keyed_names strips it first.
-    #[test]
-    fn an_unreadable_row_does_not_count_toward_the_last_searched_rule() {
-        let mut searched = names(&["bad.zip", "A"]);
-        let mut not = names(&["B"]);
-        let bad = names(&["bad.zip"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &bad, DictBox::Searched, 1, false);
-        assert_eq!(None, landed);
-        assert_eq!(names(&["bad.zip", "A"]), searched);
-        assert_eq!(names(&["B"]), not);
-    }
-
-    #[test]
-    fn adding_appends_to_searched() {
-        let mut searched = names(&["A", "B"]);
-        assert_eq!(2, add_dict(&mut searched, "C"));
-        assert_eq!(names(&["A", "B", "C"]), searched);
-    }
-
-    #[test]
-    fn up_inside_searched_reorders_without_crossing() {
-        let mut searched = names(&["A", "B", "C"]);
-        let mut not = names(&["D"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 2, true);
-        assert_eq!(Some((DictBox::Searched, 1)), landed);
-        assert_eq!(names(&["A", "C", "B"]), searched);
-        assert_eq!(names(&["D"]), not);
-    }
-
-    #[test]
-    fn down_inside_searched_reorders_without_crossing() {
-        let mut searched = names(&["A", "B", "C"]);
-        let mut not = names(&["D"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 0, false);
-        assert_eq!(Some((DictBox::Searched, 1)), landed);
-        assert_eq!(names(&["B", "A", "C"]), searched);
-        assert_eq!(names(&["D"]), not);
-    }
-
-    #[test]
-    fn up_inside_not_searched_reorders_without_crossing() {
-        let mut searched = names(&["A"]);
-        let mut not = names(&["B", "C", "D"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 2, true);
-        assert_eq!(Some((DictBox::NotSearched, 1)), landed);
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["B", "D", "C"]), not);
-    }
-
-    #[test]
-    fn down_inside_not_searched_reorders_without_crossing() {
-        let mut searched = names(&["A"]);
-        let mut not = names(&["B", "C", "D"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 0, false);
-        assert_eq!(Some((DictBox::NotSearched, 1)), landed);
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["C", "B", "D"]), not);
-    }
-
-    /// It contributes no name.
-    #[test]
-    fn an_unreadable_row_may_itself_cross_down() {
-        let mut searched = names(&["A", "bad.zip"]);
-        let mut not: Vec<String> = Vec::new();
-        let bad = names(&["bad.zip"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &bad, DictBox::Searched, 1, false);
-        assert_eq!(Some((DictBox::NotSearched, 0)), landed);
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["bad.zip"]), not);
-    }
-
-    /// Remove can empty the box.
-    #[test]
-    fn a_row_crosses_up_into_an_empty_searched_box() {
-        let mut searched: Vec<String> = Vec::new();
-        let mut not = names(&["A", "B"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::NotSearched, 0, true);
-        assert_eq!(Some((DictBox::Searched, 0)), landed);
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["B"]), not);
-    }
-
-    #[test]
-    fn a_move_from_beyond_the_last_row_does_nothing() {
-        let mut searched = names(&["A", "B"]);
-        let mut not = names(&["C"]);
-        let landed =
-            dict_move(&mut searched, &mut not, &[], DictBox::Searched, 2, true);
-        assert_eq!(None, landed);
-        assert_eq!(names(&["A", "B"]), searched);
-        assert_eq!(names(&["C"]), not);
-    }
-
-    /// Greying asks without moving.
-    #[test]
-    fn the_target_refuses_exactly_what_the_move_refuses() {
-        let searched = names(&["A"]);
-        let not = names(&["B"]);
-        assert_eq!(
-            None,
-            dict_move_target(&searched, &not, &[], DictBox::Searched, 0, false)
-        );
-        assert_eq!(
-            Some((DictBox::Searched, 1)),
-            dict_move_target(&searched, &not, &[], DictBox::NotSearched, 0, true)
-        );
-        assert_eq!(names(&["A"]), searched);
-        assert_eq!(names(&["B"]), not);
-    }
-
-    // ---- which box acts ----
-
-    #[test]
-    fn only_the_searched_box_selected_acts_on_searched() {
-        assert_eq!(DictBox::Searched, acting_box(true, false, None));
-        assert_eq!(DictBox::Searched, acting_box(true, false, Some(DictBox::NotSearched)));
-    }
-
-    #[test]
-    fn only_the_not_searched_box_selected_acts_on_not_searched() {
-        assert_eq!(DictBox::NotSearched, acting_box(false, true, None));
-    }
-
-    /// A LISTBOX keeps a selection.
-    #[test]
-    fn both_boxes_selected_acts_on_the_last_one_touched() {
-        assert_eq!(DictBox::NotSearched, acting_box(true, true, Some(DictBox::NotSearched)));
-        assert_eq!(DictBox::Searched, acting_box(true, true, Some(DictBox::Searched)));
-    }
-
-    #[test]
-    fn both_boxes_selected_with_nothing_tracked_acts_on_searched() {
-        assert_eq!(DictBox::Searched, acting_box(true, true, None));
-    }
-
-    #[test]
-    fn neither_box_selected_acts_on_searched() {
-        assert_eq!(DictBox::Searched, acting_box(false, false, None));
-    }
-
-    /// A selection beats the memory.
-    #[test]
-    fn a_stale_tracked_box_never_beats_a_single_selection() {
-        assert_eq!(DictBox::NotSearched, acting_box(false, true, Some(DictBox::Searched)));
-    }
-
-    #[test]
-    fn remove_follows_the_box_holding_the_selection() {
-        assert_eq!(ID_DICTS_OFF, dict_box_id(acting_box(false, true, None)));
-        assert_eq!(ID_DICTS, dict_box_id(acting_box(true, false, None)));
     }
 
     // ---- the layout budget ----
 
-    /// The one-box layout cost 218.
+    /// The list sits beside a four-button column, so it may not be shorter
+    /// than one.
     #[test]
-    fn the_dictionaries_group_did_not_outgrow_the_one_box_layout() {
-        assert_eq!(20 + 20 + (4 * BTN_PITCH + ROW_H) + ROW_GAP + 28 + 8, dict_group_h());
+    fn a_role_list_is_as_tall_as_its_four_button_column() {
+        assert_eq!(3 * BTN_PITCH + ROW_H, DICT_LIST_H);
+    }
+
+    /// Only Frequency has a rule to pick, so only its group pays for the
+    /// row that picks one.
+    #[test]
+    fn only_the_frequency_group_is_taller_by_the_strategy_row() {
+        let plain = 20 + DICT_CAP_H + DICT_LIST_H + 8;
+        assert_eq!(plain, role_group_h(Role::Terms));
+        assert_eq!(plain, role_group_h(Role::Pitch));
+        assert_eq!(plain + ROW_H + ROW_GAP, role_group_h(Role::Frequency));
+    }
+
+    /// The whole seam, not only the decisions: a real window renders three
+    /// role sections and every row reads back with the checkbox and the
+    /// position it was given, and the strategy combo round-trips.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn three_role_sections_read_back_every_row_with_its_checkbox() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.terms = rows(&[("Terms A", true), ("Terms B", false)]);
+        form.frequency = rows(&[("Freq A", true), ("Freq B", true)]);
+        form.pitch = rows(&[("Pitch A", false)]);
+        form.ranking_strategy = RankingStrategy::Median;
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+
+        let back = window.read(&form);
+
+        assert_eq!(form.terms, back.terms);
+        assert_eq!(form.frequency, back.frequency);
+        assert_eq!(form.pitch, back.pitch);
+        assert_eq!(RankingStrategy::Median, back.ranking_strategy);
+    }
+
+    /// A checkbox may only affect the section it sits in, and a Move button
+    /// only the list beside it: one dictionary supplying two roles has two
+    /// rows, and unticking its definitions may not touch its frequency
+    /// data (ADR-0014).
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn a_move_and_a_tick_reach_one_section_only() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.terms = rows(&[("Mixed", true), ("Terms only", true)]);
+        form.frequency = rows(&[("Mixed", true), ("Freq only", true)]);
+        form.pitch = rows(&[("Pitch only", true)]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: `h` is the window just opened, live for this whole test;
+        // both ids name controls `build` created inside it, and each
+        // `lv_*` helper states its own contract.
+        unsafe {
+            let freqs = dlg_item(h, ID_FREQS).expect("the frequency list");
+            lv_select(freqs, 0);
+            SendMessageW(h, WM_COMMAND, Some(WPARAM(ID_FREQ_DOWN as usize)), None);
+            let terms = dlg_item(h, ID_TERMS).expect("the terms list");
+            lv_set(terms, 0, &DictRow { name: "Mixed".to_string(), enabled: false });
+        }
+
+        let back = window.read(&form);
+
+        assert_eq!(rows(&[("Freq only", true), ("Mixed", true)]), back.frequency);
+        assert_eq!(rows(&[("Mixed", false), ("Terms only", true)]), back.terms);
+        assert_eq!(form.pitch, back.pitch, "pitch was asked to change nothing");
+    }
+
+    /// Every row is listable and removable even with no roles at all: an
+    /// unreadable archive is carried in Terms for exactly that reason, so
+    /// its Remove button has to be live when its row is selected.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn an_unreadable_row_is_listed_and_its_remove_button_is_live() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.terms = rows(&[("broken.zip", false)]);
+        form.unreadable = names(&["broken.zip"]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+            .expect("opening the settings window");
+        let h = window.hwnd();
+
+        // SAFETY: as above; `IsWindowEnabled` reads a live control.
+        let (listed, removable) = unsafe {
+            let terms = dlg_item(h, ID_TERMS).expect("the terms list");
+            lv_select(terms, 0);
+            update_list_buttons(h);
+            let remove = dlg_item(h, ID_TERMS_REMOVE).expect("the terms Remove button");
+            let live = windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(remove);
+            (lv_rows(h, ID_TERMS), live.as_bool())
+        };
+
+        assert_eq!(Some(rows(&[("broken.zip", false)])), listed);
+        assert!(removable, "an unreadable archive must stay removable");
+    }
+
+    /// The window feeds the core seam and the seam decides: a frequency
+    /// reorder, tick or strategy change is a reindex, and a terms or pitch
+    /// change is a config write and the existing `reload`. The rule itself
+    /// is `settings::dictionary_work`'s, so this asserts only that every
+    /// control reaches it - a `read` that dropped the strategy on the
+    /// floor would silently never rerank.
+    ///
+    /// Needs a real desktop session.
+    #[test]
+    #[ignore]
+    fn only_a_frequency_change_reaches_the_reindex() {
+        use crate::settings::DictionaryWork::{None as NoWork, Reindex};
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.terms = rows(&[("Mixed", true), ("Terms only", true)]);
+        form.frequency = rows(&[("Mixed", true), ("Freq only", true)]);
+        form.pitch = rows(&[("Pitch only", true)]);
+        let before = crate::settings::apply_to(&form, &crate::config::Config::default());
+        // One window per change: they would otherwise accumulate.
+        let work = |touch: &dyn Fn(HWND)| {
+            let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
+                .expect("opening the settings window");
+            touch(window.hwnd());
+            let after = crate::settings::apply_to(&window.read(&form), &before);
+            crate::settings::dictionary_work(&before, &after)
+        };
+        let reorder = |list: i32, down: i32| {
+            move |h: HWND| {
+                // SAFETY: both ids name controls `build` created inside
+                // `h`, which is live for this call; `lv_select` states its
+                // own contract and the button is driven the way a click
+                // drives it.
+                unsafe {
+                    let l = dlg_item(h, list).expect("a role list");
+                    lv_select(l, 0);
+                    SendMessageW(h, WM_COMMAND, Some(WPARAM(down as usize)), None);
+                }
+            }
+        };
+        let untick = |list: i32| {
+            move |h: HWND| {
+                // SAFETY: as above; `lv_check` states its own contract.
+                unsafe {
+                    let l = dlg_item(h, list).expect("a role list");
+                    lv_check(l, 0, false);
+                }
+            }
+        };
+
+        assert_eq!(NoWork, work(&|_| {}), "an untouched window changes nothing");
+        assert_eq!(Reindex, work(&reorder(ID_FREQS, ID_FREQ_DOWN)));
+        assert_eq!(Reindex, work(&untick(ID_FREQS)));
+        assert_eq!(
+            Reindex,
+            work(&|h| {
+                // SAFETY: `ID_RANKING` names the combo `build` created
+                // inside `h`, live for this call.
+                unsafe {
+                    let combo = dlg_item(h, ID_RANKING).expect("the ranking combo");
+                    let at = RANKING_STRATEGIES
+                        .iter()
+                        .position(|(s, _)| *s == RankingStrategy::Median)
+                        .expect("median is offered");
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(at)), None);
+                }
+            })
+        );
+        assert_eq!(NoWork, work(&reorder(ID_TERMS, ID_TERMS_DOWN)));
+        assert_eq!(NoWork, work(&untick(ID_PITCH)));
     }
 
     // ---- Plugins tab ----

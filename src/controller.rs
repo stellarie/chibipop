@@ -964,6 +964,7 @@ mod tests {
             freq: None,
             blocks: Vec::new(),
             match_len: written.chars().count(),
+            pitch: Vec::new(),
         }
     }
 

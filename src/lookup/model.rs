@@ -2,6 +2,7 @@
 
 use crate::dict::gloss::{plain_items, pos_labels, GlossDoc};
 use crate::dict::media::Intrinsic;
+use crate::dict::pitch::{Accent, PitchClaim};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,6 +61,19 @@ pub struct Entry {
     /// intrinsic size, which is exactly the state the `alt`-text fallback
     /// acts on (`dict::media`).
     pub media: Vec<(String, Intrinsic)>,
+    /// The Reported frequency of this record's headword: the number the
+    /// highest-ordered enabled frequency dictionary that has the headword
+    /// actually published.
+    ///
+    /// What the popup prints, and never the reduced Frequency rank
+    /// [`TermRow::freq`] carries (ADR-0015): priority-first-wins whatever
+    /// ranking strategy the ranks were reduced under, so the figure on
+    /// screen is always something a real dictionary said and the reader can
+    /// look it up. A median of three sources is not.
+    ///
+    /// `None` when no enabled frequency dictionary ranks the headword, and
+    /// for any `Entry` with no store behind it.
+    pub reported_freq: Option<i64>,
 }
 
 impl Entry {
@@ -69,19 +83,21 @@ impl Entry {
         dict_id: i64,
         gloss: Arc<GlossDoc>,
         media: Vec<(String, Intrinsic)>,
+        reported_freq: Option<i64>,
     ) -> Entry {
         let pos = pos_labels(&gloss);
-        Entry { entry_id, dict_id, gloss, pos, media }
+        Entry { entry_id, dict_id, gloss, pos, media, reported_freq }
     }
 
     /// Parses a raw glossary payload. The hover path goes through
     /// `SqliteDictionary`'s cache instead; this is the fixture path.
     ///
-    /// No media, and that is the truth about it: there is no store behind a
-    /// tree parsed from a string, so its images size from what they declare
-    /// and fall back to their `alt` text.
+    /// No media and no Reported frequency, and that is the truth about it:
+    /// there is no store behind a tree parsed from a string, so its images
+    /// size from what they declare and fall back to their `alt` text, and no
+    /// frequency dictionary has said anything about its headword.
     pub fn parse(entry_id: i64, dict_id: i64, glossary: &str) -> Entry {
-        Entry::new(entry_id, dict_id, Arc::new(GlossDoc::parse(glossary)), Vec::new())
+        Entry::new(entry_id, dict_id, Arc::new(GlossDoc::parse(glossary)), Vec::new(), None)
     }
 
     /// The plain-text glosses, one per glossary item.
@@ -110,6 +126,25 @@ pub trait Dictionary {
     /// Dictionary identities, read once at startup. The `dict` table has a
     /// handful of rows; this is not a hot-path call.
     fn dicts(&self) -> Result<Vec<crate::present::DictInfo>>;
+
+    /// Every stored Pitch pattern for one headword and reading, whichever
+    /// dictionary made the claim.
+    ///
+    /// `term` is the headword as an archive names it - the kanji spelling,
+    /// or the kana one where there is no kanji - and `reading` is the
+    /// reading it is scoped to. Which dictionaries are enabled and in what
+    /// order they rank is the pitch list's question and therefore config's,
+    /// so the answer here is unfiltered and unordered (ADR-0014).
+    ///
+    /// Once per card the popup builds, never on the term path: a Pitch
+    /// pattern is per reading, so it cannot ride on a `term` row.
+    ///
+    /// **Total.** A store fault draws no pitch rather than costing the
+    /// hover its card, which is the same ladder an unreadable image asset
+    /// takes (`SqliteDictionary::media_sizes`): the accent is one row of a
+    /// card header, and losing the whole hover over it would be the worse
+    /// answer.
+    fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim>;
 }
 
 /// In-memory `Dictionary` for tests.
@@ -118,6 +153,9 @@ pub struct FakeDictionary {
     terms: HashMap<String, Vec<TermRow>>,
     entries: HashMap<i64, Entry>,
     dicts: Vec<crate::present::DictInfo>,
+    /// Headword plus reading to the claims made about it, in the order they
+    /// were seeded - which is the order the stored rows come back in.
+    pitch: HashMap<(String, String), Vec<PitchClaim>>,
 }
 
 impl FakeDictionary {
@@ -125,6 +163,10 @@ impl FakeDictionary {
         Self::default()
     }
 
+    /// One `term` row, by hand. The argument list is the row's own columns
+    /// and nothing else, so a struct here would only be `TermRow` spelled
+    /// twice.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_term(
         &mut self,
         surface: &str,
@@ -156,6 +198,14 @@ impl FakeDictionary {
     pub fn add_dict(&mut self, dict_id: i64, name: &str) {
         self.dicts.push(crate::present::DictInfo { dict_id, name: name.to_string() });
     }
+
+    /// One dictionary's claim about one headword and reading.
+    pub fn add_pitch(&mut self, term: &str, reading: &str, dict_id: i64, accent: Accent) {
+        self.pitch
+            .entry((term.to_string(), reading.to_string()))
+            .or_default()
+            .push(PitchClaim { dict_id, accent });
+    }
 }
 
 impl Dictionary for FakeDictionary {
@@ -169,6 +219,13 @@ impl Dictionary for FakeDictionary {
 
     fn dicts(&self) -> Result<Vec<crate::present::DictInfo>> {
         Ok(self.dicts.clone())
+    }
+
+    fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
+        self.pitch
+            .get(&(term.to_string(), reading.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

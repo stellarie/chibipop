@@ -29,7 +29,8 @@ use super::*;
 use crate::dict::media::{Intrinsic, MediaFormat};
 use crate::dict::sheet;
 use crate::geom::PhysRect;
-use crate::present::{AnkiPopupState, Card, CollapsedRow, GlossBlock, GlossEntry};
+use crate::dict::pitch::{Accent, Position};
+use crate::present::{AnkiPopupState, Card, CollapsedRow, GlossBlock, GlossEntry, PitchRow};
 use crate::text::layout::TextGeom;
 use crate::text::TextSpan;
 use crate::ui::layout::{BoxStyle, Edges, ElemBox, GlossOrigin, MarkerBox, Rgb, RubyBox};
@@ -81,14 +82,21 @@ pub struct Fixture {
     pub variants: Vec<(&'static str, Spec)>,
 }
 
-/// The thirteen ADR-0011 fixtures.
+/// The sixteen ADR-0011 fixtures.
 ///
 /// Seven from the original set, whose
 /// intent is unchanged, then the six
 /// ADR-0013 requires: the widened
 /// schema has fields no plain-string
 /// fixture can ever fill, and an
-/// unfilled field gates nothing.
+/// unfilled field gates nothing. The
+/// last three are ticket 02's, for the
+/// same reason again: pitch has no
+/// geometry before that ticket, so
+/// nothing could be captured from a
+/// build that drew none, and these
+/// three are the only thing pinning
+/// the card header's marks.
 pub fn fixtures() -> Vec<Fixture> {
     vec![
         wrapping_heavy(),
@@ -104,6 +112,9 @@ pub fn fixtures() -> Vec<Fixture> {
         table_spans(),
         ruby_run(),
         inline_image(),
+        pitch_single(),
+        pitch_multiple(),
+        pitch_sources(),
     ]
 }
 
@@ -568,6 +579,24 @@ fn card(
         freq,
         blocks,
         match_len,
+        pitch: Vec::new(),
+    }
+}
+
+/// One accent, and the dictionaries that gave it.
+///
+/// Real accents out of `docs/research/pitch-accent-shapes.md`'s census, so a
+/// golden that moves says something about a reading somebody's dictionary
+/// actually publishes.
+fn pitch(fall: u32, dicts: &[&str]) -> PitchRow {
+    PitchRow {
+        accent: Accent {
+            position: Position::Downstep(fall),
+            nasal: Vec::new(),
+            devoice: Vec::new(),
+            tags: Vec::new(),
+        },
+        dicts: dicts.iter().map(|d| d.to_string()).collect(),
     }
 }
 
@@ -1233,4 +1262,101 @@ fn inline_image() -> Fixture {
     let mut spec = Spec::plain(present(Some(top), vec![]));
     spec.max_w = 380;
     Fixture { name: "inline_image", variants: vec![("default", spec)] }
+}
+
+/// 14. **One accent** — the card header's new geometry at its simplest, and
+///     the only fixture that pins where an overline and a downstep tick land.
+///
+/// `雑談 / ざつだん`, heiban, which is 48.0% of ticket 01's censused accents:
+/// the first mora low, the other three high, and no tick - so this golden
+/// records the overline's own extent with nothing else in the row to confuse
+/// it. Every mark is an `inline_box` with one border edge, so the fields that
+/// move here are exactly the ones marked kana is drawn out of.
+fn pitch_single() -> Fixture {
+    let mut top = card(
+        Some("雑談"),
+        Some("ざつだん"),
+        &["noun"],
+        Some(7671),
+        vec![block("Jitendex", &["chatting; idle talk"])],
+        2,
+    );
+    top.pitch = vec![pitch(0, &["NHK"])];
+    Fixture {
+        name: "pitch_single",
+        variants: vec![("default", Spec::plain(present(Some(top), vec![])))],
+    }
+}
+
+/// 15. **Several accents** — the row stack, and the tick inside a word.
+///
+/// `白目 / しろめ` with all four of the accents ticket 01's census unions out
+/// of its five pitch dictionaries, which is the corpus maximum and reached by
+/// only 50 of 218 783 expression+reading pairs. Heiban, atamadaka, nakadaka
+/// and odaka in one capture, so the golden holds one row of each shape and
+/// the gap the walk stacks between them.
+fn pitch_multiple() -> Fixture {
+    let mut top = card(
+        Some("白目"),
+        Some("しろめ"),
+        &["noun"],
+        Some(31_602),
+        vec![block("大辞林", &["白眼。眼球の白い部分。"])],
+        2,
+    );
+    top.pitch = vec![
+        pitch(0, &["大辞林"]),
+        pitch(1, &["三省堂"]),
+        pitch(2, &["新明解"]),
+        pitch(3, &["NHK"]),
+    ];
+    Fixture {
+        name: "pitch_multiple",
+        variants: vec![("default", Spec::plain(present(Some(top), vec![])))],
+    }
+}
+
+/// 16. **Several source dictionaries** — the dedup, as the panel draws it.
+///
+/// `合縁奇縁 / あいえんきえん`, where three of the census's dictionaries say
+/// `5` and 大辞泉 says heiban: two rows, three names against one. The
+/// `agreed` variant is the same reading with every dictionary unanimous,
+/// which is 81.4% of the readings two or more of them know - one row naming
+/// four. The pair is what a golden needs to pin the dedup, because the
+/// difference between them is a whole row of geometry.
+///
+/// A kana-only headword in the `agreed` variant on purpose: the marked kana
+/// then sits directly under the headword with no reading line between them,
+/// which is a different y for every element below it.
+fn pitch_sources() -> Fixture {
+    let mut split = card(
+        Some("合縁奇縁"),
+        Some("あいえんきえん"),
+        &["noun"],
+        None,
+        vec![block("Jitendex", &["a couple joined by a happy chance"])],
+        4,
+    );
+    split.pitch = vec![
+        pitch(5, &["三省堂", "新明解", "NHK"]),
+        pitch(0, &["大辞泉"]),
+    ];
+
+    let mut agreed = card(
+        None,
+        Some("あいえんきえん"),
+        &[],
+        None,
+        vec![block("Jitendex", &["a couple joined by a happy chance"])],
+        7,
+    );
+    agreed.pitch = vec![pitch(5, &["大辞林", "大辞泉", "三省堂", "NHK"])];
+
+    Fixture {
+        name: "pitch_sources",
+        variants: vec![
+            ("split", Spec::plain(present(Some(split), vec![]))),
+            ("agreed", Spec::plain(present(Some(agreed), vec![]))),
+        ],
+    }
 }

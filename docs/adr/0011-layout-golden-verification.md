@@ -76,7 +76,7 @@ goldens still fail inside tier0's own `cargo test` on drift — the problem rein
 
 ## Fixture set
 
-**Thirteen** hand-built `Presentation`s, each one committed golden. The first seven
+**Sixteen** hand-built `Presentation`s, each one committed golden. The first seven
 are the original set, in the `one_card`/`with_collapsed` style, and their intent is
 unchanged:
 
@@ -125,8 +125,28 @@ something about a dictionary somebody owns:
     recorded `1em` GIF gaiji, a monochrome SVG declaring both axes, and an unrecorded
     asset that falls to its `alt` text. Where a media key reaches a golden.
 
+The last three are ticket 02's, and they are authored for the same reason: pitch has
+no geometry before this ticket, so nothing could be captured from a build that drew
+none. Each accent in them is a real one from `docs/research/pitch-accent-shapes.md`'s
+census, so a golden that moves says something about a reading somebody's dictionary
+publishes:
+
+14. **One accent** — `雑談 / ざつだん`, heiban, which is 48.0% of the censused
+    accents. The overline's own extent with nothing else in the row, and the only
+    fixture that pins an unticked mark.
+15. **Several accents** — `白目 / しろめ` with all four accents the census unions out
+    of its five pitch dictionaries, which is the corpus maximum. Heiban, atamadaka,
+    nakadaka and odaka in one capture, so one row of each shape and the gap the walk
+    stacks between them.
+16. **Several source dictionaries** — `合縁奇縁 / あいえんきえん`, where three
+    dictionaries say `5` and one says heiban: a `split` variant drawing two rows with
+    three names against one, and an `agreed` variant drawing a single row naming four.
+    The pair is what pins the dedup, because the difference between them is a whole
+    row of geometry. `agreed` carries a kana-only headword, so its marked kana sits
+    directly under the headword with no reading line between them.
+
 `fixtures()` and this list grow together, and
-`the_fixture_set_is_the_thirteen_from_adr_0011` pins the names against it.
+`the_fixture_set_is_the_sixteen_from_adr_0011` pins the names against it.
 
 ### One finding this set recorded, and the fix that closed it
 

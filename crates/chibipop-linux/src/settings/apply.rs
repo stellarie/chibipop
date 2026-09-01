@@ -5,11 +5,20 @@
 //! ApplyMode — connectable means the daemon hot-reloads, absent means
 //! config-only with a notice. No structured settings ever cross the
 //! socket.
+//!
+//! One thing sits between the save and the `reload`: a change to the
+//! frequency inputs makes `term.freq` stale, and
+//! [`chibipop::settings::dictionary_work`] is what says so. Reconciling it
+//! is an in-place recompute over rows that are already here, never a
+//! rebuild - see [`reindex`].
 
 use crate::control::{self, Verb};
 use anyhow::{Context, Result};
 use chibipop::config::{Config, OcrClipboardConfig, PopupLayer, ScreenshotConfig};
-use chibipop::settings::SettingsForm;
+use chibipop::library::Role;
+use chibipop::present::DictInfo;
+use chibipop::settings::{DictionaryWork, SettingsForm};
+use rusqlite::OpenFlags;
 use std::path::Path;
 
 /// The fields the shared form does not model: Linux platform fields
@@ -102,20 +111,46 @@ pub enum ApplyOutcome {
     ConfigOnly,
 }
 
+/// What a change to the frequency inputs cost beyond the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frequency {
+    /// Every Frequency rank recomputed in place, over this many `term`
+    /// rows.
+    Reindexed(u64),
+    /// No database to restamp yet. A fresh install has no `term` row to
+    /// carry a rank, and the first Rebuild reads these same settings, so
+    /// there is nothing owed here.
+    NoDatabase,
+    /// The recompute failed. It is one transaction, so every rank is
+    /// still the one the last build or reindex left - which also means
+    /// the saved config now describes a ranking the database does not
+    /// have, until the next Apply or Rebuild.
+    Failed(String),
+}
+
 /// One Apply, start to finish.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
     pub outcome: ApplyOutcome,
     /// Clamp notices `apply_to` produced, for the status area.
     pub notices: Vec<String>,
+    /// `None` when the frequency inputs did not change, which is every
+    /// Apply that edited something else.
+    pub frequency: Option<Frequency>,
 }
 
-/// Save the whole struct, then one `reload`.
+/// Save the whole struct, reconcile the ranks, then one `reload`.
+///
+/// `db` and `dicts` are only here for the reconcile: the database the
+/// daemon reads, and the identities it holds, which is what turns the
+/// config's exact names into the enabled frequency list.
 pub fn apply(
     form: &SettingsForm,
     linux: &LinuxFields,
     config_path: &Path,
     socket_path: &Path,
+    db: &Path,
+    dicts: &[DictInfo],
 ) -> Result<Applied> {
     let cfg = chibipop::config::load_or_create(config_path)
         .with_context(|| format!("re-reading {}", config_path.display()))?;
@@ -123,11 +158,57 @@ pub fn apply(
     linux.apply_over(&mut out);
     let notices = chibipop::settings::clamp_notice(form, &out).into_iter().collect();
     out.save(config_path)?;
+    // The rule, before the `reload` that would otherwise hand the daemon
+    // a config its database disagrees with: a strategy, order or
+    // checkbox change recomputes `term.freq` in place from the Reported
+    // frequencies already stored, and never re-reads an archive. Only a
+    // staged library change rebuilds, and that is `super::rebuild`'s
+    // path, reached from the Rebuild button rather than from here.
+    let frequency = match chibipop::settings::dictionary_work(&cfg, &out) {
+        DictionaryWork::None => None,
+        DictionaryWork::Reindex => Some(reindex(db, &out, dicts)),
+    };
     let outcome = match control::send_to(socket_path, Verb::Reload) {
         Ok(reply) => ApplyOutcome::Live { reply },
         Err(_) => ApplyOutcome::ConfigOnly,
     };
-    Ok(Applied { outcome, notices })
+    Ok(Applied { outcome, notices, frequency })
+}
+
+/// Recompute every Frequency rank from what the database already stores.
+///
+/// A writer connection, because this is an `UPDATE` over the live file
+/// and not a lookup - `SqliteDictionary::open` hands out a read-only one
+/// on purpose. `SQLITE_OPEN_READ_WRITE` without `CREATE`, so a fresh
+/// install answers [`Frequency::NoDatabase`] instead of having an empty
+/// database conjured under the daemon's nose. No `journal_mode` pragma
+/// either: the file a build promoted is already stamped WAL, which is
+/// what lets the daemon's open snapshot keep reading the old ranking
+/// until the commit and the new one afterwards.
+///
+/// The reindex reports a line per thousand rows and they are dropped
+/// here: Apply is synchronous, so the window paints nothing while this
+/// runs and there is no live surface to stream them to. The committed row
+/// count is the report, and [`describe`] is where it is said.
+fn reindex(db: &Path, after: &Config, dicts: &[DictInfo]) -> Frequency {
+    if !db.exists() {
+        return Frequency::NoDatabase;
+    }
+    let enabled = after.dictionaries.enabled(Role::Frequency, dicts);
+    let done = rusqlite::Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .with_context(|| format!("opening {} to restamp its frequency ranks", db.display()))
+        .and_then(|mut conn| {
+            chibipop::dict::reindex::reindex(
+                &mut conn,
+                &enabled,
+                after.dictionaries.ranking_strategy,
+                &|_| {},
+            )
+        });
+    match done {
+        Ok(rows) => Frequency::Reindexed(rows),
+        Err(e) => Frequency::Failed(format!("{e:#}")),
+    }
 }
 
 /// The status line an outcome earns.
@@ -142,12 +223,34 @@ pub fn describe(applied: &Applied) -> String {
         line.push(' ');
         line.push_str(notice);
     }
+    // A failure here is the one thing Apply can leave half-done: the file
+    // is saved and the ranks are not, so it has to be said out loud
+    // rather than folded into "Saved".
+    match &applied.frequency {
+        None => {}
+        Some(Frequency::Reindexed(rows)) => {
+            line.push_str(&format!(" Frequency rankings recomputed over {rows} term rows."));
+        }
+        Some(Frequency::NoDatabase) => {
+            line.push_str(
+                " There is no dictionary database yet - Rebuild reads the new frequency \
+                 settings when it builds one.",
+            );
+        }
+        Some(Frequency::Failed(why)) => {
+            line.push_str(&format!(
+                " The frequency rankings could not be recomputed, so they still come from the \
+                 previous settings: {why}"
+            ));
+        }
+    }
     line
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chibipop::lookup::model::Dictionary;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
@@ -163,6 +266,21 @@ mod tests {
         chibipop::settings::from_config(cfg, &[])
     }
 
+    /// Apply against a database that is not there and no identities.
+    ///
+    /// Every test using this edits something other than the frequency
+    /// inputs, so the reindex seam has nothing to reconcile and never
+    /// reaches for a connection.
+    fn saving(
+        form: &SettingsForm,
+        linux: &LinuxFields,
+        config_path: &Path,
+        socket_path: &Path,
+    ) -> Result<Applied> {
+        let db = config_path.with_file_name("chibipop.sqlite");
+        apply(form, linux, config_path, socket_path, &db, &[])
+    }
+
     #[test]
     fn without_a_socket_apply_is_config_only() {
         let dir = scratch("config_only");
@@ -172,7 +290,7 @@ mod tests {
         linux.show_lookup_log = true;
 
         let applied =
-            apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+            saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         assert_eq!(applied.outcome, ApplyOutcome::ConfigOnly);
         let saved = chibipop::config::load_or_create(&config_path).unwrap();
@@ -202,7 +320,7 @@ mod tests {
         // maps it: absence, never an empty string.
         linux.ocr_clipboard_key_linux = None;
 
-        apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+        saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         assert_eq!(
             Some(OcrClipboardConfig { hotkey: Some("f9".to_string()), hotkey_linux: None }),
@@ -227,7 +345,7 @@ mod tests {
         let mut linux = LinuxFields::from_config(&cfg);
         linux.ocr_clipboard_key_linux = None;
 
-        apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+        saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         assert_eq!(
             None,
@@ -246,7 +364,7 @@ mod tests {
         let mut linux = LinuxFields::from_config(&cfg);
         linux.ocr_clipboard_key_linux = Some("ALT+C".to_string());
 
-        apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+        saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         let saved = chibipop::config::load_or_create(&config_path).unwrap();
         assert_eq!(
@@ -278,7 +396,7 @@ mod tests {
         });
 
         let applied =
-            apply(&form(&cfg), &LinuxFields::from_config(&cfg), &config_path, &socket_path)
+            saving(&form(&cfg), &LinuxFields::from_config(&cfg), &config_path, &socket_path)
                 .unwrap();
 
         assert_eq!(applied.outcome, ApplyOutcome::Live { reply: "OK reload".into() });
@@ -302,7 +420,7 @@ mod tests {
             show_lookup_log: true,
         };
 
-        apply(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
+        saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         let saved = chibipop::config::load_or_create(&config_path).unwrap();
         assert_eq!(LinuxFields::from_config(&saved), linux);
@@ -322,10 +440,147 @@ mod tests {
         let mut f = form(&cfg);
         f.capture_width = 5; // below the 100px floor
 
-        let applied = apply(&f, &LinuxFields::from_config(&cfg), &config_path, &dir.join("no"))
+        let applied = saving(&f, &LinuxFields::from_config(&cfg), &config_path, &dir.join("no"))
             .unwrap();
 
         assert_eq!(applied.notices.len(), 1);
         assert!(describe(&applied).contains("raised to the 100px minimum"));
+    }
+
+    /// The inode the daemon's open handle is reading, so "in place" is
+    /// observed rather than argued: a rebuild renames, and this must not.
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().ino()
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/yomitan")
+            .join(name)
+    }
+
+    /// A real database with one term dictionary and one frequency
+    /// dictionary, and a config that names the frequency one as enabled.
+    fn built(dir: &Path) -> (PathBuf, PathBuf, Vec<DictInfo>) {
+        let db = dir.join("chibipop.sqlite");
+        chibipop::dict::build::build(
+            &[fixture("terms.zip"), fixture("freq.zip")],
+            &[fixture("freq.zip")],
+            &db,
+            &|_| {},
+        )
+        .unwrap();
+        let dicts = chibipop::lookup::sqlite::SqliteDictionary::open(&db).unwrap().dicts().unwrap();
+        let config_path = dir.join("chibipop.toml");
+        let mut cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        cfg.dictionaries.frequency = vec!["FixtureFreq".to_string()];
+        cfg.save(&config_path).unwrap();
+        (config_path, db, dicts)
+    }
+
+    fn ranked(db: &Path) -> i64 {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM term WHERE freq IS NOT NULL", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Unchecking a frequency dictionary is a settings change, and a
+    /// settings change recomputes `term.freq` in place. Nothing here
+    /// re-reads an archive or builds a file beside the live one - that is
+    /// the Rebuild button's path, and this one must never take it.
+    #[test]
+    fn unchecking_a_frequency_dictionary_restamps_the_ranks_in_place() {
+        let dir = scratch("reindex");
+        let (config_path, db, dicts) = built(&dir);
+        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        let mut form = chibipop::settings::from_config(&cfg, &dicts);
+        assert!(ranked(&db) > 0, "the build stamped the ranks it is about to lose");
+        let was = inode(&db);
+
+        form.frequency.iter_mut().for_each(|row| row.enabled = false);
+        let applied = apply(
+            &form,
+            &LinuxFields::from_config(&cfg),
+            &config_path,
+            &dir.join("absent.sock"),
+            &db,
+            &dicts,
+        )
+        .unwrap();
+
+        let Some(Frequency::Reindexed(rows)) = applied.frequency else {
+            panic!("a frequency change owes a reindex: {:?}", applied.frequency);
+        };
+        assert!(rows > 0, "every term row is restamped");
+        assert_eq!(0, ranked(&db), "no dictionary is enabled, so no term carries a rank");
+        assert_eq!(was, inode(&db), "in place, never a rename");
+        assert!(describe(&applied).contains("Frequency rankings recomputed"), "{}", describe(&applied));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And an Apply that touched something else owes nothing: opening a
+    /// writer on the live database on every Save would be a cost with no
+    /// reason, and rewriting every rank to the value it already has would
+    /// be worse.
+    #[test]
+    fn an_apply_that_left_the_frequency_inputs_alone_does_no_reindex() {
+        let dir = scratch("no_reindex");
+        let (config_path, db, dicts) = built(&dir);
+        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        let mut form = chibipop::settings::from_config(&cfg, &dicts);
+        let before = ranked(&db);
+        let mut linux = LinuxFields::from_config(&cfg);
+        linux.show_lookup_log = true;
+        form.summary_chars = 120;
+
+        let applied = apply(
+            &form,
+            &linux,
+            &config_path,
+            &dir.join("absent.sock"),
+            &db,
+            &dicts,
+        )
+        .unwrap();
+
+        assert_eq!(None, applied.frequency);
+        assert_eq!(before, ranked(&db));
+        assert!(!describe(&applied).contains("Frequency"), "{}", describe(&applied));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh install has no database to restamp. Saying so beats
+    /// conjuring an empty one under the daemon's nose, which is what a
+    /// plain `Connection::open` would have done.
+    #[test]
+    fn a_frequency_change_with_no_database_yet_says_so_and_creates_nothing() {
+        let dir = scratch("reindex_no_db");
+        let config_path = dir.join("chibipop.toml");
+        let db = dir.join("chibipop.sqlite");
+        let cfg = chibipop::config::load_or_create(&config_path).unwrap();
+        let mut form = chibipop::settings::from_config(&cfg, &[]);
+        form.ranking_strategy = chibipop::dict::frequency::RankingStrategy::Priority;
+
+        let applied = apply(
+            &form,
+            &LinuxFields::from_config(&cfg),
+            &config_path,
+            &dir.join("absent.sock"),
+            &db,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(Some(Frequency::NoDatabase), applied.frequency);
+        assert!(!db.exists(), "nothing may create the database the daemon reads");
+        let saved = chibipop::config::load_or_create(&config_path).unwrap();
+        assert_eq!(
+            chibipop::dict::frequency::RankingStrategy::Priority,
+            saved.dictionaries.ranking_strategy,
+            "the setting still reaches the file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

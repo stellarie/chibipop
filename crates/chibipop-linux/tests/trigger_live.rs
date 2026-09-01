@@ -153,7 +153,7 @@ fn fixture(name: &str) -> PathBuf {
 /// process's rebuild thread does, and answers the entry count.
 fn build_from_library(dir: &Path, out: &Path) -> i64 {
     let lib = chibipop::library::Library::load(dir).expect("reading the library");
-    chibipop::dict::build::build(&lib.term_paths(dir), &lib.freq_paths(dir), out, &|_| {})
+    chibipop::dict::build::build(&lib.dict_paths(dir), &lib.freq_paths(dir), out, &|_| {})
         .expect("building the library")
         .entries
 }

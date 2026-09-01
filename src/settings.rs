@@ -3,8 +3,9 @@
 use crate::config::{
     Config, FieldMapping, LayoutMode, OcrClipboardConfig, SentenceMode, TriggerMode,
 };
-use crate::library::{kind_of, Kind, Library, Pending};
-use crate::present::{dict_order_rank, DictInfo};
+use crate::dict::frequency::RankingStrategy;
+use crate::library::{roles_of, Library, Pending, Role, Roles};
+use crate::present::DictInfo;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,9 +37,24 @@ pub struct SettingsForm {
     pub show_images: bool,
     pub show_part_of_speech: bool,
     pub exclude_from_capture: bool,
-    /// Live names, not substrings.
-    pub dict_names: Vec<String>,
-    pub dict_excluded: Vec<String>,
+    /// The terms Dictionary list: every Dictionary the config names or the
+    /// library holds with that role, in priority order, each row carrying
+    /// its own checkbox.
+    ///
+    /// One list per role and not one list plus an exclusion box: order and
+    /// enabling are separate questions, so reordering can never silently
+    /// exclude anything (ADR-0014).
+    pub terms: Vec<DictRow>,
+    /// The frequency Dictionary list. Position is the order
+    /// [`RankingStrategy::Priority`] reads, and a checkbox here never
+    /// touches the same Dictionary's row in another list.
+    pub frequency: Vec<DictRow>,
+    /// The pitch Dictionary list. Enabling a pitch Dictionary is the only
+    /// switch pitch gets.
+    pub pitch: Vec<DictRow>,
+    /// The rule reducing the enabled frequency Dictionaries' Reported
+    /// frequencies to one Frequency rank.
+    pub ranking_strategy: RankingStrategy,
     pub dict_list_language: String,
     pub per_language: BTreeMap<String, Vec<String>>,
     pub max_ocr_passes: u8,
@@ -53,7 +69,6 @@ pub struct SettingsForm {
     pub show_scan_region: bool,
     pub show_engine_log: bool,
     pub show_adapter_log: bool,
-    pub freq_names: Vec<String>,
     pub freq_changed: bool,
     pub staged_adds: Vec<StagedAdd>,
     pub staged_removes: Vec<String>,
@@ -89,6 +104,18 @@ pub struct SettingsForm {
     pub enabled_plugins: Vec<String>,
 }
 
+/// One Dictionary's row in one role's list.
+///
+/// The name is the identity and the flag is that role's checkbox. Enabled
+/// is per *role* and not per Dictionary: unchecking a mixed archive's
+/// definitions must not silently kill its frequency data, so a checkbox
+/// only ever affects the list it sits in (ADR-0014).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictRow {
+    pub name: String,
+    pub enabled: bool,
+}
+
 /// An import waiting for Apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedAdd {
@@ -98,12 +125,36 @@ pub struct StagedAdd {
 }
 
 impl SettingsForm {
+    /// This role's list.
+    pub fn list(&self, role: Role) -> &[DictRow] {
+        match role {
+            Role::Terms => &self.terms,
+            Role::Frequency => &self.frequency,
+            Role::Pitch => &self.pitch,
+        }
+    }
+
+    /// This role's list, to reorder or to check.
+    pub fn list_mut(&mut self, role: Role) -> &mut Vec<DictRow> {
+        match role {
+            Role::Terms => &mut self.terms,
+            Role::Frequency => &mut self.frequency,
+            Role::Pitch => &mut self.pitch,
+        }
+    }
+
     /// Stage an archive for import.
     ///
-    /// None when unreadable or taken.
-    pub fn stage_add(&mut self, source: &Path) -> Option<Kind> {
-        let kind = kind_of(source);
-        if kind == Kind::Unreadable {
+    /// It lands at the bottom of every list its role set names, enabled,
+    /// and moves no row that is already there: installing a Dictionary
+    /// never reorders the lists the user curated, and never silently does
+    /// nothing.
+    ///
+    /// `None` when the archive is unreadable - an empty role set has no
+    /// list to land in - or already staged.
+    pub fn stage_add(&mut self, source: &Path) -> Option<Roles> {
+        let roles = roles_of(source);
+        if roles.is_empty() {
             return None;
         }
         let name = archive_title(source)?;
@@ -111,21 +162,25 @@ impl SettingsForm {
         if self.staged_adds.iter().any(|a| a.source == source) {
             return None;
         }
-        if kind == Kind::Frequency {
-            self.freq_names.push(name.clone());
+        for role in roles.iter() {
+            self.list_mut(role).push(DictRow { name: name.clone(), enabled: true });
+        }
+        if roles.has(Role::Frequency) {
             self.freq_changed = true;
-        } else {
-            self.dict_names.push(name.clone());
         }
         self.staged_adds.push(StagedAdd { source: source.to_path_buf(), name });
-        Some(kind)
+        Some(roles)
     }
 
     /// Stage a row for removal.
+    ///
+    /// Out of every list: one archive is one Dictionary, so removing it
+    /// removes it from all three roles at once.
     pub fn stage_remove(&mut self, name: &str) {
-        let was_freq = self.freq_names.iter().any(|n| n == name);
-        self.dict_names.retain(|n| n != name);
-        self.freq_names.retain(|n| n != name);
+        let was_freq = self.frequency.iter().any(|row| row.name == name);
+        for role in Role::EVERY {
+            self.list_mut(role).retain(|row| row.name != name);
+        }
         let staged = self.staged_adds.len();
         self.staged_adds.retain(|a| a.name != name);
         // Never reached the library.
@@ -177,43 +232,49 @@ pub fn shown_name(source: &Path) -> Option<String> {
     source.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-/// Split still trustworthy?
+/// Does this window's terms list belong to the OCR language it names?
+///
+/// A per-language list is only rewritten when the rows on screen were drawn
+/// for that language and the language already has one - anything else and
+/// Apply would key one language's arrangement to another's tag.
 pub fn is_scoped(form: &SettingsForm) -> bool {
     form.dict_list_language == form.ocr_language
-        && (form.per_language.contains_key(&form.ocr_language) || !form.dict_excluded.is_empty())
+        && form.per_language.contains_key(&form.ocr_language)
 }
 
 /// Show the library's lists.
 ///
-/// Unreadable files are listed.
+/// The library is the authority on roles, because roles are read from an
+/// archive's banks and the library is what holds archives. So a name the
+/// library holds *without* a role leaves that role's list, a library
+/// archive holding a role the list does not name lands at the bottom of it
+/// enabled, and a name the library knows nothing about - an unplugged
+/// drive, or a database built outside the app - is left exactly where the
+/// config put it.
+///
+/// Unreadable files are listed in the terms list so they can still be
+/// removed, which is the only reason an empty role set is listed at all.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
-    form.freq_names = named(lib, Kind::Frequency);
-    let to_excluded = is_scoped(&form);
-    // Built first, then the rest.
-    for name in named(lib, Kind::Term) {
-        if form.dict_names.contains(&name) || form.dict_excluded.contains(&name) {
-            continue;
-        }
-        if to_excluded {
-            form.dict_excluded.push(name);
-        } else {
-            form.dict_names.push(name);
+    for role in Role::EVERY {
+        let rows = form.list_mut(role);
+        rows.retain(|row| {
+            lib.entries.iter().find(|e| e.name == row.name).is_none_or(|e| e.roles.has(role))
+        });
+        for entry in lib.entries.iter().filter(|e| e.roles.has(role)) {
+            if !rows.iter().any(|row| row.name == entry.name) {
+                rows.push(DictRow { name: entry.name.clone(), enabled: true });
+            }
         }
     }
     form.unreadable =
-        lib.entries.iter().filter(|e| e.kind == Kind::Unreadable).map(|e| e.file.clone()).collect();
+        lib.entries.iter().filter(|e| e.roles.is_empty()).map(|e| e.file.clone()).collect();
     for file in &form.unreadable {
-        if !form.dict_names.contains(file) {
-            form.dict_names.push(file.clone());
+        if !form.terms.iter().any(|row| row.name == *file) {
+            form.terms.push(DictRow { name: file.clone(), enabled: false });
         }
     }
     form.library_empty = lib.is_empty();
     form
-}
-
-/// One kind's names.
-fn named(lib: &Library, kind: Kind) -> Vec<String> {
-    lib.entries.iter().filter(|e| e.kind == kind).map(|e| e.name.clone()).collect()
 }
 
 /// Files a removal names.
@@ -233,9 +294,13 @@ pub fn terms_after_apply(form: &SettingsForm, lib: &Library) -> usize {
     let kept = lib
         .entries
         .iter()
-        .filter(|e| e.kind == Kind::Term && !gone.contains(&e.file))
+        .filter(|e| e.roles.has(Role::Terms) && !gone.contains(&e.file))
         .count();
-    kept + form.staged_adds.iter().filter(|a| kind_of(&a.source) == Kind::Term).count()
+    kept + form
+        .staged_adds
+        .iter()
+        .filter(|a| roles_of(&a.source).has(Role::Terms))
+        .count()
 }
 
 /// Do what Apply staged.
@@ -282,39 +347,52 @@ fn mutate(
     lib.save(dir)
 }
 
-fn sorted_by_order<'a>(dicts: &'a [DictInfo], order: &[String]) -> Vec<&'a DictInfo> {
-    let mut ordered: Vec<&DictInfo> = dicts.iter().collect();
-    ordered.sort_by_key(|d| (dict_order_rank(&d.name, order).unwrap_or(usize::MAX), d.dict_id));
-    ordered
+/// One role's rows, as the config holds them plus whatever the database
+/// has that no list names.
+///
+/// The config comes first because it is what the user arranged, and a name
+/// it holds that names nothing installed stays as a row: keeping it on
+/// screen is what keeps it in the file, so unplugging the drive a library
+/// sits on cannot delete a list. `with_library` then corrects the roles.
+fn rows_for(cfg: &Config, role: Role, dicts: &[DictInfo]) -> Vec<DictRow> {
+    cfg.dictionaries
+        .listed(role, dicts)
+        .into_iter()
+        .map(|(name, enabled)| DictRow { name, enabled })
+        .collect()
 }
 
-/// Flatten, in popup order.
+/// The config's lists, plus the language's own terms scope where it has
+/// one.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
-    let ordered = sorted_by_order(dicts, &cfg.dictionaries.display_order);
-    let installed = || dicts.iter().map(|d| d.name.as_str());
-    let active = cfg
-        .dictionaries
-        .per_language
-        .get(&cfg.ocr.language)
-        .filter(|l| !l.is_empty() && crate::present::any_listed(installed(), l.as_slice()));
-    let (dict_names, dict_excluded) = match active {
-        Some(list) => {
-            let matching = sorted_by_order(dicts, list);
-            (
-                matching
-                    .into_iter()
-                    .filter(|d| dict_order_rank(&d.name, list).is_some())
-                    .map(|d| d.name.clone())
-                    .collect(),
-                ordered
-                    .iter()
-                    .filter(|d| dict_order_rank(&d.name, list).is_none())
-                    .map(|d| d.name.clone())
-                    .collect(),
-            )
+    let mut terms = rows_for(cfg, Role::Terms, dicts);
+    let frequency = rows_for(cfg, Role::Frequency, dicts);
+    let pitch = rows_for(cfg, Role::Pitch, dicts);
+    // A database built outside the app has dictionaries no list has ever
+    // named and no library entry to read a role off, and the popup only
+    // ever spends the terms list - so that is where they are listed, and
+    // `with_library` moves them the moment the library holds the archive.
+    for dict in dicts {
+        let named = [&terms, &frequency, &pitch]
+            .iter()
+            .any(|rows| rows.iter().any(|row| row.name == dict.name));
+        if !named {
+            terms.push(DictRow { name: dict.name.clone(), enabled: true });
         }
-        None => (ordered.iter().map(|d| d.name.clone()).collect(), Vec::new()),
-    };
+    }
+    // The language's own list is the terms arrangement this window edits, so
+    // where it has one its rows are the checked ones, in its order, and
+    // everything else trails behind them unchecked.
+    if let Some(scope) = cfg.dictionaries.language_scope(&cfg.ocr.language, dicts) {
+        let mut rows: Vec<DictRow> =
+            scope.into_iter().map(|name| DictRow { name, enabled: true }).collect();
+        for row in terms {
+            if !rows.iter().any(|seen| seen.name == row.name) {
+                rows.push(DictRow { name: row.name, enabled: false });
+            }
+        }
+        terms = rows;
+    }
 
     SettingsForm {
         mode: cfg.trigger.mode,
@@ -334,8 +412,10 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         show_images: cfg.popup.show_images,
         show_part_of_speech: cfg.popup.show_part_of_speech,
         exclude_from_capture: cfg.popup.exclude_from_capture,
-        dict_names,
-        dict_excluded,
+        terms,
+        frequency,
+        pitch,
+        ranking_strategy: cfg.dictionaries.ranking_strategy,
         dict_list_language: cfg.ocr.language.clone(),
         per_language: cfg.dictionaries.per_language.clone(),
         max_ocr_passes: cfg.ocr.max_ocr_passes,
@@ -349,7 +429,6 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         show_scan_region: cfg.debug.show_scan_region,
         show_engine_log: cfg.debug.show_engine_log,
         show_adapter_log: cfg.debug.show_adapter_log,
-        freq_names: Vec::new(),
         freq_changed: false,
         staged_adds: Vec::new(),
         staged_removes: Vec::new(),
@@ -376,25 +455,23 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     }
 }
 
-fn keyed_names(names: &[String], unreadable: &[String], existing: &[String]) -> Vec<String> {
-    names
+/// The terms one language searches, out of the rows on screen.
+///
+/// The enabled rows, by exact name, in the order they sit in - an
+/// unreadable file is a row so it can be removed and never a Dictionary to
+/// search. `None` when that leaves nothing, because a language entry naming
+/// no dictionary is indistinguishable from having no entry and the caller
+/// should leave the saved one alone.
+pub fn scoped_entry(rows: &[DictRow], unreadable: &[String]) -> Option<Vec<String>> {
+    let named: Vec<String> = rows
         .iter()
-        .filter(|name| !unreadable.iter().any(|u| u == *name))
-        .map(|name| order_key(name, existing))
-        .collect()
+        .filter(|row| row.enabled && !unreadable.contains(&row.name))
+        .map(|row| row.name.clone())
+        .collect();
+    (!named.is_empty()).then_some(named)
 }
 
-/// `None`: leave the entry be.
-pub fn scoped_entry(
-    names: &[String],
-    unreadable: &[String],
-    existing: &[String],
-) -> Option<Vec<String>> {
-    let keyed = keyed_names(names, unreadable, existing);
-    (!keyed.is_empty()).then_some(keyed)
-}
-
-/// Substrings, not live names.
+/// The form, back onto the config it was drawn from.
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
     out.trigger.mode = form.mode;
@@ -453,21 +530,29 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     };
     out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
-    let full: Vec<String> =
-        form.dict_names.iter().chain(form.dict_excluded.iter()).cloned().collect();
-    out.dictionaries.display_order =
-        keyed_names(&full, &form.unreadable, &cfg.dictionaries.display_order);
+    // Each list splits into its pair: the checked rows in the order they
+    // sit in, then the unchecked ones. An unreadable file is a row so it
+    // can be removed and is never a Dictionary, so it reaches neither
+    // array - and `display_order` reaches nothing at all, which is what
+    // retires it from the file on the first save after an upgrade.
+    for role in Role::EVERY {
+        let named = |enabled: bool| -> Vec<String> {
+            form.list(role)
+                .iter()
+                .filter(|row| row.enabled == enabled)
+                .map(|row| row.name.clone())
+                .filter(|name| !form.unreadable.contains(name))
+                .collect()
+        };
+        out.dictionaries.set_lists(role, named(true), named(false));
+    }
+    out.dictionaries.ranking_strategy = form.ranking_strategy;
+    out.dictionaries.display_order.clear();
 
     let mut per_language = form.per_language.clone();
     if is_scoped(form) {
-        let existing = cfg
-            .dictionaries
-            .per_language
-            .get(&form.ocr_language)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        if let Some(keyed) = scoped_entry(&form.dict_names, &form.unreadable, existing) {
-            per_language.insert(form.ocr_language.clone(), keyed);
+        if let Some(named) = scoped_entry(&form.terms, &form.unreadable) {
+            per_language.insert(form.ocr_language.clone(), named);
         }
     }
     out.dictionaries.per_language = per_language;
@@ -500,66 +585,106 @@ fn axis_notice(axis: &str, asked: i32, got: i32) -> String {
     format!("Capture {axis} {verb} to the {got}px {bound}.")
 }
 
-/// Keeps a matching entry.
-fn order_key(name: &str, existing: &[String]) -> String {
-    let lower = name.to_lowercase();
-    // Blank matches everything.
-    if let Some(entry) = existing
-        .iter()
-        .filter(|e| !e.trim().is_empty())
-        .find(|e| lower.contains(&e.to_lowercase()))
-    {
-        return entry.clone();
-    }
-    let cut = name.find(['[', '(']).unwrap_or(name.len());
-    let derived = name[..cut].trim();
-    if derived.is_empty() { name.to_string() } else { derived.to_string() }
-}
-
-/// Entries matching nothing.
-pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
-    cfg.dictionaries
-        .display_order
-        .iter()
-        .filter(|entry| {
-            let needle = entry.to_lowercase();
-            !dicts.iter().any(|d| d.name.to_lowercase().contains(&needle))
-        })
-        .cloned()
-        .collect()
-}
-
-/// Drop a removed dictionary.
+/// Names no installed Dictionary answers to.
 ///
-/// An emptied list is removed.
+/// A list may legitimately hold one - an unplugged drive keeps its place -
+/// but from inside the settings window it is also exactly what a renamed
+/// archive looks like, so the window says so rather than silently ignoring
+/// the entry.
+pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
+    let mut stale: Vec<String> = Vec::new();
+    for role in Role::EVERY {
+        let (on, off) = cfg.dictionaries.lists(role);
+        for entry in on.iter().chain(off) {
+            if !dicts.iter().any(|d| d.name == *entry) && !stale.contains(entry) {
+                stale.push(entry.clone());
+            }
+        }
+    }
+    stale
+}
+
+/// Drop a removed Dictionary.
+///
+/// Out of all six arrays and every language list, because one archive is
+/// one Dictionary and removing it removes every role it held. An emptied
+/// language list is removed with it: an entry naming nothing is the same
+/// state as having no entry.
 pub fn dictionary_removed(cfg: &mut Config, name: &str) {
-    let claims = |entry: &String| dict_order_rank(name, std::slice::from_ref(entry)).is_some();
-    cfg.dictionaries.display_order.retain(|entry| !claims(entry));
+    for role in Role::EVERY {
+        let (mut on, mut off) = {
+            let (on, off) = cfg.dictionaries.lists(role);
+            (on.to_vec(), off.to_vec())
+        };
+        on.retain(|entry| entry != name);
+        off.retain(|entry| entry != name);
+        cfg.dictionaries.set_lists(role, on, off);
+    }
     cfg.dictionaries.per_language.retain(|_, list| {
-        list.retain(|entry| !claims(entry));
+        list.retain(|entry| entry != name);
         !list.is_empty()
     });
 }
 
-/// List an added dictionary.
+/// List an added Dictionary.
 ///
-/// Never makes a language list.
-pub fn dictionary_added(cfg: &mut Config, name: &str) {
+/// At the bottom of the enabled array of every role it holds, so an import
+/// reorders nothing that was already arranged. The active language's list
+/// gains it too where that language has one, because a term Dictionary the
+/// language scope never names would arrive switched off.
+pub fn dictionary_added(cfg: &mut Config, name: &str, roles: Roles) {
     if name.trim().is_empty() {
         return;
     }
-    append_key(name, &mut cfg.dictionaries.display_order);
+    for role in roles.iter() {
+        let (mut on, off) = {
+            let (on, off) = cfg.dictionaries.lists(role);
+            (on.to_vec(), off.to_vec())
+        };
+        if !on.iter().chain(&off).any(|entry| entry == name) {
+            on.push(name.to_string());
+        }
+        cfg.dictionaries.set_lists(role, on, off);
+    }
+    if !roles.has(Role::Terms) {
+        return;
+    }
     let listed = cfg.dictionaries.per_language.get_mut(&cfg.ocr.language);
     if let Some(list) = listed.filter(|l| !l.is_empty()) {
-        append_key(name, list);
+        if !list.iter().any(|entry| entry == name) {
+            list.push(name.to_string());
+        }
     }
 }
 
-/// Only if nothing claims it.
-fn append_key(name: &str, entries: &mut Vec<String>) {
-    if dict_order_rank(name, entries).is_none() {
-        let key = order_key(name, entries);
-        entries.push(key);
+/// What applying a change costs beyond writing the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictionaryWork {
+    /// Save and `reload`, and nothing else.
+    None,
+    /// Recompute every Frequency rank in place first.
+    Reindex,
+}
+
+/// Does this change need a Reindex?
+///
+/// Exactly three inputs decide `term.freq`: which frequency Dictionaries
+/// are enabled, the order they rank in, and the strategy that reduces them.
+/// Change one and the ranks in the file were computed from something else;
+/// change anything in the terms or pitch lists and they were not, because
+/// neither role contributes a number to reduce (ADR-0015).
+///
+/// The rule lives here so that neither settings window carries a copy of
+/// it, and so that a Reindex is never mistaken for a rebuild: nothing here
+/// reads an archive.
+pub fn dictionary_work(before: &Config, after: &Config) -> DictionaryWork {
+    let changed = before.dictionaries.frequency != after.dictionaries.frequency
+        || before.dictionaries.frequency_disabled != after.dictionaries.frequency_disabled
+        || before.dictionaries.ranking_strategy != after.dictionaries.ranking_strategy;
+    if changed {
+        DictionaryWork::Reindex
+    } else {
+        DictionaryWork::None
     }
 }
 
@@ -586,7 +711,7 @@ fn drift(sources: Option<&str>, lib: &Library) -> Drift {
     let built: Vec<String> = lib
         .entries
         .iter()
-        .filter(|e| e.kind != Kind::Unreadable)
+        .filter(|e| !e.roles.is_empty())
         .map(|e| e.file.clone())
         .collect();
     Drift { unbuilt: only_in(&built, &recorded), orphaned: only_in(&recorded, &built) }
@@ -607,7 +732,7 @@ pub fn drift_notice(
     db: &Path,
 ) -> Option<String> {
     // build-dict needs a term zip.
-    if !lib.entries.iter().any(|e| e.kind == Kind::Term) {
+    if !lib.entries.iter().any(|e| e.roles.has(Role::Terms)) {
         return None;
     }
     let found = drift(sources, lib);
@@ -650,42 +775,88 @@ mod tests {
         ]
     }
 
-    fn cfg_with(order: &[&str]) -> Config {
+    /// A config already written in the role shape.
+    fn cfg_with(terms: &[&str]) -> Config {
         let mut c = Config::default();
-        c.dictionaries.display_order = order.iter().map(|s| s.to_string()).collect();
+        c.dictionaries.terms = terms.iter().map(|s| (*s).to_string()).collect();
         c
+    }
+
+    /// A pre-roles config, carrying the substrings this ticket migrates.
+    fn pre_roles(order: &[&str]) -> Config {
+        let mut c = Config::default();
+        c.dictionaries.display_order = order.iter().map(|s| (*s).to_string()).collect();
+        c
+    }
+
+    fn names(rows: &[DictRow]) -> Vec<String> {
+        rows.iter().map(|row| row.name.clone()).collect()
+    }
+
+    fn enabled_names(rows: &[DictRow]) -> Vec<String> {
+        rows.iter().filter(|row| row.enabled).map(|row| row.name.clone()).collect()
     }
 
     #[test]
     fn the_form_lists_dictionaries_in_the_configured_order() {
-        let form = from_config(&cfg_with(&["大辞林", "Jitendex"]), &dicts());
-        assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], form.dict_names);
+        let form =
+            from_config(&cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]), &dicts());
+        assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], names(&form.terms));
+        assert!(form.terms.iter().all(|row| row.enabled));
     }
 
     #[test]
-    fn an_unordered_dictionary_is_listed_last() {
-        let form = from_config(&cfg_with(&["大辞林"]), &dicts());
-        assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], form.dict_names);
+    fn an_unlisted_dictionary_is_listed_last() {
+        let form = from_config(&cfg_with(&["大辞林　第四版"]), &dicts());
+        assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], names(&form.terms));
     }
 
-    /// THE trap: substrings.
+    /// THE trap the substring model set: reordering used to rewrite a
+    /// pattern, so moving one edition moved every dictionary it matched.
+    /// Now a row is a name and a move is a move.
     #[test]
-    fn reordering_preserves_the_existing_substrings_verbatim() {
-        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+    fn reordering_writes_the_exact_names_in_their_new_order() {
+        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         let mut form = from_config(&cfg, &dicts());
-        form.dict_names.reverse();
+        form.terms.reverse();
         let out = apply_to(&form, &cfg);
         assert_eq!(
-            vec!["Jitendex".to_string(), "大辞林".to_string()],
-            out.dictionaries.display_order
+            vec!["Jitendex.org [2026-07-09]".to_string(), "大辞林　第四版".to_string()],
+            out.dictionaries.terms,
         );
+        assert!(out.dictionaries.terms_disabled.is_empty());
+    }
+
+    /// The upgrade, end to end: a config still naming `大辞林` opens as the
+    /// exact installed names it matched, and the first Apply writes them
+    /// into the six arrays and retires the key.
+    #[test]
+    fn a_pre_roles_config_is_written_back_as_exact_names() {
+        let cfg = pre_roles(&["大辞林", "Kenkyusha"]);
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(
+            vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"],
+            names(&form.terms),
+            "the substring resolved, the one matching nothing was dropped, and the \
+             dictionary no substring named landed at the bottom",
+        );
+
+        let out = apply_to(&form, &cfg);
+
+        assert_eq!(
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
+            out.dictionaries.terms,
+        );
+        let text = toml::to_string_pretty(&out).expect("the migrated config serialises");
+        assert!(!text.contains("display_order"), "the retired key is gone: {text}");
+        assert!(!text.contains("\"大辞林\""), "and so is the substring: {text}");
     }
 
     /// ADR-0012: the Windows Apply pipeline renders its subset and
     /// carries the Linux platform fields untouched.
     #[test]
     fn applying_the_form_preserves_the_other_platforms_fields() {
-        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let mut cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         cfg.trigger.trigger_key_linux = "SUPER+J".to_string();
         cfg.anki.add_key_linux = "SUPER+K".to_string();
         cfg.anki.static_region_key_linux = "SUPER+R".to_string();
@@ -710,81 +881,93 @@ mod tests {
         assert_eq!("light", out.popup.theme);
     }
 
+    /// The name written is the dictionary's own, edition and date and all,
+    /// where the old key derivation cut everything from the first bracket
+    /// so that two editions collapsed onto one entry.
     #[test]
-    fn a_never_ordered_dictionary_derives_a_key_without_the_date() {
+    fn a_never_listed_dictionary_is_written_under_its_whole_name() {
         let cfg = cfg_with(&[]);
         let form = from_config(&cfg, &dicts());
         let out = apply_to(&form, &cfg);
-        assert!(
-            out.dictionaries.display_order.contains(&"Jitendex.org".to_string()),
-            "got {:?}",
-            out.dictionaries.display_order
+        assert_eq!(
+            vec!["Jitendex.org [2026-07-09]".to_string(), "大辞林　第四版".to_string()],
+            out.dictionaries.terms,
         );
-        assert!(out.dictionaries.display_order.contains(&"大辞林　第四版".to_string()));
     }
 
-    /// Empty key matches all.
+    /// An unchecked row is written to the disabled twin, keeps its order
+    /// within it, and is not searched.
     #[test]
-    fn a_key_that_would_be_empty_falls_back_to_the_whole_name() {
+    fn an_unchecked_row_lands_in_the_disabled_twin() {
         let cfg = cfg_with(&[]);
-        let odd = vec![DictInfo { dict_id: 1, name: "[2026] Something".into() }];
-        let form = from_config(&cfg, &odd);
+        let mut form = from_config(&cfg, &dicts());
+        form.terms[0].enabled = false;
         let out = apply_to(&form, &cfg);
-        assert_eq!(vec!["[2026] Something".to_string()], out.dictionaries.display_order);
+        assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.terms);
+        assert_eq!(
+            vec!["Jitendex.org [2026-07-09]".to_string()],
+            out.dictionaries.terms_disabled,
+        );
+        assert_eq!(
+            vec!["大辞林　第四版".to_string()],
+            out.present_config(&dicts()).terms,
+            "and the popup searches only what is checked",
+        );
     }
 
-    /// Blank matches every name.
+    /// The whole point of exact names: one edition off, the other on.
     #[test]
-    fn a_blank_order_entry_never_claims_a_dictionary() {
-        let cfg = cfg_with(&["", "大辞林"]);
-        let out = apply_to(&from_config(&cfg, &dicts()), &cfg);
-        assert!(
-            !out.dictionaries.display_order.iter().any(|e| e.trim().is_empty()),
-            "a blank entry silently pins every dictionary, got {:?}",
-            out.dictionaries.display_order
-        );
-        assert!(out.dictionaries.display_order.contains(&"Jitendex.org".to_string()));
+    fn two_dictionaries_sharing_a_substring_are_enabled_independently() {
+        let editions = vec![
+            DictInfo { dict_id: 1, name: "大辞林　第三版".into() },
+            DictInfo { dict_id: 2, name: "大辞林　第四版".into() },
+        ];
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &editions);
+        form.terms[0].enabled = false;
+        let out = apply_to(&form, &cfg);
+        assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.terms);
+        assert_eq!(vec!["大辞林　第三版".to_string()], out.dictionaries.terms_disabled);
+        assert_eq!(vec!["大辞林　第四版".to_string()], out.present_config(&editions).terms);
     }
 
     /// A rename looks like this.
     #[test]
     fn an_entry_matching_no_dictionary_is_reported() {
-        let stale = stale_order_entries(&cfg_with(&["大辞林", "Kenkyusha"]), &dicts());
+        let stale = stale_order_entries(&cfg_with(&["大辞林　第四版", "Kenkyusha"]), &dicts());
         assert_eq!(vec!["Kenkyusha".to_string()], stale);
     }
 
     #[test]
     fn entries_that_all_match_report_nothing() {
-        assert!(stale_order_entries(&cfg_with(&["大辞林", "Jitendex"]), &dicts()).is_empty());
+        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
+        assert!(stale_order_entries(&cfg, &dicts()).is_empty());
     }
 
-    /// Must agree with ranking.
+    /// Reported stale in every role, because every array names Dictionaries
+    /// the same way.
     #[test]
-    fn a_reported_entry_is_exactly_one_dict_order_rank_cannot_use() {
-        let cfg = cfg_with(&["大辞林", "Kenkyusha", "Jitendex"]);
-        for entry in stale_order_entries(&cfg, &dicts()) {
-            for d in dicts() {
-                assert_ne!(
-                    Some(0),
-                    dict_order_rank(&d.name, std::slice::from_ref(&entry)),
-                    "{entry:?} was reported stale but does rank {:?}",
-                    d.name
-                );
-            }
-        }
+    fn a_stale_entry_is_reported_whichever_list_holds_it() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.frequency = vec!["Gone".to_string()];
+        cfg.dictionaries.pitch_disabled = vec!["Also gone".to_string()];
+        assert_eq!(
+            vec!["Gone".to_string(), "Also gone".to_string()],
+            stale_order_entries(&cfg, &dicts()),
+        );
     }
 
     /// Catches a bad control.
     #[test]
     fn an_untouched_form_round_trips_to_an_equal_config() {
-        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
     }
 
     #[test]
     fn every_setting_survives_the_round_trip() {
-        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let mut cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         cfg.trigger.mode = TriggerMode::HoldKey;
         cfg.popup.theme = "light".into();
         cfg.popup.font = "Noto Sans JP".into();
@@ -1244,28 +1427,31 @@ mod tests {
     }
 
     #[test]
-    fn from_config_splits_active_from_excluded() {
+    fn from_config_puts_the_languages_own_terms_first_and_unchecks_the_rest() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["大辞林".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
         let form = from_config(&cfg, &dicts());
-        assert!(form.dict_names.iter().all(|n| n.contains("大辞林")));
-        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+        assert_eq!(vec!["大辞林　第四版".to_string()], enabled_names(&form.terms));
+        assert!(form.terms.iter().any(|row| row.name.contains("Jitendex") && !row.enabled));
     }
 
     #[test]
-    fn apply_to_writes_the_visible_list_into_its_language() {
+    fn apply_to_writes_the_checked_rows_into_their_language() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
         let mut form = from_config(&cfg, &dicts());
-        form.dict_names = vec!["大辞林　第四版".to_string()];
-        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        form.terms = vec![
+            DictRow { name: "大辞林　第四版".to_string(), enabled: true },
+            DictRow { name: "Jitendex.org [2026-07-09]".to_string(), enabled: false },
+        ];
         let out = apply_to(&form, &cfg);
-        assert_eq!(
-            vec!["大辞林　第四版".to_string()],
-            out.dictionaries.per_language["ja"],
-        );
+        assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.per_language["ja"]);
     }
 
     /// Others must survive.
@@ -1274,9 +1460,8 @@ mod tests {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
         let mut form = from_config(&cfg, &dicts());
-        form.per_language.insert(
-            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
-        form.dict_names = vec!["大辞林　第四版".to_string()];
+        form.per_language.insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        form.terms = vec![DictRow { name: "大辞林　第四版".to_string(), enabled: true }];
         let out = apply_to(&form, &cfg);
         assert_eq!(
             vec!["中日大辞典".to_string()],
@@ -1285,26 +1470,28 @@ mod tests {
         );
     }
 
-    /// Re-include keeps the key.
+    /// Re-checking a row keeps the key and rewrites it, under the exact
+    /// names the second Apply saw.
     #[test]
     fn a_second_apply_rewrites_the_key_the_first_one_wrote() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
         let mut form = from_config(&cfg, &dicts());
-        form.dict_names = vec!["大辞林　第四版".to_string()];
-        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        form.terms = vec![
+            DictRow { name: "大辞林　第四版".to_string(), enabled: true },
+            DictRow { name: "Jitendex.org [2026-07-09]".to_string(), enabled: false },
+        ];
         let first = apply_to(&form, &cfg);
-        assert_eq!(
-            vec!["大辞林　第四版".to_string()],
-            first.dictionaries.per_language["ja"],
-        );
+        assert_eq!(vec!["大辞林　第四版".to_string()], first.dictionaries.per_language["ja"]);
+
         form.reseed_per_language(&first.dictionaries.per_language);
-        form.dict_names =
-            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()];
-        form.dict_excluded = Vec::new();
+        form.terms[1].enabled = true;
         let second = apply_to(&form, &first);
         assert_eq!(
-            vec!["大辞林　第四版".to_string(), "Jitendex.org".to_string()],
+            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
             second.dictionaries.per_language["ja"],
             "the second Apply must rewrite the key, never drop it",
         );
@@ -1315,19 +1502,21 @@ mod tests {
     fn with_library_keeps_the_exclusion_scoped() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["大辞林".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
         let form = with_library(from_config(&cfg, &dicts()), &library());
-        assert!(!form.dict_names.iter().any(|n| n.contains("Jitendex")));
-        assert!(form.dict_excluded.iter().any(|n| n.contains("Jitendex")));
+        assert!(!enabled_names(&form.terms).iter().any(|n| n.contains("Jitendex")));
+        assert!(form.terms.iter().any(|row| row.name.contains("Jitendex") && !row.enabled));
     }
 
     /// A stale list must not win.
     #[test]
     fn apply_to_does_not_write_a_stale_dict_list_language() {
         let mut cfg = Config::default();
-        cfg.dictionaries.per_language.insert(
-            "zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         let mut form = from_config(&cfg, &dicts());
         form.ocr_language = "zh-Hans-CN".to_string();
         let out = apply_to(&form, &cfg);
@@ -1340,31 +1529,39 @@ mod tests {
 
     /// One helper, two writers.
     #[test]
-    fn a_keyed_empty_entry_is_never_written() {
-        assert_eq!(None, scoped_entry(&[], &[], &[]));
+    fn a_scoped_entry_naming_nothing_is_never_written() {
+        let unreadable = ["bad.zip".to_string()];
+        assert_eq!(None, scoped_entry(&[], &[]));
         assert_eq!(
             None,
-            scoped_entry(&["bad.zip".to_string()], &["bad.zip".to_string()], &[]),
+            scoped_entry(&[DictRow { name: "bad.zip".into(), enabled: true }], &unreadable),
         );
         assert_eq!(
-            Some(vec!["大辞林".to_string()]),
-            scoped_entry(&["大辞林　第四版".to_string()], &[], &["大辞林".to_string()]),
+            None,
+            scoped_entry(&[DictRow { name: "大辞林　第四版".into(), enabled: false }], &[]),
+            "an unchecked row is not a dictionary this language searches",
+        );
+        assert_eq!(
+            Some(vec!["大辞林　第四版".to_string()]),
+            scoped_entry(&[DictRow { name: "大辞林　第四版".into(), enabled: true }], &[]),
         );
     }
 
-    /// I2-a: nothing left searched.
+    /// I2-a: nothing left checked.
     #[test]
     fn apply_to_will_not_erase_a_list_when_nothing_is_searched() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["大辞林".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
         let mut form = from_config(&cfg, &dicts());
-        form.dict_names = Vec::new();
-        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        for row in &mut form.terms {
+            row.enabled = false;
+        }
         let out = apply_to(&form, &cfg);
         assert_eq!(
-            vec!["大辞林".to_string()],
+            vec!["大辞林　第四版".to_string()],
             out.dictionaries.per_language["ja"],
             "an empty split must leave the entry alone",
         );
@@ -1375,49 +1572,58 @@ mod tests {
     fn apply_to_will_not_erase_a_list_for_an_unreadable_row() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["大辞林".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
         let mut form = from_config(&cfg, &dicts());
-        form.dict_names = vec!["bad.zip".to_string()];
-        form.dict_excluded = vec!["Jitendex.org [2026-07-09]".to_string()];
+        form.terms = vec![
+            DictRow { name: "bad.zip".to_string(), enabled: true },
+            DictRow { name: "Jitendex.org [2026-07-09]".to_string(), enabled: false },
+        ];
         form.unreadable = vec!["bad.zip".to_string()];
         let out = apply_to(&form, &cfg);
         assert_eq!(
-            vec!["大辞林".to_string()],
+            vec!["大辞林　第四版".to_string()],
             out.dictionaries.per_language["ja"],
-            "a keyed-empty split must leave the entry alone",
+            "a split naming only an unreadable file must leave the entry alone",
         );
     }
 
-    /// Matches nothing: search all.
+    /// A language list naming nothing installed is still that language's
+    /// list: the guard that used to throw it away and search everything was
+    /// insurance against a substring, and an exact name cannot mistype its
+    /// way into matching all of them.
     #[test]
-    fn from_config_ignores_a_list_matching_nothing_installed() {
+    fn from_config_keeps_a_language_list_naming_nothing_installed() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["Daijirin".to_string()]);
+        cfg.dictionaries.per_language.insert("ja".to_string(), vec!["Daijirin".to_string()]);
         let form = from_config(&cfg, &dicts());
-        assert_eq!(
-            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
-            form.dict_names,
-            "the tab must match present_config's fallback",
+        assert_eq!(vec!["Daijirin".to_string()], enabled_names(&form.terms));
+        assert!(
+            form.terms.iter().filter(|row| !row.enabled).count() == 2,
+            "and both installed dictionaries sit unchecked below it: {:?}",
+            form.terms,
         );
-        assert!(form.dict_excluded.is_empty());
     }
 
     #[test]
     fn from_config_still_splits_a_list_that_matches_one() {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
-        cfg.dictionaries.per_language.insert(
-            "ja".to_string(), vec!["大辞林".to_string()]);
+        cfg.dictionaries
+            .per_language
+            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
         let form = from_config(&cfg, &dicts());
-        assert_eq!(vec!["大辞林　第四版".to_string()], form.dict_names);
-        assert_eq!(vec!["Jitendex.org [2026-07-09]".to_string()], form.dict_excluded);
+        assert_eq!(vec!["大辞林　第四版".to_string()], enabled_names(&form.terms));
+        assert_eq!(
+            vec!["Jitendex.org [2026-07-09]".to_string()],
+            form.terms.iter().filter(|r| !r.enabled).map(|r| r.name.clone()).collect::<Vec<_>>(),
+        );
     }
 
     fn staged_form() -> SettingsForm {
-        from_config(&cfg_with(&["大辞林", "Jitendex"]), &dicts())
+        from_config(&cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]), &dicts())
     }
 
     #[test]
@@ -1425,15 +1631,19 @@ mod tests {
         let form = staged_form();
         assert!(!form.has_staged());
         assert!(!form.freq_changed);
-        assert!(form.freq_names.is_empty());
+        assert!(form.frequency.is_empty());
+        assert!(form.pitch.is_empty());
         assert!(!form.library_empty);
     }
 
     #[test]
     fn staging_an_add_then_removing_it_is_a_no_op() {
         let mut form = staged_form();
-        let before = form.dict_names.clone();
-        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        let before = names(&form.terms);
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&fixture("terms.zip")),
+        );
         assert_eq!(1, form.staged_adds.len());
         assert_eq!("FixtureTerms", form.staged_adds[0].name, "the title, not the filename");
 
@@ -1441,52 +1651,100 @@ mod tests {
 
         assert!(form.staged_adds.is_empty());
         assert!(form.staged_removes.is_empty(), "the library was never asked for it");
-        assert_eq!(before, form.dict_names);
+        assert_eq!(before, names(&form.terms));
         assert!(!form.has_staged());
     }
 
     #[test]
     fn a_staged_add_keeps_the_position_the_user_gave_it() {
-        let mut cfg = Config::default();
-        cfg.dictionaries.display_order = vec!["Jitendex".to_string()];
+        let cfg = Config::default();
         let installed = vec![DictInfo { dict_id: 1, name: "Jitendex.org [2026]".into() }];
         let mut form = from_config(&cfg, &installed);
         form.stage_add(&fixture("terms.zip")).expect("a real archive stages");
 
         // User drags it to the top.
         let name = form.staged_adds[0].name.clone();
-        form.dict_names.retain(|n| n != &name);
-        form.dict_names.insert(0, name.clone());
+        form.terms.retain(|row| row.name != name);
+        form.terms.insert(0, DictRow { name: name.clone(), enabled: true });
 
         let out = apply_to(&form, &cfg);
 
-        assert_eq!(Some(&name), out.dictionaries.display_order.first(),
-            "the position the user chose must survive Apply");
+        assert_eq!(
+            Some(&name),
+            out.dictionaries.terms.first(),
+            "the position the user chose must survive Apply",
+        );
+    }
+
+    /// An import lands at the bottom of every list its roles name, enabled,
+    /// and moves nothing that was already arranged.
+    #[test]
+    fn an_import_lands_at_the_bottom_of_each_of_its_role_lists() {
+        let mut form = staged_form();
+        let before = names(&form.terms);
+
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms, Role::Pitch])),
+            form.stage_add(&fixture("both.zip")),
+        );
+
+        let mut expected = before.clone();
+        expected.push("FixtureBoth".to_string());
+        assert_eq!(expected, names(&form.terms), "at the bottom, and nothing else moved");
+        assert_eq!(vec!["FixtureBoth".to_string()], names(&form.pitch));
+        assert!(form.frequency.is_empty(), "it supplies no frequency data");
+        assert!(
+            form.terms.last().unwrap().enabled && form.pitch[0].enabled,
+            "and it arrives switched on in both",
+        );
+    }
+
+    /// A pitch-only archive is in the Pitch list and in neither other one -
+    /// the filename heuristic used to file it under terms.
+    #[test]
+    fn a_pitch_only_import_reaches_the_pitch_list_alone() {
+        let mut form = staged_form();
+        let terms_before = names(&form.terms);
+
+        assert_eq!(Some(Roles::only(&[Role::Pitch])), form.stage_add(&fixture("pitch.zip")));
+
+        assert_eq!(vec!["FixturePitch".to_string()], names(&form.pitch));
+        assert_eq!(terms_before, names(&form.terms));
+        assert!(form.frequency.is_empty());
     }
 
     #[test]
-    fn a_frequency_list_lands_in_frequency_whichever_button_was_used() {
+    fn a_frequency_archive_lands_in_the_frequency_list_whichever_button_was_used() {
         let mut form = staged_form();
-        let dicts_before = form.dict_names.clone();
+        let terms_before = names(&form.terms);
 
         // Picked under Dictionaries.
-        assert_eq!(Some(Kind::Frequency), form.stage_add(&fixture("freq.zip")));
+        assert_eq!(
+            Some(Roles::only(&[Role::Frequency])),
+            form.stage_add(&fixture("freq.zip")),
+        );
 
-        assert_eq!(vec!["FixtureFreq".to_string()], form.freq_names);
-        assert_eq!(dicts_before, form.dict_names, "it is not a dictionary");
+        assert_eq!(vec!["FixtureFreq".to_string()], names(&form.frequency));
+        assert_eq!(terms_before, names(&form.terms), "it supplies no definitions");
     }
 
     #[test]
     fn staging_a_freq_add_sets_freq_changed() {
         let mut form = staged_form();
-        assert_eq!(Some(Kind::Frequency), form.stage_add(&fixture("freq.zip")));
+        assert_eq!(
+            Some(Roles::only(&[Role::Frequency])),
+            form.stage_add(&fixture("freq.zip")),
+        );
         assert!(form.freq_changed);
     }
 
     #[test]
     fn staging_a_term_add_does_not_set_freq_changed() {
         let mut form = staged_form();
-        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&fixture("terms.zip")),
+        );
         assert!(!form.freq_changed);
     }
 
@@ -1506,13 +1764,31 @@ mod tests {
     #[test]
     fn a_removal_preserves_the_order_of_the_rest() {
         let mut form = staged_form();
-        form.dict_names = vec!["a".into(), "b".into(), "c".into()];
+        form.terms = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| DictRow { name: name.to_string(), enabled: true })
+            .collect();
 
         form.stage_remove("b");
 
-        assert_eq!(vec!["a".to_string(), "c".to_string()], form.dict_names);
+        assert_eq!(vec!["a".to_string(), "c".to_string()], names(&form.terms));
         assert_eq!(vec!["b".to_string()], form.staged_removes);
         assert!(form.has_staged());
+    }
+
+    /// One archive is one Dictionary, so removing it removes every role it
+    /// held rather than the one list the user happened to click in.
+    #[test]
+    fn a_removal_drops_the_dictionary_from_every_list() {
+        let mut form = staged_form();
+        form.stage_add(&fixture("both.zip")).expect("a mixed archive stages");
+        form.frequency.push(DictRow { name: "FixtureBoth".to_string(), enabled: true });
+
+        form.stage_remove("FixtureBoth");
+
+        assert!(!names(&form.terms).contains(&"FixtureBoth".to_string()));
+        assert!(form.pitch.is_empty());
+        assert!(form.frequency.is_empty());
     }
 
     #[test]
@@ -1525,8 +1801,12 @@ mod tests {
         std::fs::copy(fixture("terms.zip"), &a).unwrap();
         std::fs::copy(fixture("terms.zip"), &b).unwrap();
 
-        assert_eq!(Some(Kind::Term), form.stage_add(&a));
-        assert_eq!(Some(Kind::Term), form.stage_add(&b), "a split edition shares its title");
+        assert_eq!(Some(Roles::only(&[Role::Terms])), form.stage_add(&a));
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&b),
+            "a split edition shares its title",
+        );
 
         assert_eq!(2, form.staged_adds.len());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1535,7 +1815,10 @@ mod tests {
     #[test]
     fn the_same_file_cannot_be_staged_twice() {
         let mut form = staged_form();
-        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&fixture("terms.zip")),
+        );
         assert_eq!(None, form.stage_add(&fixture("terms.zip")));
         assert_eq!(1, form.staged_adds.len());
     }
@@ -1543,27 +1826,33 @@ mod tests {
     #[test]
     fn an_add_of_an_already_listed_name_is_rejected_not_duplicated() {
         let mut form = staged_form();
-        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&fixture("terms.zip")),
+        );
 
         assert_eq!(None, form.stage_add(&fixture("terms.zip")));
 
         assert_eq!(1, form.staged_adds.len());
-        assert_eq!(1, form.dict_names.iter().filter(|n| *n == "FixtureTerms").count());
+        assert_eq!(1, names(&form.terms).iter().filter(|n| *n == "FixtureTerms").count());
     }
 
     /// Only the same file duplicates.
     #[test]
     fn a_title_an_installed_dictionary_uses_does_not_block_the_add() {
         let mut form = staged_form();
-        form.dict_names.push("FixtureTerms".into());
-        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        form.terms.push(DictRow { name: "FixtureTerms".into(), enabled: true });
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&fixture("terms.zip")),
+        );
         assert_eq!(1, form.staged_adds.len());
     }
 
     #[test]
     fn removing_the_same_row_twice_records_it_once() {
         let mut form = staged_form();
-        let name = form.dict_names[0].clone();
+        let name = form.terms[0].name.clone();
         form.stage_remove(&name);
         form.stage_remove(&name);
         assert_eq!(vec![name], form.staged_removes);
@@ -1572,16 +1861,16 @@ mod tests {
     #[test]
     fn a_frequency_row_is_removable_by_the_same_call() {
         let mut form = staged_form();
-        form.freq_names = vec!["jiten_freq_global.zip".into()];
+        form.frequency = vec![DictRow { name: "jiten_freq_global.zip".into(), enabled: true }];
         form.stage_remove("jiten_freq_global.zip");
-        assert!(form.freq_names.is_empty());
+        assert!(form.frequency.is_empty());
         assert_eq!(vec!["jiten_freq_global.zip".to_string()], form.staged_removes);
     }
 
     #[test]
     fn removing_a_freq_row_sets_freq_changed() {
         let mut form = staged_form();
-        form.freq_names = vec!["FixtureFreq".into()];
+        form.frequency = vec![DictRow { name: "FixtureFreq".into(), enabled: true }];
         form.stage_remove("FixtureFreq");
         assert!(form.freq_changed);
     }
@@ -1589,34 +1878,43 @@ mod tests {
     #[test]
     fn removing_a_term_row_does_not_set_freq_changed() {
         let mut form = staged_form();
-        let name = form.dict_names[0].clone();
+        let name = form.terms[0].name.clone();
         form.stage_remove(&name);
         assert!(!form.freq_changed);
     }
 
     #[test]
-    fn a_removed_dictionary_loses_its_display_order_entry() {
-        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+    fn a_removed_dictionary_loses_its_place_in_every_array() {
+        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         let mut form = from_config(&cfg, &dicts());
         form.stage_remove("大辞林　第四版");
         assert_eq!(
-            vec!["Jitendex".to_string()],
-            apply_to(&form, &cfg).dictionaries.display_order
+            vec!["Jitendex.org [2026-07-09]".to_string()],
+            apply_to(&form, &cfg).dictionaries.terms,
         );
     }
 
     /// A title orders, not a file.
     #[test]
     fn a_staged_add_is_ordered_by_its_title_not_its_filename() {
-        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         let mut form = from_config(&cfg, &dicts());
-        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
-        let out = apply_to(&form, &cfg);
-        assert!(!out.dictionaries.display_order.iter().any(|e| e.contains(".zip")),
-            "a filename must never reach display_order");
         assert_eq!(
-            vec!["大辞林".to_string(), "Jitendex".to_string(), "FixtureTerms".to_string()],
-            out.dictionaries.display_order
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&fixture("terms.zip")),
+        );
+        let out = apply_to(&form, &cfg);
+        assert!(
+            !out.dictionaries.terms.iter().any(|e| e.contains(".zip")),
+            "a filename must never reach a Dictionary list",
+        );
+        assert_eq!(
+            vec![
+                "大辞林　第四版".to_string(),
+                "Jitendex.org [2026-07-09]".to_string(),
+                "FixtureTerms".to_string()
+            ],
+            out.dictionaries.terms,
         );
     }
 
@@ -1626,17 +1924,17 @@ mod tests {
                 crate::library::Entry {
                     file: "jitendex.zip".into(),
                     name: "Jitendex.org [2026-07-09]".into(),
-                    kind: Kind::Term,
+                    roles: Roles::only(&[Role::Terms]),
                 },
                 crate::library::Entry {
                     file: "daijirin.zip".into(),
                     name: "大辞林　第四版".into(),
-                    kind: Kind::Term,
+                    roles: Roles::only(&[Role::Terms]),
                 },
                 crate::library::Entry {
                     file: "freq.zip".into(),
                     name: "jiten_freq_global".into(),
-                    kind: Kind::Frequency,
+                    roles: Roles::only(&[Role::Frequency]),
                 },
             ],
         }
@@ -1645,9 +1943,47 @@ mod tests {
     #[test]
     fn the_frequency_list_comes_from_the_library_not_the_database() {
         let form = with_library(staged_form(), &library());
-        assert_eq!(vec!["jiten_freq_global".to_string()], form.freq_names);
+        assert_eq!(vec!["jiten_freq_global".to_string()], names(&form.frequency));
         assert!(!form.library_empty);
-        assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], form.dict_names);
+        assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], names(&form.terms));
+    }
+
+    /// An archive with two roles is one row in each of its two lists, and no
+    /// row at all in the third.
+    #[test]
+    fn a_mixed_archive_appears_in_both_its_lists_once_each() {
+        let lib = Library {
+            entries: vec![crate::library::Entry {
+                file: "mixed.zip".into(),
+                name: "Mixed".into(),
+                roles: Roles::only(&[Role::Terms, Role::Frequency]),
+            }],
+        };
+        let form = with_library(from_config(&Config::default(), &[]), &lib);
+        assert_eq!(vec!["Mixed".to_string()], names(&form.terms));
+        assert_eq!(vec!["Mixed".to_string()], names(&form.frequency));
+        assert!(form.pitch.is_empty());
+    }
+
+    /// The library is the authority on roles, so a name the config filed
+    /// under a role the archive does not hold leaves that list. A name the
+    /// library knows nothing about stays exactly where the config put it -
+    /// that is what keeps an unplugged drive's entry alive.
+    #[test]
+    fn the_library_corrects_a_role_and_leaves_a_name_it_does_not_know() {
+        let mut cfg = Config::default();
+        cfg.dictionaries.pitch = vec!["jiten_freq_global".to_string()];
+        cfg.dictionaries.terms = vec!["On the USB stick".to_string()];
+        let form = with_library(from_config(&cfg, &[]), &library());
+        assert!(form.pitch.is_empty(), "the archive supplies no pitch: {:?}", form.pitch);
+        assert_eq!(
+            vec![
+                "On the USB stick".to_string(),
+                "Jitendex.org [2026-07-09]".to_string(),
+                "大辞林　第四版".to_string()
+            ],
+            names(&form.terms),
+        );
     }
 
     #[test]
@@ -1685,14 +2021,20 @@ mod tests {
         assert_eq!(0, terms_after_apply(&form, &library()));
     }
 
-    /// Frequency alone is nothing.
+    /// Frequency alone is nothing to build definitions from.
     #[test]
     fn a_frequency_only_library_leaves_no_term_archives() {
         let mut form = with_library(staged_form(), &Library::default());
-        form.dict_names.clear();
-        assert_eq!(Some(Kind::Frequency), form.stage_add(&fixture("freq.zip")));
+        form.terms.clear();
+        assert_eq!(
+            Some(Roles::only(&[Role::Frequency])),
+            form.stage_add(&fixture("freq.zip")),
+        );
         assert_eq!(0, terms_after_apply(&form, &Library::default()));
-        assert_eq!(Some(Kind::Term), form.stage_add(&fixture("terms.zip")));
+        assert_eq!(
+            Some(Roles::only(&[Role::Terms])),
+            form.stage_add(&fixture("terms.zip")),
+        );
         assert_eq!(1, terms_after_apply(&form, &Library::default()));
     }
 
@@ -1700,19 +2042,24 @@ mod tests {
     #[test]
     fn an_add_that_no_longer_exists_cannot_be_staged_at_all() {
         let mut form = with_library(staged_form(), &Library::default());
-        form.dict_names.clear();
+        form.terms.clear();
         assert_eq!(None, form.stage_add(Path::new(r"C:\gone\jmdict.zip")));
         assert_eq!(0, terms_after_apply(&form, &Library::default()));
     }
 
-    /// Kept, not deleted.
+    /// Kept, not deleted: the row stays on screen, so Apply writes it back
+    /// and the drive it names can be plugged in again.
     #[test]
-    fn a_stale_entry_is_replaced_by_applying_not_by_reporting() {
-        let cfg = cfg_with(&["Kenkyusha", "大辞林"]);
+    fn a_stale_entry_survives_an_apply_that_never_saw_its_dictionary() {
+        let cfg = cfg_with(&["Kenkyusha", "大辞林　第四版"]);
         assert_eq!(vec!["Kenkyusha".to_string()], stale_order_entries(&cfg, &dicts()));
         let out = apply_to(&from_config(&cfg, &dicts()), &cfg);
-        assert!(!out.dictionaries.display_order.contains(&"Kenkyusha".to_string()));
-        assert!(stale_order_entries(&out, &dicts()).is_empty());
+        assert!(out.dictionaries.terms.contains(&"Kenkyusha".to_string()));
+        assert_eq!(vec!["Kenkyusha".to_string()], stale_order_entries(&out, &dicts()));
+        assert!(
+            !dicts().iter().any(|d| d.name == "Kenkyusha"),
+            "and nothing installed answers to it, so it orders and enables nothing",
+        );
     }
 
     // ---- library changes ----
@@ -1785,9 +2132,10 @@ mod tests {
         let lib = Library::load(&dir).unwrap();
         assert_eq!(2, lib.entries.len(), "the copy is not a second dictionary");
         assert_eq!(
-            vec![dir.join("terms.zip")],
-            lib.term_paths(&dir),
-            "and the name the manifest already held is the one that builds",
+            vec![dir.join("freq.zip"), dir.join("terms.zip")],
+            lib.dict_paths(&dir),
+            "the byte-identical copy is not a second dictionary, and the frequency \
+             archive is one in its own right",
         );
     }
 
@@ -1852,16 +2200,19 @@ mod tests {
 
     /// Ask the file, not the list.
     #[test]
-    fn a_frequency_archive_added_under_dictionaries_is_still_not_a_dictionary() {
+    fn a_frequency_archive_added_under_dictionaries_supplies_no_terms() {
         let (dir, _guard) = stocked("misfiled");
         let before = files_in(&dir);
         let mut form = form_for(&dir);
         form.stage_remove("FixtureTerms");
-        form.freq_names.clear();
-        // Routed by what it is.
-        assert_eq!(Some(Kind::Frequency), form.stage_add(&fixture("freq.zip")));
-        assert!(!form.dict_names.iter().any(|n| n.contains("Freq")));
-        assert!(form.freq_names.contains(&"FixtureFreq".to_string()));
+        form.frequency.clear();
+        // Routed by what its banks hold.
+        assert_eq!(
+            Some(Roles::only(&[Role::Frequency])),
+            form.stage_add(&fixture("freq.zip")),
+        );
+        assert!(!names(&form.terms).iter().any(|n| n.contains("Freq")));
+        assert!(names(&form.frequency).contains(&"FixtureFreq".to_string()));
 
         assert_eq!(0, terms_after_apply(&form, &Library::load(&dir).unwrap()));
         let refused = stage_into_library(&form, &dir).unwrap_err();
@@ -1879,9 +2230,9 @@ mod tests {
         let before = files_in(&dir);
         let mut form = form_for(&dir);
         assert!(
-            form.dict_names.contains(&"broken.zip".to_string()),
+            names(&form.terms).contains(&"broken.zip".to_string()),
             "it must stay visible so it can be removed: {:?}",
-            form.dict_names
+            form.terms
         );
         form.stage_remove("FixtureTerms");
 
@@ -1892,7 +2243,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_row_contributes_no_display_order_entry() {
+    fn an_unreadable_row_reaches_no_dictionary_list() {
         let (dir, _guard) = stocked("unreadable_order");
         std::fs::write(dir.join("broken.zip"), b"not a zip at all").unwrap();
         let cfg = cfg_with(&[]);
@@ -1900,7 +2251,13 @@ mod tests {
 
         let out = apply_to(&form, &cfg);
 
-        assert!(!out.dictionaries.display_order.iter().any(|e| e.contains("broken")), "{out:?}");
+        for role in Role::EVERY {
+            let (on, off) = out.dictionaries.lists(role);
+            assert!(
+                !on.iter().chain(off).any(|e| e.contains("broken")),
+                "{role:?}: {on:?} {off:?}",
+            );
+        }
     }
 
     /// It must be removable.
@@ -1980,7 +2337,7 @@ mod tests {
     fn the_frequency_list_a_window_opens_with_comes_from_the_library() {
         let (dir, _guard) = stocked("form");
         let form = form_for(&dir);
-        assert_eq!(vec!["FixtureFreq".to_string()], form.freq_names);
+        assert_eq!(vec!["FixtureFreq".to_string()], names(&form.frequency));
         assert!(!form.library_empty);
         assert!(!form.has_staged());
     }
@@ -1998,11 +2355,11 @@ mod tests {
             entries: vec![crate::library::Entry {
                 file: "dropped-in.zip".into(),
                 name: "DroppedIn".into(),
-                kind: Kind::Term,
+                roles: Roles::only(&[Role::Terms]),
             }],
         };
         let form = with_library(from_config(&Config::default(), &[]), &lib);
-        assert!(form.dict_names.contains(&"DroppedIn".to_string()), "{form:?}");
+        assert!(names(&form.terms).contains(&"DroppedIn".to_string()), "{form:?}");
     }
 
     // ---- incremental ----
@@ -2017,28 +2374,37 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_dictionary_loses_its_order_entry() {
-        let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
+    fn a_removed_dictionary_loses_its_entry_in_every_array() {
+        let mut cfg = cfg_with(&["大辞林　第四版", "Jitendex.org"]);
+        cfg.dictionaries.frequency_disabled = strs(&["大辞林　第四版"]);
+        cfg.dictionaries.pitch = strs(&["大辞林　第四版", "NHK"]);
         dictionary_removed(&mut cfg, "大辞林　第四版");
-        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["Jitendex.org"]), cfg.dictionaries.terms);
+        assert!(cfg.dictionaries.frequency_disabled.is_empty());
+        assert_eq!(strs(&["NHK"]), cfg.dictionaries.pitch);
     }
 
     #[test]
     fn a_removal_drops_the_name_from_every_language_list() {
         let mut cfg = with_list(
-            with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林", "Jitendex"]),
+            with_list(
+                cfg_with(&["大辞林　第四版", "Jitendex.org"]),
+                "ja",
+                &["大辞林　第四版", "Jitendex.org"],
+            ),
             "zh-Hans-CN",
-            &["大辞林", "中日大辞典"],
+            &["大辞林　第四版", "中日大辞典"],
         );
         dictionary_removed(&mut cfg, "大辞林　第四版");
-        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+        assert_eq!(strs(&["Jitendex.org"]), cfg.dictionaries.per_language["ja"]);
         assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
     }
 
-    /// `[]` searches everything.
+    /// An entry naming nothing is the same state as no entry.
     #[test]
     fn a_language_list_left_empty_loses_its_key() {
-        let mut cfg = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        let mut cfg =
+            with_list(cfg_with(&["大辞林　第四版", "Jitendex.org"]), "ja", &["大辞林　第四版"]);
         dictionary_removed(&mut cfg, "大辞林　第四版");
         assert!(
             !cfg.dictionaries.per_language.contains_key("ja"),
@@ -2050,68 +2416,83 @@ mod tests {
     /// Why `[]` is not written.
     #[test]
     fn an_empty_list_left_behind_would_scope_the_language() {
-        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["大辞林"]);
+        let mut cfg = with_list(cfg_with(&["Jitendex.org"]), "ja", &["大辞林　第四版"]);
         dictionary_removed(&mut cfg, "大辞林　第四版");
         assert!(!is_scoped(&from_config(&cfg, &[])), "the language must be unscoped again");
 
-        let blanked = with_list(cfg_with(&["Jitendex"]), "ja", &[]);
+        let blanked = with_list(cfg_with(&["Jitendex.org"]), "ja", &[]);
         assert!(
             is_scoped(&from_config(&blanked, &[])),
             "[] keeps the language scoped and pins it at the next Apply",
         );
     }
 
-    /// A blank claims nothing.
+    /// The substring model's worst failure, gone: a removal touches the
+    /// name it was given and no other.
     #[test]
-    fn a_removal_leaves_a_blank_entry_alone() {
-        let mut cfg = cfg_with(&["", "大辞林"]);
+    fn a_removal_leaves_the_other_edition_of_a_shared_name_alone() {
+        let mut cfg = cfg_with(&["大辞林　第三版", "大辞林　第四版"]);
         dictionary_removed(&mut cfg, "大辞林　第四版");
-        assert_eq!(strs(&[""]), cfg.dictionaries.display_order);
+        assert_eq!(strs(&["大辞林　第三版"]), cfg.dictionaries.terms);
     }
 
-    /// A frequency name too.
     #[test]
     fn a_removal_naming_no_entry_changes_nothing() {
-        let before = with_list(cfg_with(&["大辞林", "Jitendex"]), "ja", &["大辞林"]);
+        let before =
+            with_list(cfg_with(&["大辞林　第四版", "Jitendex.org"]), "ja", &["大辞林　第四版"]);
         let mut cfg = before.clone();
         dictionary_removed(&mut cfg, "jiten_freq_global");
         assert_eq!(before, cfg);
     }
 
-    /// Recorded, not desired.
-    #[test]
-    fn a_substring_two_dictionaries_share_is_dropped_by_either_removal() {
-        let mut cfg = cfg_with(&["大辞"]);
-        dictionary_removed(&mut cfg, "大辞林　第四版");
-        assert!(cfg.dictionaries.display_order.is_empty(), "大辞泉 loses its place too");
-    }
-
     #[test]
     fn a_list_that_was_already_empty_is_removed_too() {
-        let mut cfg = with_list(cfg_with(&["Jitendex"]), "zh-Hans-CN", &[]);
+        let mut cfg = with_list(cfg_with(&["Jitendex.org"]), "zh-Hans-CN", &[]);
         dictionary_removed(&mut cfg, "大辞林　第四版");
         assert!(cfg.dictionaries.per_language.is_empty());
     }
 
+    /// The bottom of every list its roles name, under its whole name.
     #[test]
-    fn an_added_dictionary_is_appended_with_a_derived_key() {
-        let mut cfg = cfg_with(&["大辞林"]);
-        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
-        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.display_order);
+    fn an_added_dictionary_is_appended_to_each_of_its_role_lists() {
+        let mut cfg = cfg_with(&["大辞林　第四版"]);
+        dictionary_added(
+            &mut cfg,
+            "Jitendex.org [2026-07-09]",
+            Roles::only(&[Role::Terms, Role::Frequency]),
+        );
+        assert_eq!(
+            strs(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]),
+            cfg.dictionaries.terms,
+        );
+        assert_eq!(strs(&["Jitendex.org [2026-07-09]"]), cfg.dictionaries.frequency);
+        assert!(cfg.dictionaries.pitch.is_empty(), "and no list it has no role for");
     }
 
     #[test]
     fn an_added_dictionary_joins_a_language_that_has_a_list() {
-        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
-        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
-        assert_eq!(strs(&["大辞林", "Jitendex.org"]), cfg.dictionaries.per_language["ja"]);
+        let mut cfg = with_list(cfg_with(&["大辞林　第四版"]), "ja", &["大辞林　第四版"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]", Roles::only(&[Role::Terms]));
+        assert_eq!(
+            strs(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]),
+            cfg.dictionaries.per_language["ja"],
+        );
     }
 
-    /// No entry: search all.
+    /// `per_language` answers a question about definitions, so an archive
+    /// with no terms role has no business in one.
+    #[test]
+    fn an_added_frequency_dictionary_never_joins_a_language_list() {
+        let mut cfg = with_list(cfg_with(&["大辞林　第四版"]), "ja", &["大辞林　第四版"]);
+        dictionary_added(&mut cfg, "jiten_freq_global", Roles::only(&[Role::Frequency]));
+        assert_eq!(strs(&["大辞林　第四版"]), cfg.dictionaries.per_language["ja"]);
+    }
+
+    /// No entry: the global list decides.
     #[test]
     fn an_added_dictionary_never_creates_a_language_list() {
-        let mut cfg = cfg_with(&["大辞林"]);
-        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        let mut cfg = cfg_with(&["大辞林　第四版"]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]", Roles::only(&[Role::Terms]));
         assert!(
             cfg.dictionaries.per_language.is_empty(),
             "creating an entry would pin the language: {:?}",
@@ -2122,8 +2503,8 @@ mod tests {
     /// `[]` is not a list.
     #[test]
     fn an_added_dictionary_never_fills_an_empty_language_list() {
-        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &[]);
-        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        let mut cfg = with_list(cfg_with(&["大辞林　第四版"]), "ja", &[]);
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]", Roles::only(&[Role::Terms]));
         assert!(
             cfg.dictionaries.per_language["ja"].is_empty(),
             "filling [] would scope ja to the new dictionary alone",
@@ -2133,50 +2514,103 @@ mod tests {
     #[test]
     fn an_added_dictionary_leaves_the_other_languages_alone() {
         let mut cfg = with_list(
-            with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]),
+            with_list(cfg_with(&["大辞林　第四版"]), "ja", &["大辞林　第四版"]),
             "zh-Hans-CN",
             &["中日大辞典"],
         );
-        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
+        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]", Roles::only(&[Role::Terms]));
         assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
     }
 
-    /// It is already ordered.
+    /// It is already listed, checked or not.
     #[test]
-    fn an_entry_that_already_claims_the_name_is_not_duplicated() {
-        let mut cfg = with_list(cfg_with(&["Jitendex"]), "ja", &["Jitendex"]);
-        dictionary_added(&mut cfg, "Jitendex.org [2026-07-09]");
-        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.display_order);
-        assert_eq!(strs(&["Jitendex"]), cfg.dictionaries.per_language["ja"]);
+    fn a_name_an_array_already_holds_is_not_added_twice() {
+        let mut cfg = with_list(cfg_with(&["Jitendex.org"]), "ja", &["Jitendex.org"]);
+        cfg.dictionaries.pitch_disabled = strs(&["Jitendex.org"]);
+        dictionary_added(
+            &mut cfg,
+            "Jitendex.org",
+            Roles::only(&[Role::Terms, Role::Pitch]),
+        );
+        assert_eq!(strs(&["Jitendex.org"]), cfg.dictionaries.terms);
+        assert!(cfg.dictionaries.pitch.is_empty(), "an unchecked row stays unchecked");
+        assert_eq!(strs(&["Jitendex.org"]), cfg.dictionaries.per_language["ja"]);
     }
 
-    /// A blank pins everything.
     #[test]
     fn a_dictionary_with_no_title_adds_no_entry() {
-        let mut cfg = with_list(cfg_with(&["大辞林"]), "ja", &["大辞林"]);
-        dictionary_added(&mut cfg, "");
-        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.display_order);
-        assert_eq!(strs(&["大辞林"]), cfg.dictionaries.per_language["ja"]);
+        let mut cfg = with_list(cfg_with(&["大辞林　第四版"]), "ja", &["大辞林　第四版"]);
+        dictionary_added(&mut cfg, "", Roles::only(&[Role::Terms]));
+        assert_eq!(strs(&["大辞林　第四版"]), cfg.dictionaries.terms);
+        assert_eq!(strs(&["大辞林　第四版"]), cfg.dictionaries.per_language["ja"]);
     }
 
     /// Two writers, one result.
     #[test]
     fn an_incremental_removal_agrees_with_a_full_apply() {
-        let cfg = cfg_with(&["大辞林", "Jitendex"]);
+        let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
         let kept = vec![DictInfo { dict_id: 1, name: "Jitendex.org [2026-07-09]".into() }];
-        let full = apply_to(&from_config(&cfg, &kept), &cfg);
+        let mut form = from_config(&cfg, &kept);
+        form.stage_remove("大辞林　第四版");
+        let full = apply_to(&form, &cfg);
         let mut incremental = cfg.clone();
         dictionary_removed(&mut incremental, "大辞林　第四版");
         assert_eq!(full.dictionaries, incremental.dictionaries);
     }
 
+    // ---- what applying a change costs ----
+
+    /// Only the frequency inputs reduce to `term.freq`, so only they cost a
+    /// Reindex - and none of them costs a rebuild.
+    #[test]
+    fn reordering_the_frequency_list_costs_a_reindex() {
+        let before = Config::default();
+        let mut after = before.clone();
+        after.dictionaries.frequency = strs(&["B", "A"]);
+        assert_eq!(DictionaryWork::Reindex, dictionary_work(&before, &after));
+    }
+
+    #[test]
+    fn toggling_a_frequency_checkbox_costs_a_reindex() {
+        let mut before = Config::default();
+        before.dictionaries.frequency = strs(&["A"]);
+        let mut after = before.clone();
+        after.dictionaries.frequency = Vec::new();
+        after.dictionaries.frequency_disabled = strs(&["A"]);
+        assert_eq!(DictionaryWork::Reindex, dictionary_work(&before, &after));
+    }
+
+    #[test]
+    fn selecting_a_ranking_strategy_costs_a_reindex() {
+        let before = Config::default();
+        let mut after = before.clone();
+        after.dictionaries.ranking_strategy = RankingStrategy::Median;
+        assert_eq!(DictionaryWork::Reindex, dictionary_work(&before, &after));
+    }
+
+    #[test]
+    fn reordering_or_toggling_terms_and_pitch_costs_nothing_extra() {
+        let before = Config::default();
+        let mut after = before.clone();
+        after.dictionaries.terms = strs(&["B", "A"]);
+        after.dictionaries.terms_disabled = strs(&["C"]);
+        after.dictionaries.pitch = strs(&["NHK"]);
+        after.dictionaries.pitch_disabled = strs(&["三省堂"]);
+        after.popup.summary_chars = 55;
+        assert_eq!(DictionaryWork::None, dictionary_work(&before, &after));
+    }
+
     /// Two writers, one result.
     #[test]
     fn an_incremental_addition_agrees_with_a_full_apply() {
-        let cfg = cfg_with(&["大辞林"]);
+        let cfg = cfg_with(&["大辞林　第四版"]);
         let full = apply_to(&from_config(&cfg, &dicts()), &cfg);
         let mut incremental = cfg.clone();
-        dictionary_added(&mut incremental, "Jitendex.org [2026-07-09]");
+        dictionary_added(
+            &mut incremental,
+            "Jitendex.org [2026-07-09]",
+            Roles::only(&[Role::Terms]),
+        );
         assert_eq!(full.dictionaries, incremental.dictionaries);
     }
 
@@ -2203,8 +2637,12 @@ mod tests {
         drift_notice(Some(sources), lib, Path::new(LIB_DIR), Path::new(DB_FILE))
     }
 
-    fn entry(file: &str, kind: Kind) -> crate::library::Entry {
-        crate::library::Entry { file: file.into(), name: file.into(), kind }
+    fn entry(file: &str, roles: &[Role]) -> crate::library::Entry {
+        crate::library::Entry {
+            file: file.into(),
+            name: file.into(),
+            roles: Roles::only(roles),
+        }
     }
 
     #[test]
@@ -2233,7 +2671,7 @@ mod tests {
     #[test]
     fn an_archive_the_database_never_built_from_is_drift() {
         let mut lib = library();
-        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        lib.entries.push(entry("dropped-in.zip", &[Role::Terms]));
         let text = notice(EDITED_JSON, &lib).expect("a dropped-in archive is drift");
         assert!(text.contains("dropped-in.zip"), "{text}");
     }
@@ -2251,7 +2689,7 @@ mod tests {
     fn drift_names_each_side_in_its_own_list() {
         let mut lib = library();
         lib.entries.retain(|e| e.file != "daijirin.zip");
-        lib.entries.push(entry("dropped-in.zip", Kind::Term));
+        lib.entries.push(entry("dropped-in.zip", &[Role::Terms]));
         let found = drift(Some(EDITED_JSON), &lib);
         assert_eq!(strs(&["dropped-in.zip"]), found.unbuilt);
         assert_eq!(strs(&["daijirin.zip"]), found.orphaned);
@@ -2261,7 +2699,7 @@ mod tests {
     #[test]
     fn an_unreadable_archive_is_not_drift() {
         let mut lib = library();
-        lib.entries.push(entry("broken.zip", Kind::Unreadable));
+        lib.entries.push(entry("broken.zip", &[]));
         assert_eq!(None, notice(EDITED_JSON, &lib));
     }
 
@@ -2320,7 +2758,7 @@ mod tests {
     /// Frequency builds nothing.
     #[test]
     fn a_library_with_no_term_archive_offers_no_rebuild() {
-        let lib = Library { entries: vec![entry("freq.zip", Kind::Frequency)] };
+        let lib = Library { entries: vec![entry("freq.zip", &[Role::Frequency])] };
         assert_eq!(None, notice(EDITED_JSON, &lib));
     }
 

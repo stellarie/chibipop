@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::path::Path;
+use zip::read::{ZipFile, ZipReadOptions};
 use zip::ZipArchive;
 
 const MAX_BANK: usize = 256 << 20;
@@ -118,14 +119,40 @@ pub fn for_each_row(
     mut on_row: impl FnMut(TermRow) -> Result<()>,
 ) -> Result<()> {
     stream_rows(text, name, &mut |row: MaybeRow| match row.0 {
-        Some(row) => on_row(row),
-        None => Ok(()),
+        Some(row) => on_row(row).map(|()| true),
+        None => Ok(true),
     })
+    .map(|_| ())
 }
 
-/// Streams frequency bank rows.
-pub fn for_each_freq_row(zip: &Path, on_row: impl FnMut(Value) -> Result<()>) -> Result<()> {
-    for_each_bank_row(zip, "term_meta_bank_", on_row)
+/// Streams term-meta bank rows.
+///
+/// Every row of every `term_meta_bank_`, whatever mode it is tagged with:
+/// the frequency loader keeps the `"freq"` rows and the pitch loader keeps
+/// the `"pitch"` ones, and an archive carrying both is read once by each.
+pub fn for_each_meta_row(zip: &Path, mut on_row: impl FnMut(Value) -> Result<()>) -> Result<()> {
+    for_each_bank_row(zip, "term_meta_bank_", &mut |row| on_row(row).map(|()| true))
+        .map(|_| ())
+}
+
+/// Does any term-meta row satisfy `pred`?
+///
+/// The same walk [`for_each_meta_row`] takes, stopped at the first row that
+/// answers yes - which is what makes a role predicate affordable. A pitch
+/// archive answers from the first row of its first bank instead of being
+/// read whole: ticket 01's census measured 48.7 MB of bank JSON across the
+/// five pitch archives in one library.
+///
+/// `false` for an archive with no matching row, and an `Err` for one this
+/// build cannot open or parse - the caller decides what an unreadable
+/// archive supplies.
+pub fn any_meta_row(zip: &Path, mut pred: impl FnMut(&Value) -> bool) -> Result<bool> {
+    let mut found = false;
+    for_each_bank_row(zip, "term_meta_bank_", &mut |row| {
+        found = pred(&row);
+        Ok(!found)
+    })?;
+    Ok(found)
 }
 
 /// The dictionary's own `styles.css`, or `None` when it ships none.
@@ -233,8 +260,7 @@ pub fn for_each_media<'a>(
             continue;
         };
         {
-            let entry = archive
-                .by_index(i)
+            let entry = member(&mut archive, i)
                 .with_context(|| format!("reading {name} from {}", zip.display()))?;
             if entry.size() > MAX_ASSET {
                 unusable.extend(paths);
@@ -276,25 +302,24 @@ fn archive_relative(path: &str) -> &str {
     at
 }
 
-/// Detects a frequency archive.
-pub fn is_frequency_archive(zip: &Path) -> bool {
-    let name_says_freq =
-        zip.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("Freq"));
-    let index_says_freq =
-        read_index(zip).is_ok_and(|idx| idx.get("frequencyMode").is_some_and(is_truthy));
-    name_says_freq || index_says_freq
-}
-
-/// Python-style truthiness.
-fn is_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
+/// Does this archive supply the terms role?
+///
+/// Its own banks, never its filename: a `term_bank_` member is what a
+/// glossary lives in, and an archive that ships none supplies no
+/// definitions whatever it is called. The same question
+/// [`crate::dict::frequency::supplies_frequency`] and
+/// [`crate::dict::pitch::supplies_pitch`] answer for the other two roles,
+/// asked the same way (ADR-0014).
+///
+/// The central directory answers it, so this costs one open and no
+/// inflation: a term bank is present or it is not, and a bank member with
+/// no readable row in it is a broken archive rather than a different role.
+///
+/// `false` for an archive this build cannot open - unreadable supplies no
+/// role at all, which is the answer [`crate::library::roles_of`] gives such
+/// an archive for every one of the three.
+pub fn supplies_terms(zip: &Path) -> bool {
+    TermBanks::open(zip).is_ok_and(|banks| !banks.is_empty())
 }
 
 /// Opens a zip for reading.
@@ -308,6 +333,25 @@ fn archive_names(archive: &ZipArchive<File>) -> Vec<String> {
     archive.file_names().map(String::from).collect()
 }
 
+/// One member of an open zip, read without checking its CRC-32.
+///
+/// The one place a member's bytes are reached, so the reasoning lives once.
+/// **The check is off deliberately.** Every one of the five pitch archives
+/// ticket 01 censused stores CRC-32 values that do not match its own
+/// payload - 48 of their 54 members - and this reader refused every one of
+/// them with `Invalid checksum` while Yomitan imported them cleanly, never
+/// passing `checkSignature` or `checkCrc32` to its own zip reader. So the
+/// check was not defending a user against corruption; it was refusing five
+/// working dictionaries (`docs/research/pitch-accent-shapes.md`).
+///
+/// What still holds is what actually catches a damaged archive: a member
+/// has to inflate, it has to stay under the caller's own cap, and a bank
+/// has to parse as the JSON its schema says. A truncated member fails all
+/// three.
+fn member(archive: &mut ZipArchive<File>, index: usize) -> Result<ZipFile<'_, File>> {
+    Ok(archive.by_index_with_options(index, ZipReadOptions::new().ignore_crc32(true))?)
+}
+
 /// One zip entry as JSON.
 fn read_json(archive: &mut ZipArchive<File>, name: &str) -> Result<Value> {
     let text = read_entry(archive, name)?;
@@ -316,7 +360,10 @@ fn read_json(archive: &mut ZipArchive<File>, name: &str) -> Result<Value> {
 
 /// One zip entry's text.
 fn read_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<String> {
-    let entry = archive.by_name(name).with_context(|| format!("reading {name}"))?;
+    let index = archive
+        .index_for_name(name)
+        .with_context(|| format!("reading {name}: no such entry"))?;
+    let entry = member(archive, index).with_context(|| format!("reading {name}"))?;
     let mut buf = Vec::new();
     entry
         .take(MAX_BANK as u64 + 1)
@@ -328,50 +375,72 @@ fn read_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<String> {
     String::from_utf8(buf).with_context(|| format!("decoding {name}"))
 }
 
-/// Streams one archive's rows.
+/// Streams one archive's rows, until a caller says stop.
+///
+/// `on_row` returning `false` ends the walk, and the return value says
+/// whether every row was read: a predicate over the rows can answer from
+/// the first bank instead of inflating all sixteen of them.
 fn for_each_bank_row(
     zip: &Path,
     prefix: &str,
-    mut on_row: impl FnMut(Value) -> Result<()>,
-) -> Result<()> {
+    on_row: &mut impl FnMut(Value) -> Result<bool>,
+) -> Result<bool> {
     let mut archive = open_archive(zip)?;
     for bank in sorted_banks(&archive_names(&archive), prefix) {
         let text = read_entry(&mut archive, &bank)?;
-        stream_rows(&text, &bank, &mut on_row)?;
+        if !stream_rows(&text, &bank, on_row)? {
+            return Ok(false);
+        }
     }
-    Ok(())
+    Ok(true)
 }
 
-/// Streams one bank's rows.
+/// Streams one bank's rows, until a caller says stop.
 ///
-/// Generic in the row type so the freq reader keeps its `Value` and the
+/// Generic in the row type so the meta reader keeps its `Value` and the
 /// term reader can take a [`TermRow`] that borrows straight out of `text`.
-fn stream_rows<'de, T, F>(text: &'de str, name: &str, on_row: &mut F) -> Result<()>
+/// `false` means `on_row` stopped the walk, in which case the rest of the
+/// bank is never parsed - and neither is the array's own tail, so the
+/// trailing-bytes check is skipped along with it.
+fn stream_rows<'de, T, F>(text: &'de str, name: &str, on_row: &mut F) -> Result<bool>
 where
     T: serde::Deserialize<'de>,
-    F: FnMut(T) -> Result<()>,
+    F: FnMut(T) -> Result<bool>,
 {
     let mut failed = None;
+    let mut stopped = false;
     let mut de = serde_json::Deserializer::from_str(text);
-    let outcome = Rows { on_row, failed: &mut failed, row: PhantomData }.deserialize(&mut de);
+    let outcome = Rows { on_row, failed: &mut failed, stopped: &mut stopped, row: PhantomData }
+        .deserialize(&mut de);
     if let Some(err) = failed {
         return Err(err);
     }
+    if stopped {
+        return Ok(false);
+    }
     outcome.with_context(|| format!("parsing {name}"))?;
-    de.end().with_context(|| format!("parsing {name}"))
+    de.end().with_context(|| format!("parsing {name}"))?;
+    Ok(true)
 }
 
 /// Visits array elements.
+///
+/// `failed` and `stopped` are two different things and the difference is
+/// the caller's answer: a callback that returned an error abandons the walk
+/// *and* the read, and one that returned `false` abandons only the walk.
+/// Both leave the array part-consumed, which serde can only express as an
+/// error, so both come back out through one.
 struct Rows<'a, T, F> {
     on_row: &'a mut F,
     failed: &'a mut Option<anyhow::Error>,
+    stopped: &'a mut bool,
     row: PhantomData<fn() -> T>,
 }
 
 impl<'de, T, F> DeserializeSeed<'de> for Rows<'_, T, F>
 where
     T: serde::Deserialize<'de>,
-    F: FnMut(T) -> Result<()>,
+    F: FnMut(T) -> Result<bool>,
 {
     type Value = ();
 
@@ -386,7 +455,7 @@ where
 impl<'de, T, F> Visitor<'de> for Rows<'_, T, F>
 where
     T: serde::Deserialize<'de>,
-    F: FnMut(T) -> Result<()>,
+    F: FnMut(T) -> Result<bool>,
 {
     type Value = ();
 
@@ -399,9 +468,16 @@ where
         A: SeqAccess<'de>,
     {
         while let Some(row) = seq.next_element::<T>()? {
-            if let Err(err) = (self.on_row)(row) {
-                *self.failed = Some(err);
-                return Err(serde::de::Error::custom("row rejected"));
+            match (self.on_row)(row) {
+                Ok(true) => {}
+                Ok(false) => {
+                    *self.stopped = true;
+                    return Err(serde::de::Error::custom("walk stopped"));
+                }
+                Err(err) => {
+                    *self.failed = Some(err);
+                    return Err(serde::de::Error::custom("row rejected"));
+                }
             }
         }
         Ok(())
@@ -560,16 +636,21 @@ mod tests {
         assert_eq!("v1", taberu.2);
     }
 
+    /// The role a filename cannot answer: `freq.zip` and `pitch.zip` carry
+    /// nothing but a term-meta bank, so neither supplies definitions, and
+    /// `terms.zip` does whatever its name says.
     #[test]
-    fn a_frequency_archive_is_detected_and_a_term_archive_is_not() {
-        assert!(is_frequency_archive(&fixture("freq.zip")));
-        assert!(!is_frequency_archive(&fixture("terms.zip")));
+    fn the_terms_role_is_read_from_the_banks_and_not_from_the_name() {
+        assert!(supplies_terms(&fixture("terms.zip")));
+        assert!(supplies_terms(&fixture("both.zip")));
+        assert!(!supplies_terms(&fixture("freq.zip")));
+        assert!(!supplies_terms(&fixture("pitch.zip")));
     }
 
     #[test]
-    fn frequency_rows_come_back_raw_for_the_parser() {
+    fn term_meta_rows_come_back_raw_for_the_parser() {
         let mut rows = Vec::new();
-        for_each_freq_row(&fixture("freq.zip"), |row| {
+        for_each_meta_row(&fixture("freq.zip"), |row| {
             rows.push(row);
             Ok(())
         })
@@ -591,8 +672,8 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_frequency_row_stops_the_stream_with_its_own_error() {
-        let err = for_each_freq_row(&fixture("freq.zip"), |_| anyhow::bail!("caller said no"))
+    fn a_rejected_term_meta_row_stops_the_stream_with_its_own_error() {
+        let err = for_each_meta_row(&fixture("freq.zip"), |_| anyhow::bail!("caller said no"))
             .unwrap_err();
         assert_eq!("caller said no", format!("{err}"));
     }
@@ -600,12 +681,47 @@ mod tests {
     #[test]
     fn a_missing_bank_prefix_streams_nothing_rather_than_failing() {
         let mut seen = 0;
-        for_each_freq_row(&fixture("terms.zip"), |_| {
+        for_each_meta_row(&fixture("terms.zip"), |_| {
             seen += 1;
             Ok(())
         })
         .unwrap();
         assert_eq!(0, seen);
+    }
+
+    /// The whole point of the stop: a predicate over the rows must not
+    /// inflate every bank of an archive to answer from the first row.
+    #[test]
+    fn a_satisfied_predicate_stops_the_walk_at_the_row_that_answered_it() {
+        let mut seen = 0;
+        let found = any_meta_row(&fixture("freq.zip"), |row| {
+            seen += 1;
+            row[0].as_str() == Some("食べる")
+        })
+        .unwrap();
+
+        assert!(found);
+        assert_eq!(1, seen, "the fixture's first row answers, so no second row is parsed");
+    }
+
+    #[test]
+    fn an_unsatisfied_predicate_reads_every_row_and_answers_no() {
+        let mut seen = 0;
+        let found = any_meta_row(&fixture("freq.zip"), |_| {
+            seen += 1;
+            false
+        })
+        .unwrap();
+
+        assert!(!found);
+        assert_eq!(3, seen);
+    }
+
+    /// An archive with no term-meta bank has no row to satisfy anything,
+    /// and answering that costs its central directory and no inflate.
+    #[test]
+    fn an_archive_with_no_term_meta_bank_answers_no_to_every_predicate() {
+        assert!(!any_meta_row(&fixture("terms.zip"), |_| true).unwrap());
     }
 
     #[test]

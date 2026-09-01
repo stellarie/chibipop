@@ -1,6 +1,7 @@
 //! AnkiConnect v6 client.
 
 use crate::dict::gloss::{render_html, RoleFilter, Selection};
+use crate::dict::pitch::marked_morae;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -333,7 +334,68 @@ pub fn fields_from_card(
     if let Some(freq) = card.freq {
         fields.insert("frequency".to_string(), freq.to_string());
     }
+    // The HTML field only, and never a plain-text one: marked kana *is*
+    // markup, and a plain-text field would have to spell the notation out
+    // in words or drop it.
+    if let Some(pitch) = pitch_html(card) {
+        fields.insert("pitch_html".to_string(), pitch);
+    }
     fields
+}
+
+/// One card's accents in the Anki community's marked-kana shape.
+///
+/// `<span>`s carrying `border-top` over the high moras and `border-right`
+/// on the mora the pitch falls after, which is what every community pitch
+/// template already styles and what Yomitan's own popup emits - so a note
+/// mined here renders in a deck built for Yomitan with no new template.
+///
+/// The moras are [`marked_morae`]'s answer, the same one the card header
+/// drew, so the field cannot disagree with the panel the user read it off.
+/// One `<li>` per accent in the pitch list's order, each naming the
+/// dictionaries that gave it - the deduplicated rows and not the raw claims.
+///
+/// `None` when the card has no accent, so a note carries no empty field.
+fn pitch_html(card: &crate::present::Card) -> Option<String> {
+    let reading = card.reading.as_deref().filter(|r| !r.is_empty())?;
+    if card.pitch.is_empty() {
+        return None;
+    }
+    let items: String = card
+        .pitch
+        .iter()
+        .map(|row| {
+            let marked: String = marked_morae(reading, &row.accent.position)
+                .into_iter()
+                .map(|mora| {
+                    let mut edges = Vec::new();
+                    if mora.high {
+                        edges.push("border-top:1px solid currentColor");
+                    }
+                    if mora.fall {
+                        edges.push("border-right:1px solid currentColor");
+                    }
+                    let text = escape_html(mora.mora.text);
+                    if edges.is_empty() {
+                        text
+                    } else {
+                        format!("<span style=\"{}\">{text}</span>", edges.join(";"))
+                    }
+                })
+                .collect();
+            let sources = row
+                .dicts
+                .iter()
+                .map(|d| escape_html(d))
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ");
+            format!(
+                "<li><span style=\"display:inline-block;white-space:nowrap\">{marked}</span> \
+                 <span style=\"opacity:0.6\">{sources}</span></li>"
+            )
+        })
+        .collect();
+    Some(format!("<ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>"))
 }
 
 #[cfg(test)]
@@ -378,6 +440,7 @@ mod tests {
             freq,
             blocks: vec![],
             match_len: 1,
+            pitch: Vec::new(),
         }
     }
 
@@ -946,5 +1009,106 @@ mod tests {
             Some("猫"),
             anki.seen()[0]["params"]["notes"][0]["fields"]["Expression"].as_str(),
         );
+    }
+
+    // ---- pitch (ticket 02) ----
+
+    /// One pitch row: an accent and the dictionaries that gave it.
+    fn pitch_row(fall: u32, dicts: &[&str]) -> crate::present::PitchRow {
+        crate::present::PitchRow {
+            accent: crate::dict::pitch::Accent {
+                position: crate::dict::pitch::Position::Downstep(fall),
+                nasal: Vec::new(),
+                devoice: Vec::new(),
+                tags: Vec::new(),
+            },
+            dicts: dicts.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    /// The community's marked-kana shape: `border-top` over the high moras
+    /// and `border-right` on the mora the pitch falls after. `ねこ` with an
+    /// atamadaka accent is one high mora that also ticks, and one bare one.
+    #[test]
+    fn a_mined_note_carries_the_html_pitch_field_in_the_community_shape() {
+        let mut mined = card(Some("猫"), Some("ねこ"), None);
+        mined.pitch = vec![pitch_row(1, &["NHK"])];
+
+        let f = fields_from_card(&mined, &[]);
+
+        let mark = "border-top:1px solid currentColor;border-right:1px solid currentColor";
+        let want = format!(
+            "<ol style=\"margin:2px 0 2px 20px;padding:0\">\
+             <li><span style=\"display:inline-block;white-space:nowrap\">\
+             <span style=\"{mark}\">ね</span>こ</span> \
+             <span style=\"opacity:0.6\">NHK</span></li></ol>"
+        );
+        assert_eq!(Some(&want), f.get("pitch_html"));
+    }
+
+    /// One row per accent in the pitch list's order, each naming its own
+    /// dictionaries - the deduplicated rows the card header drew, not the raw
+    /// claims behind them.
+    #[test]
+    fn the_pitch_field_holds_one_item_per_accent_naming_its_dictionaries() {
+        let mut mined = card(Some("白目"), Some("しろめ"), None);
+        mined.pitch =
+            vec![pitch_row(0, &["大辞林", "NHK"]), pitch_row(2, &["三省堂"])];
+
+        let f = fields_from_card(&mined, &[]);
+        let html = f.get("pitch_html").expect("a pitch field");
+
+        assert_eq!(2, html.matches("<li>").count(), "{html}");
+        assert!(html.contains("大辞林 \u{b7} NHK"), "{html}");
+        assert!(html.contains("三省堂"), "{html}");
+        assert!(
+            html.find("大辞林").unwrap() < html.find("三省堂").unwrap(),
+            "in the pitch list's order: {html}"
+        );
+    }
+
+    /// No accent, no field - a note carries no empty one. And the plain-text
+    /// fields never learn that pitch exists: marked kana *is* markup.
+    #[test]
+    fn a_card_with_no_accent_mines_no_pitch_field_and_no_plain_text_one() {
+        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), None), &[]);
+
+        assert_eq!(None, f.get("pitch_html"));
+        assert_eq!(None, f.get("pitch"));
+        assert!(!f.get("glossary").unwrap().contains("ね"), "{:?}", f.get("glossary"));
+    }
+
+    /// A card with an accent still mines the plain-text fields unchanged:
+    /// pitch reaches the HTML field only.
+    #[test]
+    fn an_accent_never_reaches_a_plain_text_field() {
+        let blocks = vec![block("Jitendex", json!(["cat"]))];
+        let mut mined = card(Some("猫"), Some("ねこ"), Some(42));
+        mined.pitch = vec![pitch_row(1, &["NHK"])];
+
+        let with_accent = fields_from_card(&mined, &blocks);
+        let without = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks);
+
+        for field in ["expression", "reading", "glossary", "glossary_html", "frequency"] {
+            assert_eq!(
+                without.get(field),
+                with_accent.get(field),
+                "{field} must be byte-identical to what it was"
+            );
+        }
+        assert!(with_accent.contains_key("pitch_html"));
+        assert!(!without.contains_key("pitch_html"));
+    }
+
+    /// A dictionary name is arbitrary text out of an archive's index.json, so
+    /// it is escaped here exactly as it is in the glossary field.
+    #[test]
+    fn a_dictionary_name_with_markup_in_it_is_escaped_in_the_pitch_field() {
+        let mut mined = card(Some("猫"), Some("ねこ"), None);
+        mined.pitch = vec![pitch_row(1, &["<b>evil</b> & co"])];
+
+        let html = fields_from_card(&mined, &[]).remove("pitch_html").expect("a pitch field");
+
+        assert!(html.contains("&lt;b&gt;evil&lt;/b&gt; &amp; co"), "{html}");
     }
 }
