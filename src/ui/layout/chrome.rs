@@ -310,16 +310,15 @@ pub(super) fn side_span<'a>(theme: &'a Theme, text: &'a str, color: Rgb) -> Styl
 /// gets each mora's mark on the mora's own line instead of one box stretched
 /// across the break.
 ///
-/// The argument list is the measurer, the text, and where to put it; there
-/// is no smaller grouping of those that is not just this function's frame
-/// spelled twice.
-#[allow(clippy::too_many_arguments)]
+/// The pen is where the row goes, absolute, exactly as the gloss and table
+/// walks take it. What is left is the measurer, the text, and the two
+/// scratch buffers the seam fills; there is no smaller grouping of those
+/// that is not just this function's frame spelled twice.
 pub(super) fn pitch_elem(
     m: &mut dyn TextMeasure,
     font: &str,
     pitch: &Pitch,
-    origin: f32,
-    y: f32,
+    pen: (f32, f32),
     wrap_w: f32,
     scratch: &mut Measured,
     probes: &mut Vec<GlyphBox>,
@@ -349,8 +348,8 @@ pub(super) fn pitch_elem(
         let last = covered.next_back().unwrap_or(first);
         inline_boxes.push(ElemBox {
             rect: SceneRect {
-                x: origin + first.x,
-                y: origin + y + first.y,
+                x: pen.0 + first.x,
+                y: pen.1 + first.y,
                 w: (last.x + last.w - first.x).max(0.0),
                 h: first.h,
             },
@@ -369,8 +368,8 @@ pub(super) fn pitch_elem(
         top_gap: pitch.reading.top_gap,
         wrap_w,
         align: Align::Leading,
-        pen: (origin, origin + y),
-        rect: SceneRect { x: origin, y: origin + y, w: met.w, h: met.h },
+        pen,
+        rect: SceneRect { x: pen.0, y: pen.1, w: met.w, h: met.h },
         lines: met.lines,
         advance: met.h,
         spans: vec![

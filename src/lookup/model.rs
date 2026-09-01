@@ -166,7 +166,6 @@ impl FakeDictionary {
     /// One `term` row, by hand. The argument list is the row's own columns
     /// and nothing else, so a struct here would only be `TermRow` spelled
     /// twice.
-    #[allow(clippy::too_many_arguments)]
     pub fn add_term(
         &mut self,
         surface: &str,
