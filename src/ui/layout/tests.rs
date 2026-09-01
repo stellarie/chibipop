@@ -6374,3 +6374,74 @@ fn a_base_with_two_readings_stacks_the_second_band_over_the_first() {
     assert_eq!(near.y, far.y + far.h, "しちしょく rests on なないろ");
     assert_eq!(0.0, far.y, "and the pair reaches the top of the room it bought");
 }
+
+// ---- a reading at the end of a line ----
+
+/// 岩波国語辞典　第八版 row 31513, verbatim: `宿酔` under
+/// `しゅくすい・ふつかよい`, with the filler that puts `宿` at the end of the
+/// first line. Eleven kana stand over two kanji, the base splits at the break,
+/// and the whole reading is then centred over the one character that stayed
+/// behind - so 2.38 px of kana stood outside the panel, where one bin clips
+/// them away and the other paints them off the rounded rect. A reader reads
+/// them in neither case, and half a spelled-out number reads as a different
+/// number.
+///
+/// Yomitan declares no `ruby` or `rt` rule for glossary content, so what a
+/// reader sees is the browser's own default, and the browser keeps every kana
+/// inside the content box. CSS Ruby Level 1 §5.2 is the rule that answers a
+/// line edge: a user agent may pull an annotation at a line edge back to that
+/// edge. Chromium 151 was measured doing exactly that - with the ruby
+/// mid-line the `rt` box stands 4.00 px left of the `ruby` box and 4.02 px
+/// right of it, and at a line end (filler 25) the `rt` runs 371.28 to 393.78
+/// against a `ruby` box of 375.02 to 393.77: hung left of its base, stopped at
+/// the line's own edge.
+///
+/// Both boxes are pinned, and against the *content column* rather than the
+/// panel, because the content column is the box a browser keeps the annotation
+/// in. Shrinking the element rect alone would satisfy nothing: the kana would
+/// still be drawn where they were.
+#[test]
+fn a_reading_at_a_line_end_is_pulled_back_to_the_content_edge() {
+    let unit = Theme::dark().body_size * ADVANCE;
+    let read_unit = unit * RUBY_RATIO;
+    let filler = "\u{3042}".repeat(52);
+    let s = laid_out(
+        &rich(&sc(&format!(
+            concat!(
+                r#"{{"tag":"div","content":["{filler}","#,
+                r#"{{"content":["\u5bbf\u9154",{{"content":"\u3057\u3085\u304f\u3059\u3044"#,
+                r#"\u30fb\u3075\u3064\u304b\u3088\u3044","tag":"rt"}}],"tag":"ruby"}}]}}"#,
+            ),
+            filler = filler,
+        ))),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+    let read = &gloss.ruby[0];
+    // The column is 424 - 2 x 12 = 400, and it ends here.
+    let edge = s.origin + s.content_w;
+    assert_eq!(412.0, edge, "the content column's own right edge");
+
+    // 53 characters of 7.5 px fill the line and end it at 397.5, so the 52
+    // filler kana and 宿 fill it and 酔 starts the next line.
+    assert_eq!(2, gloss.lines);
+    assert_eq!(11.0 * read_unit, read.w, "eleven kana at half the base's size");
+    assert_eq!(41.25, read.w, "which is 41.25 px");
+    assert_eq!(53.0 * unit, 397.5, "and the line before it ends at 397.5");
+
+    // Centred over the one character that stayed behind, the reading would
+    // start at 385.12 and end at 426.38 - past the panel's own 424. Pulled
+    // back, it ends on the content edge.
+    assert_eq!(edge, gloss.pen.0 + read.x + read.w, "no kana outside the column");
+    assert!(
+        gloss.pen.0 + read.x >= s.origin,
+        "and none off its left edge either: {}",
+        gloss.pen.0 + read.x,
+    );
+    // The element's own ink box grew to cover the reading, so it reports the
+    // same edge rather than a width its furigana exceeds.
+    assert_eq!(edge, gloss.rect.x + gloss.rect.w, "the ink box ends there too");
+}

@@ -336,11 +336,34 @@ pub(super) fn place_ruby(
         let floor = geom.baseline - top;
         let y = geom.y + (floor - stacked).max(0.0);
         // Centred over the base, and
-        // never off the panel's left
-        // edge: a reading wider than its
-        // base overhangs it, which is
-        // what a browser does too. The
-        // line's own alignment slack
+        // inside the content column on
+        // both sides. A reading wider
+        // than its base overhangs it,
+        // which is what a browser does
+        // too - but only *within* a
+        // line. At a line's own edge
+        // CSS Ruby Level 1 §5.2 lets a
+        // user agent pull the annotation
+        // back to that edge, and
+        // Chromium 151 was measured
+        // doing it: with the ruby
+        // mid-line its `rt` box stands
+        // 4.00 px left of the `ruby` box
+        // and 4.02 px right of it, and
+        // at a line end the `rt` runs
+        // 371.28 to 393.78 against a
+        // `ruby` box of 375.02 to
+        // 393.77 - hung left of its base
+        // and stopped at the line's
+        // edge. Without the right-hand
+        // pull, 岩波's `しゅくすい・ふつ
+        // かよい` over a split `宿酔`
+        // put 2.38 px of kana outside
+        // the *panel*, which one bin
+        // clips away and the other
+        // paints off the rounded rect.
+        //
+        // The line's own alignment slack
         // comes first, because the base
         // it sits over moved by it.
         //
@@ -357,7 +380,13 @@ pub(super) fn place_ruby(
         // it.
         let indent = (wrap_w - geom.w).max(0.0) * slack;
         let over = if based { (right - left - box_.w) / 2.0 } else { 0.0 };
-        let x = (indent + left + over).max(0.0);
+        // The right pull before the left
+        // clamp: a reading wider than the
+        // whole column has no place that
+        // holds it, and starting it at
+        // the column's own left edge is
+        // the most of it a reader gets.
+        let x = (indent + left + over).min(wrap_w - box_.w).max(0.0);
         out.push(RubyBox {
             text: ruby.text.clone(),
             x,
