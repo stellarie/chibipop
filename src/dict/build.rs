@@ -1975,27 +1975,57 @@ mod tests {
             .unwrap()
     }
 
-    /// A live database, grown past one page and then checkpointed, with a
-    /// still-open write connection.
+    /// A database and the log a crashed writer left beside it, with nothing
+    /// holding either.
     ///
-    /// Grown on purpose. That is what makes a stale-log failure the user's
-    /// failure rather than a merely stale answer: a log whose pages are
-    /// replayed into a file laid out differently leaves the header claiming
-    /// what the file does not hold, which is `database disk image is
-    /// malformed`. A single-page database has nothing to disagree about.
-    fn live_with_a_log(out: &Path) -> Connection {
-        build(&[fixture("terms.zip")], &[], out, &|_| {}).expect("the first build");
-        let live = Connection::open(out).unwrap();
-        live.execute_batch(
-            "INSERT INTO meta (k, v)
-               WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 4000)
-               SELECT 'pad' || i, hex(zeroblob(100)) FROM s;
-             PRAGMA wal_checkpoint(TRUNCATE);
-             INSERT OR REPLACE INTO meta (k, v) VALUES ('marker', 'old');",
-        )
-        .unwrap();
-        assert!(suffixed(out, "-wal").exists(), "the log is what this test is about");
-        live
+    /// Copied under the tested name rather than held open, and the copy is
+    /// the whole trick: a `-wal` is keyed to its database's **file name**,
+    /// so the pair byte-copied under another name *is* that writer's crash.
+    /// A fixture that kept the writer open instead would be testing the
+    /// platform - Windows refuses to unlink or rename over a file any
+    /// handle holds, SQLite opens without `FILE_SHARE_DELETE`, and no
+    /// promote there ever runs beside a live handle (docs/BACKLOG.md,
+    /// "Windows will not rename onto an open file").
+    ///
+    /// Grown past one page on purpose. That is what makes a stale-log
+    /// failure the user's failure rather than a merely stale answer: a log
+    /// whose pages are replayed into a file laid out differently leaves the
+    /// header claiming what the file does not hold, which is `database disk
+    /// image is malformed`. A single-page database has nothing to disagree
+    /// about.
+    ///
+    /// The marker commit lands *after* the checkpoint, so the log is left
+    /// holding frames nothing has copied back - the only state a stale log
+    /// can do harm from, and the state a killed daemon leaves behind.
+    fn crashed_with_a_log(out: &Path) {
+        let source = suffixed(out, ".source");
+        let source_guard = TempDbGuard(source.clone());
+        build(&[fixture("terms.zip")], &[], &source, &|_| {}).expect("the first build");
+        {
+            let live = Connection::open(&source).unwrap();
+            live.execute_batch(
+                "INSERT INTO meta (k, v)
+                   WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 4000)
+                   SELECT 'pad' || i, hex(zeroblob(100)) FROM s;
+                 PRAGMA wal_checkpoint(TRUNCATE);
+                 INSERT OR REPLACE INTO meta (k, v) VALUES ('marker', 'old');",
+            )
+            .unwrap();
+            assert!(suffixed(&source, "-wal").exists(), "the log is what this test is about");
+            // Taken while the writer is idle between commits: what is on
+            // disk at this instant is exactly what killing it leaves.
+            for suffix in ["", "-wal", "-shm"] {
+                let from = suffixed(&source, suffix);
+                if from.exists() {
+                    std::fs::copy(&from, suffixed(out, suffix)).expect("the crash is copied");
+                }
+            }
+        }
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(suffixed(&source, suffix));
+        }
+        drop(source_guard);
+        assert!(suffixed(out, "-wal").exists(), "the copy keeps the log beside the database");
     }
 
     /// The same database held the way a running daemon holds it, and left in
@@ -2011,6 +2041,7 @@ mod tests {
     /// the log into a different file destroys it. A fully copied-back log is
     /// harmless: its index says there is nothing to replay, and a reader
     /// reads straight past it.
+    #[cfg(unix)]
     fn held_by_a_reader(out: &Path) -> Connection {
         build(&[fixture("terms.zip")], &[], out, &|_| {}).expect("the first build");
         let writer = Connection::open(out).unwrap();
@@ -2032,7 +2063,8 @@ mod tests {
         reader
     }
 
-    /// The bug a user hit, and the reason [`drop_sidecars`] exists.
+    /// A promote leaves no sidecar of the database it replaced, on every
+    /// platform.
     ///
     /// A write-ahead log's sidecars are keyed to the database's **file
     /// name**, never to its inode, and `rename` replaces only the main
@@ -2043,30 +2075,65 @@ mod tests {
     /// reader does not get a stale answer, it gets
     /// `database disk image is malformed`.
     ///
-    /// Without [`drop_sidecars`] this test reports
-    /// `wrong # of entries in index sqlite_autoindex_meta_1` from
-    /// `integrity_check` - the same class of answer as the
-    /// `Tree 3 page 3 cell 0: invalid page number` the user's database gave.
-    /// Which page-level complaint comes out depends on which of the new
-    /// file's pages the old log happens to land on, so the assertion that
-    /// matters is the invariant: **no sidecar of the replaced database may
-    /// survive the promote.**
+    /// A crashed writer's pair with nothing holding it is what a rebuild
+    /// finds on Windows, and [`drain_wal`]'s checkpoint alone already
+    /// empties that log - so this test states the invariant and would not
+    /// red on the removal going. The removal's own red case needs a log a
+    /// checkpoint cannot drain, which means a live handle, which is the
+    /// POSIX-only test below.
     #[test]
     fn a_promote_never_leaves_the_previous_databases_log_beside_the_new_one() {
         let out = out_path("stale_log");
         let guard = TempDbGuard(out.clone());
+        crashed_with_a_log(&out);
+
+        // A different dictionary built over it with the old log still on
+        // disk - what a rebuild finds after the process that wrote it died.
+        build(&[media_archive()], &[], &out, &|_| {}).expect("the rebuild promotes");
+
+        assert!(!suffixed(&out, "-wal").exists(), "the old log must not outlive the promote");
+        assert!(!suffixed(&out, "-shm").exists(), "nor its index");
+
+        // Then the symptom, met the way the user met it: something opens
+        // the promoted file cold.
+        assert_eq!("ok", verdict(&out), "a cold reader must find the promoted file sound");
+        assert_eq!("FixtureMedia", first_dict(&out), "it is the dictionary just built");
+        assert_eq!(None, marker(&out), "with nothing recovered out of the old log");
+        drop(guard);
+    }
+
+    /// The bug a user hit, and the test [`drop_sidecars`] exists for.
+    ///
+    /// The old database is *held open* here, which is the shape a Linux
+    /// rebuild has: the daemon is another process, its reader holds a
+    /// snapshot the checkpoint cannot copy back, and the log therefore
+    /// still has live frames in it when the rename lands. Without
+    /// [`drop_sidecars`] this test reports
+    /// `wrong # of entries in index sqlite_autoindex_meta_1` from
+    /// `integrity_check` - the same class of answer as the
+    /// `Tree 3 page 3 cell 0: invalid page number` the user's database
+    /// gave. Which page-level complaint comes out depends on which of the
+    /// new file's pages the old log happens to land on, so the assertion
+    /// that matters is the invariant, not the wording.
+    ///
+    /// POSIX-only, and not a gap on Windows: an unlink and a rename both
+    /// refuse a file any handle holds there, so a promote beside a live
+    /// handle is a state that platform cannot reach - the tray app edits
+    /// the database in place and its rebuild is a fresh process that has
+    /// opened nothing (docs/BACKLOG.md, docs/REGRESSION.md 1.20).
+    #[cfg(unix)]
+    #[test]
+    fn a_promote_under_a_live_reader_leaves_no_log_behind_either() {
+        let out = out_path("stale_log_live");
+        let guard = TempDbGuard(out.clone());
         let live = held_by_a_reader(&out);
 
-        // A different dictionary built over it with `live` still open -
-        // exactly as the daemon's connection is during a rebuild.
         build(&[media_archive()], &[], &out, &|_| {}).expect("the rebuild promotes");
 
         // The invariant, checked while the daemon's handle is still there.
         assert!(!suffixed(&out, "-wal").exists(), "the old log must not outlive the promote");
         assert!(!suffixed(&out, "-shm").exists(), "nor its index");
 
-        // Then the symptom, met the way the user met it: the process that
-        // held the old log has gone, and something opens the file cold.
         drop(live);
         assert_eq!("ok", verdict(&out), "a cold reader must find the promoted file sound");
         assert_eq!("FixtureMedia", first_dict(&out), "it is the dictionary just built");
@@ -2083,7 +2150,7 @@ mod tests {
     fn a_promote_interrupted_before_the_rename_leaves_the_old_database_whole() {
         let out = out_path("interrupted");
         let guard = TempDbGuard(out.clone());
-        let live = live_with_a_log(&out);
+        crashed_with_a_log(&out);
         let tmp = suffixed(&out, ".building");
         let tmp_guard = TempDbGuard(tmp.clone());
         build_into(&[media_archive()], &[], &tmp, &|_| {}).expect("the new build");
@@ -2101,7 +2168,6 @@ mod tests {
             "the checkpoint is what keeps the log's own rows: dropping a log \
              that had not been drained is how a promote loses a transaction",
         );
-        drop(live);
         drop(tmp_guard);
         drop(guard);
     }
