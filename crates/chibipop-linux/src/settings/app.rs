@@ -1341,8 +1341,8 @@ fn popup_section(app: &App) -> Element<'_, Message> {
 /// [`SENTENCE_MODES`] is: the labels going out and the mode coming back,
 /// so nothing in between gets to decide the mapping.
 const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
-    (LayoutMode::Roomy, "Roomy — one item per line"),
-    (LayoutMode::Compact, "Compact — one line per dictionary"),
+    (LayoutMode::Roomy, "Roomy (one item per line)"),
+    (LayoutMode::Compact, "Compact (one line per dictionary)"),
 ];
 
 /// The picker's items, in table order.
@@ -1412,9 +1412,9 @@ fn content_section(app: &App) -> Element<'_, Message> {
 /// mapping. The Windows window offers these same three labels, because a
 /// user reading both screens is reading one setting.
 const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
-    (RankingStrategy::BestRank, "Best rank — the commonest claim wins"),
-    (RankingStrategy::Priority, "Priority — the highest list that has the word"),
-    (RankingStrategy::Median, "Median — the middle of what they claim"),
+    (RankingStrategy::BestRank, "Best rank (rank by highest frequency out of all freq dicts)"),
+    (RankingStrategy::Priority, "Priority (rank using highest prioritized freq dict available)"),
+    (RankingStrategy::Median, "Median (rank by median freq)"),
 ];
 
 /// The picker's items, in table order.
@@ -1447,9 +1447,9 @@ fn ranking_strategy_of(label: &str) -> RankingStrategy {
 /// is the only place that difference is said out loud (ADR-0014).
 fn role_caption(role: Role) -> &'static str {
     match role {
-        Role::Terms => "Terms — the definitions a lookup searches, in priority order",
-        Role::Frequency => "Frequency — the lists a word's rank is read from",
-        Role::Pitch => "Pitch — the dictionaries a word's accent is read from",
+        Role::Terms => "Term Dictionaries (priority order)",
+        Role::Frequency => "Frequency Dictionaries",
+        Role::Pitch => "Pitch Dictionaries",
     }
 }
 
